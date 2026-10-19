@@ -86,7 +86,12 @@ class AudioRecognitionPipeline:
         """An irreversible input establishes a lower bound for the next voice."""
         with self.lock:
             self.last_boundary_ms = max(self.last_boundary_ms, advanced_at_ms)
-            self.last_vad_rise_ms = None
+            # An onset AFTER the observed screen transition began belongs to
+            # the new candidate window, even if that candidate became ready
+            # only after the onset. Invalidate only earlier playback.
+            if (self.last_vad_rise_ms is not None and
+                self.last_vad_rise_ms < self.last_boundary_ms):
+                self.last_vad_rise_ms = None
             self.fresh_onset = False
 
     def begin(self, target: TargetLine) -> None:

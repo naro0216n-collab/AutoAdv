@@ -107,9 +107,17 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(h.c.state,S.WAIT_TRANSITION_ACK)
         self.assertEqual(h.c.line.epoch,1)
 
-    def test_new_line_id_is_valid_ack(self):
+    def test_new_line_identity_does_not_bypass_transition_ack(self):
         h=Harness();h.line();h.absent();self.assertTrue(h.sent(h.tick()))
+        old=h.c.line
         h.send(E.LINE_CANDIDATE,source_seq=2,source_line_id="b",text="おはよう")
+        self.assertIs(h.c.line,old)
+        self.assertEqual(h.c.line.epoch,1)
+        self.assertEqual(h.c.state,S.WAIT_TRANSITION_ACK)
+        self.assertTrue(old.sent)
+        h.send(E.TRANSITION_ACK,transition_id="visual-ready-cycle-b")
+        self.assertEqual(h.c.state,S.WAIT_LINE)
+        h.send(E.LINE_CANDIDATE,source_seq=3,source_line_id="b",text="おはよう")
         self.assertEqual(h.c.line.epoch,2)
         self.assertEqual(h.c.state,S.WAIT_TEXT_READY)
 

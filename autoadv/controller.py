@@ -218,10 +218,11 @@ class Controller:
                 # A repeated origin text does NOT mean a second line.
                 # Only a confirmed transition ACK may authorize a new epoch.
                 if self.state is S.WAIT_TRANSITION_ACK:
-                    if e.source_line_id and self.line.source_line_id and e.source_line_id != self.line.source_line_id:
-                        self._new_line(e)
-                    else:
-                        return []
+                    # New source identities are only candidate observations.
+                    # Neither a changed ID nor changed text proves that the
+                    # game advanced. A separate, positively verified
+                    # TRANSITION_ACK must release this line first.
+                    return []
                 elif e.source_line_id and e.source_line_id == self.line.source_line_id:
                     # A partial replacement is still the same line; never alter
                     # text after readiness without invalidating the decision.

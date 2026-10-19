@@ -42,6 +42,24 @@ class AppContracts(TestCase):
         observe(8000)
         self.assertEqual(inp.calls,2)
 
+    def test_audio_boundary_is_first_visual_fall_not_ack_or_sent_time(self):
+        c=Controller(session_id='s');inp=Input();times=[0];boundaries=[]
+        rt=Runtime(c,Guard(),inp,TTS(),clock=lambda:times[0])
+        app=ObservationOrchestrator(rt,on_line_boundary=boundaries.append)
+        def observe(now,ready=True):
+            times[0]=now
+            app.observe(ScreenSample(now,SS.DIALOGUE,ready,True,'本文',True),
+                        focused=True,capture_ok=True,voice_metadata=MetadataVoice(False,verified=True))
+        app.candidate(Candidate(1,1,1,'本文','HOOK'),100)
+        observe(200);observe(4000)
+        self.assertEqual(inp.calls,1)
+        observe(4400,False)
+        observe(4600,False)
+        app.candidate(Candidate(1,2,2,'次の本文','HOOK'),4700)
+        observe(5000)
+        self.assertEqual(boundaries,[4400])
+        self.assertEqual(c.line.epoch,2)
+
     def test_no_line_when_text_unverified(self):
         c=Controller(session_id='s');inp=Input()
         app=ObservationOrchestrator(Runtime(c,Guard(),inp,TTS(),clock=lambda:1000))

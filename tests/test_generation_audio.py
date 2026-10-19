@@ -55,6 +55,23 @@ class GenerationAudioTests(unittest.TestCase):
         p._infer(p.target,p.history.since(0))
         self.assertEqual(events,[])
 
+    def test_new_voice_onset_after_visual_transition_floor_is_retained(self):
+        p,pcm,v,events=self.make()
+        v.active=True;p.feed(pcm)
+        # A pre-transition rise cannot be attributed to the next line.
+        p.mark_boundary(2200)
+        p.begin(TargetLine('s',2,2,'おはよう',2300))
+        self.assertFalse(p.fresh_onset)
+        # A rise after the observed disappearance of the ready marker, but
+        # before next visual TEXT_READY, belongs to the next candidate.
+        v.active=False
+        p.feed(PCMChunk(2300,pcm.frames,48000,2,4))
+        v.active=True
+        p.feed(PCMChunk(2400,pcm.frames,48000,2,4))
+        p.mark_boundary(2200)
+        p.begin(TargetLine('s',3,3,'おはよう',2500))
+        self.assertTrue(p.fresh_onset)
+
     def test_partial_line_retarget_keeps_epoch_and_onset(self):
         p,pcm,v,events=self.make()
         v.active=True;p.feed(pcm)

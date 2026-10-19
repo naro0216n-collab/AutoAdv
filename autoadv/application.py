@@ -48,6 +48,7 @@ class ObservationOrchestrator:
         self._last_screen=ScreenState.UNKNOWN
         self._ready_was_present=False
         self._saw_fall_after_sent=False
+        self._fall_at_ms: int | None = None
         self._saw_fresh_candidate_after_sent=False
         self._line_counter=0
         self._last_metadata:tuple | None=None
@@ -103,16 +104,19 @@ class ObservationOrchestrator:
             return
         if self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK:
             if not sample.ready:
+                if not self._saw_fall_after_sent:
+                    self._fall_at_ms=now
                 self._saw_fall_after_sent=True
             if (self._saw_fall_after_sent and self._saw_fresh_candidate_after_sent
                 and sample.state is ScreenState.DIALOGUE and sample.ready
                 and sample.text_matches and self.pending is not None):
-                last_sent=self.ctrl.line.sent_at_ms if self.ctrl.line is not None else now
+                transition_floor=self._fall_at_ms if self._fall_at_ms is not None else now
                 self._line_counter+=1
                 self._post(EK.TRANSITION_ACK,now,transition_id=f'visual-ready-cycle-{self._line_counter}')
                 if self.ctrl.state is ControllerState.WAIT_LINE:
-                    self.on_line_boundary(last_sent or now)
+                    self.on_line_boundary(transition_floor)
                 self._saw_fall_after_sent=False
+                self._fall_at_ms=None
                 self._saw_fresh_candidate_after_sent=False
             else:
                 return
