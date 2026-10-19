@@ -1,11 +1,15 @@
 import tempfile
 from pathlib import Path
 import unittest
-import numpy as np
-import cv2
+try:
+    import numpy as np
+    import cv2
+except ImportError:
+    np = cv2 = None
 from autoadv.screen import ScreenObserver, ScreenProfile, Marker, recognize_markers
 from autoadv.contracts import ScreenState
 
+@unittest.skipUnless(cv2 is not None and np is not None, "requires the visual runtime extras")
 class VisualContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -55,3 +59,32 @@ class VisualContractTests(unittest.TestCase):
         self.assertFalse(s.observe('本文',600).ready)
 
 if __name__=='__main__':unittest.main()
+
+class SymbolicAndEmptyTests(unittest.TestCase):
+    def test_visible_key_keeps_symbols_where_asr_key_drops_them(self):
+        from autoadv.screen import visible_key
+        from autoadv.audio_match import phonetic_key
+        self.assertEqual(visible_key(' …… '),visible_key('……'))
+        self.assertNotEqual(visible_key('……'),visible_key('！！'))
+        self.assertEqual(phonetic_key('……'),'')
+
+    @unittest.skipUnless(cv2 is not None and np is not None, "requires the visual runtime extras")
+    def test_optional_empty_positive_marker(self):
+        import cv2,numpy as np
+        from autoadv.screen import ScreenObserver,ScreenProfile,Marker
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp)
+            keys=['dialogue','text_ready','choice','map','menu','transition','empty_event']
+            markers={}
+            frame=np.zeros((12,50,3),dtype=np.uint8)
+            for i,key in enumerate(keys):
+                img=np.full((4,4,3),30+i*30,dtype=np.uint8)
+                file=base/(key+'.png');cv2.imwrite(str(file),img)
+                markers[key]=Marker(file,(i*5,0,4,4),.99)
+                if key in ('dialogue','text_ready','empty_event'):
+                    frame[0:4,i*5:i*5+4]=img
+            o=ScreenObserver(ScreenProfile(markers,(0,6,30,4)),lambda:frame,ocr=lambda _: '')
+            o.observe('',100)
+            v=o.observe('',240)
+            self.assertTrue(v.empty_event_confirmed)
+            self.assertTrue(v.text_matches)

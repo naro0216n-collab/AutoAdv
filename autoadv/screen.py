@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 import json
+import unicodedata
 from .contracts import ScreenState
 from .audio_match import phonetic_key
 
 ROLES = ('dialogue', 'text_ready', 'choice', 'map', 'menu', 'transition')
+OPTIONAL_ROLES = ('empty_event',)
 BLOCKERS = ('choice', 'map', 'menu', 'transition')
 
 
@@ -36,7 +38,7 @@ class ScreenProfile:
     minimum_ready_span_ms: int = 120
 
     def __post_init__(self):
-        if set(self.markers)!=set(ROLES):
+        if not set(ROLES).issubset(self.markers) or not set(self.markers).issubset(set(ROLES)|set(OPTIONAL_ROLES)):
             raise ValueError('all dialogue/readiness/blocker markers are required')
         x,y,w,h=self.text_rect
         if min(x,y)<0 or w<=0 or h<=0 or self.minimum_ready_observations<2 or self.minimum_ready_span_ms<=0:
@@ -59,6 +61,14 @@ class ScreenSample:
     text_matches: bool
     raw_ocr: str
     calibrated: bool
+    empty_event_confirmed: bool = False
+
+
+def visible_key(text: str) -> str:
+    # Unlike ASR matching, punctuation and symbolic lines are semantically
+    # significant on the display. Do not erase "……" during OCR comparison.
+    return ''.join(c for c in unicodedata.normalize('NFKC',text)
+                   if not c.isspace())
 
 
 def recognize_markers(frame, templates:dict[str,tuple[Marker,object]]) -> tuple[ScreenState,bool]:
@@ -126,8 +136,18 @@ class ScreenObserver:
             if roi.shape[:2]==(h,w):
                 raw=self.ocr(roi)
         # OCR is not trusted to identify different consecutive identical lines.
-        match=bool(phonetic_key(expected_text) and phonetic_key(raw)==phonetic_key(expected_text))
-        return ScreenSample(at_ms,state,stable,match,raw,True)
+        empty_confirmed=False
+        if not visible_key(expected_text) and 'empty_event' in self.templates and stable:
+            marker,template=self.templates['empty_event']
+            x,y,w,h=marker.rect
+            roi=frame[y:y+h,x:x+w]
+            if roi.shape[:2]==(h,w):
+                import numpy as np
+                score=1-np.mean(np.abs(roi.astype('float32')-template.astype('float32')))/255
+                empty_confirmed=score>=marker.min_score
+        match=(bool(visible_key(expected_text)) and
+               visible_key(raw)==visible_key(expected_text)) or empty_confirmed
+        return ScreenSample(at_ms,state,stable,match,raw,True,empty_confirmed)
 
 
 class WindowsClientCapture:

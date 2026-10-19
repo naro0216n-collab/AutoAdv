@@ -108,7 +108,8 @@ class ObservationOrchestrator:
             self._active_candidate_seq=packet.source_seq
             self._post(EK.LINE_CANDIDATE,now,source_seq=packet.source_seq,
                        source_line_id=f'visual:{self._line_counter}:{packet.source_seq}',
-                       text=packet.raw_text,text_ready=False)
+                       text=packet.raw_text,text_ready=False,
+                       empty_confirmed=sample.empty_event_confirmed)
         line=self.ctrl.line
         if line is None:return
         if sample.state is ScreenState.DIALOGUE and sample.ready and sample.text_matches and line.ready_ms is None:

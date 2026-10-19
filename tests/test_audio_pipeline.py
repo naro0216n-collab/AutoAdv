@@ -44,6 +44,8 @@ class ASRContractTests(unittest.TestCase):
 if __name__=='__main__':unittest.main()
 
 class VADFramingTests(unittest.TestCase):
+    @unittest.skipUnless(__import__('importlib').util.find_spec('numpy') is not None,
+                         'requires the audio runtime extras')
     def test_partial_pcm_frames_are_buffered_across_callbacks(self):
         from autoadv.audio_match import VoiceActivity
         from unittest.mock import patch
