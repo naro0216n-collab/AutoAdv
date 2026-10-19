@@ -1,0 +1,13 @@
+{
+  "markers": {
+    "dialogue": {"image":"templates/dialogue.png","rect":[0,0,40,20],"min_score":0.96},
+    "text_ready": {"image":"templates/text-ready.png","rect":[50,0,40,20],"min_score":0.96},
+    "choice": {"image":"templates/choice.png","rect":[100,0,40,20],"min_score":0.96},
+    "map": {"image":"templates/map.png","rect":[150,0,40,20],"min_score":0.96},
+    "menu": {"image":"templates/menu.png","rect":[200,0,40,20],"min_score":0.96},
+    "transition": {"image":"templates/transition.png","rect":[250,0,40,20],"min_score":0.96}
+  },
+  "text_rect":[0,100,1000,180],
+  "minimum_ready_observations":2,
+  "minimum_ready_span_ms":120
+}

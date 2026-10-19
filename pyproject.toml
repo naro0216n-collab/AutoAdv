@@ -13,6 +13,7 @@ dependencies = []
 luna = ["websockets>=13,<17"]
 audio = ["sounddevice>=0.5,<1"]
 dev = ["pytest>=8,<10"]
+live = ["psutil>=5.9,<9", "mss>=9,<12", "numpy>=2,<3", "opencv-python>=4.8,<5", "pytesseract>=0.3.13,<1", "webrtcvad-wheels>=2.0.14,<3", "sherpa-onnx>=1.10,<2", "sounddevice>=0.5,<1"]
 
 [tool.setuptools.packages.find]
 include = ["autoadv*"]

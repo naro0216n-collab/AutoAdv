@@ -71,7 +71,16 @@ def main() -> int:
     tts.add_argument("--play",action="store_true",help="play until output device drained (sounddevice required)")
     bridge=sub.add_parser("bridge-monitor",help="inspect opt-in pre-filter candidate packets")
     bridge.add_argument("--port",type=int,default=47916)
+    live=sub.add_parser("run-windows",help="calibrated process-loopback/ASR/visual game control")
+    live.add_argument("--config",type=Path,required=True,help="game calibration JSON")
+    live.add_argument("--enable-input",action="store_true",help="authorize guarded SendInput; off by default")
     args=parser.parse_args()
+    if args.command=="run-windows":
+        from .live import LiveConfig,run_windows
+        try:return run_windows(LiveConfig.load(args.config),enable_input=args.enable_input)
+        except (OSError,ValueError,FileNotFoundError) as exc:
+            print(f"AutoAdv configuration or runtime error: {exc}",file=sys.stderr)
+            return 2
     if args.command=="luna-origin":return _origin(args)
     if args.command=="bridge-monitor":return _bridge(args)
     return _tts(args)

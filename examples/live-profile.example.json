@@ -1,0 +1,30 @@
+{
+  "pid": 12345,
+  "hwnd": 123456,
+  "screen_profile": "screen-profile.example.json",
+  "loopback_helper": "../integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll",
+  "asr_model": "C:/ASR/sensevoice/model.int8.onnx",
+  "asr_tokens": "C:/ASR/sensevoice/tokens.txt",
+  "tts": {
+    "url": "http://127.0.0.1:8088/v1/audio/speech",
+    "policy": "UNASSIGNED",
+    "selected_voice": null,
+    "default_voice": null,
+    "speed": 1.0,
+    "required_for_accessibility": false
+  },
+  "speaker_rules": {
+    "大和": {"policy":"SKIP"},
+    "ナレーション": {"policy":"SELECTED","voice_id":"narrator"}
+  },
+  "name_readings": {"京":"みやこ"},
+  "bridge_port": 47916,
+  "grace_ms": 500,
+  "allow_heuristic_absence": false,
+  "silent_dwell": {
+    "base_ms": 700,
+    "min_ms": 1000,
+    "reading_chars_per_sec": 12
+  },
+  "log_path": "../logs/autoadv.jsonl"
+}

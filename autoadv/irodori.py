@@ -135,6 +135,11 @@ class TTSWorker:
 
         Thread(target=work, name="autoadv-irodori", daemon=True).start()
 
+    def is_active(self) -> bool:
+        # Pending HTTP generation or device playback both block advancement.
+        with self._lock:
+            return bool(self._jobs)
+
     def cancel_all(self) -> None:
         with self._lock:
             for ev in self._jobs.values():

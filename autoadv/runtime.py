@@ -65,13 +65,24 @@ class Runtime:
         except Empty:
             return False
         self.audit("event", {"kind": event.kind.name, "epoch": event.line_epoch,
-                             "session": event.session_id, "at_ms": event.at_ms})
+                             "session": event.session_id, "at_ms": event.at_ms,
+                             "native_evidence": event.evidence.name,
+                             "voice_presence": event.voice.name if event.voice else None,
+                             "capture_ok": event.capture_ok,
+                             "screen_state": event.screen.name if event.screen else None,
+                             "tts_success": event.tts_success})
         effects = self.controller.accept(event)
         for effect in effects:
             self.audit("effect", {"kind": effect.kind.name, "epoch": effect.line_epoch,
                                   "reason": effect.reason})
             if effect.kind in (EffectKind.START_TTS, EffectKind.CANCEL_TTS):
-                self.tts.apply(effect)
+                try:
+                    self.tts.apply(effect)
+                except Exception as exc:
+                    self.audit("tts_dispatch_failed", {"epoch": effect.line_epoch,
+                                                       "error_type": type(exc).__name__})
+                    for stop in self.controller._pause('tts_dispatch_failed'):
+                        self.audit("effect", {"kind": stop.kind.name, "reason": stop.reason})
             elif effect.kind is EffectKind.REQUEST_ADVANCE:
                 # Read guard synchronously immediately before SendInput.
                 snapshot = self.guard.observe()
@@ -98,12 +109,16 @@ class Runtime:
                 try:
                     self.input_driver.advance()
                 except Exception:
-                    self.controller.input_failed()
+                    for stop in self.controller.input_failed():
+                        self.audit("effect", {"kind": stop.kind.name, "reason": stop.reason})
                     self.audit("input_failed", {"epoch": effect.line_epoch})
         return True
 
     def poll(self) -> None:
-        self.controller.transition_timed_out(self.clock())
+        for effect in self.controller.transition_timed_out(self.clock()):
+            self.audit("effect", {"kind": effect.kind.name, "reason": effect.reason})
+            if effect.kind is EffectKind.CANCEL_TTS:
+                self.tts.apply(effect)
         l = self.controller.line
         if l is not None:
             self.post(Envelope(EventKind.TIMER, self.controller.session_id, self.clock(),

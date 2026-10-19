@@ -33,6 +33,7 @@ class Settings:
     # Until a game profile is independently calibrated, heuristic absence is
     # never sufficient to authorize silent progression.
     allow_heuristic_absence: bool = False
+    name_readings: tuple[tuple[str, str], ...] = ()
     transition_timeout_ms: int = 10000
     unresolved_timeout_ms: int = 6000
     native_start_timeout_ms: int = 30000
@@ -128,7 +129,7 @@ class Controller:
         self._epoch += 1
         self._token += 1
         self.line = Line(self._epoch, self._token,
-                         normalize(e.text or "", empty_confirmed=e.empty_confirmed),
+                         normalize(e.text or "", empty_confirmed=e.empty_confirmed, names=dict(self.settings.name_readings)),
                          e.source_line_id, e.at_ms, e.source_seq or 0)
         self.state = S.WAIT_TEXT_READY
         self.pause_reason = None
@@ -164,7 +165,12 @@ class Controller:
                 return self._pause("invalid_screen_observation")
             self.screen = e.screen
             if self.screen is not ScreenState.DIALOGUE and self.line is not None:
-                return self._pause(f"screen_{self.screen.name.lower()}")
+                # After an input has been emitted, a verified scene TRANSITION
+                # is normal; never send again before an independently observed
+                # boundary ACK. Choices/menus/maps still require user action.
+                if not (self.state is S.WAIT_TRANSITION_ACK and
+                        self.screen is ScreenState.TRANSITION):
+                    return self._pause(f"screen_{self.screen.name.lower()}")
         elif e.kind is EK.FOCUS_CHANGED:
             self.focused = e.focused is True
             if not self.focused and self.line is not None:
@@ -192,7 +198,7 @@ class Controller:
                     # text after readiness without invalidating the decision.
                     if self.line.ready_ms is not None and e.text != self.line.text.raw:
                         return self._pause("text_changed_after_ready")
-                    self.line.text = normalize(e.text or "", empty_confirmed=e.empty_confirmed)
+                    self.line.text = normalize(e.text or "", empty_confirmed=e.empty_confirmed, names=dict(self.settings.name_readings))
                 elif e.source_line_id and self.line.source_line_id and e.source_line_id != self.line.source_line_id:
                     return self._pause("unexpected_line_boundary")
                 elif e.text != self.line.text.raw:
@@ -214,7 +220,7 @@ class Controller:
             assert self.line is not None
             if self.line.ready_ms is not None:
                 return self._pause("text_changed_after_ready")
-            self.line.text = normalize(e.text or "", empty_confirmed=e.empty_confirmed)
+            self.line.text = normalize(e.text or "", empty_confirmed=e.empty_confirmed, names=dict(self.settings.name_readings))
         elif e.kind is EK.LINE_READY:
             assert self.line is not None
             if self.line.text.kind is ContentKind.NON_DIALOGUE:
@@ -246,6 +252,10 @@ class Controller:
                 return effects
         elif e.kind is EK.NATIVE_STARTED:
             assert self.line is not None
+            if self.line.sent:
+                # Hardware input was irreversible. No post hoc "yield" can
+                # protect the already advanced line: surface the race.
+                return self._pause("native_started_after_advance")
             # Audio must be positively attributed to the current line.
             if not self.capture_ok or e.evidence not in (Evidence.AUDIO_CONFIRMED, Evidence.METADATA) or not e.native_utterance_id:
                 return []
@@ -264,6 +274,8 @@ class Controller:
             return effects
         elif e.kind is EK.NATIVE_COMPLETED:
             assert self.line is not None
+            if self.line.sent:
+                return []
             if (not self.capture_ok or self.line.playback is not Playback.ACTIVE or
                 not e.native_utterance_id or e.native_utterance_id != self.line.utterance_id or
                 e.evidence not in (Evidence.AUDIO_CONFIRMED, Evidence.METADATA)):

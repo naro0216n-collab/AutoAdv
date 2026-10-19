@@ -1,41 +1,30 @@
 # AutoAdv
 
-LunaTranslatorを原文観測基盤とした、音声同期型のノベルゲーム自動進行Controller。
+LunaTranslatorの原文取得、Windowsゲームのprocess-loopback音声、音声認識、Irodori-TTS-Serverを単一Controllerへ接続するノベルゲーム用自動進行基盤。
 
-## 現在の実装範囲
+## 進行の安全契約
 
-* 共通状態機械（単一advance主体）、原文表現と記号/短文/空イベント区分、音声有無と再生状態の独立管理。
-* 同期的な入力前ガード、epoch/token、遷移ACK、手動停止、重複入力禁止。
-* Irodori `/v1/audio/speech`クライアントと中断可能なWAV再生Worker（`audio`オプション）。
-* Luna `/api/ws/text/origin`観測Adapter（**診断専用**、台詞ID/表示完了が不明なため自動送りには使用不可）。
-* Windows Enter Driver（Runtimeのガードを経ない単独使用は禁止）。
+進行主体はControllerだけ。台詞世代・キャンセルトークン・画面状態・表示完了・native/TTS再生完了・手動介入・遷移ACKを検査し、入力は一行あたり最大一度とする。ゲームボイスの存在が不明、取得不能、ASR/VADの根拠不足なら無音タイマーで強制送りしない。選択肢・マップ・メニュー・不明画面は停止する。
 
-## 未接続の必須箇所
+## 実装
 
-Lunaのフィルタ前イベント境界、実ゲーム画面完了・選択判定、Windows process loopback、VAD/ASRによる現在行への発話帰属と終了確認、作品profile。これらを通すまでは実ゲームの自動入力を有効化しない。
+- `autoadv/controller.py`, `application.py`, `runtime.py`：進行State・観測統合・入力直前の独立検査。
+- `autoadv/process_audio.py` + `integrations/windows-loopback/`：NAudio 3.2を使うプロセス固有WASAPI loopback。ゲームPIDのステレオPCM/heartbeatだけをPythonへ送る。
+- `autoadv/audio_recognition.py`, `audio_match.py`, `native_gate.py`：音声履歴・日本語Sherpa ASR・WebRTC VAD・台詞照合と単調な進行/末尾確認。音声検出・ASR単独では発話終了を断定しない。
+- `autoadv/screen.py`, `live_guard.py`：ゲーム別の正の視覚マーカー、Tesseract日本語OCR、Windows foreground/PID照合、手動入力検出。
+- `autoadv/irodori.py`, `speaker.py`, `text.py`：TTS生成と実デバイス再生完了の区別、TTS中断、話者別voice/Skip、ルビ処理。
+- `autoadv/luna_bridge.py` + `integrations/luna/`：Luna原文フィルタ前の候補観測。HOOK成功・安定行ID・表示完了はそれだけでは保証しない。
+- `autoadv/live.py`：上記Adapterを一つに接続するWindows実行系。入力は明示 `--enable-input` と校正プロファイルが必要。
 
 ## 検証
 
 ```sh
 python -m unittest discover -s tests -v
+python -m autoadv --help
 ```
 
-Irodoriとゲームの動作確認はWindows上で別途必要。実機での未検証事項を合格とみなさない。
+[OPERATING.md](OPERATING.md)にWindowsでの導入・画面校正・初期設定・診断・接続障害対応を記載。デフォルトの音声有無は未解決として扱い、実ゲームでの自動送り可能性はモデル/作品別の校正が必要。
 
-## 安全な接続診断
+**未検証**：この開発環境ではWindowsゲーム、Luna HOOK、日本語OCR/ASRモデル実データ、WASAPI COM動作、.NET 9 helperビルド、Irodori音声デバイス、代表ゲームにおける連続進行の実機試験を実行できない。Linuxの単体テスト合格だけで指示書の完了判定を行わない。
 
-```sh
-# Luna標準原文WebSocketの確認（台詞境界は保証されない）
-python -m autoadv luna-origin --url ws://127.0.0.1:2333/api/ws/text/origin --count 10
-
-# Irodori-Serverの実生成確認。VOICE_IDはIrodoriに登録済みのものを指定
-python -m autoadv tts-smoke --voice VOICE_ID --output sample.wav
-
-# Lunaの任意差分を導入する場合。LunaTranslator.pyのあるディレクトリを指定
-python scripts/luna_bridge_patch.py PATH_TO_LUNA_PYTHON_DIR --install
-python -m autoadv bridge-monitor
-```
-
-bridge-monitorのraw line candidateにも表示完了・ゲーム画面分類・台詞境界の保証はないため、現時点で自動入力へ直結しない。Luna側でHOOK/OCRより手前にある重複・空文字フィルタの有無は作品とLunaバージョンごとに再確認する。
-
-Publish Gatewayの移植準備と初回bootstrapの区別は [`docs/publish.md`](docs/publish.md) に記載。
+正準仕様は `docs/integration-spec.md`、開発原則は `docs/development-principles.md`。公開は `develop` へ標準Publish Gatewayを使い、`main`はユーザー承認まで不変更。
