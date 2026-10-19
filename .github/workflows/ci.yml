@@ -1,0 +1,97 @@
+name: Fast CI
+
+on:
+  push:
+    branches: [develop, temp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: fast-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-artifact:
+    name: Source artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build restorable source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/source"
+          branch="${GITHUB_REF_NAME}"
+          publish_commit="$(git rev-parse refs/remotes/origin/publish)"
+          publish_tree="$(git rev-parse "${publish_commit}^{tree}")"
+          git update-ref "refs/heads/${branch}" "${GITHUB_SHA}"
+          git update-ref refs/autoadv/publish-base "${publish_commit}"
+          git bundle create "${RUNNER_TEMP}/source/repository.bundle" \
+            "refs/heads/${branch}" refs/autoadv/publish-base
+          git bundle verify "${RUNNER_TEMP}/source/repository.bundle"
+          printf '%s\n' "${GITHUB_SHA}" > "${RUNNER_TEMP}/source/.source-commit"
+          git rev-parse "${GITHUB_SHA}^{tree}" > "${RUNNER_TEMP}/source/.source-tree"
+          printf '%s\n' "${branch}" > "${RUNNER_TEMP}/source/.source-branch"
+          printf '%s\n' "${publish_commit}" > "${RUNNER_TEMP}/source/.source-publish-commit"
+          printf '%s\n' "${publish_tree}" > "${RUNNER_TEMP}/source/.source-publish-tree"
+      - name: Upload source bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: ${{ runner.temp }}/source
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  unit:
+    name: Domain contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -v
+
+  package-smoke:
+    name: Clean package install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install .
+      - run: |
+          cd "${RUNNER_TEMP}"
+          python -c "import autoadv; assert autoadv.Controller"
+
+  status-rollup:
+    name: Fast CI status
+    if: ${{ always() }}
+    needs: [source-artifact, unit, package-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish final status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RESULT: ${{ needs.source-artifact.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          PACKAGE_RESULT: ${{ needs.package-smoke.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          conclusion=failure
+          if [[ "$SOURCE_RESULT" == success && "$UNIT_RESULT" == success && "$PACKAGE_RESULT" == success ]]; then
+            conclusion=success
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="$conclusion" -f context='Fast CI' \
+            -f description="source=${SOURCE_RESULT},unit=${UNIT_RESULT},package=${PACKAGE_RESULT}"
+          [[ "$conclusion" == success ]]
