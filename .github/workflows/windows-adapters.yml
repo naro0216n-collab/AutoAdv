@@ -1,0 +1,39 @@
+name: Windows Adapter Validation
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'autoadv/**'
+      - 'integrations/windows-loopback/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/windows-adapters.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-adapters:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Build process-scoped WASAPI helper
+        run: dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
+      - name: Install Windows audio/visual/model adapters
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install '.[live]'
+      - name: Verify full optional dependency test suite
+        run: python -m unittest discover -s tests -v
+      - name: Validate Windows adapter imports
+        run: |
+          python -c "import numpy,cv2,mss,pytesseract,webrtcvad,sherpa_onnx,sounddevice,psutil; from autoadv.live import LiveConfig; print('Windows adapter imports OK')"
