@@ -8,7 +8,7 @@ closed. The hooks never issue any input or control the Controller directly.
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
-from threading import Event, Thread
+from threading import Event, Thread, Lock
 import ctypes
 import sys
 import time
@@ -24,6 +24,32 @@ def is_manual_hook_event(*, keyboard: bool, flags: int, extra_info: int) -> bool
     return not (flags & injected_bit and extra_info == AUTOADV_INPUT_MARK)
 
 
+class InputOriginTracker:
+    """Independent last-input timestamp cross-check; never ignores a time span."""
+    def __init__(self, initial_tick: int):
+        self._last_tick = initial_tick
+        self._automatic_ticks: set[int] = set()
+        self.manual = False
+
+    def hook_event(self, *, keyboard:bool, flags:int, extra_info:int, tick:int) -> None:
+        if is_manual_hook_event(keyboard=keyboard,flags=flags,extra_info=extra_info):
+            self.manual = True
+        else:
+            self._automatic_ticks.add(tick)
+            # The most recent two strokes are enough; never allow future
+            # unrelated inputs to match a stale own-input timestamp.
+            if len(self._automatic_ticks)>4:
+                self._automatic_ticks={t for t in self._automatic_ticks if t>=tick-100}
+
+    def os_input_tick(self, tick:int) -> bool:
+        if tick != self._last_tick:
+            if tick not in self._automatic_ticks:
+                self.manual=True
+            self._last_tick=tick
+            self._automatic_ticks.clear()
+        return self.manual
+
+
 class WindowsManualMonitor:
     """Latches genuine/manual or foreign-injected input until the session ends.
 
@@ -35,6 +61,8 @@ class WindowsManualMonitor:
         if sys.platform != 'win32':
             raise OSError('Windows required')
         self._manual = Event()
+        self._origin_lock = Lock()
+        self._origin = InputOriginTracker(self._last_input())
         self._ready = Event()
         self._stop = Event()
         self._thread_id = 0
@@ -44,6 +72,16 @@ class WindowsManualMonitor:
         if not self._ready.wait(5) or self._error is not None:
             self.close()
             raise RuntimeError('unable to install low-level input observation hooks') from self._error
+
+    @staticmethod
+    def _last_input() -> int:
+        from ctypes import wintypes
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_=[('cbSize',wintypes.UINT),('dwTime',wintypes.DWORD)]
+        state=LASTINPUTINFO(ctypes.sizeof(LASTINPUTINFO),0)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(state)):
+            raise OSError('GetLastInputInfo failed')
+        return state.dwTime
 
     def _monitor(self) -> None:
         from ctypes import wintypes
@@ -67,19 +105,27 @@ class WindowsManualMonitor:
         user32.CallNextHookEx.restype = ctypes.c_ssize_t
         user32.GetMessageW.argtypes = (ctypes.POINTER(MSG),ctypes.c_void_p,wintypes.UINT,wintypes.UINT)
         user32.GetMessageW.restype = ctypes.c_int
+        user32.TranslateMessage.argtypes = (ctypes.POINTER(MSG),)
+        user32.DispatchMessageW.argtypes = (ctypes.POINTER(MSG),)
         user32.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
         hooks = []
-        def keyboard(code, wparam, lparam):
+        def check_event(*, keyboard, code, lparam):
             if code >= 0:
-                info = ctypes.cast(lparam,ctypes.POINTER(KBD)).contents
-                if is_manual_hook_event(keyboard=True,flags=info.flags,extra_info=info.dwExtraInfo):
+                try:
+                    struct=KBD if keyboard else MOUSE
+                    info=ctypes.cast(lparam,ctypes.POINTER(struct)).contents
+                    with self._origin_lock:
+                        self._origin.hook_event(keyboard=keyboard,flags=info.flags,
+                                                extra_info=info.dwExtraInfo,tick=info.time)
+                        if self._origin.manual:self._manual.set()
+                except Exception:
+                    # ctypes callbacks otherwise swallow Python exceptions.
                     self._manual.set()
+        def keyboard(code, wparam, lparam):
+            check_event(keyboard=True,code=code,lparam=lparam)
             return user32.CallNextHookEx(None,code,wparam,lparam)
         def mouse(code, wparam, lparam):
-            if code >= 0:
-                info = ctypes.cast(lparam,ctypes.POINTER(MOUSE)).contents
-                if is_manual_hook_event(keyboard=False,flags=info.flags,extra_info=info.dwExtraInfo):
-                    self._manual.set()
+            check_event(keyboard=False,code=code,lparam=lparam)
             return user32.CallNextHookEx(None,code,wparam,lparam)
         # Keep callback references alive for the duration of the hook.
         keyboard_cb, mouse_cb = CALLBACK(keyboard), CALLBACK(mouse)
@@ -97,6 +143,8 @@ class WindowsManualMonitor:
                 if status <= 0:
                     if status == -1:raise OSError('low-level input hook message loop failed')
                     break
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
             if not self._stop.is_set():
                 self._manual.set()
         except Exception as exc:
@@ -108,7 +156,15 @@ class WindowsManualMonitor:
                 user32.UnhookWindowsHookEx(hook)
 
     def intervened(self) -> bool:
-        return self._manual.is_set() or not self._thread.is_alive() or self._error is not None
+        if self._manual.is_set() or not self._thread.is_alive() or self._error is not None:
+            return True
+        try:
+            latest = self._last_input()
+            with self._origin_lock:
+                if self._origin.os_input_tick(latest):self._manual.set()
+        except Exception:
+            self._manual.set()
+        return self._manual.is_set()
 
     def reset_after_transition(self):
         # Transition to the next line is never permission to erase user input.

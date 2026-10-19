@@ -35,3 +35,22 @@ class ApplicationUpdates(unittest.TestCase):
         self.assertEqual(ctrl.line.ready_ms,500)
 
 if __name__=='__main__':unittest.main()
+
+class PartialSpeakerAndEarlyNative(unittest.TestCase):
+    def test_native_event_precedes_readiness_without_illegal_tts_configuration(self):
+        from autoadv.contracts import Envelope,EventKind as E,Evidence,TTSPolicy
+        from autoadv.speaker import SpeakerRouter,VoiceRoute
+        c=Controller(session_id='s')
+        app=ObservationOrchestrator(Runtime(c,Closed(),NeverInput(),NoTTS(),clock=lambda:300),
+            speaker_router=SpeakerRouter({'大和':VoiceRoute(TTSPolicy.SKIP)},
+                                         VoiceRoute(TTSPolicy.SELECTED,'fallback')))
+        app.candidate(Candidate(1,1,1,'大','HOOK'),100)
+        app.observe(ScreenSample(200,S.DIALOGUE,False,True,'大',True),focused=True,capture_ok=True)
+        l=c.line
+        c.accept(Envelope(E.NATIVE_STARTED,'s',220,line_epoch=l.epoch,cancel_token=l.token,
+                          evidence=Evidence.AUDIO_CONFIRMED,native_utterance_id='native'))
+        app.candidate(Candidate(1,2,2,'大和「こんにちは」','HOOK'),240)
+        app.observe(ScreenSample(300,S.DIALOGUE,True,True,'こんにちは',True),focused=True,capture_ok=True)
+        self.assertEqual(c.line.epoch,1)
+        self.assertEqual(c.tts_policy,TTSPolicy.SKIP)
+        self.assertEqual(c.line.ready_ms,300)

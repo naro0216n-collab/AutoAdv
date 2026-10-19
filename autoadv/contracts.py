@@ -109,6 +109,7 @@ class Envelope:
     voice: Optional[VoicePresence] = None
     evidence: Evidence = Evidence.NONE
     native_utterance_id: Optional[str] = None
+    native_asset_id: Optional[str] = None
     # A completed TTS event means that the audio output device has drained,
     # not merely that the HTTP synthesis request finished.
     tts_success: Optional[bool] = None

@@ -12,6 +12,7 @@ from typing import Any
 from threading import Lock
 import hashlib
 import json
+import os
 import socket
 import sys
 import time
@@ -25,6 +26,7 @@ from .irodori import TTSWorker, IrodoriClient, IrodoriConfig
 from .live_guard import LiveGuard, WindowsManualMonitor
 from .process_audio import CaptureHealth, ProcessCapture
 from .luna_bridge import decode
+from .game_metadata import VoiceMetadataInbox
 from .runtime import Runtime
 from .screen import ScreenObserver, ScreenProfile, WindowsClientCapture, ScreenSample
 from .windows_input import WindowsAdvancementInput
@@ -58,8 +60,10 @@ class LiveConfig:
     silent_min_ms: int
     reading_chars_per_sec: float
     tts_required: bool
+    config_sha256: str
     input_mode: str
     input_virtual_key: int
+    game_metadata_port: int | None
 
     @classmethod
     def load(cls,path:Path) -> 'LiveConfig':
@@ -69,7 +73,7 @@ class LiveConfig:
         if set(d) != {'pid','hwnd','screen_profile','loopback_helper','asr_model',
                        'asr_tokens','tts','bridge_port','grace_ms',
                        'allow_heuristic_absence','log_path','speaker_rules','name_readings',
-                       'silent_dwell','advance_input'}:
+                       'silent_dwell','advance_input','game_metadata_port'}:
             raise ValueError('live configuration fields differ from the defined schema')
         p=cls(int(d['pid']),int(d['hwnd']),abs_path('screen_profile'),
               abs_path('loopback_helper'),abs_path('asr_model'),abs_path('asr_tokens'),
@@ -83,9 +87,13 @@ class LiveConfig:
               int(d['silent_dwell']['base_ms']),int(d['silent_dwell']['min_ms']),
               float(d['silent_dwell']['reading_chars_per_sec']),
               bool(d['tts'].get('required_for_accessibility',False)),
-              d['advance_input']['mode'],int(d['advance_input']['virtual_key']))
+              hashlib.sha256(path.read_bytes()).hexdigest(),
+              d['advance_input']['mode'],int(d['advance_input']['virtual_key']),
+              int(d['game_metadata_port']) if d['game_metadata_port'] is not None else None)
         if p.pid<=0 or p.hwnd<=0 or not 1<=p.bridge_port<=65535 or p.grace_ms<0 or p.input_mode not in ('keyboard','mouse_left') or not 1<=p.input_virtual_key<=254:
             raise ValueError('invalid PID, HWND, port or grace')
+        if p.game_metadata_port is not None and (p.game_metadata_port == p.bridge_port or not 1<=p.game_metadata_port<=65535):
+            raise ValueError('invalid game metadata port')
         if type(p.allow_heuristic_absence) is not bool:
             raise ValueError('allow_heuristic_absence must be boolean')
         return p
@@ -148,6 +156,11 @@ class GuardNoInput:
 def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
     if sys.platform!='win32':
         raise OSError('live game integration requires Windows')
+    shared_key=b''
+    if config.game_metadata_port is not None:
+        shared_key=os.environ.get('AUTOADV_GAME_METADATA_KEY','').encode('utf-8')
+        if len(shared_key)<16:
+            raise ValueError('authenticated game-asset adapter key is missing')
     import ctypes
     from ctypes import wintypes
     import psutil
@@ -174,7 +187,8 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
     ctrl.configure_tts(config.tts_policy, selected_voice=config.selected_voice,
                        default_voice=config.default_voice)
     audit=JsonAudit(config.log_path, context={
-        'config_version':'live-profile-v1',
+        'config_version':config.config_sha256,
+        'profile_schema':'live-profile-v1',
         'asr_model_id':config.asr_model.name,
         'asr_tokens_id':config.asr_tokens.name,
         'screen_profile_id':config.screen_profile.name,
@@ -184,6 +198,8 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
     runtime=None
     capture=None
     sock=None
+    metadata_sock=None
+    metadata_inbox=VoiceMetadataInbox(shared_key) if config.game_metadata_port is not None else None
     try:
         guard=LiveGuard(ctrl,screen,config.hwnd,config.pid,manual,
                         lambda:tts.is_active() if tts else True,health.alive,
@@ -212,6 +228,10 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
         capture.start()
         sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
         sock.bind(('127.0.0.1',config.bridge_port)); sock.setblocking(False)
+        if config.game_metadata_port is not None:
+            metadata_sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            metadata_sock.bind(('127.0.0.1',config.game_metadata_port))
+            metadata_sock.setblocking(False)
         was_waiting_ack=False
         print('AutoAdv live session started; input '+('ENABLED' if enable_input else 'DISABLED'),flush=True)
         while True:
@@ -222,6 +242,15 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
                     packet=decode(payload)
                 except (ValueError,UnicodeDecodeError,json.JSONDecodeError):continue
                 app.candidate(packet,_clock())
+            if metadata_sock is not None:
+                while True:
+                    try:payload,_=metadata_sock.recvfrom(4097)
+                    except BlockingIOError:break
+                    try:
+                        assert metadata_inbox is not None
+                        metadata_inbox.accept(payload,ctrl.session_id,ctrl.line)
+                    except (ValueError,UnicodeDecodeError,json.JSONDecodeError):
+                        audit('metadata_rejected',{'reason':'invalid_or_unverified_schema'})
             runtime.step()
             l=ctrl.line
             expected=(app.pending.raw_text
@@ -238,7 +267,8 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
             user32.GetForegroundWindow.restype=wintypes.HWND
             foreground=user32.GetForegroundWindow()==config.hwnd
             app.observe(sample,focused=foreground,
-                        capture_ok=health.alive(),manual_intervened=manual.intervened())
+                        capture_ok=health.alive(),manual_intervened=manual.intervened(),
+                        voice_metadata=metadata_inbox.for_line(ctrl.session_id,ctrl.line) if metadata_inbox else None)
             while runtime.step():pass
             if was_waiting_ack and ctrl.state is ControllerState.WAIT_LINE:
                 manual.reset_after_transition()
@@ -255,6 +285,7 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
         if asr:asr.close()
         if tts:tts.cancel_all()
         if sock:sock.close()
+        if metadata_sock:metadata_sock.close()
         if runtime:runtime.finalize()
         manual.close()
         audit.close()

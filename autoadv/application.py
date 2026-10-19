@@ -50,6 +50,7 @@ class ObservationOrchestrator:
         self._saw_fall_after_sent=False
         self._saw_fresh_candidate_after_sent=False
         self._line_counter=0
+        self._last_metadata:tuple | None=None
 
     def _post(self,kind:EK,now:int,**fields)->None:
         line=self.ctrl.line
@@ -77,7 +78,7 @@ class ObservationOrchestrator:
             line=self.ctrl.line
             if packet.raw_text==line.text.raw:
                 return
-            if (self.ctrl.state is ControllerState.WAIT_TEXT_READY and
+            if (line.ready_ms is None and self.ctrl.state is not ControllerState.PAUSED and
                 packet.raw_text.startswith(line.text.raw)):
                 self._post(EK.LINE_UPDATED,at_ms,text=packet.raw_text)
                 if self.ctrl.state is not ControllerState.PAUSED:
@@ -119,10 +120,6 @@ class ObservationOrchestrator:
             if not (sample.state is ScreenState.DIALOGUE and sample.text_matches):
                 return
             packet=self.pending
-            if self.speaker_router is not None:
-                route=self.speaker_router.resolve(packet.raw_text)
-                self.ctrl.configure_tts(route.policy, selected_voice=route.voice_id,
-                                        default_voice=self.ctrl.default_voice_id)
             first_seen=self.pending_at_ms if self.pending_at_ms is not None else now
             self.pending=None
             self.pending_at_ms=None
@@ -137,6 +134,12 @@ class ObservationOrchestrator:
         line=self.ctrl.line
         if line is None:return
         if sample.state is ScreenState.DIALOGUE and sample.ready and sample.text_matches and line.ready_ms is None:
+            # Only a completed display can establish the actual speaker;
+            # the first partial candidate may not contain their full name.
+            if self.speaker_router is not None:
+                route=self.speaker_router.resolve(line.text.raw)
+                self.ctrl.configure_tts(route.policy, selected_voice=route.voice_id,
+                                        default_voice=self.ctrl.default_voice_id)
             self._post(EK.LINE_READY,now)
         if (voice_metadata is None and self.ctrl.settings.allow_heuristic_absence and
             line.voice is VoicePresence.UNRESOLVED and sample.ready and
@@ -147,9 +150,14 @@ class ObservationOrchestrator:
             self._post(EK.VOICE_PRESENCE,now,voice=VoicePresence.ABSENT,
                        evidence=Evidence.HEURISTIC)
         if voice_metadata is not None and voice_metadata.verified:
-            if voice_metadata.asset_assigned and voice_metadata.asset_id:
-                self._post(EK.VOICE_PRESENCE,now,voice=VoicePresence.PRESENT,evidence=Evidence.METADATA)
-            elif not voice_metadata.asset_assigned:
-                self._post(EK.VOICE_PRESENCE,now,voice=VoicePresence.ABSENT,evidence=Evidence.METADATA)
+            signature=(line.epoch,line.token,voice_metadata.asset_assigned,voice_metadata.asset_id)
+            if signature != self._last_metadata:
+                if voice_metadata.asset_assigned and voice_metadata.asset_id:
+                    self._post(EK.VOICE_PRESENCE,now,voice=VoicePresence.PRESENT,
+                               evidence=Evidence.METADATA,native_asset_id=voice_metadata.asset_id)
+                    self._last_metadata=signature
+                elif not voice_metadata.asset_assigned:
+                    self._post(EK.VOICE_PRESENCE,now,voice=VoicePresence.ABSENT,evidence=Evidence.METADATA)
+                    self._last_metadata=signature
         self.runtime.poll()
         self.runtime.step()

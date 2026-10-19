@@ -37,5 +37,6 @@
   "advance_input": {
     "mode": "keyboard",
     "virtual_key": 13
-  }
+  },
+  "game_metadata_port": null
 }

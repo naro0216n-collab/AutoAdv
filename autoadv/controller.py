@@ -69,6 +69,7 @@ class Line:
     sent: bool = False
     request_pending: bool = False
     sent_at_ms: Optional[int] = None
+    native_asset_id: Optional[str] = None
     native_started_at_ms: Optional[int] = None
     native_completed_at_ms: Optional[int] = None
     tts_started_at_ms: Optional[int] = None
@@ -107,8 +108,9 @@ class Controller:
 
     def configure_tts(self, policy: TTSPolicy, *, selected_voice: str | None = None,
                       default_voice: str | None = None) -> None:
-        if self.line is not None and self.state not in (S.WAIT_LINE, S.PAUSED):
-            raise RuntimeError("change TTS policy only between lines or while paused")
+        if (self.line is not None and self.state is not S.PAUSED and
+            (self.line.ready_ms is not None or self.line.tts_job_started)):
+            raise RuntimeError("TTS policy can only change before text readiness")
         self.tts_policy = policy
         self.voice_id = selected_voice
         self.default_voice_id = default_voice
@@ -268,6 +270,8 @@ class Controller:
                 return []
             self.line.voice = e.voice
             self.line.evidence = e.evidence
+            if e.evidence is Evidence.METADATA:
+                self.line.native_asset_id = e.native_asset_id if e.voice is VoicePresence.PRESENT else None
             if e.voice is VoicePresence.PRESENT and self.line.presentation is Presentation.TTS:
                 effects: list[Effect] = []
                 if self.line.tts_job_started and not self.line.tts_canceled and not self.line.tts_finished:

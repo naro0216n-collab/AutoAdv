@@ -10,7 +10,7 @@ import sys
 
 # A source-identification tag, NOT permission to ignore foreign injected input.
 # Only this process's explicitly tagged, injected key/mouse events are automatic.
-AUTOADV_INPUT_MARK = 0x4155544F414456
+AUTOADV_INPUT_MARK = 0x41564456
 
 
 def input_types():

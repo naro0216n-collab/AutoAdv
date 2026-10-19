@@ -15,3 +15,25 @@ class InputOwnership(unittest.TestCase):
         self.assertEqual(a.ki.dwExtraInfo,AUTOADV_INPUT_MARK)
 
 if __name__=='__main__':unittest.main()
+
+class FailClosedHookCrossCheck(unittest.TestCase):
+    def test_missed_hook_is_detected_from_os_input_time(self):
+        from autoadv.live_guard import InputOriginTracker
+        tracker=InputOriginTracker(100)
+        self.assertFalse(tracker.os_input_tick(100))
+        self.assertTrue(tracker.os_input_tick(105))
+
+    def test_tagged_automatic_event_can_update_last_input_time(self):
+        from autoadv.live_guard import InputOriginTracker
+        t=InputOriginTracker(100)
+        t.hook_event(keyboard=True,flags=0x10,extra_info=AUTOADV_INPUT_MARK,tick=105)
+        self.assertFalse(t.os_input_tick(105))
+        self.assertFalse(t.os_input_tick(105))
+        self.assertTrue(t.os_input_tick(109))
+
+    def test_manual_input_is_latched_even_if_automatic_follows(self):
+        from autoadv.live_guard import InputOriginTracker
+        t=InputOriginTracker(100)
+        t.hook_event(keyboard=True,flags=0,extra_info=0,tick=101)
+        t.hook_event(keyboard=True,flags=0x10,extra_info=AUTOADV_INPUT_MARK,tick=102)
+        self.assertTrue(t.os_input_tick(102))

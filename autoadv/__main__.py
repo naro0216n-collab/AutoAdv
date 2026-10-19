@@ -69,6 +69,9 @@ def main() -> int:
     tts.add_argument("--speed",type=float,default=1)
     tts.add_argument("--output",help="save synthesized WAV")
     tts.add_argument("--play",action="store_true",help="play until output device drained (sounddevice required)")
+    report=sub.add_parser('audit-evaluate',help='evaluate structured line logs; labels optional')
+    report.add_argument('audit',type=Path)
+    report.add_argument('--labels',type=Path,help='independently verified ground-truth CSV')
     bridge=sub.add_parser("bridge-monitor",help="inspect opt-in pre-filter candidate packets")
     bridge.add_argument("--port",type=int,default=47916)
     live=sub.add_parser("run-windows",help="calibrated process-loopback/ASR/visual game control")
@@ -80,6 +83,19 @@ def main() -> int:
         try:return run_windows(LiveConfig.load(args.config),enable_input=args.enable_input)
         except (OSError,ValueError,FileNotFoundError) as exc:
             print(f"AutoAdv configuration or runtime error: {exc}",file=sys.stderr)
+            return 2
+    if args.command=='audit-evaluate':
+        from .evaluation import load_jsonl,evaluate_audit
+        import csv
+        try:
+            labels=None
+            if args.labels:
+                with args.labels.open(encoding='utf-8-sig',newline='') as f:
+                    labels=list(csv.DictReader(f))
+            print(json.dumps(evaluate_audit(load_jsonl(args.audit),labels),ensure_ascii=False,indent=2))
+            return 0
+        except (OSError,ValueError,KeyError,json.JSONDecodeError) as exc:
+            print(f'audit evaluation failed: {exc}',file=sys.stderr)
             return 2
     if args.command=="luna-origin":return _origin(args)
     if args.command=="bridge-monitor":return _bridge(args)

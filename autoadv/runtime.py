@@ -113,6 +113,12 @@ class Runtime:
                     continue
                 try:
                     self.input_driver.advance()
+                    self.audit('input_injected',{
+                        'session_id':effect.session_id,
+                        'line_epoch':effect.line_epoch,
+                        'cancel_token':effect.cancel_token,
+                        'at_ms':self.clock(),
+                    })
                 except Exception:
                     for stop in self.controller.input_failed():
                         self.audit("effect", {"kind": stop.kind.name, "reason": stop.reason})
@@ -134,6 +140,7 @@ class Runtime:
             'native_presence':line.voice.name,
             'native_evidence':line.evidence.name,
             'native_utterance_id':line.utterance_id,
+            'native_asset_id':line.native_asset_id,
             'text_ready_at_ms':line.ready_ms,
             'native_onset_ms':line.native_started_at_ms,
             'native_end_ms':line.native_completed_at_ms,
