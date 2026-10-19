@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from queue import Queue, Empty
 from typing import Callable, Protocol
+import hashlib
 import time
 
 from .contracts import Effect, EffectKind, Envelope, EventKind, ScreenState
@@ -55,6 +56,8 @@ class Runtime:
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.queue: Queue[Envelope] = Queue()
         self.audit = audit or (lambda name, details: None)
+        self._reported_state: tuple | None = None
+        self._finalized: set[int] = set()
 
     def post(self, event: Envelope) -> None:
         self.queue.put(event)
@@ -64,13 +67,15 @@ class Runtime:
             event = self.queue.get(timeout=timeout)
         except Empty:
             return False
-        self.audit("event", {"kind": event.kind.name, "epoch": event.line_epoch,
-                             "session": event.session_id, "at_ms": event.at_ms,
-                             "native_evidence": event.evidence.name,
-                             "voice_presence": event.voice.name if event.voice else None,
-                             "capture_ok": event.capture_ok,
-                             "screen_state": event.screen.name if event.screen else None,
-                             "tts_success": event.tts_success})
+        if event.kind is not EventKind.TIMER:
+            self.audit("event", {"kind": event.kind.name, "epoch": event.line_epoch,
+                                 "session": event.session_id, "at_ms": event.at_ms,
+                                 "native_evidence": event.evidence.name,
+                                 "voice_presence": event.voice.name if event.voice else None,
+                                 "capture_ok": event.capture_ok,
+                                 "screen_state": event.screen.name if event.screen else None,
+                                 "tts_success": event.tts_success})
+        previous = self.controller.line
         effects = self.controller.accept(event)
         for effect in effects:
             self.audit("effect", {"kind": effect.kind.name, "epoch": effect.line_epoch,
@@ -112,7 +117,63 @@ class Runtime:
                     for stop in self.controller.input_failed():
                         self.audit("effect", {"kind": stop.kind.name, "reason": stop.reason})
                     self.audit("input_failed", {"epoch": effect.line_epoch})
+        self._audit_state(event,previous)
         return True
+
+    def _line_fields(self, line) -> dict:
+        c = self.controller
+        return {
+            'session_id':c.session_id, 'line_epoch':line.epoch,
+            'source_line_id':line.source_line_id,
+            'raw_sha256':hashlib.sha256(line.text.raw.encode('utf-8')).hexdigest(),
+            'content_kind':line.text.kind.name,
+            'screen_state':c.screen.name,
+            'tts_policy':c.tts_policy.name,
+            'tts_selected_voice':c.voice_id if c.tts_policy.name=='SELECTED' else c.default_voice_id if c.tts_policy.name=='DEFAULT' else None,
+            'presentation':line.presentation.name,
+            'native_presence':line.voice.name,
+            'native_evidence':line.evidence.name,
+            'native_utterance_id':line.utterance_id,
+            'text_ready_at_ms':line.ready_ms,
+            'native_onset_ms':line.native_started_at_ms,
+            'native_end_ms':line.native_completed_at_ms,
+            'tts_started_ms':line.tts_started_at_ms,
+            'tts_completed_ms':line.tts_ended_at_ms,
+            'tts_cancelled':line.tts_canceled,
+            'silent_dwell_started_ms':line.silent_started_at_ms,
+            'presentation_complete_at_ms':line.presentation_complete_at_ms,
+            'input_at_ms':line.sent_at_ms,
+            'pause_reason':c.pause_reason,
+        }
+
+    def _finalize_line(self, line, status:str, event:Envelope | None=None) -> None:
+        if line.epoch in self._finalized:return
+        self._finalized.add(line.epoch)
+        details=self._line_fields(line)
+        details['final_status']=status
+        details['transition_ack']=event.transition_id if event and event.kind is EventKind.TRANSITION_ACK else None
+        self.audit('line_summary',details)
+
+    def _audit_state(self, event:Envelope, previous) -> None:
+        line = self.controller.line
+        if line is not None:
+            snapshot=(line.epoch,self.controller.state,line.presentation,line.voice,line.evidence,
+                      line.ready_ms,line.sent_at_ms,line.native_started_at_ms,
+                      line.native_completed_at_ms,line.tts_ended_at_ms,line.tts_canceled,
+                      self.controller.pause_reason)
+            if snapshot != self._reported_state:
+                self.audit('line_state',{'state':self.controller.state.name,**self._line_fields(line)})
+                self._reported_state=snapshot
+            if self.controller.state.name=='PAUSED':
+                self._finalize_line(line,'paused')
+        if previous is not None and line is None and event.kind is EventKind.TRANSITION_ACK:
+            self._finalize_line(previous,'advanced_and_acknowledged',event)
+            self._reported_state=None
+
+    def finalize(self, reason:str='session_ended') -> None:
+        line=self.controller.line
+        if line is not None:
+            self._finalize_line(line,reason)
 
     def poll(self) -> None:
         for effect in self.controller.transition_timed_out(self.clock()):

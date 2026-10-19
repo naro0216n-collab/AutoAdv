@@ -48,6 +48,7 @@ class VisualContractTests(unittest.TestCase):
         self.assertTrue(observed.ready)
         self.assertTrue(observed.text_matches)
         self.assertFalse(s.observe('違う',400).text_matches)
+        self.assertTrue(s.observe('大和「おはよう」',420).text_matches)
 
     def test_blocker_resets_ready_streak(self):
         f=[self.make('dialogue','text_ready')]

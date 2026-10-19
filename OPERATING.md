@@ -19,9 +19,11 @@ py -3.11 -m autoadv bridge-monitor
 
 画面はDialogue、Choice、Map、Menu、Transitionを個別に検出する。衝突または未検出はUnknownとなる。さらに画面本文を日本語OCRで読み、Luna原文と照合する。OCR失敗は送信停止であり、未確認のText Readyを自動補完しない。
 
-音声キャプチャはWASAPI process-loopbackで対象ゲームPIDと子プロセスだけを取得し、外部TTSは取り込まない。PC内で別デバイスのシステム音を混ぜる代替経路は設けない。音声が無音でもhelperはheartbeatを出すが、それは「ボイスなし」の証明ではない。サンプル保存は行わず、JSONLにはイベント種別・epoch・判定根拠・停止理由等を記録する。
+音声キャプチャはWASAPI process-loopbackで対象ゲームPIDと子プロセスだけを取得し、外部TTSは取り込まない。PC内で別デバイスのシステム音を混ぜる代替経路は設けない。音声が無音でもhelperはheartbeatを出すが、それは「ボイスなし」の証明ではない。サンプル保存は行わず、JSONLにはイベント種別・epoch・判定根拠・停止理由等を記録する。各行の`line_state`/`line_summary`には原文のSHA-256、音声根拠、提示経路、Ready時刻、native/TTS開始・終了、input時刻、遷移ACK、停止理由とモデル識別子を含める。ASR分析時のcoverage、tail confidence、VAD末尾無音は`asr_progress`で記録し、最終`line_summary`にも統合する。実際の誤送り率や不要停止率の確定には、ゲーム実測と独立に正解ラベルを付与した評価が必要である。
 
 **未校正の作品では `allow_heuristic_absence:false`を維持する。** ゲーム内の音声割当て情報が取得できない無音台詞は、検出不能なら停止する。trueは音声開始遅延・SE/BGM・誤送りログを作品別に実測した場合のみに設定する。trueであってもVAD等で曖昧な音声が検出された場合は解決不能として停止する。確率的に絶対的な誤送りゼロは保証できない。
+
+ゲーム別の進行入力は`advance_input`で`{"mode":"keyboard","virtual_key":13}`（Enter）、`{"mode":"keyboard","virtual_key":32}`（Space）、`{"mode":"mouse_left","virtual_key":13}`（現在のカーソル位置で左クリック）などを選択する。入力はController直下の単一ドライバのみが行い、SendInputには固有の発生元タグを付ける。Windows低レベルフックが物理/他アプリ由来の操作を検出したら停止し、フック導入失敗時も入力を許可しない。マウス操作モードでは、選択肢表示を含む画面停止判定を十分に校正すること。
 
 TTSの割当ては`tts.policy`および`speaker_rules`で管理する。`SKIP`は台詞自体を飛ばさず、native不在を確認したうえで無音閲覧する。DEFAULTは実際に利用できるデフォルトvoiceがあるときだけ使用する。`name_readings`は固有作品の読みを登録し、複合名に勝手に置換しない。`京(みやこ)`のようなルビはベース漢字を読み上げず読みを残す。
 

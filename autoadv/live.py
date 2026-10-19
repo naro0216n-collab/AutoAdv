@@ -27,7 +27,7 @@ from .process_audio import CaptureHealth, ProcessCapture
 from .luna_bridge import decode
 from .runtime import Runtime
 from .screen import ScreenObserver, ScreenProfile, WindowsClientCapture, ScreenSample
-from .windows_input import WindowsEnterInput
+from .windows_input import WindowsAdvancementInput
 from .speaker import SpeakerRouter, VoiceRoute
 
 
@@ -58,6 +58,8 @@ class LiveConfig:
     silent_min_ms: int
     reading_chars_per_sec: float
     tts_required: bool
+    input_mode: str
+    input_virtual_key: int
 
     @classmethod
     def load(cls,path:Path) -> 'LiveConfig':
@@ -67,7 +69,7 @@ class LiveConfig:
         if set(d) != {'pid','hwnd','screen_profile','loopback_helper','asr_model',
                        'asr_tokens','tts','bridge_port','grace_ms',
                        'allow_heuristic_absence','log_path','speaker_rules','name_readings',
-                       'silent_dwell'}:
+                       'silent_dwell','advance_input'}:
             raise ValueError('live configuration fields differ from the defined schema')
         p=cls(int(d['pid']),int(d['hwnd']),abs_path('screen_profile'),
               abs_path('loopback_helper'),abs_path('asr_model'),abs_path('asr_tokens'),
@@ -80,8 +82,9 @@ class LiveConfig:
               float(d['tts'].get('speed',1)),
               int(d['silent_dwell']['base_ms']),int(d['silent_dwell']['min_ms']),
               float(d['silent_dwell']['reading_chars_per_sec']),
-              bool(d['tts'].get('required_for_accessibility',False)))
-        if p.pid<=0 or p.hwnd<=0 or not 1<=p.bridge_port<=65535 or p.grace_ms<0:
+              bool(d['tts'].get('required_for_accessibility',False)),
+              d['advance_input']['mode'],int(d['advance_input']['virtual_key']))
+        if p.pid<=0 or p.hwnd<=0 or not 1<=p.bridge_port<=65535 or p.grace_ms<0 or p.input_mode not in ('keyboard','mouse_left') or not 1<=p.input_virtual_key<=254:
             raise ValueError('invalid PID, HWND, port or grace')
         if type(p.allow_heuristic_absence) is not bool:
             raise ValueError('allow_heuristic_absence must be boolean')
@@ -106,16 +109,31 @@ class CaptureLiveness:
 
 
 class JsonAudit:
-    def __init__(self,path:Path):
+    """Thread-safe JSONL with per-line model identity and ASR tail evidence."""
+    def __init__(self,path:Path,*,context:dict | None=None):
         path.parent.mkdir(parents=True,exist_ok=True)
         self.output=path.open('a',encoding='utf-8')
+        self.context=context or {}
+        self.lock=Lock()
+        self._asr_by_line:dict[tuple[str,int],dict]={}
 
     def __call__(self,kind:str,details:dict):
-        item={'at_ms':_clock(),'name':kind,**details}
-        self.output.write(json.dumps(item,ensure_ascii=False)+'\n')
-        self.output.flush()
+        with self.lock:
+            if kind=='asr_progress':
+                key=(details['session_id'],details['line_epoch'])
+                self._asr_by_line[key]={
+                    k:details[k] for k in ('asr_coverage','asr_tail_confidence',
+                        'asr_order_consistent','vad_tail_silence_ms','inference_samples',
+                        'native_attributed') if k in details}
+            if kind=='line_summary':
+                details={**self.context,**details,**self._asr_by_line.pop(
+                    (details['session_id'],details['line_epoch']),{})}
+            item={'at_ms':_clock(),'name':kind,**details}
+            self.output.write(json.dumps(item,ensure_ascii=False)+'\n')
+            self.output.flush()
 
-    def close(self):self.output.close()
+    def close(self):
+        with self.lock:self.output.close()
 
 
 class InputDisabled:
@@ -155,9 +173,15 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
                              tts_required=config.tts_required))
     ctrl.configure_tts(config.tts_policy, selected_voice=config.selected_voice,
                        default_voice=config.default_voice)
-    audit=JsonAudit(config.log_path)
+    audit=JsonAudit(config.log_path, context={
+        'config_version':'live-profile-v1',
+        'asr_model_id':config.asr_model.name,
+        'asr_tokens_id':config.asr_tokens.name,
+        'screen_profile_id':config.screen_profile.name,
+    })
     tts=None
     asr=None
+    runtime=None
     capture=None
     sock=None
     try:
@@ -165,16 +189,19 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
                         lambda:tts.is_active() if tts else True,health.alive,
                         lambda:asr.potentially_active() if asr else True)
         runtime=Runtime(ctrl,guard if enable_input else GuardNoInput(guard),
-                        WindowsEnterInput(config.hwnd) if enable_input else InputDisabled(),
+                        WindowsAdvancementInput(config.hwnd,mode=config.input_mode,
+                                                virtual_key=config.input_virtual_key) if enable_input else InputDisabled(),
                         # temporarily assigned below, before processing any events
                         _TTSProxy(),audit=audit)
         tts=TTSWorker(IrodoriClient(IrodoriConfig(url=config.tts_url,speed=config.tts_speed)),runtime.post)
         runtime.tts=tts
         recognizer=JapaneseASR(config.asr_model,config.asr_tokens)
-        asr=AudioRecognitionPipeline(history,recognizer,runtime.post)
+        asr=AudioRecognitionPipeline(history,recognizer,runtime.post,audit=audit)
         app=ObservationOrchestrator(runtime,
             on_line_started=lambda epoch,token,text,now:asr.begin(
                 TargetLine(ctrl.session_id,epoch,token,text,now)),
+            on_line_updated=lambda epoch,token,text:asr.retarget(epoch,token,text),
+            on_line_boundary=asr.mark_boundary,
             speaker_router=SpeakerRouter(config.speaker_rules,
                 VoiceRoute(config.tts_policy,config.selected_voice)),
             heuristic_absence_ready=asr.can_heuristically_exclude_voice)
@@ -228,6 +255,8 @@ def run_windows(config:LiveConfig, *, enable_input:bool=False)->int:
         if asr:asr.close()
         if tts:tts.cancel_all()
         if sock:sock.close()
+        if runtime:runtime.finalize()
+        manual.close()
         audit.close()
 
 

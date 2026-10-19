@@ -14,10 +14,17 @@
     "required_for_accessibility": false
   },
   "speaker_rules": {
-    "大和": {"policy":"SKIP"},
-    "ナレーション": {"policy":"SELECTED","voice_id":"narrator"}
+    "大和": {
+      "policy": "SKIP"
+    },
+    "ナレーション": {
+      "policy": "SELECTED",
+      "voice_id": "narrator"
+    }
   },
-  "name_readings": {"京":"みやこ"},
+  "name_readings": {
+    "京": "みやこ"
+  },
   "bridge_port": 47916,
   "grace_ms": 500,
   "allow_heuristic_absence": false,
@@ -26,5 +33,9 @@
     "min_ms": 1000,
     "reading_chars_per_sec": 12
   },
-  "log_path": "../logs/autoadv.jsonl"
+  "log_path": "../logs/autoadv.jsonl",
+  "advance_input": {
+    "mode": "keyboard",
+    "virtual_key": 13
+  }
 }

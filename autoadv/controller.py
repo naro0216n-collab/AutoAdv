@@ -70,6 +70,11 @@ class Line:
     request_pending: bool = False
     sent_at_ms: Optional[int] = None
     native_started_at_ms: Optional[int] = None
+    native_completed_at_ms: Optional[int] = None
+    tts_started_at_ms: Optional[int] = None
+    tts_ended_at_ms: Optional[int] = None
+    silent_started_at_ms: Optional[int] = None
+    presentation_complete_at_ms: Optional[int] = None
 
 
 class Controller:
@@ -91,6 +96,9 @@ class Controller:
         self._token = 0
         self._last_source_seq = -1
         self._last_at_ms = -1
+        # Producer-local ordering, not a total order across unrelated sources.
+        # A polling timer must never erase a delayed choice/audio/focus event.
+        self._last_kind_at_ms: dict[tuple[EK, int | None], int] = {}
         self.pause_reason: Optional[str] = None
         self.tts_policy = TTSPolicy.UNASSIGNED
         self.voice_id: Optional[str] = None
@@ -138,7 +146,16 @@ class Controller:
             self.state = S.RESOLVE_PRESENTATION
 
     def _check_event(self, e: Envelope) -> bool:
-        if e.session_id != self.session_id or e.at_ms < self._last_at_ms:
+        if e.session_id != self.session_id:
+            return False
+        # Candidate packets carry an independent source_seq; their producer
+        # clock is not a reliable ordering oracle for other observations.
+        order_key = (e.kind, e.line_epoch if e.kind in (
+            EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
+            EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
+            EK.LINE_INVALIDATED) else None)
+        if (e.kind is not EK.MANUAL_OVERRIDE and e.kind is not EK.LINE_CANDIDATE and
+            e.at_ms < self._last_kind_at_ms.get(order_key, -1)):
             return False
         # Callback events and their cancellation guards may never reach a new line.
         if e.kind in (EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
@@ -151,7 +168,17 @@ class Controller:
     def accept(self, e: Envelope) -> list[Effect]:
         if not self._check_event(e):
             return []
-        self._last_at_ms = e.at_ms
+        if self.state is S.PAUSED and e.kind is not EK.MANUAL_OVERRIDE:
+            # PAUSED is latched. Late native onset, metadata, TTS completion,
+            # timers and screen observations must not resume a stopped line.
+            return []
+        self._last_at_ms = max(self._last_at_ms, e.at_ms)
+        order_key = (e.kind, e.line_epoch if e.kind in (
+            EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
+            EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
+            EK.LINE_INVALIDATED) else None)
+        self._last_kind_at_ms[order_key] = max(
+            e.at_ms, self._last_kind_at_ms.get(order_key, -1))
         if e.kind is EK.MANUAL_OVERRIDE:
             effects = self._pause("manual_override")
             self._token += 1
@@ -281,6 +308,7 @@ class Controller:
                 e.evidence not in (Evidence.AUDIO_CONFIRMED, Evidence.METADATA)):
                 return []
             self.line.playback = Playback.COMPLETE
+            self.line.native_completed_at_ms = e.at_ms
             self.line.presentation = Presentation.NATIVE
         elif e.kind is EK.TTS_FINISHED:
             assert self.line is not None
@@ -288,6 +316,7 @@ class Controller:
                 return []
             if e.tts_success is True:
                 self.line.tts_finished = True
+                self.line.tts_ended_at_ms = e.at_ms
             else:
                 if self.settings.tts_required or self.line.voice is not VoicePresence.ABSENT:
                     return self._pause("tts_failed")
@@ -374,11 +403,13 @@ class Controller:
                 if voice and l.text.kind is ContentKind.SPEAKABLE:
                     l.presentation = Presentation.TTS
                     l.tts_job_started = True
+                    l.tts_started_at_ms = at_ms
                     self.state = S.WAIT_TTS_END
                     return [self._effect(FX.START_TTS, voice=voice)]
                 if self.settings.tts_required and l.text.kind is ContentKind.SPEAKABLE:
                     return self._pause("tts_required_unassigned")
                 l.presentation = Presentation.SILENT
+                l.silent_started_at_ms = l.ready_ms
             if l.presentation is Presentation.TTS:
                 if not l.tts_finished:
                     self.state = S.WAIT_TTS_END
@@ -393,6 +424,7 @@ class Controller:
         if not self._eligible_for_request():
             return []
         l.request_pending = True
+        l.presentation_complete_at_ms = at_ms
         self.state = S.READY_TO_ADVANCE
         return [self._effect(FX.REQUEST_ADVANCE, "presentation_complete")]
 

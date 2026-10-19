@@ -63,6 +63,7 @@ class TargetMatcher:
 class VADDecision:
     active: bool
     tail_silence_ms: int
+    frames_analyzed: bool = True
 
 
 class VoiceActivity:
@@ -87,10 +88,12 @@ class VoiceActivity:
         unit = 48000 * 20 // 1000 * 2
         self._pending.extend(pcm)
         voiced = False
+        analyzed = False
         while len(self._pending) >= unit:
+            analyzed = True
             segment = bytes(self._pending[:unit])
             del self._pending[:unit]
             speech = self.vad.is_speech(segment, 48000)
             voiced = voiced or speech
             self.tail_ms = 0 if speech else self.tail_ms + 20
-        return VADDecision(voiced, self.tail_ms)
+        return VADDecision(voiced, self.tail_ms, analyzed)

@@ -12,6 +12,7 @@ import json
 import unicodedata
 from .contracts import ScreenState
 from .audio_match import phonetic_key
+from .speaker import split_speaker
 
 ROLES = ('dialogue', 'text_ready', 'choice', 'map', 'menu', 'transition')
 OPTIONAL_ROLES = ('empty_event',)
@@ -130,7 +131,9 @@ class ScreenObserver:
                 self._ready_first_at is not None and
                 at_ms-self._ready_first_at>=self.profile.minimum_ready_span_ms)
         raw=''
-        if state is ScreenState.DIALOGUE and stable:
+        if state is ScreenState.DIALOGUE:
+            # Partial OCR is permitted as a candidate/line-update observation,
+            # but NEVER as TEXT_READY or an advance preflight proof.
             x,y,w,h=self.profile.text_rect
             roi=frame[y:y+h,x:x+w]
             if roi.shape[:2]==(h,w):
@@ -145,8 +148,13 @@ class ScreenObserver:
                 import numpy as np
                 score=1-np.mean(np.abs(roi.astype('float32')-template.astype('float32')))/255
                 empty_confirmed=score>=marker.min_score
-        match=(bool(visible_key(expected_text)) and
-               visible_key(raw)==visible_key(expected_text)) or empty_confirmed
+        _, dialogue_body=split_speaker(expected_text)
+        expected_keys={visible_key(expected_text),visible_key(dialogue_body)}-{''}
+        visible=visible_key(raw)
+        full=bool(expected_keys) and visible in expected_keys
+        partial=(not stable and len(visible)>=2 and
+                 any(candidate.startswith(visible) for candidate in expected_keys))
+        match=full or partial or empty_confirmed
         return ScreenSample(at_ms,state,stable,match,raw,True,empty_confirmed)
 
 

@@ -58,12 +58,14 @@ class AudioRecognitionPipeline:
                  emit: Callable[[Envelope], None],
                  activity: VoiceActivity | None = None,
                  *, interval_ms: int = 500,
+                 audit: Callable[[str,dict],None] | None = None,
                  clock: Callable[[], int] = lambda: time.monotonic_ns() // 1_000_000):
         if interval_ms < 50:
             raise ValueError('inference interval too small')
         self.history, self.asr, self.emit = history, asr, emit
         self.activity = activity or VoiceActivity()
         self.interval_ms, self.clock = interval_ms, clock
+        self.audit = audit or (lambda *_:None)
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='autoadv-asr')
         self.lock = Lock()
         self.target: TargetLine | None = None
@@ -77,6 +79,15 @@ class AudioRecognitionPipeline:
         self.fresh_onset = False
         self.ambiguous_speech = False
         self.tail_ms = 0
+        self.last_vad_rise_ms: int | None = None
+        self.last_boundary_ms: int = 0
+
+    def mark_boundary(self, advanced_at_ms: int) -> None:
+        """An irreversible input establishes a lower bound for the next voice."""
+        with self.lock:
+            self.last_boundary_ms = max(self.last_boundary_ms, advanced_at_ms)
+            self.last_vad_rise_ms = None
+            self.fresh_onset = False
 
     def begin(self, target: TargetLine) -> None:
         with self.lock:
@@ -85,18 +96,34 @@ class AudioRecognitionPipeline:
             self.utterance_id = uuid.uuid4().hex
             self.gate.begin_line(target.session_id, target.line_epoch, target.cancel_token)
             self.last_sample_ms = -1
-            self.fresh_onset = False
+            # The first candidate precedes visual TEXT_READY. A rising edge
+            # captured just before the candidate may belong to THIS dialogue,
+            # but never across a confirmed input/transition boundary.
+            self.fresh_onset = bool(
+                self.last_vad_rise_ms is not None and
+                self.last_vad_rise_ms >= max(self.last_boundary_ms,
+                                            target.text_first_seen_ms - 2000))
             self.ambiguous_speech = False
-            # Preserve the VAD state across line epochs: continuing voice
-            # from the previous line is NOT a fresh current-line onset.
+
+    def retarget(self, line_epoch:int, cancel_token:int, text:str) -> None:
+        """Partial line text changed without creating an audio generation."""
+        with self.lock:
+            if self.target is None or (self.target.line_epoch, self.target.cancel_token) != (line_epoch, cancel_token):
+                return
+            from dataclasses import replace
+            self.target = replace(self.target,text=text)
+            self.matcher = TargetMatcher(text)
+            self.last_sample_ms = -1
+            # In-flight results for the former target cannot update this line.
 
     def potentially_active(self) -> bool:
         with self.lock:
-            return self.inflight or self.ambiguous_speech or self.gate.active and not self.gate.complete
+            return (self.inflight or self.ambiguous_speech or self.last_vad_active or
+                    self.gate.active and not self.gate.complete)
 
     def can_heuristically_exclude_voice(self) -> bool:
         with self.lock:
-            return not self.inflight and not self.ambiguous_speech and not self.gate.active
+            return not self.inflight and not self.last_vad_active and not self.ambiguous_speech and not self.gate.active
 
     def feed(self, chunk: PCMChunk) -> None:
         try:
@@ -109,11 +136,15 @@ class AudioRecognitionPipeline:
         with self.lock:
             if self.closed:
                 return
-            if not current_vad.active:
-                self.last_vad_active = False
-            elif not self.last_vad_active:
-                self.fresh_onset = True
-                self.last_vad_active = True
+            if current_vad.frames_analyzed:
+                if not current_vad.active:
+                    self.last_vad_active = False
+                elif not self.last_vad_active:
+                    self.last_vad_rise_ms = chunk.at_ms
+                    self.last_vad_active = True
+                    if (self.target is not None and chunk.at_ms >= max(
+                            self.last_boundary_ms, self.target.text_first_seen_ms-2000)):
+                        self.fresh_onset = True
             self.tail_ms = current_vad.tail_silence_ms
             if self.target is None or not self.history.healthy:
                 return
@@ -136,7 +167,10 @@ class AudioRecognitionPipeline:
                 if self.target != target or self.closed or not self.matcher:
                     return
                 match = self.matcher.observe(hypothesis)
-                attributed = bool(target.metadata_voice_id) or (self.fresh_onset and match.matched_chars >= 2)
+                # Voice-asset assignment indicates expected playback, NOT that
+                # arbitrary BGM/SE belongs to that line. Require target-matched
+                # acoustic evidence for the actual native onset.
+                attributed = self.fresh_onset and match.matched_chars >= 2
                 if attributed and match.onset_score >= self.gate.policy.onset_score:
                     self.ambiguous_speech = False
                 emitted = self.gate.observe(AudioEvidence(
@@ -145,8 +179,17 @@ class AudioRecognitionPipeline:
                     attributed,
                     match.onset_score, self.fresh_onset, self.tail_ms,
                     match.coverage, match.tail_confidence, match.monotonic,
-                    metadata_voice_id_matches=bool(target.metadata_voice_id),
+                    metadata_voice_id_matches=False,
                 ))
+            self.audit('asr_progress',{
+                'session_id':target.session_id,'line_epoch':target.line_epoch,
+                'at_ms':self.clock(),'asr_coverage':match.coverage,
+                'asr_tail_confidence':match.tail_confidence,
+                'asr_order_consistent':match.monotonic,
+                'vad_tail_silence_ms':self.tail_ms,
+                'inference_samples':sum(len(c.frames) for c in samples)//8,
+                'native_attributed':attributed,
+            })
             for event in emitted:
                 self.emit(event)
         except Exception:
