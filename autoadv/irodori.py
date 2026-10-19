@@ -86,6 +86,12 @@ def play_wav(audio: bytes, canceled: Event) -> bool:
             stream.close()
 
 
+@dataclass
+class _TTSJob:
+    cancelled: Event
+    playing: bool = False
+
+
 class TTSWorker:
     """Asynchronous TTS worker. Callback posts to Controller's serialized queue."""
 
@@ -96,16 +102,16 @@ class TTSWorker:
         self.emit = emit
         self.player = player
         self.clock = monotonic_ms
-        self._jobs: dict[tuple[str, int, int], Event] = {}
+        self._jobs: dict[tuple[str, int, int], _TTSJob] = {}
         self._lock = Lock()
 
     def apply(self, effect: Effect) -> None:
         key = (effect.session_id, effect.line_epoch, effect.cancel_token)
         if effect.kind is EffectKind.CANCEL_TTS:
             with self._lock:
-                cancel = self._jobs.get(key)
-                if cancel:
-                    cancel.set()
+                job = self._jobs.get(key)
+                if job:
+                    job.cancelled.set()
             return
         if effect.kind is not EffectKind.START_TTS:
             raise ValueError("TTSWorker accepts only TTS effects")
@@ -115,14 +121,25 @@ class TTSWorker:
             if key in self._jobs:
                 raise RuntimeError("duplicate TTS job")
             cancellation = Event()
-            self._jobs[key] = cancellation
+            job = _TTSJob(cancellation)
+            self._jobs[key] = job
 
         def work():
             success = False
             try:
                 wav = self.client.synthesize(effect.text, effect.voice_id or "")
-                if not cancellation.is_set():
-                    success = self.player(wav, cancellation)
+                # A cancelled HTTP synthesis may remain blocked, but has no
+                # audio output. The playback phase is entered atomically with
+                # the cancellation check so no sound starts after cancellation.
+                with self._lock:
+                    if not cancellation.is_set():
+                        job.playing = True
+                if job.playing:
+                    try:
+                        success = self.player(wav, cancellation)
+                    finally:
+                        with self._lock:
+                            job.playing = False
             except Exception:
                 success = False
             finally:
@@ -136,11 +153,15 @@ class TTSWorker:
         Thread(target=work, name="autoadv-irodori", daemon=True).start()
 
     def is_active(self) -> bool:
-        # Pending HTTP generation or device playback both block advancement.
+        # An uncancelled HTTP job is pending presentation. A cancelled HTTP
+        # job cannot play anything and MUST NOT block later native playback.
+        # A cancelled *playing* job continues to block until device abort has
+        # completed and the player callback returns.
         with self._lock:
-            return bool(self._jobs)
+            return any(not job.cancelled.is_set() or job.playing
+                       for job in self._jobs.values())
 
     def cancel_all(self) -> None:
         with self._lock:
-            for ev in self._jobs.values():
-                ev.set()
+            for job in self._jobs.values():
+                job.cancelled.set()

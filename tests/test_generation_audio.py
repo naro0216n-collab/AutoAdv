@@ -82,6 +82,20 @@ class GenerationAudioTests(unittest.TestCase):
         self.assertEqual(p.utterance_id,first_id)
         self.assertTrue(p.fresh_onset)
 
+    def test_cancelled_generation_asr_failure_cannot_pause_next_line(self):
+        p,pcm,v,events=self.make()
+        class BrokenASR:
+            def recognize(self,samples):raise RuntimeError('stale decoder failure')
+        p.asr=BrokenASR()
+        p.begin(TargetLine('s',1,1,'おはよう',2000))
+        old=p.target
+        p.begin(TargetLine('s',2,2,'次の本文',2200))
+        p._infer(old,())
+        self.assertEqual(events,[])
+        p._infer(p.target,())
+        self.assertEqual([e.kind for e in events],[E.CAPTURE_HEALTH])
+        self.assertFalse(events[0].capture_ok)
+
     def test_history_retains_target_start_longer_than_15_seconds(self):
         h=AudioHistory()
         h.start(42)

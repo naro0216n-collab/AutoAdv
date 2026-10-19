@@ -198,9 +198,14 @@ class AudioRecognitionPipeline:
             for event in emitted:
                 self.emit(event)
         except Exception:
-            # ASR/VAD failure is a capture-analysis failure, never ABSENT.
+            # An ASR failure is a capture-analysis failure, never ABSENT.
+            # A cancelled *previous* line's decoding failure cannot poison
+            # the next line's independently owned capture/ASR generation.
             from .contracts import EventKind
-            self.emit(Envelope(EventKind.CAPTURE_HEALTH, target.session_id, self.clock(), capture_ok=False))
+            with self.lock:
+                current = not self.closed and self.target == target
+            if current:
+                self.emit(Envelope(EventKind.CAPTURE_HEALTH, target.session_id, self.clock(), capture_ok=False))
         finally:
             with self.lock:
                 self.inflight = False
