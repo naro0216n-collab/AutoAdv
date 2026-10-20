@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from threading import Lock
 import time
 import unicodedata
 
@@ -24,6 +25,7 @@ class ValidationTrace:
             path = os.environ.get("AUTOADV_VALIDATION_TRACE", "")
         self.path = Path(path).expanduser() if path else None
         self._sequence = 0
+        self._lock = Lock()
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # Refuse to append to a previous session; comparison must use one run.
@@ -34,7 +36,8 @@ class ValidationTrace:
     def emit(self, event: str, **fields: object) -> None:
         if self.path is None:
             return
-        self._sequence += 1
-        item = {"event": event, "seq": self._sequence, "at_ns": time.monotonic_ns(), **fields}
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
+        with self._lock:
+            self._sequence += 1
+            item = {"event": event, "seq": self._sequence, "at_ns": time.monotonic_ns(), **fields}
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")

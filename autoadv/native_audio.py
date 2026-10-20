@@ -43,10 +43,12 @@ class NativeAudio:
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
                  *, recognizer=None, activity=None, clock=None, vad_only: bool = False,
-                 on_pcm: Callable[[Token, int], None] | None = None):
+                 on_pcm: Callable[[Token, int], None] | None = None,
+                 on_inference: Callable[[Token, dict], None] | None = None):
         self.pid = pid
         self.notify = notify
         self.on_pcm = on_pcm
+        self.on_inference = on_inference
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=10000)
         self.vad_only = vad_only
@@ -154,11 +156,16 @@ class NativeAudio:
             for event in events:
                 self.notify(token, event, '')
         else:
-            self._pool.submit(self._infer, token, generation, samples)
+            submitted_ns = time.perf_counter_ns() if self.on_inference else 0
+            self._pool.submit(self._infer, token, generation, samples, submitted_ns)
 
-    def _infer(self, token, generation, samples):
+    def _infer(self, token, generation, samples, submitted_ns=0):
+        started_ns = time.perf_counter_ns() if self.on_inference else 0
+        if not submitted_ns:
+            submitted_ns = started_ns
         try:
             hypothesis = self.asr.recognize(samples)
+            decoded_ns = time.perf_counter_ns() if self.on_inference else 0
             events = []
             with self._lock:
                 if (self._closed or self._generation != generation or token != self.token
@@ -173,6 +180,20 @@ class NativeAudio:
                         and progress.tail_confidence >= .90 and self.tail_ms >= 300):
                     self.completed = True
                     events.append('completed')
+            if self.on_inference:
+                audio_ms = sum(chunk.duration_ms for chunk in samples)
+                measurements = {
+                    'queue_ms': round(max(0, started_ns - submitted_ns) / 1_000_000, 3),
+                    'decode_ms': round(max(0, decoded_ns - started_ns) / 1_000_000, 3),
+                    'audio_ms': round(audio_ms, 3),
+                    'coverage': round(progress.coverage, 4),
+                    'monotonic': progress.monotonic,
+                    'tail_confidence': progress.tail_confidence,
+                }
+                try:
+                    self.on_inference(token, measurements)
+                except Exception:
+                    pass  # Optional diagnostics must never affect speech recognition.
             for event in events:
                 self.notify(token, event, '')
         except Exception as exc:

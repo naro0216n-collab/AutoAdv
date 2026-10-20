@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import wave
+import time
 from threading import Event, Thread
 from typing import Callable
 from urllib import parse, request
@@ -46,9 +47,19 @@ def play(audio: bytes, cancelled: Event) -> bool:
 
 class VoiceJobs:
     """One active presentation; every completion is tied to a session/line token."""
-    def __init__(self, report: Callable[[Token, bool, str], None]):
+    def __init__(self, report: Callable[[Token, bool, str], None],
+                 on_timing: Callable[[Token, str, float, float], None] | None = None):
         self.report = report
+        self.on_timing = on_timing
         self.cancelled: Event | None = None
+
+    def _timing(self, token: Token, stage: str, started_ns: int, audio_ms: float) -> None:
+        try:
+            self.on_timing(token, stage,
+                           round((time.perf_counter_ns() - started_ns) / 1_000_000, 3),
+                           round(audio_ms, 3))
+        except Exception:
+            pass  # Observability is not part of the TTS completion contract.
 
     def cancel(self) -> None:
         if self.cancelled:
@@ -61,8 +72,22 @@ class VoiceJobs:
         self.cancelled = event
         def run():
             try:
+                started_ns = time.perf_counter_ns() if self.on_timing else 0
                 audio = synthesize(url, reading, voice)
+                if self.on_timing:
+                    # Diagnostic inspection must never turn successful synthesis
+                    # into a playback failure.
+                    audio_ms = 0.0
+                    try:
+                        with wave.open(io.BytesIO(audio), 'rb') as wav:
+                            audio_ms = wav.getnframes() * 1000.0 / wav.getframerate()
+                    except Exception:
+                        pass
+                    self._timing(token, 'synthesis', started_ns, audio_ms)
+                playback_ns = time.perf_counter_ns() if self.on_timing else 0
                 success = not event.is_set() and play(audio, event)
+                if self.on_timing and not event.is_set():
+                    self._timing(token, 'playback', playback_ns, audio_ms)
                 self.report(token, success, '' if success else 'TTS cancelled')
             except Exception as exc:
                 if not event.is_set():

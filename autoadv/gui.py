@@ -1,6 +1,7 @@
 """A single GUI integrating game profiles, LunaHook, Irodori, and advancement."""
 from __future__ import annotations
 import ctypes
+import os
 import sys
 import subprocess
 import threading
@@ -64,7 +65,12 @@ def run_gui() -> int:
             self.bridge.native_ready.connect(self.on_native_ready)
             self.bridge.native_pcm.connect(self.on_native_pcm)
             self.bridge.preview.connect(self.on_preview)
-            self.jobs = VoiceJobs(lambda token, done, reason: self.bridge.voice.emit(token, done, reason))
+            self.jobs = VoiceJobs(
+                lambda token, done, reason: self.bridge.voice.emit(token, done, reason),
+                on_timing=(lambda token, stage, duration_ms, audio_ms:
+                    self.validation_trace.emit('tts_timing', session=token.session,
+                        line=token.line, stage=stage, duration_ms=duration_ms, audio_ms=audio_ms))
+                if os.environ.get('AUTOADV_VALIDATION_TRACE') else None)
             self.preview_jobs = VoiceJobs(lambda token, done, reason: self.bridge.preview.emit(done, reason))
             self.controller = Controller(self.send_input, self.preflight)
             self.validation_trace = ValidationTrace()
@@ -1397,6 +1403,10 @@ def run_gui() -> int:
                         lambda token, event, detail: self.bridge.native.emit(token, event, detail),
                         vad_only=vad_only,
                         on_pcm=(lambda token, frames: self.bridge.native_pcm.emit(token, frames))
+                        if self.validation_trace.path else None,
+                        on_inference=(lambda token, metrics:
+                            self.validation_trace.emit('asr_inference', session=token.session,
+                                line=token.line, **metrics))
                         if self.validation_trace.path else None)
                     native.start()
                     self.bridge.native_ready.emit(session, native, '')

@@ -115,6 +115,26 @@ class RealGameVerifierContract(unittest.TestCase):
                     for r in records]
         self.assertTrue(validate(positive, phase='reading')['ok'])
 
+    def test_performance_numbers_are_observations_not_extra_acceptance_thresholds(self):
+        records = contract_records(9, 12)
+        from validation.real_game.verify_trace import _summary
+        self.assertEqual(_summary([100, 200, 500])['p95'], 500)
+        self.assertTrue(validate(records, phase='native')['ok'])
+        metrics = validate(records, phase='native')['performance']
+        self.assertEqual(metrics['hook_to_utterance_ms']['count'], 3)
+        self.assertEqual(metrics['input_to_next_hook_ms']['count'], 2)
+        self.assertEqual(metrics['utterance_to_presentation_ms']['count'], 3)
+        self.assertNotIn('asr_decode_ms', metrics)  # Older traces cannot invent inference speed.
+        # Optional real measurements must not convert a valid input sequence into FAIL.
+        at = records[-1]['at_ns'] + 100
+        records.append({'event': 'asr_inference', 'seq': len(records), 'at_ns': at,
+                        'session': 1, 'line': 3, 'audio_ms': 2000,
+                        'decode_ms': 4000.0, 'queue_ms': 3.2})
+        result = validate(records, phase='native')
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertEqual(result['performance']['asr_rtf']['p95'], 2.0)
+        self.assertEqual(result['performance']['asr_decode_ms']['count'], 1)
+
     def test_wrong_origin_and_wrong_dialogue_cannot_claim_success(self):
         records = contract_records(0, 3, mode='reading')
         wrong_pid = [dict(r, pid=999) if r['event'] == 'hook_output' else r for r in records]

@@ -101,3 +101,21 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 `AUTOADV_VALIDATION_TRACE`を直接設定してGUIを起動した場合も、終了後に
 `python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL>` で同じ照合を行える。
 旧形式（version 1）のトレースは、入力後HOOK受信時刻とPCM証拠がないため検収対象外。
+
+## 音声認識品質と処理速度（任意実行、Fast CI対象外）
+
+**実モデルの認識精度をFast CIの合否条件にはしない。** 同一モデル・コーパス・前処理ではほぼ不変のため、モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に明示実行する。モデルの取得・インストールは行わず、既存のASR環境を利用する。通常の`Real Audio Validation`ワークフローも、この実モデルベンチマークは自動実行しない。
+
+```powershell
+python -m validation.real_game.benchmark_asr `
+  --model 'C:\path\to\model.int8.onnx' `
+  --tokens 'C:\path\to\tokens.txt' `
+  --conditions clean quiet noise clipped truncated bgm `
+  --rounds 2 --output .\asr-performance.json
+```
+
+実行時に`JapaneseASR`（製品使用の`sherpa-onnx`）で既存14音声を認識する。`clean`に加え、低音量・ノイズ・クリッピング・先頭欠落・シナリオ同梱のBGMを**メモリ内で加工**して同じ経路で評価する。モデル読込時間、各発話の実推論wall-clock時間、RTF（推論時間÷音声時間）、正規化CER、条件別のP50/P95と最大値を記録する。モデル／tokensのハッシュ、実行環境、条件・seedも保存する。テスト音声の改変ファイルは生成・再配布しない。速度と認識品質は**観測結果**であり、全音声を認識できるという固定アサーションにしない。言語の読み・表記揺れがあるためCERは単独で送り判断の品質を確定しない。
+
+通常の実ゲーム検収 (`run_live_check.ps1`) は、検証トレースに追加された**製品処理そのものの時間**を集計する。`verify_trace.py`のJSON結果に含まれる`performance`は、HOOK取得通知→Utterance、Utterance→提示完了、提示完了→入力試行、入力試行→次HOOK受信、実ASR推論・キュー待ち、Irodori合成・実再生の各時間とRTFのP50/P95／最大値／件数。`input_to_next_hook_ms`は次HOOKの受信元時刻を使う。トレースを有効にしていない一般利用時には追加診断を記録しない。
+
+計測時は実際に使用するCPU/GPU・ASRモデル・音声機器・ゲーム負荷を記録して比較する。少数の台詞から得たP95は推定値であり、異なるPCやCIランナーとの絶対性能比較には使用しない。待ち時間には原音の実再生・閲覧時間が含まれるため、純粋な処理オーバーヘッドと分けて解釈する。音声が認識できない場合や入力権限が失効した場合、計測値の大小ではなく本体の既存状態遷移と安全停止を検証する。

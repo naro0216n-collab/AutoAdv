@@ -9,12 +9,31 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
 from typing import Sequence
 from autoadv.validation_trace import text_digest
 
 HERE = Path(__file__).resolve().parent
 PHASES = ('hook', 'reading', 'native', 'tts', 'mixed')
+
+
+def _summary(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return {
+        'count': len(ordered),
+        'p50': round(ordered[(len(ordered) - 1) // 2], 3),
+        'p95': round(ordered[math.ceil(len(ordered) * .95) - 1], 3),
+        'max': round(ordered[-1], 3),
+    }
+
+
+def _elapsed_ms(first: int | None, last: int | None) -> float | None:
+    if first is None or last is None or first > last:
+        return None
+    return (last - first) / 1_000_000
 
 
 def _key(record: dict) -> tuple[object, object]:
@@ -63,6 +82,15 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     pause_after_advance: set[object] = set()
     timeouts: set[tuple] = set()
     methods: dict[tuple, str] = {}
+    presentation_at: dict[tuple, int] = {}
+    audio_started_at: dict[tuple, int] = {}
+    audio_completed_at: dict[tuple, int] = {}
+    measured: dict[str, list[float]] = {
+        name: [] for name in (
+            'asr_decode_ms', 'asr_queue_ms', 'asr_rtf',
+            'tts_synthesis_ms', 'tts_synthesis_rtf', 'tts_playback_ms',
+        )
+    }
 
     for record in records[1:]:
         event, session = record.get('event'), record.get('session')
@@ -120,16 +148,40 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     or record.get('audio_pid') != monitoring.get(session, {}).get('audio_pid')):
                 errors.append(f'PCM is not valid captured frames for {key}')
             pcm.add(key)
+        elif event == 'asr_inference':
+            if key in utterances and record.get('audio_ms', 0) > 0:
+                duration = record.get('decode_ms')
+                queue = record.get('queue_ms')
+                if type(duration) in (int, float) and duration >= 0:
+                    measured['asr_decode_ms'].append(duration)
+                    measured['asr_rtf'].append(duration / record['audio_ms'])
+                if type(queue) in (int, float) and queue >= 0:
+                    measured['asr_queue_ms'].append(queue)
+        elif event == 'tts_timing':
+            if key in utterances and type(record.get('duration_ms')) in (int, float):
+                duration = record['duration_ms']
+                if duration >= 0:
+                    if record.get('stage') == 'synthesis':
+                        measured['tts_synthesis_ms'].append(duration)
+                        if record.get('audio_ms', 0) > 0:
+                            measured['tts_synthesis_rtf'].append(duration / record['audio_ms'])
+                    elif record.get('stage') == 'playback':
+                        measured['tts_playback_ms'].append(duration)
         elif event == 'native_event':
+            if record.get('status') == 'started':
+                audio_started_at.setdefault(key, at)
             if record.get('status') == 'completed':
+                audio_completed_at[key] = at
                 methods[key] = record.get('method', '')
                 native.add(key)
         elif event == 'tts_result':
             if record.get('success') is True:
                 tts.add(key)
+                audio_completed_at[key] = at
         elif event == 'presentation_complete':
             if record.get('success') is True:
                 complete.add(key)
+                presentation_at[key] = at
         elif event == 'permit_requested':
             permits[session] = permits.get(session, 0) + 1
             if session in pause_after_advance:
@@ -246,7 +298,32 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if not any(n >= 2 and s in advanced_after_resumption
                    for s, n in permits.items()):
             errors.append('manual pause, reauthorization and further real input not observed')
+    # Measurements are observational, never an additional pass criterion.
+    # The same monotonic clock times delivery, policy and actual advancement.
+    durations = {name: values for name, values in measured.items()}
+    for index, key in enumerate(utterance_order):
+        u = utterances[key]
+        origin = (key[0], u.get('source'), u.get('hook_sequence'), u.get('raw_hash'))
+        if (ms := _elapsed_ms(source_outputs.get(origin), timestamps.get(key))) is not None:
+            durations.setdefault('hook_to_utterance_ms', []).append(ms)
+        if (ms := _elapsed_ms(timestamps.get(key), audio_started_at.get(key))) is not None:
+            durations.setdefault('utterance_to_native_onset_ms', []).append(ms)
+        if (ms := _elapsed_ms(timestamps.get(key), audio_completed_at.get(key))) is not None:
+            durations.setdefault('utterance_to_audio_done_ms', []).append(ms)
+        if (ms := _elapsed_ms(timestamps.get(key), presentation_at.get(key))) is not None:
+            durations.setdefault('utterance_to_presentation_ms', []).append(ms)
+        if (ms := _elapsed_ms(presentation_at.get(key), attempts.get(key))) is not None:
+            durations.setdefault('presentation_to_input_ms', []).append(ms)
+        if key in links:
+            next_u = utterances[utterance_order[index + 1]]
+            next_origin = (utterance_order[index + 1][0], next_u.get('source'),
+                           next_u.get('hook_sequence'), next_u.get('raw_hash'))
+            if (ms := _elapsed_ms(attempts.get(key), source_outputs.get(next_origin))) is not None:
+                durations.setdefault('input_to_next_hook_ms', []).append(ms)
+    performance = {name: stats for name, samples in durations.items()
+                   if (stats := _summary(samples)) is not None}
     return {
+        'performance': performance,
         'ok': not errors, 'phase': phase,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
