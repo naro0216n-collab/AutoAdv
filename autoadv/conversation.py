@@ -43,8 +43,10 @@ class Controller:
         self.pending_speakers: dict[str, tuple[str, int, int]] = {}
         self.awaiting_next = False
         self.ocr_blank = False
+        self.active_text_source: str | None = None
 
-    def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
+    def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
+              available_sources: tuple[str, ...] = ()) -> int:
         profile.validate()
         if profile.source == 'hook' and not any(h.role == 'text' for h in profile.hooks):
             raise ValueError('select at least one text HOOK to monitor')
@@ -53,6 +55,10 @@ class Controller:
         self.close('session_changed')
         self.profile, self.target = deepcopy(profile), target
         self.source_generation, self.connection_generation = host_generation, connection_generation
+        # Only one selected dialogue stream may own the utterance sequence.
+        # Prefer the highest-priority saved source that is already observed.
+        self.active_text_source = next((h.identity for h in profile.hooks
+            if h.role == 'text' and h.identity in available_sources), None)
         self.reason = 'advance_not_authorized'
         return self.session
 
@@ -69,6 +75,7 @@ class Controller:
         self.awaiting_next = False
         self.pending_speakers.clear()
         self.ocr_blank = False
+        self.active_text_source = None
         self.reason = reason
 
     def observe(self, *, generation: str, connection: int, sequence: int,
@@ -98,7 +105,13 @@ class Controller:
             return None
         if not text.strip():
             return None
-        return self._accept_line(sequence=sequence, text=text, origin=getattr(source, 'identity', ''),
+        identity = matched[0].identity
+        if self.active_text_source is None:
+            # Once chosen, another source cannot silently replace the line owner.
+            self.active_text_source = identity
+        if identity != self.active_text_source:
+            return None
+        return self._accept_line(sequence=sequence, text=text, origin=identity,
                                  side_speaker=self._paired_speaker(matched[0].identity, sequence, received_ns))
 
     def _paired_speaker(self, text_source: str, sequence: int, received_ns: int) -> str:

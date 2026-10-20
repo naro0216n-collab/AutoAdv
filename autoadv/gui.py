@@ -5,6 +5,7 @@ import sys
 import subprocess
 import threading
 import copy
+from collections import deque
 from pathlib import Path
 
 from .conversation import Controller, Target, Token
@@ -28,7 +29,8 @@ def run_gui() -> int:
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
                                    QLabel, QPushButton, QComboBox, QFileDialog,
-                                   QSpinBox, QGroupBox, QMessageBox, QCheckBox, QScrollArea, QInputDialog)
+                                   QSpinBox, QGroupBox, QMessageBox, QCheckBox, QScrollArea, QInputDialog,
+                                   QTableWidget, QTableWidgetItem, QAbstractItemView)
 
     class SignalBridge(QObject):
         hook = Signal(object)
@@ -45,7 +47,7 @@ def run_gui() -> int:
         def __init__(self):
             super().__init__()
             self.setWindowTitle('AutoAdv — HOOK / Irodori / Advance')
-            self.resize(1000, 950)
+            self.resize(1150, 950)
             self.catalog = load()
             self.bridge = SignalBridge()
             self.bridge.hook.connect(self.on_hook)
@@ -64,7 +66,9 @@ def run_gui() -> int:
             self.host_generation = ''
             self.connection_generation = 0
             self.sources: dict[str, ThreadSource] = {}
-            self.source_samples: dict[str, str] = {}
+            self.source_samples: dict[str, deque[str]] = {}
+            self.ambiguous_sources: set[str] = set()
+            self.source_rows: dict[tuple[str, int], int] = {}
             self.game_id = ''
             self.profile_id = ''
             self.server: IrodoriServer | None = None
@@ -170,8 +174,14 @@ def run_gui() -> int:
             self.btn_insert = QPushButton('Insert and save manual HOOK')
             self.btn_insert.clicked.connect(self.insert_hook)
             capture.addRow(self.btn_insert)
-            self.found_hooks = QComboBox()
-            capture.addRow('Search candidates (code and sample)', self.found_hooks)
+            self.found_hooks = QTableWidget(0, 2)
+            self.found_hooks.setHorizontalHeaderLabels(['HOOK code', 'Search sample'])
+            self.found_hooks.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.found_hooks.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.found_hooks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.found_hooks.setMinimumHeight(110)
+            self.found_hooks.horizontalHeader().setStretchLastSection(True)
+            capture.addRow('Search results', self.found_hooks)
             self.btn_found = QPushButton('Insert selected search result')
             self.btn_found.clicked.connect(self.insert_found)
             capture.addRow(self.btn_found)
@@ -184,12 +194,18 @@ def run_gui() -> int:
             capture.addRow('Installed Tesseract executable', self.ocr_exe)
             capture.addRow('OCR language', self.ocr_lang)
             capture.addRow('OCR region x,y,width,height', self.ocr_region)
-            self.source_choice = QComboBox()
-            self.source_choice.currentIndexChanged.connect(self.show_hook_preview)
-            capture.addRow('Observed HOOK sources', self.source_choice)
+            self.source_table = QTableWidget(0, 6)
+            self.source_table.setHorizontalHeaderLabels(['Role / priority', 'HOOK code / name', 'PID', 'Context', 'Thread address', 'Latest raw text'])
+            self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.source_table.setMinimumHeight(205)
+            self.source_table.horizontalHeader().setStretchLastSection(True)
+            self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
+            capture.addRow('Live HOOK candidates (select a row)', self.source_table)
             self.hook_preview = QPlainTextEdit()
             self.hook_preview.setReadOnly(True)
-            self.hook_preview.setMaximumHeight(90)
+            self.hook_preview.setMaximumHeight(130)
             capture.addRow('Raw text from selected HOOK (before choosing)', self.hook_preview)
             row = QHBoxLayout()
             self.text_hook = QPushButton('Use as dialogue HOOK')
@@ -199,11 +215,25 @@ def run_gui() -> int:
             row.addWidget(self.text_hook)
             row.addWidget(self.speaker_hook)
             capture.addRow(row)
-            self.btn_unselect_hook = QPushButton('Remove selected HOOK role')
+            self.btn_unselect_hook = QPushButton('Remove saved HOOK role')
             self.btn_unselect_hook.clicked.connect(self.unselect_hook)
             capture.addRow(self.btn_unselect_hook)
             self.selected_hooks = QLabel('Selected HOOKs: none')
             capture.addRow(self.selected_hooks)
+            self.saved_hook_choice = QComboBox()
+            capture.addRow('Saved HOOK priority (first dialogue HOOK is preferred)', self.saved_hook_choice)
+            row = QHBoxLayout()
+            self.btn_hook_up = QPushButton('Move saved HOOK up')
+            self.btn_hook_down = QPushButton('Move saved HOOK down')
+            self.btn_hook_up.clicked.connect(lambda: self.move_saved_hook(-1))
+            self.btn_hook_down.clicked.connect(lambda: self.move_saved_hook(1))
+            row.addWidget(self.btn_hook_up)
+            row.addWidget(self.btn_hook_down)
+            capture.addRow(row)
+            self.hook_reconnect = QLabel('Saved HOOKs: not connected')
+            capture.addRow(self.hook_reconnect)
+            self.active_hook_status = QLabel('Active dialogue HOOK: not monitoring')
+            capture.addRow(self.active_hook_status)
             self.paired_text_hook = QComboBox()
             self.paired_speaker_hook = QComboBox()
             capture.addRow('Dialogue HOOK to associate', self.paired_text_hook)
@@ -373,10 +403,7 @@ def run_gui() -> int:
 
         def choose_game(self, *_):
             self.stop_session()
-            self.sources.clear()
-            self.source_samples.clear()
-            self.source_choice.clear()
-            self.hook_preview.clear()
+            self.clear_hook_observations()
             self.game_id = self.game_choice.currentData() or ''
             self.profile_choice.blockSignals(True)
             self.profile_choice.clear()
@@ -411,7 +438,7 @@ def run_gui() -> int:
             self.asr_tokens.setText(profile.asr_tokens)
             self.native_wait.setValue(profile.native_wait_ms)
             self.refresh_rules()
-            self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in profile.hooks))
+            self.refresh_selected_hooks()
             self.refresh_speaker_choices()
             self.refresh_hook_pairs()
 
@@ -664,14 +691,15 @@ def run_gui() -> int:
             if not self.hook_host:
                 self.note('Start and attach LunaHook first')
                 return
-            self.found_hooks.clear()
+            self.found_hooks.setRowCount(0)
             try:
                 self.hook_host.command('find_hooks', pid=self.pid.value())
             except Exception as exc:
                 self.note(str(exc))
 
         def insert_found(self):
-            code = self.found_hooks.currentData()
+            row = self.found_hooks.currentRow()
+            code = self.found_hooks.item(row, 0).text() if row >= 0 and self.found_hooks.item(row, 0) else ''
             if code:
                 self.manual_hook.setText(code)
                 self.insert_hook()
@@ -725,10 +753,7 @@ def run_gui() -> int:
             if self.hook_host:
                 self.hook_host.close()
             self.host_generation = ''
-            self.sources.clear()
-            self.source_samples.clear()
-            self.source_choice.clear()
-            self.hook_preview.clear()
+            self.clear_hook_observations()
             self.hook_host = HookHost(Path(self.catalog.host_dll),
                                       self.bridge.hook.emit, self.bridge.closed.emit)
             try:
@@ -787,13 +812,118 @@ def run_gui() -> int:
             except Exception as exc:
                 self.note(str(exc))
 
+        def clear_hook_observations(self):
+            self.sources.clear()
+            self.source_samples.clear()
+            self.ambiguous_sources.clear()
+            self.source_rows.clear()
+            self.source_table.setRowCount(0)
+            self.hook_preview.clear()
+            self.refresh_hook_connection()
+
+        def chosen_source(self):
+            row = self.source_table.currentRow()
+            if row < 0:
+                return None
+            item = self.source_table.item(row, 1)
+            if item is None:
+                return None
+            key, address = item.data(256) or ('', -1)
+            source = self.sources.get(key)
+            return source if source and source.address == address and key not in self.ambiguous_sources else None
+
+        def update_candidate(self, source: ThreadSource, sample: str | None):
+            key = (source.identity, source.address)
+            if key not in self.source_rows:
+                row = self.source_table.rowCount()
+                self.source_table.insertRow(row)
+                self.source_rows[key] = row
+            else:
+                row = self.source_rows[key]
+            profile = self.current_profile()
+            role = 'candidate'
+            if profile:
+                for i, hook in enumerate(profile.hooks):
+                    if hook.matches(source):
+                        role = f'{hook.role} #{1 + sum(h.role == hook.role for h in profile.hooks[:i])}'
+                        break
+            if source.identity in self.ambiguous_sources:
+                role = 'AMBIGUOUS'
+            if sample is not None:
+                history = self.source_samples.setdefault(source.identity, deque(maxlen=4))
+                if not history or history[-1] != sample:
+                    history.append(sample)
+            latest = self.source_samples.get(source.identity, ())
+            values = (role, f'{source.hook_code} / {source.hook_name}', str(source.process_id),
+                      f'{source.context} / {source.context2}', hex(source.address), latest[-1] if latest else '')
+            for col, value in enumerate(values):
+                item = self.source_table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.source_table.setItem(row, col, item)
+                item.setText(value)
+                if col == 1:
+                    item.setData(256, key)
+            if self.source_table.currentRow() == row:
+                self.show_hook_preview()
+
+        def refresh_selected_hooks(self):
+            profile = self.current_profile()
+            hooks = profile.hooks if profile else []
+            selected = self.saved_hook_choice.currentData()
+            self.saved_hook_choice.blockSignals(True)
+            self.saved_hook_choice.clear()
+            for index, hook in enumerate(hooks):
+                self.saved_hook_choice.addItem(f'{index + 1}. {hook.role}: {hook.identity}', hook.identity)
+            chosen = self.saved_hook_choice.findData(selected)
+            self.saved_hook_choice.setCurrentIndex(chosen if chosen >= 0 else (0 if hooks else -1))
+            self.saved_hook_choice.blockSignals(False)
+            self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in hooks) if hooks else 'Selected HOOKs: none')
+            self.refresh_hook_pairs()
+            for source in self.sources.values():
+                self.update_candidate(source, None)
+            self.refresh_hook_connection()
+
+        def move_saved_hook(self, movement):
+            profile = self.current_profile()
+            if not profile:
+                return
+            index = self.saved_hook_choice.currentIndex()
+            target = index + movement
+            if index < 0 or target < 0 or target >= len(profile.hooks):
+                return
+            self.stop_session()
+            profile.hooks[index], profile.hooks[target] = profile.hooks[target], profile.hooks[index]
+            self.persist()
+            self.refresh_selected_hooks()
+            self.saved_hook_choice.setCurrentIndex(target)
+            self.note('HOOK priority saved; restart monitoring to apply')
+
+        def refresh_hook_connection(self):
+            if not hasattr(self, 'hook_reconnect'):
+                return
+            profile = self.current_profile()
+            if not profile or not profile.hooks:
+                self.hook_reconnect.setText('Saved HOOKs: none selected')
+                return
+            ready = [h for h in profile.hooks if h.identity in self.sources and h.identity not in self.ambiguous_sources]
+            absent = [h for h in profile.hooks if h.identity not in self.sources]
+            ambiguous = [h for h in profile.hooks if h.identity in self.ambiguous_sources]
+            self.hook_reconnect.setText(f'Saved HOOKs: {len(ready)}/{len(profile.hooks)} observed; '
+                f'{len(absent)} waiting; {len(ambiguous)} ambiguous. Missing selections require user review.')
+
         def on_hook(self, event: HookEvent):
             if event.kind == 'hook_found' and event.process_id == self.pid.value():
-                self.found_hooks.addItem(f'{event.detail or event.text[:55]}: {event.text[:60]}', event.detail)
+                row = self.found_hooks.rowCount()
+                self.found_hooks.insertRow(row)
+                self.found_hooks.setItem(row, 0, QTableWidgetItem(event.detail))
+                self.found_hooks.setItem(row, 1, QTableWidgetItem(event.text))
                 self.note('HOOK found: ' + event.detail)
             if event.kind == 'connected' and event.process_id == self.pid.value():
                 if self.connection_generation != event.connection_generation or self.host_generation != event.host_generation:
                     self.stop_session()
+                    self.clear_hook_observations()
+                    self.found_hooks.setRowCount(0)
                 self.host_generation = event.host_generation
                 self.connection_generation = event.connection_generation
                 self.host_status.setText(f'LunaHook connected: PID {event.process_id}')
@@ -803,32 +933,57 @@ def run_gui() -> int:
                         self.hook_host.command('insert_hook', pid=event.process_id, code=code)
             elif event.kind == 'disconnected' and event.process_id == self.pid.value():
                 self.stop_session()
+                self.clear_hook_observations()
                 self.host_status.setText('LunaHook disconnected')
-            if event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value():
+            if (event.kind == 'removed' and event.source and event.process_id == self.pid.value()
+                    and event.host_generation == self.host_generation
+                    and event.connection_generation == self.connection_generation):
                 key = event.source.identity
-                if key in self.sources and self.sources[key] != event.source:
-                    self.controller.pause('ambiguous_hook_source')
-                    self.note('Multiple live HOOK threads share one saved identity; resolve selection before advancing')
-                elif key not in self.sources:
-                    self.sources[key] = event.source
-                    self.source_choice.addItem(f'{event.source.hook_name} / {key}', key)
+                if self.sources.get(key) and self.sources[key].address == event.source.address:
+                    self.sources.pop(key, None)
+                if self.controller.active_text_source == key:
+                    self.stop_session()
+                    self.note('Active dialogue HOOK disappeared; restart monitoring after checking sources')
+                row = self.source_rows.pop((key, event.source.address), None)
+                if row is not None:
+                    self.source_table.removeRow(row)
+                    for k, r in tuple(self.source_rows.items()):
+                        if r > row:
+                            self.source_rows[k] = r - 1
+                self.source_samples.pop(key, None)
+                self.refresh_hook_connection()
+            if (event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value()
+                    and event.host_generation == self.host_generation
+                    and event.connection_generation == self.connection_generation):
+                source = event.source
+                key = source.identity
+                current = self.sources.get(key)
+                if current and (current.process_id, current.address) != (source.process_id, source.address):
+                    self.ambiguous_sources.add(key)
+                    if self.controller.profile:
+                        self.stop_session()
+                    self.note('HOOK identity collision; select a non-conflicting source before restarting monitoring')
+                    self.update_candidate(current, None)
+                else:
+                    self.sources[key] = source
+                self.update_candidate(source, event.text if event.kind == 'output' else None)
+                self.refresh_hook_connection()
             if event.kind == 'output' and event.source:
-                if event.process_id == self.pid.value():
-                    self.source_samples[event.source.identity] = event.text
-                    if self.source_choice.currentData() == event.source.identity:
-                        self.show_hook_preview()
-                result = self.controller.observe(generation=event.host_generation,
-                    connection=event.connection_generation, sequence=event.sequence,
-                    source=event.source, text=event.text, pid=event.process_id or 0,
-                    received_ns=event.received_ns)
-                if result and self.controller.utterance:
-                    self.display_utterance(result)
+                if (event.process_id == self.pid.value() and event.source.identity not in self.ambiguous_sources
+                        and event.host_generation == self.host_generation
+                        and event.connection_generation == self.connection_generation):
+                    result = self.controller.observe(generation=event.host_generation,
+                        connection=event.connection_generation, sequence=event.sequence,
+                        source=event.source, text=event.text, pid=event.process_id or 0,
+                        received_ns=event.received_ns)
+                    if result and self.controller.utterance:
+                        self.display_utterance(result)
             if event.kind == 'diagnostic' and event.detail.startswith(('command_failed', 'injection_conflict')):
                 self.note(event.detail)
 
         def select_hook(self, role: str):
             p = self.current_profile()
-            source = self.sources.get(self.source_choice.currentData())
+            source = self.chosen_source()
             if not p or not source:
                 self.note('Observe and select a Hook source first')
                 return
@@ -841,8 +996,7 @@ def run_gui() -> int:
                     return
                 p.hooks.append(selection)
             self.persist()
-            self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in p.hooks))
-            self.refresh_hook_pairs()
+            self.refresh_selected_hooks()
 
         def refresh_hook_pairs(self):
             self.paired_text_hook.clear()
@@ -865,18 +1019,20 @@ def run_gui() -> int:
 
         def unselect_hook(self):
             p = self.current_profile()
-            source = self.sources.get(self.source_choice.currentData())
-            if p and source:
+            identity = self.saved_hook_choice.currentData()
+            if p and identity:
                 self.stop_session()
-                p.hooks = [h for h in p.hooks if not h.matches(source)]
+                p.hooks = [h for h in p.hooks if h.identity != identity]
                 p.speaker_links = {t: v for t, v in p.speaker_links.items()
-                                   if t != source.identity and v != source.identity}
+                                   if t != identity and v != identity}
                 self.persist()
-                self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in p.hooks))
-            self.refresh_hook_pairs()
+                self.refresh_selected_hooks()
 
         def show_hook_preview(self, *_):
-            self.hook_preview.setPlainText(self.source_samples.get(self.source_choice.currentData(), ''))
+            source = self.chosen_source()
+            history = self.source_samples.get(source.identity, ()) if source else ()
+            self.hook_preview.setPlainText('\n── Previous output ──\n'.join(reversed(history)))
+
 
         def begin_monitor(self):
             try:
@@ -896,8 +1052,11 @@ def run_gui() -> int:
                         self.bridge.ocr_error.emit)
                     self.ocr_worker.start()
                 else:
+                    if any(h.identity in self.ambiguous_sources for h in p.hooks):
+                        raise ValueError('Selected HOOK identity is ambiguous; reconnect or choose a different source')
                     self.controller.begin(p, Target(self.pid.value(), hwnd),
-                                          self.host_generation, self.connection_generation)
+                                          self.host_generation, self.connection_generation,
+                                          tuple(self.sources))
                 if sys.platform == 'win32':
                     self.manual_monitor = WindowsManualMonitor(hwnd)
                 self.start_native_audio_if_needed(p)
@@ -1073,6 +1232,11 @@ def run_gui() -> int:
         def refresh_status(self):
             c = self.controller
             self.status.setText(f'Status: {c.reason} | permission={c.authorized} | line={c.line_no} | sent={c.sent}')
+            if c.profile and c.profile.source == 'hook':
+                self.active_hook_status.setText('Active dialogue HOOK: ' +
+                    (c.active_text_source or 'waiting for selected source output'))
+            else:
+                self.active_hook_status.setText('Active dialogue HOOK: not monitoring')
 
         def stop_session(self):
             if self.manual_monitor:
