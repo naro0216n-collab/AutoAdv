@@ -1,14 +1,13 @@
 """Single text-source observation -> Utterance and audio lifecycle.
 
 A source's stable output may start presentation. It never supplies an advance
-permission, a choice clearance, or a transition acknowledgement.
+permission or certainty about a game scene.
 """
 from __future__ import annotations
 from typing import Callable
 from .contracts import Envelope, EventKind as EK, Evidence, VoicePresence, ControllerState
 from .observation import OriginObservation
 from .runtime import Runtime
-from .progression import GateObservation, GateState
 
 
 class ObservationOrchestrator:
@@ -31,7 +30,6 @@ class ObservationOrchestrator:
         self.pending_at_ms: int | None=None
         self._last_source_seq=0
         self._settled_text: str | None=None
-        self._gate_id: str | None=None
 
     def _post(self, kind: EK, now: int, **fields):
         line=self.ctrl.line
@@ -44,7 +42,6 @@ class ObservationOrchestrator:
         self.pending=None
         self.pending_at_ms=None
         self._settled_text=None
-        self._gate_id=None
         self._post(EK.MANUAL_OVERRIDE,at_ms)
 
     def unstable(self,at_ms:int,reason:str='selected_source_unstable'):
@@ -62,10 +59,26 @@ class ObservationOrchestrator:
         if manual_intervened:
             self.disconnected(at_ms)
             return
-        if self.ctrl.state in (ControllerState.PAUSED,ControllerState.WAIT_MANUAL_CHOICE):
+        if self.ctrl.state is ControllerState.PAUSED:
             return
-        if self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK:
-            # Neither new text nor OCR change is independent transition ACK.
+        if self.ctrl.state is ControllerState.WAIT_NEXT_HOOK:
+            old=self.ctrl.line
+            if (old is None or packet.kind != 'hook' or old.source_kind != 'hook'
+                or packet.origin != old.source_origin
+                or packet.source_generation != old.source_generation):
+                self.disconnected(at_ms)
+                return
+            if packet.text == old.text.observed_original:
+                return
+            previous_epoch=old.epoch
+            self._post(EK.LINE_CANDIDATE,at_ms,source_seq=packet.sequence,text=packet.text,
+                source_kind=packet.kind,source_origin=packet.origin,
+                source_generation=packet.source_generation)
+            line=self.ctrl.line
+            if line is not None and line.epoch != previous_epoch:
+                self.pending_at_ms=at_ms
+                self.on_line_boundary(at_ms)
+                self.on_line_started(line.epoch,line.token,line.text.matching,at_ms)
             return
         if self.ctrl.line is not None:
             line=self.ctrl.line
@@ -81,26 +94,15 @@ class ObservationOrchestrator:
         if self.pending is None or self.pending.text!=packet.text:
             self.pending=packet
             self.pending_at_ms=at_ms
-        # A fresh same-text packet has no boundary identity: never create a new
-        # epoch after the old one without separate ACK.
+        # Identical text does not prove a new line; never re-send on a timer.
 
-    def tick(self,now:int,*,focused:bool,capture_ok:bool,gate:GateObservation|None=None):
+    def tick(self,now:int,*,focused:bool,capture_ok:bool):
         if not self.binding_ok():
             if self.ctrl.line is not None or self.pending is not None:
                 self.disconnected(now)
             return
         if focused != self.ctrl.focused:self._post(EK.FOCUS_CHANGED,now,focused=focused)
         if capture_ok != self.ctrl.capture_ok:self._post(EK.CAPTURE_HEALTH,now,capture_ok=capture_ok)
-        if gate is not None and gate.state is GateState.MANUAL_REQUIRED:
-            if self.ctrl.state not in (ControllerState.PAUSED,ControllerState.WAIT_MANUAL_CHOICE):
-                self._post(EK.CHOICE_REQUIRED,now)
-            self.pending=None
-            self.pending_at_ms=None
-            return
-        if self.ctrl.state is ControllerState.WAIT_MANUAL_CHOICE:
-            # Without a positive, separately confirmed game transition plus
-            # genuine manual choice, never re-enter automated processing.
-            return
         if self.ctrl.state is ControllerState.PAUSED:return
         if self.ctrl.state is ControllerState.WAIT_LINE and self.ctrl.line is None and self.pending:
             packet=self.pending
@@ -120,13 +122,6 @@ class ObservationOrchestrator:
             # readiness. It says nothing about game input or visual display.
             self._post(EK.LINE_READY,now)
             self._settled_text=line.text.observed_original
-        if gate is not None:
-            allowed=gate.may_advance
-            if (self.ctrl.gate_allowed != allowed or
-                (allowed and self.ctrl.gate_proof_id != gate.proof_id)):
-                self._post(EK.ADVANCE_GATE,now,gate_allowed=allowed,
-                           gate_proof_id=gate.proof_id if allowed else None,
-                           gate_source=gate.source if allowed else None)
         if (self.ctrl.settings.allow_heuristic_absence and line.voice is VoicePresence.UNRESOLVED
             and line.ready_ms is not None and capture_ok
             and now>=line.first_seen_ms+self.ctrl.settings.grace_ms
@@ -134,18 +129,3 @@ class ObservationOrchestrator:
             self._post(EK.VOICE_PRESENCE,now,voice=VoicePresence.ABSENT,evidence=Evidence.HEURISTIC)
         self.runtime.poll()
         self.runtime.step()
-
-    def acknowledge_transition(self,now:int,*,independent_proof_id:str,source:str):
-        if not independent_proof_id or not source or not self.binding_ok():return
-        if self.ctrl.state is not ControllerState.WAIT_TRANSITION_ACK:return
-        self._post(EK.TRANSITION_ACK,now,transition_id=f'{source}:{independent_proof_id}')
-        if self.ctrl.state is ControllerState.WAIT_LINE:
-            self.pending=None
-            self.pending_at_ms=None
-            self._settled_text=None
-            self.on_line_boundary(now)
-
-    def choice_resolved(self,now:int,*,proof_id:str,source:str,manual_intervened:bool):
-        if not (proof_id and source and manual_intervened and self.binding_ok()):return
-        if self.ctrl.state is ControllerState.WAIT_MANUAL_CHOICE:
-            self._post(EK.CHOICE_RESOLVED,now,gate_proof_id=proof_id,gate_source=source)

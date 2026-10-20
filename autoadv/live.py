@@ -23,8 +23,7 @@ from .observation import OriginObservation
 from .hook_host import HookHost
 from .hook_application import HookApplication
 from .runtime import Runtime
-from .screen import ScreenObserver,ScreenProfile,WindowsClientCapture
-from .progression import ClosedGate,VisualGate,GateObservation,GateState
+from .screen import WindowsClientCapture
 from .acquisition import SourceKind,AcquisitionSession,TextCandidate
 from .ocr import TesseractOCR,OCRWorker
 from .windows_input import WindowsAdvancementInput
@@ -75,7 +74,6 @@ def _clock() -> int:
 class LiveConfig:
     pid:int
     hwnd:int
-    screen_profile:Path|None
     loopback_helper:Path
     asr_model:Path
     asr_tokens:Path
@@ -97,7 +95,7 @@ class LiveConfig:
         base=path.resolve().parent
         required={'pid','hwnd','loopback_helper','asr_model','asr_tokens','grace_ms',
                   'allow_heuristic_absence','log_path','tts_speed','silent_dwell','tts_required','advance_input'}
-        if set(data)-{'screen_profile'}!=required:raise ValueError('live hardware configuration does not match the expected schema')
+        if set(data)!=required:raise ValueError('live hardware configuration does not match the expected schema')
         d=data['silent_dwell'];advance=data['advance_input']
         if (not isinstance(d,dict) or set(d)!={'base_ms','min_ms','reading_chars_per_sec'}
             or not isinstance(advance,dict) or set(advance)!={'mode','virtual_key'}
@@ -106,12 +104,11 @@ class LiveConfig:
             or type(advance['virtual_key']) is not int
             or type(data['allow_heuristic_absence']) is not bool
             or type(data['tts_required']) is not bool
-            or (data.get('screen_profile') is not None and (not isinstance(data['screen_profile'],str) or not data['screen_profile'].strip()))
             or any(not isinstance(data[name],str) or not data[name].strip()
                    for name in ('loopback_helper','asr_model','asr_tokens','log_path'))):
             raise ValueError('invalid monitor field types / required paths')
         absolute=lambda x:(base/data[x]).resolve()
-        value=cls(int(data['pid']),int(data['hwnd']),absolute('screen_profile') if data.get('screen_profile') else None,
+        value=cls(int(data['pid']),int(data['hwnd']),
                   absolute('loopback_helper'),absolute('asr_model'),absolute('asr_tokens'),
                   int(data['grace_ms']),data['allow_heuristic_absence'],absolute('log_path'),
                   float(data['tts_speed']),int(d['base_ms']),int(d['min_ms']),
@@ -236,11 +233,6 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
     if pid.value!=config.pid:raise ValueError('HWND does not belong to target game PID')
     if any(parent.pid==config.pid for parent in psutil.Process().parents()):
         raise ValueError('AutoAdv must not be a child of target game')
-    # No visual calibration is required for HOOK/OCR acquisition or audio.
-    # Calibrated visual proof is optional and cannot be synthesized from text.
-    gate=(VisualGate(ScreenObserver(ScreenProfile.load(config.screen_profile),
-                     WindowsClientCapture(config.hwnd,config.pid)))
-          if config.screen_profile is not None else ClosedGate())
     manual=WindowsManualMonitor()
     health=CaptureLiveness()
     history=AudioHistory()
@@ -257,7 +249,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
         'profile_schema':'live-profile-v2',
         'asr_model_id':config.asr_model.name,
         'asr_tokens_id':config.asr_tokens.name,
-        'screen_profile_id':config.screen_profile.name if config.screen_profile else None})
+        'source_policy': 'hook-preferred'})
     tts=None;asr=None;runtime=None;capture=None
     packets=Queue()
     source_connected=Event()
@@ -314,8 +306,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
         guard=LiveGuard(ctrl,config.hwnd,config.pid,manual,
             lambda:tts.is_active() if tts else True,
             health.alive,lambda:asr.potentially_active() if asr else True,
-            binding_confirmed=lambda:control.bound.is_set() and source_connected.is_set(),
-            gate=gate)
+            binding_confirmed=lambda:control.bound.is_set() and source_connected.is_set())
         runtime=Runtime(ctrl,guard if enable_input else GuardNoInput(guard),
                         WindowsAdvancementInput(config.hwnd,mode=config.input_mode,
                               virtual_key=config.input_virtual_key) if enable_input else InputDisabled(),
@@ -341,8 +332,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             source_connected.set();control.bound.set()
             ocr_worker.start()
         status({'monitor':'running','acquisition':acquisition.kind.value,'advance':'disabled',
-                'gate':'not configured' if isinstance(gate,ClosedGate) else 'optional visual provider',
-                'reason':'Awaiting text; independent progression gate required for game input'})
+                'reason':'Awaiting selected source and audio; no game-state scanner'})
         while not control.stop.is_set():
             while True:
                 try:kind,payload=packets.get_nowait()
@@ -366,7 +356,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                         app.candidate(OriginObservation(payload.sequence,payload.text,payload.text,
                             kind=payload.kind.value,source_generation=payload.source_generation,
                             game_id=payload.game_id,profile_id=payload.profile_id,origin=payload.origin),
-                            _clock(),manual_intervened=manual.choice_action_seen())
+                            _clock(),manual_intervened=ctrl.autoplay_authorized and manual.intervened())
                 elif kind=='source_blank':
                     if payload==session.generation:app.unstable(_clock())
                 elif kind=='source_error':
@@ -379,13 +369,12 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                 control.pause.clear()
             if control.authorize.is_set():
                 control.authorize.clear()
-                if (enable_input and source_connected.is_set() and control.bound.is_set() and
+                if (enable_input and acquisition.kind is SourceKind.HOOK and
+                    source_connected.is_set() and control.bound.is_set() and
                     ctrl.state is ControllerState.WAIT_LINE):
                     manual.reset_after_authorization()
                     ctrl.authorize()
-                    status({'advance':'authorized',
-                            'reason':('Waiting for independent game-state permission'
-                                      if isinstance(gate,ClosedGate) else 'Waiting for verified normal line')})
+                    status({'advance':'authorized','reason':'Waiting for selected HOOK and audio synchronization'})
                 else:
                     status({'advance':'disabled','reason':'Selected source / controller not ready for authorization'})
             while runtime.step():pass
@@ -395,19 +384,11 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                     ctrl.interpreter=TextInterpreter(config_update)
                     audit('game_config_updated',{'revision':config_update.revision})
             now=_clock()
-            try:
-                proof=gate.observe(now)
-            except Exception as exc:
-                audit('game_gate_unavailable',{'error_type':type(exc).__name__})
-                proof=GateObservation(now,GateState.UNKNOWN)
             user32.GetForegroundWindow.restype=wintypes.HWND
             focused=user32.GetForegroundWindow()==config.hwnd
-            was_manual=ctrl.state is ControllerState.WAIT_MANUAL_CHOICE
-            app.tick(now,focused=focused,capture_ok=health.alive(),gate=proof)
-            if not was_manual and ctrl.state is ControllerState.WAIT_MANUAL_CHOICE:
-                manual.reset_choice_actions()
-            # Manual selection alone is not a confirmed return to normal play.
-            # A provider must explicitly confirm the post-choice boundary.
+            if ctrl.autoplay_authorized and manual.intervened():
+                app.disconnected(now)
+            app.tick(now,focused=focused,capture_ok=health.alive())
             while runtime.step():pass
             line=ctrl.line
             view=(ctrl.state.name,ctrl.pause_reason,
@@ -419,7 +400,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                 status({'controller':view[0],'reason':view[1] or '',
                         'epoch':view[2],'presentation':view[3],'speaker':view[4],
                         'body':view[5],'sent':view[6],'focused':focused,
-                        'capture_ok':health.alive(),'awaiting_ack':ctrl.state is ControllerState.WAIT_TRANSITION_ACK,
+                        'capture_ok':health.alive(),'awaiting_next_hook':ctrl.state is ControllerState.WAIT_NEXT_HOOK,
                         'utterance':utterance_view(line)})
                 last_state=view
             if ctrl.state is ControllerState.PAUSED:

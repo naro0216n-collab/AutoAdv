@@ -14,15 +14,12 @@ from .controller import Controller
 class FreshSnapshot:
     focused: bool = False
     capture_ok: bool = False
-    gate_allowed: bool = False
-    gate_proof_id: str | None = None
     # Unknown blockers conservatively prohibit input.
     native_voice_active: bool = True
     tts_playing: bool = True
     target_window_matches: bool = False
     input_available: bool = False
     manual_override: bool = True
-    transition_pending: bool = True
 
 
 class Guard(Protocol):
@@ -41,8 +38,8 @@ class Runtime:
     """All callbacks post to the same serial queue; never call InputDriver.
 
     The fresh guard is deliberately independent of controller's cached state.
-    The guard must re-read an independently verified game input gate and
-    window/audio/manual state; neither HOOK nor OCR output grants input.
+    The guard checks current window/audio/manual state immediately before
+    input; a selected HOOK candidate alone does not grant permission.
     """
 
     def __init__(self, controller: Controller, guard: Guard, input_driver: InputDriver,
@@ -93,14 +90,11 @@ class Runtime:
                     line_epoch=effect.line_epoch, cancel_token=effect.cancel_token,
                     fresh_focused=snapshot.focused,
                     fresh_capture_ok=snapshot.capture_ok,
-                    fresh_gate_allowed=snapshot.gate_allowed,
-                    fresh_gate_proof_id=snapshot.gate_proof_id,
                     fresh_native_voice_active=snapshot.native_voice_active,
                     fresh_tts_playing=snapshot.tts_playing,
                     fresh_target_window_matches=snapshot.target_window_matches,
                     fresh_input_available=snapshot.input_available,
                     fresh_manual_override=snapshot.manual_override,
-                    fresh_transition_pending=snapshot.transition_pending,
                     at_ms=self.clock(),
                 ):
                     self.audit("advance_rejected", {"epoch": effect.line_epoch})
@@ -159,7 +153,6 @@ class Runtime:
         self._finalized.add(line.epoch)
         details=self._line_fields(line)
         details['final_status']=status
-        details['transition_ack']=event.transition_id if event and event.kind is EventKind.TRANSITION_ACK else None
         self.audit('line_summary',details)
 
     def _audit_state(self, event:Envelope, previous) -> None:
@@ -174,8 +167,9 @@ class Runtime:
                 self._reported_state=snapshot
             if self.controller.state.name=='PAUSED':
                 self._finalize_line(line,'paused')
-        if previous is not None and line is None and event.kind is EventKind.TRANSITION_ACK:
-            self._finalize_line(previous,'advanced_and_acknowledged',event)
+        if (previous is not None and line is not None and line is not previous
+                and event.kind is EventKind.LINE_CANDIDATE):
+            self._finalize_line(previous,'advanced_to_new_hook_candidate',event)
             self._reported_state=None
 
     def finalize(self, reason:str='session_ended') -> None:
@@ -184,7 +178,7 @@ class Runtime:
             self._finalize_line(line,reason)
 
     def poll(self) -> None:
-        for effect in self.controller.transition_timed_out(self.clock()):
+        for effect in self.controller.next_hook_timed_out(self.clock()):
             self.audit("effect", {"kind": effect.kind.name, "reason": effect.reason})
             if effect.kind is EffectKind.CANCEL_TTS:
                 self.tts.apply(effect)

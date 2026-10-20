@@ -8,7 +8,6 @@ from autoadv.acquisition import SourceSelection,SourceKind,AcquisitionSession,Te
 from autoadv.ocr import TesseractOCR,OCRWorker
 from autoadv.profiles import GameCatalog,GameProfile
 from autoadv.preferences import Preferences
-from autoadv.progression import ClosedGate,GateState,GateObservation
 
 class AcquisitionContracts(unittest.TestCase):
     def test_default_hook_does_not_import_or_require_ocr(self):
@@ -55,11 +54,6 @@ class AcquisitionContracts(unittest.TestCase):
         self.assertFalse(session.accept(TextCandidate('game-B','profile-A',SourceKind.OCR,1,2,102,'旧OCR','hwnd:roi')))
         self.assertFalse(session.accept(TextCandidate('game-A','profile-A',SourceKind.OCR,2,1,102,'別作品','hwnd:roi')))
         self.assertTrue(session.accept(TextCandidate('game-B','profile-A',SourceKind.OCR,2,1,103,'現在OCR','hwnd:roi')))
-
-    def test_closed_game_gate_never_authorizes(self):
-        self.assertFalse(ClosedGate().observe(100).may_advance)
-        self.assertFalse(GateObservation(100,GateState.ALLOW).may_advance)
-        self.assertFalse(GateObservation(100,GateState.MANUAL_REQUIRED,'id','game').may_advance)
 
     def test_tesseract_receives_only_explicit_client_rectangle(self):
         import numpy as np

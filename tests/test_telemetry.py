@@ -12,7 +12,7 @@ class FakeInput:
     def __init__(self): self.count=0
     def advance(self): self.count+=1
 class FakeGuard:
-    def observe(self):return FreshSnapshot(focused=True,capture_ok=True,gate_allowed=True,gate_proof_id='gate-A',native_voice_active=False,tts_playing=False,target_window_matches=True,input_available=True,manual_override=False,transition_pending=False)
+    def observe(self):return FreshSnapshot(focused=True,capture_ok=True,native_voice_active=False,tts_playing=False,target_window_matches=True,input_available=True,manual_override=False)
 class FakeTTS:
     def apply(self,x):raise AssertionError('no TTS expected')
 
@@ -31,21 +31,23 @@ class TelemetryContracts(unittest.TestCase):
                 rt.step()
             step(E.FOCUS_CHANGED,2,focused=True)
             step(E.CAPTURE_HEALTH,3,capture_ok=True)
-            step(E.LINE_CANDIDATE,4,source_seq=1,source_line_id='a',text='おはよう',text_ready=True)
-            step(E.ADVANCE_GATE,5,gate_allowed=True,gate_proof_id="gate-A",gate_source="game")
+            step(E.LINE_CANDIDATE,4,source_seq=1,source_line_id='a',text='おはよう',text_ready=True,
+                 source_kind='hook',source_origin='selected-hook',source_generation=1)
+
             step(E.VOICE_PRESENCE,6,voice=VoicePresence.ABSENT,evidence=Evidence.METADATA)
             sink('asr_progress',{'session_id':'s','line_epoch':1,'asr_coverage':.8,'asr_tail_confidence':.2})
             clock[0]=3001
             step(E.TIMER,3000)
             self.assertEqual(driver.count,1)
-            step(E.TRANSITION_ACK,3100,transition_id='new-line')
+            step(E.LINE_CANDIDATE,3100,source_seq=2,text='次',source_kind='hook',
+                 source_origin='selected-hook',source_generation=1)
             rt.finalize()
             sink.close()
             rows=[json.loads(x) for x in (Path(td)/'result.jsonl').read_text().splitlines()]
-            summary=[x for x in rows if x['name']=='line_summary']
+            summary=[x for x in rows if x['name']=='line_summary'
+                     and x['final_status']=='advanced_to_new_hook_candidate']
             self.assertEqual(len(summary),1)
-            self.assertEqual(summary[0]['final_status'],'advanced_and_acknowledged')
-            self.assertEqual(summary[0]['transition_ack'],'new-line')
+            self.assertEqual(summary[0]['final_status'],'advanced_to_new_hook_candidate')
             self.assertEqual(summary[0]['asr_coverage'],.8)
             self.assertEqual(summary[0]['asr_model_id'],'model.int8.onnx')
             self.assertEqual(summary[0]['input_at_ms'],3001)

@@ -2,7 +2,7 @@
 
 This layer deliberately cannot authorize game input. Only confirmed, unique
 source observations reach the existing Utterance/Controller pipeline, where
-independent progression evidence and audio completion determine if input is allowed.
+audio completion and the immediate input-target/manual guard determine when input is sent.
 """
 from __future__ import annotations
 from collections.abc import Callable

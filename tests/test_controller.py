@@ -28,9 +28,8 @@ class Harness:
 
     def line(self, text="おはよう", *, ready=True, id="a", empty=False):
         effects = self.send(E.LINE_CANDIDATE, source_seq=self.c._last_source_seq+1,
-                            source_line_id=id, text=text, text_ready=ready)
-        if self.c.line is not None:
-            self.send(E.ADVANCE_GATE,gate_allowed=True,gate_proof_id='verified-gate',gate_source='game-state')
+                            source_line_id=id, text=text, text_ready=ready,
+                            source_kind='hook',source_origin='selected-hook',source_generation=1)
         return effects
 
     def absent(self, evidence=Evidence.METADATA):
@@ -44,21 +43,23 @@ class Harness:
         x = effects[0]
         return self.c.confirm_advance(line_epoch=x.line_epoch, cancel_token=x.cancel_token,
                     fresh_focused=True, fresh_capture_ok=True,
-                    fresh_gate_allowed=True, fresh_gate_proof_id="verified-gate",
                     fresh_native_voice_active=False, fresh_tts_playing=False,
-                    fresh_line_matches=True, fresh_target_window_matches=True,
+                    fresh_target_window_matches=True,
                     fresh_input_available=True, fresh_manual_override=False,
-                    fresh_transition_pending=False, at_ms=self.now+1)
+                    at_ms=self.now+1)
 
 
 class ContractTests(unittest.TestCase):
-    def test_silent_unassigned_once_ack(self):
-        h=Harness();h.line();h.absent(); effects=h.tick()
-        self.assertTrue(h.sent(effects));self.assertEqual(h.c.state,S.WAIT_TRANSITION_ACK)
+    def test_silent_one_input_then_post_input_new_hook_candidate(self):
+        h=Harness();h.line();h.absent();effects=h.tick()
+        self.assertTrue(h.sent(effects));self.assertEqual(h.c.state,S.WAIT_NEXT_HOOK)
         self.assertEqual(h.tick(),[])
-        h.send(E.TRANSITION_ACK, transition_id="new-scene-1")
-        self.assertEqual(h.c.state,S.WAIT_LINE)
-        h.line("おはよう",id="b");h.absent();self.assertTrue(h.sent(h.tick()))
+        h.send(E.LINE_CANDIDATE,source_seq=2,text='次の本文',source_kind='hook',
+               source_origin='selected-hook',source_generation=1,source_line_id='b')
+        self.assertEqual(h.c.state,S.WAIT_TEXT_READY)
+        self.assertEqual(h.c.line.epoch,2)
+        h.send(E.LINE_READY);h.absent()
+        self.assertTrue(h.sent(h.tick()))
 
     def test_skip_and_missing_default_silent(self):
         for p in (TP.SKIP, TP.DISABLED, TP.UNASSIGNED):
@@ -105,22 +106,20 @@ class ContractTests(unittest.TestCase):
     def test_unconfirmed_next_identical_stays_waiting(self):
         h=Harness();h.line();h.absent();self.assertTrue(h.sent(h.tick()))
         h.send(E.LINE_CANDIDATE,source_seq=2,source_line_id="a",text="おはよう")
-        self.assertEqual(h.c.state,S.WAIT_TRANSITION_ACK)
+        self.assertEqual(h.c.state,S.WAIT_NEXT_HOOK)
         self.assertEqual(h.c.line.epoch,1)
 
-    def test_new_line_identity_does_not_bypass_transition_ack(self):
+    def test_changed_candidate_requires_same_hook_and_new_generation(self):
         h=Harness();h.line();h.absent();self.assertTrue(h.sent(h.tick()))
         old=h.c.line
-        h.send(E.LINE_CANDIDATE,source_seq=2,source_line_id="b",text="おはよう")
-        self.assertIs(h.c.line,old)
-        self.assertEqual(h.c.line.epoch,1)
-        self.assertEqual(h.c.state,S.WAIT_TRANSITION_ACK)
-        self.assertTrue(old.sent)
-        h.send(E.TRANSITION_ACK,transition_id="visual-ready-cycle-b")
-        self.assertEqual(h.c.state,S.WAIT_LINE)
-        h.send(E.LINE_CANDIDATE,source_seq=3,source_line_id="b",text="おはよう")
+        for kind,origin,generation in [('ocr','selected-hook',1),('hook','other',1),
+                                        ('hook','selected-hook',2)]:
+            h.send(E.LINE_CANDIDATE,source_seq=h.c._last_source_seq+1,text='別本文',
+                   source_kind=kind,source_origin=origin,source_generation=generation)
+            self.assertIs(h.c.line,old)
+        h.send(E.LINE_CANDIDATE,source_seq=h.c._last_source_seq+1,text='別本文',
+               source_kind='hook',source_origin='selected-hook',source_generation=1)
         self.assertEqual(h.c.line.epoch,2)
-        self.assertEqual(h.c.state,S.WAIT_TEXT_READY)
 
     def test_native_long_pause_and_completion(self):
         h=Harness();h.line("……")
@@ -159,14 +158,6 @@ class ContractTests(unittest.TestCase):
         h=Harness();h.line();h.send(E.CAPTURE_HEALTH,capture_ok=False)
         self.assertEqual(h.c.pause_reason,"audio_capture_unhealthy")
         self.assertEqual(h.tick(),[])
-
-    def test_choices_stop(self):
-        h=Harness();h.line();h.absent()
-        h.send(E.CHOICE_REQUIRED)
-        self.assertEqual(h.c.state,S.WAIT_MANUAL_CHOICE)
-        self.assertFalse(h.c.gate_allowed)
-        self.assertEqual(h.tick(),[])
-
 
     def test_focus_lost_pauses(self):
         h=Harness();h.line();h.send(E.FOCUS_CHANGED,focused=False)
@@ -231,7 +222,7 @@ class ContractTests(unittest.TestCase):
     def test_preflight_blocks(self):
         h=Harness();h.line();h.absent();effect=h.tick()[0]
         self.assertFalse(h.c.confirm_advance(line_epoch=effect.line_epoch,
-            cancel_token=effect.cancel_token,fresh_gate_allowed=False,
+            cancel_token=effect.cancel_token,
             fresh_focused=True,fresh_capture_ok=True,at_ms=h.now+1))
         self.assertFalse(h.c.line.sent)
 
@@ -239,27 +230,22 @@ class ContractTests(unittest.TestCase):
         h=Harness();h.line();h.absent();effect=h.tick()[0]
         h.send(E.MANUAL_OVERRIDE)
         self.assertFalse(h.c.confirm_advance(line_epoch=effect.line_epoch,cancel_token=effect.cancel_token,
-                        fresh_gate_allowed=True,fresh_gate_proof_id="verified-gate",
                         fresh_focused=True,fresh_capture_ok=True,at_ms=h.now+1))
 
-    def test_delayed_stale_notifications(self):
-        h=Harness(TP.SELECTED,"s");h.line();h.absent();old=h.c.line
-        h.send(E.NATIVE_STARTED,native_utterance_id="n",evidence=Evidence.AUDIO_CONFIRMED)
-        req=h.send(E.NATIVE_COMPLETED,native_utterance_id="n",evidence=Evidence.AUDIO_CONFIRMED)
+    def test_delayed_stale_audio_does_not_cross_hook_line(self):
+        h=Harness(TP.SELECTED,'s');h.line();h.absent();old=h.c.line
+        h.send(E.NATIVE_STARTED,native_utterance_id='n',evidence=Evidence.AUDIO_CONFIRMED)
+        req=h.send(E.NATIVE_COMPLETED,native_utterance_id='n',evidence=Evidence.AUDIO_CONFIRMED)
         self.assertTrue(h.sent(req))
-        h.send(E.TRANSITION_ACK,transition_id="ack")
-        h.line("次",id="b")
-        self.assertEqual(h.send(E.TTS_FINISHED,tts_success=True,line_epoch=old.epoch,cancel_token=old.token),[])
+        h.send(E.LINE_CANDIDATE,delta=2,source_seq=2,text='次',source_line_id='b',
+               source_kind='hook',source_origin='selected-hook',source_generation=1)
+        self.assertEqual(h.send(E.TTS_FINISHED,tts_success=True,
+            line_epoch=old.epoch,cancel_token=old.token),[])
         self.assertEqual(h.c.line.epoch,2)
 
-    def test_ack_timeout_no_resend(self):
+    def test_new_hook_timeout_no_resend(self):
         h=Harness();h.line();h.absent();self.assertTrue(h.sent(h.tick()))
-        self.assertEqual(h.c.transition_timed_out(h.now+20000)[0].kind,FX.STOPPED)
-        self.assertEqual(h.c.state,S.PAUSED)
-
-    def test_bad_ack_identity(self):
-        h=Harness();h.line();h.absent();self.assertTrue(h.sent(h.tick()))
-        h.send(E.TRANSITION_ACK,transition_id=None)
+        self.assertEqual(h.c.next_hook_timed_out(h.now+20000)[0].kind,FX.STOPPED)
         self.assertEqual(h.c.state,S.PAUSED)
 
     def test_long_text_no_cap(self):

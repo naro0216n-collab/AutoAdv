@@ -15,13 +15,6 @@ class ContentKind(Enum):
     NON_DIALOGUE = auto()
 
 
-class ScreenState(Enum):
-    ADVANCE_INDICATOR = auto()
-    MANUAL_REQUIRED = auto()
-    TRANSITION = auto()
-    UNKNOWN = auto()
-
-
 class VoicePresence(Enum):
     PRESENT = auto()
     ABSENT = auto()
@@ -66,8 +59,7 @@ class ControllerState(Enum):
     WAIT_TTS_END = auto()
     WAIT_SILENT_DWELL = auto()
     READY_TO_ADVANCE = auto()
-    WAIT_TRANSITION_ACK = auto()
-    WAIT_MANUAL_CHOICE = auto()
+    WAIT_NEXT_HOOK = auto()
     PAUSED = auto()
 
 
@@ -82,12 +74,8 @@ class EventKind(Enum):
     NATIVE_COMPLETED = auto()
     TTS_FINISHED = auto()
     TIMER = auto()
-    TRANSITION_ACK = auto()
     MANUAL_OVERRIDE = auto()
     FOCUS_CHANGED = auto()
-    ADVANCE_GATE = auto()
-    CHOICE_REQUIRED = auto()
-    CHOICE_RESOLVED = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,11 +102,6 @@ class Envelope:
     # not merely that the HTTP synthesis request finished.
     tts_success: Optional[bool] = None
     focused: Optional[bool] = None
-    # An ACK must originate from a confirmed line/scene boundary, not text hash.
-    transition_id: Optional[str] = None
-    gate_allowed: Optional[bool] = None
-    gate_proof_id: Optional[str] = None
-    gate_source: Optional[str] = None
 
 
 class EffectKind(Enum):

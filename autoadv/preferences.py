@@ -42,6 +42,13 @@ class Preferences:
         if not path.is_file():return cls()
         data=json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(data,dict):raise ValueError('invalid preferences JSON')
+        # One-time migration of obsolete screen-state persistence requires
+        # approval and source preservation, never implicit schema repair.
+        if data.get('schema_version')==cls.SCHEMA:
+            for game in data.get('catalog',{}).get('games',{}).values():
+                for profile in game.get('profiles',{}).values():
+                    if 'screen' in profile:
+                        raise LegacyPreferencesDetected('旧画面判定設定の原本保全付き移行を選択してください')
         if data.get('schema_version')!=cls.SCHEMA:
             if ('games' in data or 'live_profiles' in data or 'luna_url' in data
                 or 'selected_game' in data or 'live_config' in data):
@@ -87,39 +94,61 @@ class Preferences:
         """User-confirmed, atomic replacement; immutable checksum-named backup."""
         original=path.read_bytes()
         raw=json.loads(original)
-        if not isinstance(raw,dict) or 'schema_version' in raw:
-            raise ValueError('not a supported legacy AutoAdv settings file')
-        allowed={'irodori_root','irodori_url','luna_url','selected_game','games','live_profiles','live_config'}
-        if set(raw)-allowed:raise ValueError('unrecognized legacy setting keys')
-        games=raw.get('games',{})
-        monitors=raw.get('live_profiles',{})
-        if not isinstance(games,dict) or not isinstance(monitors,dict):
-            raise ValueError('invalid legacy game maps')
-        prefs=cls(irodori_root=raw.get('irodori_root',''),
-                  irodori_url=raw.get('irodori_url','http://127.0.0.1:8088'))
-        mapping={}
-        for name in dict.fromkeys([*games,*monitors]):
-            if not isinstance(name,str) or not name.strip():raise ValueError('invalid old game name')
-            game=prefs.catalog.create_game(name)
-            mapping[name]=game.game_id
-            profile=game.profiles[game.default_profile_id]
-            profile.text=GameTextConfig.from_dict(games.get(name,{})).to_dict()
-            if name in monitors:
-                from .live import LiveConfig
-                source=Path(monitors[name])
-                conf=LiveConfig.load(source)
-                doc=json.loads(source.read_text(encoding='utf-8'))
-                # Runtime process identity is re-established for each session.
-                doc.pop('pid',None);doc.pop('hwnd',None);doc.pop('screen_profile',None)
-                for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
-                    doc[key]=str(getattr(conf,key))
-                # Old dialogue/readiness markers never proved input safety.
-                # Keep their original data in the checksum backup, not in the
-                # new profile as a purported positive advancement provider.
-                profile.monitor=doc
-        selected=raw.get('selected_game','')
-        if selected and selected in mapping:
-            prefs.catalog.choose(mapping[selected])
+        if not isinstance(raw,dict):
+            raise ValueError('not an AutoAdv settings document')
+        if raw.get('schema_version')==cls.SCHEMA:
+            # Explicit migration: drop unused former screen evidence, retain
+            # all game identities, saved HOOKs, voices and monitor settings.
+            converted=copy.deepcopy(raw)
+            if not isinstance(converted.get('catalog'),dict):
+                raise ValueError('invalid previous game catalog')
+            seen=False
+            for game in converted['catalog'].get('games',{}).values():
+                for profile in game.get('profiles',{}).values():
+                    if 'screen' in profile:
+                        seen=True
+                        profile.pop('screen')
+            if not seen:raise ValueError('no obsolete screen settings to migrate')
+            prefs=cls(irodori_root=converted.get('irodori_root',''),
+                irodori_url=converted.get('irodori_url','http://127.0.0.1:8088'),
+                luna_host_dll=converted.get('luna_host_dll',''),
+                globals=converted.get('globals',{}),
+                catalog=GameCatalog.from_dict(converted['catalog']))
+        else:
+            if 'schema_version' in raw:
+                raise ValueError('not a supported legacy AutoAdv settings file')
+            allowed={'irodori_root','irodori_url','luna_url','selected_game','games','live_profiles','live_config'}
+            if set(raw)-allowed:raise ValueError('unrecognized legacy setting keys')
+            games=raw.get('games',{})
+            monitors=raw.get('live_profiles',{})
+            if not isinstance(games,dict) or not isinstance(monitors,dict):
+                raise ValueError('invalid legacy game maps')
+            prefs=cls(irodori_root=raw.get('irodori_root',''),
+                      irodori_url=raw.get('irodori_url','http://127.0.0.1:8088'))
+            mapping={}
+            for name in dict.fromkeys([*games,*monitors]):
+                if not isinstance(name,str) or not name.strip():raise ValueError('invalid old game name')
+                game=prefs.catalog.create_game(name)
+                mapping[name]=game.game_id
+                profile=game.profiles[game.default_profile_id]
+                profile.text=GameTextConfig.from_dict(games.get(name,{})).to_dict()
+                if name in monitors:
+                    from .live import LiveConfig
+                    source=Path(monitors[name])
+                    doc=json.loads(source.read_text(encoding='utf-8'))
+                    # The deprecated image document is left in the backup only.
+                    doc.pop('screen_profile',None)
+                    for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
+                        doc[key]=str((source.parent / doc[key]).resolve())
+                    with tempfile.TemporaryDirectory(prefix='autoadv-migrate-') as tmp:
+                        validation=Path(tmp)/'monitor.json'
+                        validation.write_text(json.dumps(doc,ensure_ascii=False),encoding='utf-8')
+                        LiveConfig.load(validation)
+                    doc.pop('pid',None);doc.pop('hwnd',None)
+                    profile.monitor=doc
+            selected=raw.get('selected_game','')
+            if selected and selected in mapping:
+                prefs.catalog.choose(mapping[selected])
         prefs.document()  # verify fully BEFORE replacing the source
         digest=hashlib.sha256(original).hexdigest()[:16]
         backup=path.with_name(path.name+'.legacy-'+digest+'.bak')

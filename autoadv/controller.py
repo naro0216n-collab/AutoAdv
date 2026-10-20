@@ -1,4 +1,4 @@
-"""Deterministic, fail-closed, single-owner visual-novel advancement state machine.
+"""Single-owner HOOK and native-audio synchronized advancement state machine.
 
 No hardware driver or ML model is allowed to issue advancement directly.
 All asynchronous events carry the session, line epoch, cancel token and a
@@ -29,11 +29,10 @@ class Settings:
     symbolic_long_ms: int = 2500
     symbolic_other_ms: int = 1000
     tts_required: bool = False
-    # Until a game profile is independently calibrated, heuristic absence is
-    # never sufficient to authorize silent progression.
-    allow_heuristic_absence: bool = False
+    # Heuristic native absence needs positively verified ASR silence, never a timer alone.
+    allow_heuristic_absence: bool = True
     name_readings: tuple[tuple[str, str], ...] = ()
-    transition_timeout_ms: int = 10000
+    next_hook_timeout_ms: int = 10000
     unresolved_timeout_ms: int = 6000
     native_start_timeout_ms: int = 30000
     native_end_timeout_ms: int = 180000
@@ -41,7 +40,7 @@ class Settings:
     def __post_init__(self) -> None:
         if self.grace_ms < 0 or self.silent_min_ms < 0 or self.silent_base_ms < 0:
             raise ValueError("durations must be nonnegative")
-        if any(x <= 0 for x in (self.transition_timeout_ms, self.unresolved_timeout_ms,
+        if any(x <= 0 for x in (self.next_hook_timeout_ms, self.unresolved_timeout_ms,
                                  self.native_start_timeout_ms, self.native_end_timeout_ms)):
             raise ValueError("timeout must be positive")
         if self.reading_chars_per_sec <= 0:
@@ -83,8 +82,8 @@ class Line:
 class Controller:
     """A session has one controller and one owner of line_epoch.
 
-    Initial screen and audio health are UNKNOWN. They must be confirmed by
-    independent adapters before an auto-advance request can be emitted.
+    Input is permitted only after explicit authorization, stable HOOK text,
+    resolved audio playback, and fresh window/manual preflight.
     """
 
     def __init__(self, settings: Settings | None = None, session_id: str | None = None, interpreter: TextInterpreter | None = None):
@@ -92,9 +91,6 @@ class Controller:
         self.interpreter = interpreter or TextInterpreter(GameTextConfig(name_readings=dict(self.settings.name_readings)))
         self.session_id = session_id or str(uuid.uuid4())
         self.state = S.WAIT_LINE
-        self.gate_allowed = False
-        self.gate_proof_id: str | None = None
-        self.gate_source: str | None = None
         self.focused = False
         self.capture_ok = False
         self.line: Optional[Line] = None
@@ -103,14 +99,13 @@ class Controller:
         self._last_source_seq = -1
         self._last_at_ms = -1
         # Producer-local ordering, not a total order across unrelated sources.
-        # A polling timer must never erase a delayed choice/audio/focus event.
+        # A polling timer must never erase delayed audio or focus events.
         self._last_kind_at_ms: dict[tuple[EK, int | None], int] = {}
         self.pause_reason: Optional[str] = None
         self.autoplay_authorized = bool(self.settings.autoplay)
         self.tts_policy = TTSPolicy.UNASSIGNED
         self.voice_id: Optional[str] = None
         self.default_voice_id: Optional[str] = None
-        self._last_ack_id: Optional[str] = None
 
     def configure_tts(self, policy: TTSPolicy, *, selected_voice: str | None = None,
                       default_voice: str | None = None) -> None:
@@ -137,8 +132,6 @@ class Controller:
 
     def _pause(self, reason: str) -> list[Effect]:
         self.autoplay_authorized=False
-        self.gate_allowed=False
-        self.gate_proof_id=None
         if self.line is None:
             self.state = S.PAUSED
             self.pause_reason = reason
@@ -153,23 +146,9 @@ class Controller:
         effects.append(self._effect(FX.STOPPED, reason))
         return effects
 
-    def _manual_choice(self) -> list[Effect]:
-        effects=[]
-        if self.line is not None and self.line.tts_job_started and not self.line.tts_finished and not self.line.tts_canceled:
-            self.line.tts_canceled=True
-            effects.append(self._effect(FX.CANCEL_TTS,'manual_choice'))
-        self._token+=1
-        self.line=None
-        self.gate_allowed=False
-        self.gate_proof_id=None
-        self.state=S.WAIT_MANUAL_CHOICE
-        return effects
-
     def _new_line(self, e: Envelope) -> None:
         self._epoch += 1
         self._token += 1
-        self.gate_allowed=False
-        self.gate_proof_id=None
         utterance=self.interpreter.parse(e.text or "")
         self.line = Line(self._epoch, self._token, utterance,
                          e.source_line_id, e.at_ms, e.source_seq or 0,
@@ -191,14 +170,14 @@ class Controller:
         order_key = (e.kind, e.line_epoch if e.kind in (
             EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
             EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
-            EK.LINE_INVALIDATED, EK.ADVANCE_GATE) else None)
+            EK.LINE_INVALIDATED) else None)
         if (e.kind is not EK.MANUAL_OVERRIDE and e.kind is not EK.LINE_CANDIDATE and
             e.at_ms < self._last_kind_at_ms.get(order_key, -1)):
             return False
         # Callback events and their cancellation guards may never reach a new line.
         if e.kind in (EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
                       EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
-                      EK.LINE_INVALIDATED, EK.ADVANCE_GATE):
+                      EK.LINE_INVALIDATED):
             if self.line is None or e.line_epoch != self.line.epoch or e.cancel_token != self.line.token:
                 return False
         return True
@@ -214,7 +193,7 @@ class Controller:
         order_key = (e.kind, e.line_epoch if e.kind in (
             EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
             EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
-            EK.LINE_INVALIDATED, EK.ADVANCE_GATE) else None)
+            EK.LINE_INVALIDATED) else None)
         self._last_kind_at_ms[order_key] = max(
             e.at_ms, self._last_kind_at_ms.get(order_key, -1))
         if e.kind is EK.MANUAL_OVERRIDE:
@@ -225,26 +204,9 @@ class Controller:
                 # callbacks from the invalidated epoch cannot match any line.
                 self.line.token = self._token
             return effects
-        if e.kind is EK.CHOICE_REQUIRED:
-            return self._manual_choice()
-        elif e.kind is EK.CHOICE_RESOLVED:
-            if self.state is S.WAIT_MANUAL_CHOICE and e.gate_proof_id and e.gate_source:
-                self.state = S.WAIT_LINE
-                self.gate_allowed = False
-                self.gate_proof_id = None
-            return []
-        elif e.kind is EK.ADVANCE_GATE:
-            # Gate must belong to the active line generation. It may be revoked
-            # without creating or completing a line. Stale grants are rejected
-            # by _check_event; the executor will sample again before SendInput.
-            self.gate_allowed=bool(e.gate_allowed and e.gate_proof_id and e.gate_source)
-            self.gate_proof_id=e.gate_proof_id if self.gate_allowed else None
-            self.gate_source=e.gate_source if self.gate_allowed else None
-            if not self.gate_allowed and self.line and self.line.request_pending:
-                return self._pause('game_input_gate_revoked')
-        elif e.kind is EK.FOCUS_CHANGED:
+        if e.kind is EK.FOCUS_CHANGED:
             self.focused = e.focused is True
-            if not self.focused and (self.line is not None or self.state is S.WAIT_MANUAL_CHOICE):
+            if not self.focused and (self.line is not None):
                 return self._pause("window_unfocused")
         elif e.kind is EK.CAPTURE_HEALTH:
             self.capture_ok = e.capture_ok is True
@@ -258,12 +220,19 @@ class Controller:
                 self._new_line(e)
             elif self.line is not None:
                 # A repeated origin text does NOT mean a second line.
-                # Only a confirmed transition ACK may authorize a new epoch.
-                if self.state is S.WAIT_TRANSITION_ACK:
-                    # New source identities are only candidate observations.
-                    # Neither a changed ID nor changed text proves that the
-                    # game advanced. A separate, positively verified
-                    # TRANSITION_ACK must release this line first.
+                # A post-input, changed HOOK candidate may begin the next epoch.
+                if self.state is S.WAIT_NEXT_HOOK:
+                    old=self.line
+                    # No visual ACK and no time-only assumption: a new, different
+                    # selected HOOK observation after our one input starts a new line.
+                    if (e.source_kind != 'hook' or old.source_kind != 'hook'
+                        or e.source_generation != old.source_generation
+                        or e.source_origin != old.source_origin
+                        or not e.text or e.text == old.text.observed_original
+                        or not old.sent_at_ms or e.at_ms <= old.sent_at_ms
+                        or e.source_seq <= old.source_seq):
+                        return []
+                    self._new_line(e)
                     return []
                 elif e.source_line_id and e.source_line_id == self.line.source_line_id:
                     # A partial replacement is still the same line; never alter
@@ -279,19 +248,6 @@ class Controller:
                     return self._pause("unattributed_line_change")
                 else:
                     return []
-        elif e.kind is EK.TRANSITION_ACK:
-            if self.line is None or self.state is not S.WAIT_TRANSITION_ACK:
-                return []
-            if e.line_epoch != self.line.epoch or e.cancel_token != self.line.token:
-                return []
-            if not e.transition_id or e.transition_id == self._last_ack_id:
-                return self._pause("ambiguous_transition_ack")
-            self._last_ack_id = e.transition_id
-            self.line = None
-            self.gate_allowed = False
-            self.gate_proof_id = None
-            self.state = S.WAIT_LINE
-            return []
         elif e.kind is EK.LINE_UPDATED:
             assert self.line is not None
             if self.line.ready_ms is not None:
@@ -407,15 +363,15 @@ class Controller:
     def _eligible_for_request(self) -> bool:
         l = self.line
         return bool(l and self.autoplay_authorized and self.focused and
-                    self.gate_allowed and self.capture_ok and
+                    self.capture_ok and
                     l.ready_ms is not None and not l.sent and not l.request_pending and
                     l.presentation is not Presentation.UNRESOLVED and
                     l.playback is not Playback.ACTIVE and not (l.tts_job_started and not (l.tts_finished or l.tts_canceled)) and
-                    self.state not in (S.PAUSED, S.WAIT_TRANSITION_ACK))
+                    self.state not in (S.PAUSED, S.WAIT_NEXT_HOOK))
 
     def _evaluate(self, at_ms: int) -> list[Effect]:
         l = self.line
-        if l is None or self.state in (S.PAUSED, S.WAIT_TRANSITION_ACK):
+        if l is None or self.state in (S.PAUSED, S.WAIT_NEXT_HOOK):
             return []
         if not self.focused or not self.capture_ok:
             if at_ms >= l.first_seen_ms + self.settings.unresolved_timeout_ms:
@@ -480,14 +436,11 @@ class Controller:
 
     def confirm_advance(self, *, line_epoch: int, cancel_token: int,
                         fresh_focused: bool, fresh_capture_ok: bool,
-                        fresh_gate_allowed: bool = False, fresh_gate_proof_id: str | None = None,
                         fresh_native_voice_active: bool = True,
                         fresh_tts_playing: bool = True,
-                        fresh_line_matches: bool = False,
                         fresh_target_window_matches: bool = False,
                         fresh_input_available: bool = False,
                         fresh_manual_override: bool = True,
-                        fresh_transition_pending: bool = True,
                         at_ms: int = -1) -> bool:
         """Called synchronously by the sole input executor after fresh observation.
 
@@ -496,29 +449,27 @@ class Controller:
         l = self.line
         if (l is None or l.epoch != line_epoch or l.token != cancel_token or
             self.state is not S.READY_TO_ADVANCE or not l.request_pending or
-            not self.gate_allowed or not self.gate_proof_id or
-            not fresh_gate_allowed or fresh_gate_proof_id != self.gate_proof_id or
             not self.focused or not self.capture_ok or
             not fresh_focused or not fresh_capture_ok or
             fresh_native_voice_active or fresh_tts_playing or
             not fresh_target_window_matches or
             not fresh_input_available or fresh_manual_override or
-            fresh_transition_pending or at_ms < self._last_at_ms or
+            at_ms < self._last_at_ms or
             l.sent or l.playback is Playback.ACTIVE):
             return False
         l.sent = True
         l.sent_at_ms = at_ms
         l.request_pending = False
-        self.state = S.WAIT_TRANSITION_ACK
+        self.state = S.WAIT_NEXT_HOOK
         self._last_at_ms = at_ms
         return True
 
     def input_failed(self) -> list[Effect]:
         return self._pause("input_failed_no_retry")
 
-    def transition_timed_out(self, now_ms: int) -> list[Effect]:
-        if (self.state is S.WAIT_TRANSITION_ACK and self.line is not None and
+    def next_hook_timed_out(self, now_ms: int) -> list[Effect]:
+        if (self.state is S.WAIT_NEXT_HOOK and self.line is not None and
             self.line.sent_at_ms is not None and
-            now_ms - self.line.sent_at_ms >= self.settings.transition_timeout_ms):
-            return self._pause("transition_ack_timeout_no_retry")
+            now_ms - self.line.sent_at_ms >= self.settings.next_hook_timeout_ms):
+            return self._pause("next_hook_timeout_no_retry")
         return []

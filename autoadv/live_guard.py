@@ -13,22 +13,14 @@ import ctypes
 import sys
 import time
 from .runtime import FreshSnapshot
-from .contracts import ScreenState, Playback, ControllerState
+from .contracts import Playback
 from .controller import Controller
 from .windows_input import AUTOADV_INPUT_MARK
-from .progression import ClosedGate
 
 
 def is_manual_hook_event(*, keyboard: bool, flags: int, extra_info: int) -> bool:
     injected_bit = 0x10 if keyboard else 0x01
     return not (flags & injected_bit and extra_info == AUTOADV_INPUT_MARK)
-
-
-def is_choice_selection_event(*,keyboard:bool,message:int,flags:int,extra_info:int)->bool:
-    """Selection action, not mouse motion or AutoAdv's own tagged SendInput."""
-    if not is_manual_hook_event(keyboard=keyboard,flags=flags,extra_info=extra_info):return False
-    return message in ((0x0100,0x0104) if keyboard else
-                       (0x0201,0x0204,0x0207,0x020A,0x020B))
 
 
 class InputOriginTracker:
@@ -68,7 +60,6 @@ class WindowsManualMonitor:
         if sys.platform != 'win32':
             raise OSError('Windows required')
         self._manual = Event()
-        self._choice_input = Event()
         self._origin_lock = Lock()
         self._origin = InputOriginTracker(self._last_input())
         self._ready = Event()
@@ -177,19 +168,12 @@ class WindowsManualMonitor:
             self._manual.set()
         return self._manual.is_set()
 
-    def choice_action_seen(self)->bool:
-        return self._choice_input.is_set() and self.intervened()
-
-    def reset_choice_actions(self):
-        self._choice_input.clear()
-
     def reset_after_authorization(self):
         # Only explicit new-session authorization or positively verified choice
         # completion can clear physical input observed during setup/selection.
         with self._origin_lock:
             self._origin = InputOriginTracker(self._last_input())
             self._manual.clear()
-            self._choice_input.clear()
 
     def close(self):
         self._stop.set()
@@ -203,13 +187,10 @@ class LiveGuard:
     def __init__(self, controller:Controller, hwnd:int,pid:int,manual,
                  tts_active:Callable[[],bool], capture_alive:Callable[[],bool],
                  audio_activity:Callable[[],bool]=lambda:True,
-                 binding_confirmed:Callable[[],bool]=lambda:False,
-                 gate=None, clock:Callable[[],int]=lambda:time.monotonic_ns()//1_000_000):
+                 binding_confirmed:Callable[[],bool]=lambda:False):
         self.ctrl,self.hwnd,self.pid=controller,hwnd,pid
         self.manual,self.tts_active,self.capture_alive=manual,tts_active,capture_alive
         self.audio_activity,self.binding_confirmed=audio_activity,binding_confirmed
-        self.gate=gate or ClosedGate()
-        self.clock=clock
 
     def observe(self)->FreshSnapshot:
         try:
@@ -224,13 +205,9 @@ class LiveGuard:
                    and bool(user32.IsWindowEnabled(self.hwnd)))
             line=self.ctrl.line
             if line is None:raise RuntimeError('no active line')
-            proof=self.gate.observe(self.clock()) if valid else None
-            allowed=bool(proof and proof.may_advance and self.binding_confirmed())
             return FreshSnapshot(focused=foreground and valid,capture_ok=self.capture_alive(),
-                gate_allowed=allowed,gate_proof_id=proof.proof_id if allowed else None,
                 native_voice_active=(line.playback is Playback.ACTIVE or self.audio_activity()),
                 tts_playing=self.tts_active(),target_window_matches=valid,input_available=valid,
-                manual_override=self.manual.intervened(),
-                transition_pending=self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK)
+                manual_override=self.manual.intervened() or not self.binding_confirmed())
         except Exception:
             return FreshSnapshot()

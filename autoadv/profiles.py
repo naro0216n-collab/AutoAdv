@@ -39,7 +39,6 @@ class GameProfile:
     inserted_hooks: list[str] = field(default_factory=list)
     quality: dict = field(default_factory=dict)
     monitor: dict = field(default_factory=dict)
-    screen: dict = field(default_factory=dict)
     overrides: dict = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -52,7 +51,7 @@ class GameProfile:
             raise ValueError('duplicate selected HookKey')
         if (not isinstance(self.inserted_hooks,list)
             or any(not isinstance(x,str) or not x.strip() for x in self.inserted_hooks)
-            or any(not isinstance(x,dict) for x in (self.quality,self.monitor,self.screen,self.overrides))):
+            or any(not isinstance(x,dict) for x in (self.quality,self.monitor,self.overrides))):
             raise ValueError('invalid profile settings')
         for forbidden in ('pid','hwnd','host_generation','connection_generation','authorized'):
             if forbidden in self.monitor or forbidden in self.overrides:

@@ -1,8 +1,0 @@
-{
-  "markers": {
-    "advance_allowed": {"image":"templates/advance-allowed.png","rect":[0,0,40,20],"min_score":0.96},
-    "manual_block": {"image":"templates/manual-block.png","rect":[50,0,40,20],"min_score":0.96}
-  },
-  "minimum_ready_observations": 2,
-  "minimum_ready_span_ms": 120
-}

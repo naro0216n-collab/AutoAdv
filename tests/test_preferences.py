@@ -22,6 +22,25 @@ class PersistenceTests(TestCase):
             self.assertEqual(from_disk.preview('大和「京(みやこ)」'),svc.preview('大和「京(みやこ)」'))
             self.assertEqual(json.loads(path.read_text())['schema_version'],2)
 
+    def test_previous_screen_field_is_removed_only_by_explicit_preserving_import(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'settings.json'
+            svc=AutoAdvService(settings_file=p)
+            game=svc.new_game('作品')
+            old=json.loads(p.read_text(encoding='utf-8'))
+            profile=old['catalog']['games'][game.game_id]['profiles'][game.default_profile_id]
+            profile['screen']={'markers':{'advance_allowed':{'image':'old.png','rect':[0,0,1,1]}}}
+            original=json.dumps(old,ensure_ascii=False).encode('utf-8')
+            p.write_bytes(original)
+            with self.assertRaises(LegacyPreferencesDetected):Preferences.load(p)
+            self.assertEqual(p.read_bytes(),original)
+            imported=Preferences.import_legacy(p)
+            self.assertEqual(imported.catalog.active_game_id,game.game_id)
+            self.assertNotIn('screen',p.read_text(encoding='utf-8'))
+            backups=list(p.parent.glob('settings.json.legacy-*.bak'))
+            self.assertEqual(len(backups),1)
+            self.assertEqual(backups[0].read_bytes(),original)
+
     def test_legacy_is_not_silently_accepted_as_new_preferences(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'settings.json'
@@ -45,48 +64,44 @@ class MonitorProfilePersistence(TestCase):
             'tts_speed':1.0,'silent_dwell':{'base_ms':700,'min_ms':1000,'reading_chars_per_sec':12},
             'tts_required':False,'advance_input':{'mode':'keyboard','virtual_key':13},
         }
-        screen={}  # Default HOOK monitoring must not require image calibration.
-        return live,screen
+        return live
 
     def test_monitor_is_atomic_in_single_profile_not_secondary_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);path=root/'settings.json'
             svc=AutoAdvService(settings_file=path)
             svc.new_game('つよきす')
-            live,screen=self.profile(root)
-            svc.save_monitor(live,screen)
+            live=self.profile(root)
+            svc.save_monitor(live)
             doc=json.loads(path.read_text(encoding='utf-8'))
             self.assertEqual(set(doc),{'schema_version','irodori_root','irodori_url','luna_host_dll','globals','catalog'})
             self.assertNotIn('live_profiles',doc)
             current=AutoAdvService(settings_file=path)
-            observed,markers=current.monitor_document()
+            observed=current.monitor_document()
             self.assertNotIn('pid',observed)
             self.assertNotIn('hwnd',observed)
             self.assertNotIn('screen_profile',observed)
             self.assertEqual(observed['advance_input']['virtual_key'],13)
-            self.assertEqual(markers,{})
             configured,temporary=current.runtime_snapshot(999,888)
             try:
                 self.assertEqual((configured.pid,configured.hwnd),(999,888))
-                self.assertIsNone(configured.screen_profile)
                 self.assertEqual(LiveConfig.load(Path(temporary.name)/'monitor.json'),configured)
             finally:
                 temporary.cleanup()
             self.assertFalse(Path(temporary.name).exists())
             before=path.read_bytes()
-            invalid={'markers':{'advance_allowed':{'image':'missing.png','rect':[0,0,40,20]}}}
-            with self.assertRaises(ValueError):current.save_monitor(live,invalid)
+            invalid={**live,'tts_speed':-3}
+            with self.assertRaises(ValueError):current.save_monitor(invalid)
             self.assertEqual(path.read_bytes(),before)
             duplicated=current.profile_duplicate('別設定')
             self.assertEqual(duplicated.monitor,observed)
-            self.assertEqual(duplicated.screen,markers)
             current.profile_set_default()
             self.assertEqual(AutoAdvService(settings_file=path).active()[1].profile_id,duplicated.profile_id)
 
     def test_explicit_legacy_import_keeps_original_and_never_persists_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);path=root/'settings.json'
-            live,screen=self.profile(root)
+            live=self.profile(root)
             # Explicit migration of old AutoAdv files must preserve the original
             # screen document in the backup but NEVER imply input permission.
             old_screen={'markers':{
@@ -105,9 +120,8 @@ class MonitorProfilePersistence(TestCase):
             self.assertEqual(backups[0].read_bytes(),original)
             service=AutoAdvService(settings_file=path)
             self.assertEqual(service.current_game_name(),'game')
-            observed,markers=service.monitor_document()
+            observed=service.monitor_document()
             self.assertNotIn('pid',observed)
             self.assertNotIn('hwnd',observed)
             self.assertEqual(observed['asr_model'],str(root/'model.onnx'))
-            self.assertEqual(markers,{})
             self.assertNotIn('live_profiles',json.loads(path.read_text()))

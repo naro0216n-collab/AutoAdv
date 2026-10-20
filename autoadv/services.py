@@ -194,70 +194,47 @@ class AutoAdvService:
     def preview(self,raw:str)->Utterance:
         return TextInterpreter(self.current_config()).parse(raw)
 
-    def monitor_document(self)->tuple[dict,dict]:
+    def monitor_document(self)->dict:
         current=self.active()
-        if current is None:return {},{}
-        return copy.deepcopy(current[1].monitor),copy.deepcopy(current[1].screen)
+        return copy.deepcopy(current[1].monitor) if current else {}
 
-    def save_monitor(self,document:dict,screen_document:dict)->None:
-        """Store one snapshot within Preferences; transient target PID/HWND excluded."""
+    def save_monitor(self,document:dict)->None:
+        """Persist audio/input settings; never persist ephemeral PIDs or HWNDs."""
         if not self.active():raise ValueError('game not selected')
         from .live import LiveConfig
-        from .screen import ScreenProfile
+        live=copy.deepcopy(document)
+        for name in ('pid','hwnd','screen_profile'):
+            live.pop(name,None)
         with tempfile.TemporaryDirectory(prefix='autoadv-validate-') as tmp:
             root=Path(tmp)
-            sdata=copy.deepcopy(screen_document)
-            sfile=root/'screen.json'
-            if sdata:
-                sfile.write_text(json.dumps(sdata,ensure_ascii=False),encoding='utf-8')
-                scr=ScreenProfile.load(sfile)
-                for marker in scr.markers.values():
-                    if not marker.image.is_file():raise ValueError(f'screen marker missing: {marker.image}')
-            live=copy.deepcopy(document)
-            # Validate monitor capability without requiring a running game.
-            # Runtime PID/HWND are supplied only when monitoring actually starts.
-            live.pop('pid',None);live.pop('hwnd',None)
-            live.update({'pid':1,'hwnd':1})
-            if sdata:live['screen_profile']=str(sfile)
+            probe={**live,'pid':1,'hwnd':1}
             lfile=root/'monitor.json'
-            lfile.write_text(json.dumps(live,ensure_ascii=False),encoding='utf-8')
+            lfile.write_text(json.dumps(probe,ensure_ascii=False),encoding='utf-8')
             config=LiveConfig.load(lfile)
             for file in (config.loopback_helper,config.asr_model,config.asr_tokens):
                 if not file.is_file():raise ValueError(f'missing runtime dependency: {file}')
-        # The stored screen and monitor are one atomic per-profile settings
-        # update. Runtime PIDs are kept only in the active GUI session.
-        for name in ('pid','hwnd','screen_profile'):
-            live.pop(name,None)
         previous=copy.deepcopy(self.active()[1])
         try:
             self.active()[1].monitor=live
-            self.active()[1].screen=sdata
             self.preferences.save(self.settings_file)
         except BaseException:
             self.active()[0].profiles[previous.profile_id]=previous
             raise
 
     def runtime_snapshot(self,pid:int,hwnd:int):
-        """Ephemeral derivation for the existing LiveConfig API, not persistence.
-
-        Caller owns and closes the returned TemporaryDirectory after monitor end.
-        """
-        data,screen=self.monitor_document()
+        """Derive one runtime config without creating a secondary settings authority."""
+        data=self.monitor_document()
         if not data:raise ValueError('monitor audio settings not saved')
         if pid<=0 or hwnd<=0:raise ValueError('select a live game window')
         temp_root=self.settings_file.parent/'temp'
         temp_root.mkdir(parents=True,exist_ok=True)
         temporary=tempfile.TemporaryDirectory(prefix='live-',dir=temp_root)
         root=Path(temporary.name)
-        screen_file=root/'screen.json'
-        if screen:screen_file.write_text(json.dumps(screen,ensure_ascii=False),encoding='utf-8')
         data.update({'pid':pid,'hwnd':hwnd})
-        if screen:data['screen_profile']=str(screen_file)
         live_file=root/'monitor.json'
         live_file.write_text(json.dumps(data,ensure_ascii=False),encoding='utf-8')
         from .live import LiveConfig
-        try:
-            config=LiveConfig.load(live_file)
+        try:config=LiveConfig.load(live_file)
         except BaseException:
             temporary.cleanup()
             raise

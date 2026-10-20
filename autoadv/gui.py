@@ -146,10 +146,10 @@ def run_gui() -> int:
             actions.addWidget(ok);actions.addWidget(cancel);layout.addLayout(actions)
             def accept_selected():
                 try:
-                    from .screen_calibration import validate_roi
-                    validate_roi(self.frame,self.rect_pixels or ())
+                    from .acquisition import SourceSelection, SourceKind
+                    SourceSelection(SourceKind.OCR,region=self.rect_pixels)
                     self.accept()
-                except ValueError as exc:QMessageBox.warning(self,'無効な校正範囲',str(exc))
+                except ValueError as exc:QMessageBox.warning(self,'無効なOCR範囲',str(exc))
             ok.clicked.connect(accept_selected);cancel.clicked.connect(self.reject)
 
     class GameWorker(QThread):
@@ -222,9 +222,9 @@ def run_gui() -> int:
             root=QVBoxLayout(top)
             statuses=QGroupBox('接続・音声・進行状態（常時表示）');root.addWidget(statuses)
             status_grid=QGridLayout(statuses)
-            fields=['対象ゲーム','対象ウィンドウ/フォーカス','取得方式','HOOK Host接続','最新HOOK原文',
+            fields=['対象ゲーム','対象ウィンドウ/フォーカス','取得方式','HOOK Host接続','最新取得原文',
                     'Irodoriフォルダ','Irodori接続','Voice候補','提示経路','音声監視',
-                    '自動進行許可','進行証拠','停止理由','入力/ACK','現在Utterance']
+                    '自動進行許可','HOOK/音声同期','停止理由','入力/次HOOK候補','現在Utterance']
             self.status_labels={}
             for i,name in enumerate(fields):
                 label=QLabel(name);value=QLabel('未設定 / 不明');value.setWordWrap(True)
@@ -316,12 +316,14 @@ def run_gui() -> int:
             self.ocr_language=QLineEdit('jpn')
             self.ocr_rect=QLineEdit();self.ocr_rect.setPlaceholderText('x,y,width,height（ゲーム画面のクライアント領域）')
             self.save_source=QPushButton('取得方式をプロファイルへ保存')
+            self.pick_ocr=QPushButton('ゲーム画面からOCR本文領域を選択')
             source_layout.addRow('取得方式（既定HOOK）',self.source_kind)
             source_layout.addRow('OCR実行ファイル（OCR選択時）',self.ocr_executable)
             source_layout.addRow('OCR言語（OCR選択時）',self.ocr_language)
             source_layout.addRow('OCR領域（OCR選択時）',self.ocr_rect)
+            source_layout.addRow(self.pick_ocr)
             source_layout.addRow(self.save_source)
-            monitor=QGroupBox('作品別ゲーム監視・音声・任意画像判定（保存後に反映）')
+            monitor=QGroupBox('作品別ゲーム監視・音声・送り（保存後に反映）')
             form.addWidget(monitor)
             monitor_layout=QVBoxLayout(monitor)
             self.monitor_location=QLabel('監視設定未保存');self.monitor_location.setWordWrap(True)
@@ -361,40 +363,12 @@ def run_gui() -> int:
                 if name not in ('pid','hwnd'):edit.textEdited.connect(self.mark_monitor_dirty)
             self.input_mode=QComboBox();self.input_mode.addItems(['keyboard','mouse_left'])
             live_form.addRow('自動入力方式',self.input_mode)
-            self.heuristic_absence=QCheckBox('校正済み限定無音推定を使用')
+            self.heuristic_absence=QCheckBox('ASRの無音判定を利用（不明時は停止）')
             self.tts_required=QCheckBox('TTS必須（失敗時は停止）')
             live_form.addRow(self.heuristic_absence);live_form.addRow(self.tts_required)
-            self.min_ready_count=QLineEdit();self.min_ready_span=QLineEdit()
-            live_form.addRow('入力許可指標の連続確認数',self.min_ready_count)
-            live_form.addRow('入力許可指標の観測期間 ms',self.min_ready_span)
-            for widget in (self.min_ready_count,self.min_ready_span):
-                widget.textEdited.connect(self.mark_monitor_dirty)
             for widget in (self.input_mode,self.heuristic_absence,self.tts_required):
                 (widget.currentIndexChanged if isinstance(widget,QComboBox) else widget.toggled).connect(self.mark_monitor_dirty)
-            monitor_layout.addWidget(QLabel('任意：自動入力は作品固有の検証済み advance_allowed 指標が必要。取得済み台詞だけでは不可'))
-            self.markers=table(['役割','画像ファイル','x','y','幅','高さ','一致しきい値'],180)
-            monitor_layout.addWidget(self.markers)
-            for role in ('manual_block','transition','advance_allowed'):
-                append(self.markers,[role,'','0','0','40','20','0.96'])
-                self.markers.item(self.markers.rowCount()-1,0).setFlags(Qt.ItemFlag.ItemIsEnabled)
-            marker_browse=QPushButton('選択行の画像ファイルを指定')
-            monitor_layout.addWidget(marker_browse)
-            def browse_marker():
-                row=self.markers.currentRow()
-                if row<0:return
-                path,_=QFileDialog.getOpenFileName(self,'画面マーカーの画像',self.markers.item(row,1).text(),
-                                                    'Images (*.png *.bmp *.jpg *.jpeg)')
-                if path:self.markers.item(row,1).setText(path)
-            marker_browse.clicked.connect(browse_marker)
-            self.markers.itemChanged.connect(self.mark_monitor_dirty)
-            capture_actions=QHBoxLayout();monitor_layout.addLayout(capture_actions)
-            self.capture_marker=QPushButton('ゲーム画面からマーカー範囲を取得')
-            self.probe_marker=QPushButton('現在のゲーム画面で検出確認')
-            self.calibration_state=QLabel('画面校正: 未確認（入力許可とは独立）')
-            capture_actions.addWidget(self.capture_marker);capture_actions.addWidget(self.probe_marker)
-            monitor_layout.addWidget(self.calibration_state)
-            self.capture_marker.clicked.connect(lambda:self.capture_screen(False))
-            self.probe_marker.clicked.connect(lambda:self.capture_screen(True))
+            monitor_layout.addWidget(QLabel('HOOK本文・音声同期で送る。特殊画面・選択肢の完全自動検出はしません。'))
             monitor_actions=QHBoxLayout();monitor_layout.addLayout(monitor_actions)
             self.import_monitor=QPushButton('既存監視JSONを取り込む')
             self.save_monitor=QPushButton('ゲーム監視設定を保存')
@@ -403,10 +377,11 @@ def run_gui() -> int:
             self.save_monitor.clicked.connect(self.save_monitor_profile)
             find_windows.clicked.connect(self.refresh_windows)
             use_window.clicked.connect(self.select_target_window)
+            self.pick_ocr.clicked.connect(self.capture_ocr_region)
 
             right=QWidget();right_layout=QVBoxLayout(right);splitter.addWidget(right)
             right_layout.addWidget(QLabel('Luna原文（受信内容は加工しない）'))
-            self.original=QPlainTextEdit();self.original.setPlaceholderText('LunaのHOOK結合結果を確認してください')
+            self.original=QPlainTextEdit();self.original.setPlaceholderText('選択したHOOKまたはOCRの取得文を確認してください')
             self.original.setMinimumHeight(140);right_layout.addWidget(self.original)
             right_layout.addWidget(QLabel('実処理と共通のUtteranceプレビュー'))
             self.preview=QPlainTextEdit();self.preview.setReadOnly(True)
@@ -629,41 +604,29 @@ def run_gui() -> int:
             self.monitor_fields['hwnd'].setText(str(hwnd))
             self.show_status('対象ウィンドウ/フォーカス',f'PID={pid} / HWND={hwnd} / 未検証')
 
-        def load_monitor_document(self,document,screen,path_label):
+        def load_monitor_document(self,document,path_label):
             self._loading_monitor=True
             try:
                 defaults={'pid':'','hwnd':'','loopback_helper':'','asr_model':'','asr_tokens':'',
                           'log_path':'','grace_ms':500,'tts_speed':1.0,'silent_base_ms':700,
                           'silent_min_ms':1000,'reading_chars_per_sec':12.0,'input_virtual_key':13}
-                dwell=document.get('silent_dwell',{})
-                values={**defaults,**document,**{
-                    'silent_base_ms':dwell.get('base_ms',defaults['silent_base_ms']),
-                    'silent_min_ms':dwell.get('min_ms',defaults['silent_min_ms']),
-                    'reading_chars_per_sec':dwell.get('reading_chars_per_sec',defaults['reading_chars_per_sec']),
-                    'input_virtual_key':document.get('advance_input',{}).get('virtual_key',13)}}
+                values={**defaults,**document}
+                for key in ('silent_base_ms','silent_min_ms','reading_chars_per_sec'):
+                    values[key]=document.get('silent_dwell',{}).get({'silent_base_ms':'base_ms',
+                        'silent_min_ms':'min_ms','reading_chars_per_sec':'reading_chars_per_sec'}[key],defaults[key])
+                values['input_virtual_key']=document.get('advance_input',{}).get('virtual_key',13)
                 for name,edit in self.monitor_fields.items():edit.setText(str(values[name]))
                 self.input_mode.setCurrentText(document.get('advance_input',{}).get('mode','keyboard'))
-                self.heuristic_absence.setChecked(document.get('allow_heuristic_absence',False))
+                self.heuristic_absence.setChecked(document.get('allow_heuristic_absence',True))
                 self.tts_required.setChecked(document.get('tts_required',False))
-                self.min_ready_count.setText(str(screen.get('minimum_ready_observations',2)))
-                self.min_ready_span.setText(str(screen.get('minimum_ready_span_ms',120)))
-                self._calibration_size=tuple(screen['client_size']) if screen.get('client_size') else None
-                self._marker_client_sizes={role:(tuple(record['source_client_size'])
-                    if record.get('source_client_size') else None)
-                    for role,record in screen.get('markers',{}).items()}
-                for r,role in enumerate(('manual_block','transition','advance_allowed')):
-                    marker=screen.get('markers',{}).get(role,{})
-                    rect=marker.get('rect',[0,0,40,20])
-                    for c,value in enumerate([role,marker.get('image',''),*rect,marker.get('min_score',.96)]):
-                        if c:self.markers.item(r,c).setText(str(value))
                 self.monitor_location.setText(path_label)
                 self.monitor_dirty=False
             finally:self._loading_monitor=False
 
         def load_monitor_profile(self):
             try:
-                data,screen=self.service.monitor_document()
-                self.load_monitor_document(data,screen,'統合プロファイルに保存済み' if data else '監視設定未保存')
+                data=self.service.monitor_document()
+                self.load_monitor_document(data,'統合プロファイルに保存済み' if data else '監視設定未保存')
             except (ValueError,OSError,KeyError) as exc:
                 self.monitor_location.setText('監視設定を読み取れません: '+str(exc))
                 self.monitor_dirty=True
@@ -671,21 +634,16 @@ def run_gui() -> int:
         def import_monitor_profile(self):
             if self.game_worker is not None and self.game_worker.isRunning():
                 self.issue.setText('監視終了後に監視設定を変更してください');return
-            path,_=QFileDialog.getOpenFileName(self,'既存のゲーム監視JSONを指定',
-                    '', 'JSON (*.json)')
+            path,_=QFileDialog.getOpenFileName(self,'既存のゲーム監視JSONを指定','','JSON (*.json)')
             if not path:return
             try:
                 from .live import LiveConfig
-                from .screen import ScreenProfile
                 config=LiveConfig.load(Path(path))
                 data=json.loads(Path(path).read_text(encoding='utf-8'))
-                screen=json.loads(config.screen_profile.read_text(encoding='utf-8')) if config.screen_profile else {}
                 for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
                     data[key]=str(getattr(config,key))
-                for marker in screen.get('markers',{}).values():
-                    marker['image']=str((config.screen_profile.parent/marker['image']).resolve())
-                if config.screen_profile:ScreenProfile.load(config.screen_profile)
-                self.load_monitor_document(data,screen,'取り込み済み・まだ保存されていません')
+                data.pop('screen_profile',None)
+                self.load_monitor_document(data,'取り込み済み・まだ保存されていません')
                 self.mark_monitor_dirty()
             except (ValueError,OSError,KeyError) as exc:
                 self.issue.setText('監視設定を取り込めません: '+str(exc))
@@ -693,21 +651,7 @@ def run_gui() -> int:
         def current_monitor_document(self):
             values={name:edit.text().strip() for name,edit in self.monitor_fields.items()}
             abs_path=lambda value:str(Path(value).expanduser().resolve()) if value else ''
-            markers={}
-            for a in rows(self.markers):
-                role,path,x,y,w,h,score=a
-                if not path.strip():
-                    continue
-                markers[role]={'image':abs_path(path),'rect':[int(x),int(y),int(w),int(h)],
-                               'min_score':float(score)}
-                recorded=getattr(self,'_marker_client_sizes',{}).get(role)
-                if recorded is not None:markers[role]['source_client_size']=list(recorded)
-            screen={'markers':markers,
-                    'minimum_ready_observations':int(self.min_ready_count.text()),
-                    'minimum_ready_span_ms':int(self.min_ready_span.text())}
-            if getattr(self,'_calibration_size',None) is not None:
-                screen['client_size']=list(self._calibration_size)
-            live={'loopback_helper':abs_path(values['loopback_helper']),
+            return {'loopback_helper':abs_path(values['loopback_helper']),
                   'asr_model':abs_path(values['asr_model']),
                   'asr_tokens':abs_path(values['asr_tokens']),
                   'log_path':abs_path(values['log_path']),
@@ -720,65 +664,28 @@ def run_gui() -> int:
                   'tts_required':self.tts_required.isChecked(),
                   'advance_input':{'mode':self.input_mode.currentText(),
                                    'virtual_key':int(values['input_virtual_key'])}}
-            return live,screen if markers else {}
 
-        def capture_screen(self,probe:bool):
+        def capture_ocr_region(self):
             if self.game_worker and self.game_worker.isRunning():
-                self.issue.setText('画面校正は監視を停止してから実行してください');return
+                self.issue.setText('OCR範囲は監視終了後に指定してください');return
             try:
                 pid=int(self.monitor_fields['pid'].text())
                 hwnd=int(self.monitor_fields['hwnd'].text())
-                if pid<=0 or hwnd<=0:raise ValueError('ゲームの対象ウィンドウを指定してください')
-                if not probe and self.markers.currentRow() not in range(self.markers.rowCount()):
-                    raise ValueError('取得するマーカー行を選択してください')
+                if pid<=0 or hwnd<=0:raise ValueError('対象ウィンドウを指定してください')
             except ValueError as exc:self.issue.setText(str(exc));return
             worker=ScreenCaptureWorker(pid,hwnd)
             self._other_workers.append(worker)
-            self.calibration_state.setText('画面校正: クライアント画像取得中（入力許可ではありません）')
-            worker.captured.connect(lambda frame:self.calibration_frame(frame,probe))
-            worker.failed.connect(lambda reason:self.calibration_state.setText('画面取得失敗: '+reason))
+            self.issue.setText('OCR本文範囲用のゲーム画像を取得中')
+            worker.captured.connect(self.ocr_region_frame)
+            worker.failed.connect(lambda reason:self.issue.setText('OCR画像取得失敗: '+reason))
             worker.finished.connect(lambda:self._other_workers.remove(worker))
             worker.start()
 
-        def calibration_frame(self,frame,probe:bool):
-            try:
-                if probe:
-                    from .screen_calibration import probe as check
-                    _,screen=self.current_monitor_document()
-                    state,ready,reason,scores=check(frame,screen)
-                    details=', '.join(f'{role}={score:.3f}' for role,score in scores.items())
-                    self.calibration_state.setText(
-                        f'検出テストのみ（許可ではありません）: {state.name}, ready={ready}, {reason}; {details}')
-                    return
-                row=self.markers.currentRow()
-                if row<0:raise ValueError('校正するマーカー行を選んでください')
-                role=self.markers.item(row,0).text()
-                dialog=RegionPicker(frame,self)
-                if dialog.exec()!=QDialog.DialogCode.Accepted:return
-                current=self.service.active()
-                if current is None:raise ValueError('ゲーム・プロファイルの選択が必要です')
-                from .screen_calibration import save_calibration,immutable_calibration_path
-                root=(self.service.settings_file.parent/'markers'/current[0].game_id/
-                      current[1].profile_id)
-                target=immutable_calibration_path(frame,dialog.rect_pixels,root,role=role)
-                save_calibration(frame,dialog.rect_pixels,target,role=role)
-                captured_size=(frame.shape[1],frame.shape[0])
-                prior=getattr(self,'_calibration_size',None)
-                self._calibration_size=captured_size
-                if not hasattr(self,'_marker_client_sizes'):self._marker_client_sizes={}
-                self._marker_client_sizes[role]=captured_size
-                x,y,w,h=dialog.rect_pixels
-                for column,value in enumerate((str(target),x,y,w,h),start=1):
-                    self.markers.item(row,column).setText(str(value))
-                self.mark_monitor_dirty()
-                pending=[key for key in ('manual_block','transition','advance_allowed')
-                         if self.markers.item(('manual_block','transition','advance_allowed').index(key),1).text().strip()
-                         and self._marker_client_sizes.get(key)!=captured_size]
-                detail=(' / サイズ変更のため再校正が必要: '+', '.join(pending)) if pending else ''
-                self.calibration_state.setText(
-                    f'{role}: クライアント領域({x},{y},{w},{h})から取得。検出テスト後に保存してください'+detail)
-            except (OSError,ValueError,TypeError) as exc:
-                self.calibration_state.setText('画面校正エラー: '+str(exc))
+        def ocr_region_frame(self,frame):
+            dialog=RegionPicker(frame,self)
+            if dialog.exec()==QDialog.DialogCode.Accepted and dialog.rect_pixels:
+                self.ocr_rect.setText(','.join(map(str,dialog.rect_pixels)))
+                self.issue.setText('OCR本文領域を指定しました。取得方式の保存で反映します。')
 
         def save_monitor_profile(self):
             if self.game_worker and self.game_worker.isRunning():
@@ -786,11 +693,10 @@ def run_gui() -> int:
             if not self.service.active() or self.game_name.currentData()!=self.service.catalog.active_game_id:
                 self.issue.setText('先に作品ルールを保存し、作品を選択してください');return
             try:
-                live,screen=self.current_monitor_document()
-                self.service.save_monitor(live,screen)
+                self.service.save_monitor(self.current_monitor_document())
                 self.monitor_dirty=False
                 self.monitor_location.setText('統合プロファイルに保存済み')
-                self.issue.setText('ゲーム監視・画面・音声設定を保存しました。次の監視開始から適用します')
+                self.issue.setText('ゲーム監視・音声設定を保存しました。次の監視開始から適用します')
             except (OSError,ValueError,TypeError,KeyError) as exc:
                 self.issue.setText('監視設定を保存できません: '+str(exc))
 
@@ -916,7 +822,7 @@ def run_gui() -> int:
 
         def receive_original(self,original:str):
             self.service.latest_original=original
-            self.show_status('最新HOOK原文',original[:200] or '空原文')
+            self.show_status('最新取得原文',original[:200] or '空原文')
             self.original.setPlainText(original)
 
         def stop_luna(self):
@@ -929,7 +835,7 @@ def run_gui() -> int:
         def disallow_until_verified(self):
             self.service.autoplay_allowed=False
             self.show_status('自動進行許可','無効')
-            self.show_status('停止理由','HOOK取得元・画面・音声の許可条件が未確証')
+            self.show_status('停止理由','HOOK取得元・音声同期・入力対象が未確認')
 
         def start_game(self):
             if self.game_worker and self.game_worker.isRunning():return
@@ -954,7 +860,7 @@ def run_gui() -> int:
                 return
             self.service.latest_original=''
             self.service.hook_connected=False
-            self.show_status('最新HOOK原文','新しい監視セッションの受信待ち')
+            self.show_status('最新取得原文','新しい監視セッションの受信待ち')
             self.live_control=LiveControl()
             self.active_target=(profile.pid,profile.hwnd)
             self.game_worker=GameWorker(profile,self.service,self.live_control,temporary)
@@ -965,15 +871,18 @@ def run_gui() -> int:
             self.pause.setEnabled(True)
             self.show_status('対象ウィンドウ/フォーカス',f'PID={profile.pid} / HWND={profile.hwnd}')
             self.monitor_state.setText('ゲーム音声・本文監視: 起動中')
-            self.show_status('自動進行許可','無効（HOOK取得元の確認待ち）')
+            self.show_status('自動進行許可','無効（取得元の確認待ち）')
 
         def grant_live(self):
             if not self.game_worker or not self.game_worker.isRunning() or not self.live_control:return
+            if self.service.active()[1].source().kind.value != 'hook':
+                self.show_status('停止理由','OCRは本文・音声監視のみ。自動送りはHOOK専用です')
+                return
             if not self.live_control.bound.is_set() or not self.service.latest_original.strip():
                 self.show_status('停止理由','監視中ゲームの選択HOOKから原文を確認できていません')
                 return
-            # Controller still requires independent fresh focus/audio/game-gate
-            # evidence. Text preview alone never authorizes input.
+            # Authorization is separate from HOOK text and audio; the Controller
+            # still checks current input target, audio and manual intervention.
             self.live_control.authorize.set()
             self.show_status('自動進行許可','許可要求済み（Controller検証待ち）')
 
@@ -985,7 +894,6 @@ def run_gui() -> int:
         def game_status(self,state):
             if 'original' in state:self.receive_original(state['original'])
             if 'acquisition' in state:self.show_status('取得方式',state['acquisition'])
-            if 'gate' in state:self.show_status('進行証拠',state['gate'])
             if 'acquisition_error' in state:self.show_status('停止理由',state['acquisition_error'])
             if 'hook' in state:
                 self.service.hook_connected=state['hook'] in ('connected','observing','preview_only')
@@ -1001,8 +909,8 @@ def run_gui() -> int:
                         if self.active_target else '対象未設定')
                 self.show_status('対象ウィンドウ/フォーカス',
                                  target + (' / 前面' if state['focused'] else ' / 非フォーカス'))
-            if 'sent' in state:self.show_status('入力/ACK',
-                          '遷移ACK待ち' if state.get('awaiting_ack') else '送出済み' if state['sent'] else '未送出')
+            if 'sent' in state:self.show_status('入力/次HOOK候補',
+                          '次HOOK候補待ち' if state.get('awaiting_next_hook') else '送出済み' if state['sent'] else '未送出')
             if 'controller' in state:self.monitor_state.setText('Controller: '+state['controller'])
             if 'utterance' in state:
                 u=state['utterance']
