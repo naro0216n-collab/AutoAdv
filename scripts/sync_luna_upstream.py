@@ -22,9 +22,11 @@ PIN='51884b6c88cba8c42e98ce3e43c4f408017082a1'
 # Native is a complete tree, not a hand-selected engine whitelist. Python
 # related functionality is preserved as upstream sources (not yet loaded).
 PATHS=(
-    'src/NativeImpl/LunaHook/',
-    'src/NativeImpl/version.cmake',
-    'src/NativeImpl/winxphelper.cmake',
+    # Keep the entire native build subtree: version generator, common CMake,
+    # engine and emulator libraries. Isolating LunaHook alone omits real
+    # transitive inputs such as version_def.cpp and version templates.
+    'src/NativeImpl/',
+    'src/version.txt',
     'src/LunaTranslator/textio/',
     'src/LunaTranslator/gui/',
     'src/LunaTranslator/myutils/',

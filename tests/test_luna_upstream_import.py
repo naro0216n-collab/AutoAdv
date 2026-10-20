@@ -9,6 +9,9 @@ class UpstreamImportTests(TestCase):
         spec=importlib.util.spec_from_file_location('sync_luna_upstream',Path(__file__).parents[1]/'scripts'/'sync_luna_upstream.py')
         module=importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        self.assertIn('src/NativeImpl/',module.PATHS)
+        self.assertIn('src/version.txt',module.PATHS)
+        self.assertNotIn('src/NativeImpl/LunaHook/',module.PATHS)
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             repo=root/'upstream';repo.mkdir()
