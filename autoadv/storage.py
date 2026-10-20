@@ -7,7 +7,26 @@ import os
 import tempfile
 import uuid
 import copy
-from .model import AudioMode, Game, HookSelection, Profile, StructureRule, ReplacementRule, OCRSettings, DEFAULT_STRUCTURE_RULES
+from .model import AudioMode, Game, HookSelection, Profile, StructureRule, ReplacementRule, OCRSettings, DEFAULT_STRUCTURE_RULES, COMMON_FIELDS
+
+
+@dataclass
+class CommonSettings:
+    default_mode: AudioMode = AudioMode.READING
+    default_voice: str = ''
+    reading_ms: int = 1200
+    native_helper: str = ''
+    asr_model: str = ''
+    asr_tokens: str = ''
+    native_wait_ms: int = 1200
+    input_key: int = 13
+    next_line_timeout_ms: int = 8000
+
+    def validate(self):
+        template = Profile('_common', '_common')
+        for key in COMMON_FIELDS:
+            setattr(template, key, getattr(self, key))
+        template.validate()
 
 
 @dataclass
@@ -17,6 +36,15 @@ class Catalog:
     host_dll: str = ''
     games: dict[str, Game] = field(default_factory=dict)
     luna_imports: dict[str, str] = field(default_factory=dict)
+    common: CommonSettings = field(default_factory=CommonSettings)
+
+    def effective_profile(self, profile: Profile) -> Profile:
+        self.common.validate()
+        effective = copy.deepcopy(profile)
+        for key in profile.inherit_common:
+            setattr(effective, key, getattr(self.common, key))
+        effective.validate()
+        return effective
 
     def create_game(self, name: str, executable: str = '') -> Game:
         if not name.strip():
@@ -24,7 +52,7 @@ class Catalog:
         game_id = uuid.uuid4().hex
         pid = uuid.uuid4().hex
         game = Game(game_id, name.strip(), executable,
-                    {pid: Profile(pid, 'Default')}, pid)
+                    {pid: Profile(pid, 'Default', inherit_common=list(COMMON_FIELDS))}, pid)
         self.games[game_id] = game
         return game
 
@@ -33,7 +61,7 @@ class Catalog:
             raise ValueError('profile name required')
         game = self.games[game_id]
         profile_id = uuid.uuid4().hex
-        profile = Profile(profile_id, name.strip())
+        profile = Profile(profile_id, name.strip(), inherit_common=list(COMMON_FIELDS))
         game.profiles[profile_id] = profile
         return profile
 
@@ -74,6 +102,7 @@ def _profile_payload(p: Profile) -> dict:
                 source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
                 asr_model=p.asr_model, asr_tokens=p.asr_tokens, native_wait_ms=p.native_wait_ms,
                 native_vad_only=p.native_vad_only, next_line_timeout_ms=p.next_line_timeout_ms,
+                inherit_common=p.inherit_common,
                 reading_ms=p.reading_ms,
                 hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
                 hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
@@ -107,12 +136,12 @@ def _read_profile(raw: dict) -> Profile:
                 asr_tokens=raw.get('asr_tokens', ''), native_wait_ms=raw.get('native_wait_ms', 1200),
                 native_vad_only=raw.get('native_vad_only', False),
                 next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
+                inherit_common=list(raw.get('inherit_common', [])),
                 reading_ms=int(raw.get('reading_ms', 1200)),
                 hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
                 hook_max_buffer=int(raw.get('hook_max_buffer', 3000)), hook_max_history=int(raw.get('hook_max_history', 1000000)),
                 repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))
-    if not p.id or not p.name or p.reading_ms < 0:
-        raise ValueError('invalid stored profile')
+    p.validate()
     return p
 
 
@@ -120,10 +149,13 @@ def save(catalog: Catalog, path: Path | None = None) -> None:
     path = path or user_settings_path()
     raw = {'schema_version': 3, 'irodori_root': catalog.irodori_root,
            'irodori_url': catalog.irodori_url, 'host_dll': catalog.host_dll, 'luna_imports': catalog.luna_imports,
+           'common': {**vars(catalog.common), 'default_mode': catalog.common.default_mode.value},
            'games': {k: dict(id=g.id, name=g.name, executable=g.executable,
+                             audio_executable=g.audio_executable, input_executable=g.input_executable,
                              default_profile=g.default_profile,
                              profiles={pid: _profile_payload(p) for pid, p in g.profiles.items()})
                      for k, g in catalog.games.items()}}
+    catalog.common.validate()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, filename = tempfile.mkstemp(prefix='.autoadv-', dir=path.parent)
     try:
@@ -146,11 +178,15 @@ def load(path: Path | None = None) -> Catalog:
     if raw.get('schema_version') != 3:
         raise ValueError('unsupported settings schema; original settings preserved')
     catalog = Catalog(raw.get('irodori_root', ''), raw.get('irodori_url', 'http://127.0.0.1:8088'),
-                      raw.get('host_dll', ''), luna_imports=raw.get('luna_imports', {}))
+                      raw.get('host_dll', ''), luna_imports=raw.get('luna_imports', {}),
+                      common=CommonSettings(**{**raw.get('common', {}),
+                          'default_mode': AudioMode(raw.get('common', {}).get('default_mode', 'reading'))}))
+    catalog.common.validate()
     for gid, row in raw.get('games', {}).items():
         profiles = {pid: _read_profile(p) for pid, p in row['profiles'].items()}
         if gid != row['id'] or row['default_profile'] not in profiles:
             raise ValueError('inconsistent stored game identity')
         catalog.games[gid] = Game(gid, row['name'], row.get('executable', ''),
-                                  profiles, row['default_profile'])
+                                  profiles, row['default_profile'], row.get('audio_executable', ''),
+                                  row.get('input_executable', ''))
     return catalog

@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from autoadv.conversation import Controller, Target
 from autoadv.model import Profile, HookSelection
+from autoadv.hook_protocol import HookEvent, ThreadSource
 
 
 class HookPairingTests(unittest.TestCase):
-    def test_selected_speaker_source_pairing_across_interleaved_host_events(self):
+    def test_selected_speaker_link_applies_only_within_synchronized_outputs(self):
         p = Profile('id', 'paired')
         p.hooks = [HookSelection('T', 1, 2, 'text'),
                    HookSelection('S1', 3, 4, 'speaker'),
@@ -16,20 +17,17 @@ class HookPairingTests(unittest.TestCase):
         p.speaker_links = {p.hooks[0].identity: p.hooks[2].identity}
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(123, 456), 'generation', 1)
-        def src(selection):
-            return SimpleNamespace(hook_code=selection.code, context=selection.context,
-                                   context2=selection.context2, identity=selection.identity)
-        self.assertIsNone(c.observe(generation='generation', connection=1,
-                     sequence=1, source=src(p.hooks[1]), text='wrong', pid=123, received_ns=1_000_000_000))
-        self.assertIsNone(c.observe(generation='generation', connection=1,
-                     sequence=2, source=src(p.hooks[2]), text='花子', pid=123, received_ns=1_100_000_000))
-        self.assertIsNotNone(c.observe(generation='generation', connection=1,
-                     sequence=5, source=src(p.hooks[0]), text='台詞', pid=123, received_ns=1_200_000_000))
+        def e(s, seq, value):
+            return HookEvent('output', 'generation', 1, seq, seq * 1_000_000,
+                             123, ThreadSource(123, seq, s.context, s.context2, s.code, s.code), value)
+        token = c.observe_group([e(p.hooks[1], 1, 'wrong'), e(p.hooks[2], 2, '花子'),
+                                 e(p.hooks[0], 3, '台詞')])
+        self.assertIsNotNone(token)
         self.assertEqual(c.utterance.speaker, '花子')
-        self.assertIsNone(c.observe(generation='generation', connection=1,
-                     sequence=6, source=src(p.hooks[2]), text='古い', pid=123, received_ns=2_000_000_000))
-        c.observe(generation='generation', connection=1,
-                  sequence=10, source=src(p.hooks[0]), text='次', pid=123, received_ns=5_100_000_000)
+        c.permit(True)
+        self.assertIsNone(c.observe_group([e(p.hooks[2], 4, '古い')]))
+        self.assertFalse(c.authorized)
+        c.observe_group([e(p.hooks[0], 5, '次')])
         self.assertEqual(c.utterance.speaker, '')
 
     def test_invalid_speaker_link_is_rejected_in_one_profile_config(self):

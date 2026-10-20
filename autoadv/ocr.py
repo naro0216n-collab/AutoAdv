@@ -49,6 +49,8 @@ class OCRWorker:
 
     def _run(self):
         previous = None
+        pending = None
+        count = 0
         sequence = 0
         while not self.stopping.is_set():
             try:
@@ -57,10 +59,16 @@ class OCRWorker:
                 if not self.stopping.is_set():
                     self.on_error(f'{type(exc).__name__}: {exc}')
                 return
-            if text != previous:
-                previous = text
+            if text == pending:
+                count += 1
+            else:
+                pending, count = text, 1
+            # Require consistent observations before interpreting a new OCR
+            # result. OCR does not supply LunaHook's flushed output boundary.
+            if count >= self.reader.config.stable_samples and pending != previous:
+                previous = pending
                 sequence += 1
-                self.on_text(sequence, text)  # Blank marks an observed boundary.
+                self.on_text(sequence, pending)  # Stable blank marks a boundary.
             self.stopping.wait(self.reader.config.interval_ms / 1000)
 
     def close(self):

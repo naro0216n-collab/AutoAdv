@@ -4,28 +4,29 @@ import wave
 from unittest.mock import patch
 from types import SimpleNamespace
 from autoadv.conversation import Controller, Target
+from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import AudioMode, HookSelection, Profile
 from autoadv.voice import synthesize
 
 
 class NativeAndAudioContract(unittest.TestCase):
-    def test_speaker_output_requires_adjacency_and_selected_source(self):
+    def test_speaker_is_never_carried_to_a_different_flush_batch(self):
         p = Profile('id', 'game', hooks=[HookSelection('D', 1, 2, 'text'),
                                          HookSelection('S', 4, 5, 'speaker')])
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(11, 22), 'host', 1)
-        source_a = SimpleNamespace(hook_code='D', context=1, context2=2, identity='D|1|2')
-        source_b = SimpleNamespace(hook_code='S', context=4, context2=5, identity='S|4|5')
-        def out(seq, src, text):
-            return c.observe(generation='host', connection=1, sequence=seq,
-                             source=src, text=text, pid=11)
-        self.assertIsNone(out(1, source_b, '花子'))
-        self.assertIsNotNone(out(2, source_a, '「台詞」'))
+        body = ThreadSource(11, 10, 1, 2, 'D', 'body')
+        speaker = ThreadSource(11, 20, 4, 5, 'S', 'speaker')
+        def e(src, seq, text):
+            return HookEvent('output', 'host', 1, seq, seq * 1_000_000, 11, src, text)
+        first = c.observe_group([e(body, 1, '「台詞」'), e(speaker, 2, '花子')])
+        self.assertIsNotNone(first)
         self.assertEqual(c.utterance.speaker, '花子')
-        out(3, source_a, '別台詞')
-        self.assertEqual(c.utterance.speaker, '')
-        out(4, source_b, '太郎')
-        out(6, source_a, '台詞')
+        c.permit(True)
+        self.assertIsNone(c.observe_group([e(speaker, 3, '太郎')]))
+        self.assertFalse(c.authorized)
+        second = c.observe_group([e(body, 4, '次の台詞')])
+        self.assertIsNotNone(second)
         self.assertEqual(c.utterance.speaker, '')
 
     def test_voice_request_checks_wav_and_real_voice(self):

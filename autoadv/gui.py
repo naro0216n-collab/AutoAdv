@@ -13,7 +13,7 @@ from .hook_host import HookHost
 from .luna_runtime import runtime_dir, adopted_runtime, RELEASE
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import AudioMode, HookSelection, Profile, StructureRule, ReplacementRule
+from .model import AudioMode, HookSelection, Profile, StructureRule, ReplacementRule, COMMON_FIELDS
 from .storage import Catalog, load, save
 from .voice import VoiceJobs
 from .native_audio import NativeAudio
@@ -21,7 +21,8 @@ from .manual_input import WindowsManualMonitor
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .import_luna import inspect_luna, add_luna_games
-from .game_windows import find_game_windows
+from .import_legacy import inspect_legacy, add_legacy_games
+from .game_windows import find_game_windows, find_game_processes
 from .windows_input import WindowsAdvancementInput
 
 
@@ -107,6 +108,35 @@ def run_gui() -> int:
             self.btn_server = QPushButton('Connect / start Irodori and read Voices')
             environment.addRow(self.btn_server)
             self.btn_server.clicked.connect(self.start_server)
+            self.common_controls = {}
+            common_titles = {
+                'default_mode': 'Default audio policy', 'default_voice': 'Default Voice ID',
+                'reading_ms': 'Reading time (ms)', 'native_helper': 'Process Loopback helper',
+                'asr_model': 'Japanese ASR model', 'asr_tokens': 'ASR tokens',
+                'native_wait_ms': 'Native fallback wait (ms)', 'input_key': 'Advance key code',
+                'next_line_timeout_ms': 'Next line wait (ms)'}
+            for key in COMMON_FIELDS:
+                value = getattr(self.catalog.common, key)
+                if key == 'default_mode':
+                    control = QComboBox()
+                    control.addItems([mode.value for mode in AudioMode])
+                    control.setCurrentText(value.value)
+                elif isinstance(value, int):
+                    control = QSpinBox()
+                    if key in ('input_key',):
+                        control.setRange(1, 254)
+                    elif key == 'next_line_timeout_ms':
+                        control.setRange(1000, 120000)
+                    else:
+                        control.setRange(0, 600000)
+                    control.setValue(value)
+                else:
+                    control = QLineEdit(value)
+                self.common_controls[key] = control
+                environment.addRow('Common: ' + common_titles[key], control)
+            self.btn_save_common = QPushButton('Save common audio and advance defaults')
+            self.btn_save_common.clicked.connect(self.save_common)
+            environment.addRow(self.btn_save_common)
             self.server_status = QLabel('Irodori: not connected')
             environment.addRow(self.server_status)
             self.btn_host = QPushButton('Start LunaHook Host')
@@ -130,12 +160,21 @@ def run_gui() -> int:
             self.game_exe = QLineEdit()
             self.game_exe.setPlaceholderText('Optional game executable path for future sessions')
             games.addRow('Game executable', self.game_exe)
+            self.audio_exe = QLineEdit()
+            self.audio_exe.setPlaceholderText('Optional: separate audio process executable')
+            games.addRow('Audio process executable', self.audio_exe)
+            self.input_exe = QLineEdit()
+            self.input_exe.setPlaceholderText('Optional: separate input window executable')
+            games.addRow('Input process executable', self.input_exe)
             self.btn_launch = QPushButton('Launch registered game')
             self.btn_launch.clicked.connect(self.launch_game)
             games.addRow(self.btn_launch)
             self.btn_import = QPushButton('Import existing Luna game settings (preview and confirm)')
             games.addRow(self.btn_import)
             self.btn_import.clicked.connect(self.import_luna)
+            self.btn_import_legacy = QPushButton('Import previous AutoAdv v2 settings (preview and confirm)')
+            games.addRow(self.btn_import_legacy)
+            self.btn_import_legacy.clicked.connect(self.import_legacy)
             self.profile_choice = QComboBox()
             self.profile_choice.currentIndexChanged.connect(self.choose_profile)
             games.addRow('Profile', self.profile_choice)
@@ -163,7 +202,15 @@ def run_gui() -> int:
             self.pid.setRange(0, 2147483647)
             self.hwnd = QLineEdit()
             self.hwnd.setPlaceholderText('HWND e.g. 0x12345')
-            capture.addRow('Game PID (current run)', self.pid)
+            capture.addRow('HOOK process PID (current run)', self.pid)
+            self.audio_pid = QSpinBox()
+            self.audio_pid.setRange(0, 2147483647)
+            self.audio_pid.setSpecialValueText('Use HOOK PID')
+            self.input_pid = QSpinBox()
+            self.input_pid.setRange(0, 2147483647)
+            self.input_pid.setSpecialValueText('Use HOOK PID')
+            capture.addRow('Audio process PID (0 = HOOK)', self.audio_pid)
+            capture.addRow('Input window PID (0 = HOOK)', self.input_pid)
             capture.addRow('Game HWND (current run)', self.hwnd)
             self.attach = QPushButton('Attach to game PID')
             self.attach.clicked.connect(self.connect_game)
@@ -171,6 +218,15 @@ def run_gui() -> int:
             self.btn_discover = QPushButton('Find windows matching registered game executable')
             self.btn_discover.clicked.connect(self.detect_game)
             capture.addRow(self.btn_discover)
+            self.btn_discover_all = QPushButton('Identify a running game from all registered executables')
+            self.btn_discover_all.clicked.connect(self.detect_registered_game)
+            capture.addRow(self.btn_discover_all)
+            self.btn_audio_target = QPushButton('Find audio process by saved executable')
+            self.btn_input_target = QPushButton('Find input window by saved executable')
+            self.btn_audio_target.clicked.connect(lambda: self.detect_associated_target('audio'))
+            self.btn_input_target.clicked.connect(lambda: self.detect_associated_target('input'))
+            capture.addRow(self.btn_audio_target)
+            capture.addRow(self.btn_input_target)
             self.btn_find = QPushButton('Find HOOK candidates')
             self.btn_find.clicked.connect(self.find_hooks)
             capture.addRow(self.btn_find)
@@ -200,6 +256,9 @@ def run_gui() -> int:
             capture.addRow('Installed Tesseract executable', self.ocr_exe)
             capture.addRow('OCR language', self.ocr_lang)
             capture.addRow('OCR region x,y,width,height', self.ocr_region)
+            self.ocr_stability = QSpinBox()
+            self.ocr_stability.setRange(1, 10)
+            capture.addRow('OCR repeated stable captures', self.ocr_stability)
             self.source_table = QTableWidget(0, 6)
             self.source_table.setHorizontalHeaderLabels(['Role / priority', 'HOOK code / name', 'PID', 'Context', 'Thread address', 'Latest raw text'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -353,7 +412,7 @@ def run_gui() -> int:
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
             self.native_wait = QSpinBox()
-            self.native_wait.setRange(0, 20000)
+            self.native_wait.setRange(0, 600000)
             speech.addRow('Process audio helper DLL (native/auto only)', self.native_helper)
             self.native_vad_only = QCheckBox('Native voice-only game audio: allow VAD without ASR (cannot identify BGM)')
             speech.addRow(self.native_vad_only)
@@ -366,6 +425,11 @@ def run_gui() -> int:
             self.repeat = QComboBox()
             self.repeat.addItems(['distinct_only', 'each_after_input'])
             speech.addRow('HOOK repeated-line behavior', self.repeat)
+            self.inherit_controls = {}
+            for key in COMMON_FIELDS:
+                control = QCheckBox('Inherit common setting: ' + key.replace('_', ' '))
+                self.inherit_controls[key] = control
+                speech.addRow(control)
             self.btn_save = QPushButton('Apply and save profile')
             self.btn_save.clicked.connect(self.save_profile)
             speech.addRow(self.btn_save)
@@ -400,6 +464,27 @@ def run_gui() -> int:
         def note(self, message):
             self.log.appendPlainText(message)
 
+        def save_common(self):
+            from .storage import CommonSettings
+            values = {}
+            for key, widget in self.common_controls.items():
+                if isinstance(widget, QComboBox):
+                    values[key] = AudioMode(widget.currentText())
+                elif isinstance(widget, QSpinBox):
+                    values[key] = widget.value()
+                else:
+                    values[key] = widget.text().strip()
+            try:
+                common = CommonSettings(**values)
+                common.validate()
+                self.catalog.common = common
+                self.persist()
+                if self.current_profile() and not self.controller.profile:
+                    self.choose_profile()
+                self.note('Common defaults saved; any active session keeps its previous effective settings')
+            except Exception as exc:
+                self.note('Common settings not saved: ' + str(exc))
+
         def persist(self):
             self.catalog.irodori_root = self.irodori_path.text().strip()
             self.catalog.irodori_url = self.irodori_url.text().strip()
@@ -420,6 +505,10 @@ def run_gui() -> int:
         def choose_game(self, *_):
             self.stop_session()
             self.clear_hook_observations()
+            self.pid.setValue(0)
+            self.audio_pid.setValue(0)
+            self.input_pid.setValue(0)
+            self.hwnd.clear()
             self.game_id = self.game_choice.currentData() or ''
             self.profile_choice.blockSignals(True)
             self.profile_choice.clear()
@@ -430,6 +519,12 @@ def run_gui() -> int:
                 position = self.profile_choice.findData(game.default_profile)
                 self.profile_choice.setCurrentIndex(max(0, position))
                 self.game_exe.setText(game.executable)
+                self.audio_exe.setText(game.audio_executable)
+                self.input_exe.setText(game.input_executable)
+            else:
+                self.game_exe.clear()
+                self.audio_exe.clear()
+                self.input_exe.clear()
             self.profile_choice.blockSignals(False)
             self.choose_profile()
 
@@ -439,24 +534,28 @@ def run_gui() -> int:
             profile = self.current_profile()
             if not profile:
                 return
-            self.default_mode.setCurrentText(profile.default_mode.value)
-            self.default_voice.setEditText(profile.default_voice)
-            self.reading_ms.setValue(profile.reading_ms)
+            effective = self.catalog.effective_profile(profile)
+            for key, widget in self.inherit_controls.items():
+                widget.setChecked(key in profile.inherit_common)
+            self.default_mode.setCurrentText(effective.default_mode.value)
+            self.default_voice.setEditText(effective.default_voice)
+            self.reading_ms.setValue(effective.reading_ms)
             self.hook_flush.setValue(profile.hook_flush_ms)
             self.hook_codepage.setValue(profile.hook_codepage)
             self.hook_buffer.setValue(profile.hook_max_buffer)
-            self.input_key.setValue(profile.input_key)
+            self.input_key.setValue(effective.input_key)
             self.repeat.setCurrentText(profile.repeat_rule)
             self.source_mode.setCurrentText(profile.source)
             self.ocr_exe.setText(profile.ocr.executable)
             self.ocr_lang.setText(profile.ocr.language)
             self.ocr_region.setText(','.join(map(str, profile.ocr.region)))
-            self.native_helper.setText(profile.native_helper)
-            self.asr_model.setText(profile.asr_model)
-            self.asr_tokens.setText(profile.asr_tokens)
+            self.ocr_stability.setValue(profile.ocr.stable_samples)
+            self.native_helper.setText(effective.native_helper)
+            self.asr_model.setText(effective.asr_model)
+            self.asr_tokens.setText(effective.asr_tokens)
             self.native_vad_only.setChecked(profile.native_vad_only)
-            self.native_wait.setValue(profile.native_wait_ms)
-            self.next_line_timeout.setValue(profile.next_line_timeout_ms)
+            self.native_wait.setValue(effective.native_wait_ms)
+            self.next_line_timeout.setValue(effective.next_line_timeout_ms)
             self.refresh_rules()
             self.refresh_selected_hooks()
             self.refresh_speaker_choices()
@@ -492,7 +591,8 @@ def run_gui() -> int:
                 from .model import OCRSettings
                 updated.source = self.source_mode.currentText()
                 updated.ocr = OCRSettings(self.ocr_exe.text().strip(), self.ocr_lang.text().strip(),
-                    tuple(int(x.strip()) for x in self.ocr_region.text().split(',')))
+                    tuple(int(x.strip()) for x in self.ocr_region.text().split(',')),
+                    stable_samples=self.ocr_stability.value())
                 updated.native_helper = self.native_helper.text().strip()
                 updated.asr_model = self.asr_model.text().strip()
                 updated.asr_tokens = self.asr_tokens.text().strip()
@@ -507,10 +607,13 @@ def run_gui() -> int:
                 updated.hook_max_buffer = self.hook_buffer.value()
                 updated.input_key = self.input_key.value()
                 updated.repeat_rule = self.repeat.currentText()
+                updated.inherit_common = [key for key, widget in self.inherit_controls.items() if widget.isChecked()]
                 updated.validate()
                 game = self.catalog.games[self.game_id]
                 game.profiles[updated.id] = updated
                 game.executable = self.game_exe.text().strip()
+                game.audio_executable = self.audio_exe.text().strip()
+                game.input_executable = self.input_exe.text().strip()
                 self.persist()
                 self.note('Profile saved; restart monitoring to apply new rules')
                 return True
@@ -699,9 +802,13 @@ def run_gui() -> int:
             try:
                 entries = inspect_luna(Path(path))
                 proposed = add_luna_games(self.catalog, entries)
-                summary = '\n'.join(f'{Path(g.path).name}: {len(g.hooks)} HOOKs; {len(g.inserted)} manual' for g in entries)
+                summary = '\n'.join(f'{g.title or Path(g.path).name}: {len(g.hooks)} HOOKs; '
+                        f'{len(g.inserted)} manual; {len(g.repairs)} TTS replacements; '
+                        f'{len(g.hook_options)} native settings' +
+                        (f'\n  Review in Luna: {", ".join(g.unmapped)}' if g.unmapped else '')
+                        for g in entries)
                 if QMessageBox.question(self, 'Confirm Luna import',
-                        'Only known HOOKs and paths will be imported; original file unchanged.\n' + summary) != QMessageBox.StandardButton.Yes:
+                        'Recognized settings only; the original file is unchanged.\n' + summary) != QMessageBox.StandardButton.Yes:
                     return
                 self.stop_session()
                 self.catalog = proposed
@@ -710,6 +817,28 @@ def run_gui() -> int:
                 self.note(f'Imported {len(entries)} games')
             except Exception as exc:
                 self.note(f'Import not applied: {exc}')
+
+        def import_legacy(self):
+            path, _ = QFileDialog.getOpenFileName(self, 'Select old AutoAdv settings v2', '', 'JSON (*.json)')
+            if not path:
+                return
+            try:
+                entries = inspect_legacy(Path(path))
+                proposed = add_legacy_games(self.catalog, entries)
+                summary = '\n'.join(f'{row.game.name}: {len(row.game.profiles)} profiles' +
+                                    (f'\n  Requires manual review: {"; ".join(row.unmapped)}' if row.unmapped else '')
+                                    for row in entries)
+                if QMessageBox.question(self, 'Confirm previous AutoAdv import',
+                        'Import recognized settings as additional games? Source is read-only; '
+                        'unmapped fields remain in the source.\n' + summary) != QMessageBox.StandardButton.Yes:
+                    return
+                self.stop_session()
+                self.catalog = proposed
+                self.persist()
+                self.fill_games()
+                self.note(f'Imported {len(entries)} previous AutoAdv games; review unmapped fields')
+            except Exception as exc:
+                self.note('Previous AutoAdv import not applied: ' + str(exc))
 
         def find_hooks(self):
             if not self.hook_host:
@@ -825,6 +954,82 @@ def run_gui() -> int:
                 self.note('Selected game window: ' + options[index])
             except Exception as exc:
                 self.note('Game identification failed: ' + str(exc))
+
+        def detect_registered_game(self):
+            try:
+                candidates = []
+                seen = set()
+                for gid, game in self.catalog.games.items():
+                    if not game.executable:
+                        continue
+                    for window in find_game_windows(game.executable):
+                        key = (gid, window.pid, window.hwnd)
+                        if key not in seen:
+                            seen.add(key)
+                            candidates.append((gid, window))
+                if not candidates:
+                    self.note('No running game matched the saved executable paths')
+                    return
+                labels = [f'{self.catalog.games[gid].name}: {window.title or "(untitled)"} '
+                          f'PID {window.pid}, HWND {hex(window.hwnd)}' for gid, window in candidates]
+                if len(labels) > 1:
+                    choice, ok = QInputDialog.getItem(self, 'Select registered game',
+                        'Multiple matching windows; choose the game and dialogue window', labels, 0, False)
+                    if not ok:
+                        return
+                    index = labels.index(choice)
+                else:
+                    index = 0
+                gid, window = candidates[index]
+                self.game_choice.setCurrentIndex(self.game_choice.findData(gid))
+                self.pid.setValue(window.pid)
+                self.hwnd.setText(hex(window.hwnd))
+                self.note('Selected registered game: ' + labels[index])
+            except Exception as exc:
+                self.note('Registered-game discovery failed: ' + str(exc))
+
+        def detect_associated_target(self, role: str):
+            game = self.catalog.games.get(self.game_id)
+            if not game:
+                return
+            executable = self.audio_exe.text().strip() if role == 'audio' else self.input_exe.text().strip()
+            if not executable:
+                self.note('Set the separate process executable in game settings first')
+                return
+            try:
+                candidates = (find_game_processes(executable) if role == 'audio'
+                              else find_game_windows(executable))
+                if not candidates:
+                    self.note('No matching process/window; enter the PID manually')
+                    return
+                choices = ([f'PID {pid} — {executable}' for pid in candidates] if role == 'audio'
+                           else [f'{w.title or "(untitled)"} — PID {w.pid}, HWND {hex(w.hwnd)}'
+                                 for w in candidates])
+                if len(candidates) > 1:
+                    choice, accepted = QInputDialog.getItem(self, 'Choose ' + role + ' process',
+                                                           'Matching windows', choices, 0, False)
+                    if not accepted:
+                        return
+                    index = choices.index(choice)
+                else:
+                    index = 0
+                self.stop_session()
+                selected = candidates[index]
+                if role == 'audio':
+                    self.audio_pid.setValue(selected)
+                else:
+                    self.input_pid.setValue(selected.pid)
+                    self.hwnd.setText(hex(selected.hwnd))
+                self.note('Selected ' + role + ' target: ' + choices[index])
+            except Exception as exc:
+                self.note('Target discovery failed: ' + str(exc))
+
+        def session_target(self) -> Target:
+            input_pid = self.input_pid.value() or self.pid.value()
+            hook_pid = self.pid.value() or input_pid
+            return Target(input_pid,
+                          int(self.hwnd.text().strip(), 0),
+                          hook_pid=hook_pid, audio_pid=self.audio_pid.value() or hook_pid)
 
         def connect_game(self):
             if not self.hook_host:
@@ -1081,27 +1286,28 @@ def run_gui() -> int:
                 if not self.save_profile():
                     return
                 p = self.current_profile()
-                hwnd = int(self.hwnd.text().strip(), 0)
+                target = self.session_target()
                 if not p:
                     raise ValueError('select a game and profile')
+                p = self.catalog.effective_profile(p)
                 self.jobs.cancel()
                 self.stop_session()
                 if p.source == 'ocr':
-                    session = self.controller.begin(p, Target(self.pid.value(), hwnd), 'ocr', 1)
-                    reader = TesseractOCR(p.ocr, WindowsClientCapture(hwnd, self.pid.value()))
+                    session = self.controller.begin(p, target, 'ocr', 1)
+                    reader = TesseractOCR(p.ocr, WindowsClientCapture(target.hwnd, target.pid))
                     self.ocr_worker = OCRWorker(reader,
-                        lambda seq, txt, ss=session, pid=self.pid.value(): self.bridge.ocr.emit(ss, pid, seq, txt),
+                        lambda seq, txt, ss=session, pid=target.pid: self.bridge.ocr.emit(ss, pid, seq, txt),
                         self.bridge.ocr_error.emit)
                     self.ocr_worker.start()
                 else:
                     if any(h.identity in self.ambiguous_sources for h in p.hooks):
                         raise ValueError('Selected HOOK identity is ambiguous; reconnect or choose a different source')
-                    self.controller.begin(p, Target(self.pid.value(), hwnd),
+                    self.controller.begin(p, target,
                                           self.host_generation, self.connection_generation,
                                           tuple(self.sources))
                     self.sync_hook_threads()
                 if sys.platform == 'win32':
-                    self.manual_monitor = WindowsManualMonitor(hwnd)
+                    self.manual_monitor = WindowsManualMonitor(target.hwnd)
                 self.start_native_audio_if_needed(p)
                 self.note('Monitoring started; auto advance remains unauthorized')
             except Exception as exc:
@@ -1164,7 +1370,7 @@ def run_gui() -> int:
             def load_native():
                 native = None
                 try:
-                    native = NativeAudio(target.pid, Path(profile.native_helper),
+                    native = NativeAudio(target.audio_pid or target.pid, Path(profile.native_helper),
                         Path(profile.asr_model), Path(profile.asr_tokens),
                         lambda token, event, detail: self.bridge.native.emit(token, event, detail),
                         vad_only=vad_only)
@@ -1348,7 +1554,10 @@ def run_gui() -> int:
 
         def refresh_status(self):
             c = self.controller
-            self.status.setText(f'Status: {c.reason} | permission={c.authorized} | line={c.line_no} | sent={c.sent}')
+            targets = (f'HOOK {c.target.hook_pid or c.target.pid}; audio {c.target.audio_pid or c.target.pid}; '
+                       f'input {c.target.pid}/{hex(c.target.hwnd)}') if c.target else 'no target'
+            self.status.setText(f'Status: {c.reason} | permission={c.authorized} | '
+                                f'line={c.line_no} | sent={c.sent} | {targets}')
             if c.profile and c.profile.source == 'hook':
                 self.active_hook_status.setText('Active dialogue HOOK: ' +
                     (c.active_text_source or 'waiting for selected source output'))

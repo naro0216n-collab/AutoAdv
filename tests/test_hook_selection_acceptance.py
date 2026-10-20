@@ -73,10 +73,13 @@ class SelectedHookContracts(unittest.TestCase):
     def test_speaker_pairing_works_with_prioritized_text(self):
         self.p.speaker_links = {self.a.identity: self.s.identity}
         self.begin((self.a.identity, self.b.identity, self.s.identity))
-        self.assertIsNone(output(self.c, self.s, '京', 1))
-        self.assertIsNone(output(self.c, self.b, 'wrong source', 2))
-        self.assertIsNotNone(output(self.c, self.a, 'おはよう', 3))
+        def e(source, seq, text):
+            return HookEvent('output', 'host', 7, seq, seq * 100_000_000, 101, source, text)
+        ticket = self.c.observe_group([e(self.b, 1, 'duplicate'), e(self.s, 2, '京'),
+                                       e(self.a, 3, 'おはよう')])
+        self.assertIsNotNone(ticket)
         self.assertEqual(self.c.utterance.speaker, '京')
+        self.assertEqual(self.c.utterance.raw, 'おはよう')
 
     def test_saved_hook_priority_restores_without_pid_or_thread_address(self):
         with tempfile.TemporaryDirectory() as d:

@@ -84,13 +84,21 @@ class OCRSettings:
     language: str = 'jpn'
     region: tuple[int, int, int, int] = (0, 0, 640, 180)
     interval_ms: int = 350
+    stable_samples: int = 2
 
     def validate(self):
         if (not self.executable or not self.language or len(self.region) != 4
                 or any(type(v) is not int for v in self.region)
                 or min(self.region[:2]) < 0 or min(self.region[2:]) <= 0
-                or not 200 <= self.interval_ms <= 5000):
+                or not 200 <= self.interval_ms <= 5000 or not 1 <= self.stable_samples <= 10):
             raise ValueError('invalid OCR configuration')
+
+
+# Only these values can be inherited. The persisted profile owns the choice;
+# the effective session profile is resolved from the catalog when monitoring begins.
+COMMON_FIELDS = ('default_mode', 'default_voice', 'reading_ms', 'native_helper',
+                 'asr_model', 'asr_tokens', 'native_wait_ms', 'input_key',
+                 'next_line_timeout_ms')
 
 
 @dataclass
@@ -122,6 +130,7 @@ class Profile:
     asr_tokens: str = ''
     native_vad_only: bool = False
     native_wait_ms: int = 1200
+    inherit_common: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
         if not self.id or not self.name or self.reading_ms < 0:
@@ -148,6 +157,9 @@ class Profile:
             raise ValueError('invalid native voice evidence setting')
         if self.native_wait_ms < 0:
             raise ValueError('invalid native wait')
+        if len(self.inherit_common) != len(set(self.inherit_common)) or any(
+                name not in COMMON_FIELDS for name in self.inherit_common):
+            raise ValueError('invalid common setting inheritance')
         self.ocr.validate()
         for rule in self.structure_rules:
             StructureRule(rule.pattern, rule.condition, rule.enabled)
@@ -162,6 +174,8 @@ class Game:
     executable: str = ''
     profiles: dict[str, Profile] = field(default_factory=dict)
     default_profile: str = ''
+    audio_executable: str = ''
+    input_executable: str = ''
 
 
 @dataclass(frozen=True)
