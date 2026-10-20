@@ -58,3 +58,46 @@ HOOK・音声・入力のどれかが成立しない場合は **FAIL** とする
 実ゲームの観測記録が未取得の場合は未検収であり、検査Aの成功を検査Bの成功と読み替えない。
 GitHub-hosted Windowsには実ゲーム／音声出力／実験者の入力がないため、
 検査BをFast CIへ偽装して自動成功させない。
+
+## 実環境化した検収（2026-10-21）
+
+Windowsにログオンして**ゲームを別途起動した状態**で、通常のAutoAdv GUIを使う。
+`run_live_check.ps1`はゲームのビルド・起動・検証用制御を一切行わない。
+検証に使用する台詞順は `SCENARIO.json`（Ren'Py `script.rpy` の独立した期待値）にのみ置き、製品コードから参照しない。
+実ゲーム以外で人工的に作成したトレースは検収実績として扱わない。
+
+```powershell
+# P0-1: HookHostの実接続、取得元を伴うflush出力とUtterance
+.\validation\real_game\run_live_check.ps1 -Phase hook
+
+# P0-2: 閲覧時間→SendInput→次のHOOK取得（冒頭などを閲覧モードに設定）
+.\validation\real_game\run_live_check.ps1 -Phase reading
+
+# P0-3: Process LoopbackのPCM、実ASR一致、原音終了と次HOOK
+.\validation\real_game\run_live_check.ps1 -Phase native
+
+# P0-4: Irodoriの合成・実再生完了と次HOOK
+.\validation\real_game\run_live_check.ps1 -Phase tts
+
+# P0-5: 原音/TTS/閲覧、同一文連続、手動停止と再許可の連続検査
+.\validation\real_game\run_live_check.ps1 -Phase mixed
+```
+
+対象シナリオの途中から監視する場合は `-StartLine N`（`SCENARIO.json` の1始まりの行番号）を指定する。
+同文反復から開始して期待値の対応が曖昧な場合は省略不可。
+検証後にGUIを閉じると照合が実行される。実HOOK未成立、実音声・実入力未成立、台詞飛ばし、原音のASR証拠不足、次台詞を受け取れない場合はFAIL。
+単独のHOOK検査は音声処理とSendInputを要求しない。
+閲覧・原音・TTSはそれぞれ個別に検収でき、最初から音声環境の全要素を用意する必要はない。
+
+**判定内容と制限**：
+
+- HOOKについて、同じHost世代・接続世代・対象PIDのconnected通知、Native取得元のthread/context、LunaHostの出力順序、Utteranceの原文ハッシュと取得元を照合。
+- 入力後の台詞は、入力より*後*にHostが受信したHOOK出力から、同じセッションで生成されたことを確認。単なるSendInput戻り値や、すでに受信済みの候補は成功証拠にしない。
+- 原音について、対象ゲーム音声PIDに紐付くProcess Loopback PCM受信、ASR処理での一致と完了を区別。`native_ready`やVADのみではASR検収を通さない。TTSはVoiceJobsの実再生ドレイン完了を使用。
+- 既知の選択肢入口（`choice-notice`）ではAutoAdvの入力を要求せず、利用者が停止・選択して続行する。終端にも次台詞を要求しない。その他の送信に対応する次台詞は必須。
+- `mixed`は同文２回の別取得と別入力・手動停止と再許可も必要。開始から`choice-notice`までの区間で実行可能。
+- 検証器自体の単体テストでは人工記録を使用するが、**実ゲームの合否を生成・保証しない**。公式Windows CIは音声解析・検証器契約の実行のみ。実セッションは利用者の対話Windows環境で別に確認する。
+
+`AUTOADV_VALIDATION_TRACE`を直接設定してGUIを起動した場合も、終了後に
+`python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL>` で同じ照合を行える。
+旧形式（version 1）のトレースは、入力後HOOK受信時刻とPCM証拠がないため検収対象外。

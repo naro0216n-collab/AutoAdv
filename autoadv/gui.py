@@ -44,6 +44,7 @@ def run_gui() -> int:
         ocr_error = Signal(str)
         native = Signal(object, str, str)
         native_ready = Signal(int, object, str)
+        native_pcm = Signal(object, int)
         preview = Signal(bool, str)
 
     class MainWindow(QMainWindow):
@@ -61,6 +62,7 @@ def run_gui() -> int:
             self.bridge.ocr_error.connect(self.on_ocr_error)
             self.bridge.native.connect(self.on_native)
             self.bridge.native_ready.connect(self.on_native_ready)
+            self.bridge.native_pcm.connect(self.on_native_pcm)
             self.bridge.preview.connect(self.on_preview)
             self.jobs = VoiceJobs(lambda token, done, reason: self.bridge.voice.emit(token, done, reason))
             self.preview_jobs = VoiceJobs(lambda token, done, reason: self.bridge.preview.emit(done, reason))
@@ -1162,6 +1164,8 @@ def run_gui() -> int:
                     self.found_hooks.setRowCount(0)
                 self.host_generation = event.host_generation
                 self.connection_generation = event.connection_generation
+                self.validation_trace.emit('hook_connected', pid=event.process_id,
+                    generation=event.host_generation, connection=event.connection_generation)
                 self.host_status.setText(f'LunaHook connected: PID {event.process_id}')
                 p = self.current_profile()
                 if p and p.source == 'hook':
@@ -1215,6 +1219,8 @@ def run_gui() -> int:
                     self.validation_trace.emit('hook_output', session=self.controller.session,
                         generation=event.host_generation, connection=event.connection_generation,
                         hook_sequence=event.sequence, source=event.source.identity,
+                        received_ns=event.received_ns, pid=event.process_id, address=event.source.address,
+                        context=event.source.context, context2=event.source.context2,
                         raw_hash=text_digest(event.text))
                 if (event.process_id == self.pid.value() and event.source.identity not in self.ambiguous_sources
                         and event.host_generation == self.host_generation
@@ -1323,7 +1329,8 @@ def run_gui() -> int:
                 self.validation_trace.emit('monitor_started', session=self.controller.session,
                     source=p.source, game_id=self.game_id, profile_id=self.profile_id,
                     hook_pid=target.hook_pid or target.pid, audio_pid=target.audio_pid or target.pid,
-                    input_pid=target.pid)
+                    input_pid=target.pid, generation=self.controller.source_generation,
+                    connection=self.controller.connection_generation)
                 self.note('Monitoring started; auto advance remains unauthorized')
             except Exception as exc:
                 self.stop_session()
@@ -1388,7 +1395,8 @@ def run_gui() -> int:
                     native = NativeAudio(target.audio_pid or target.pid, Path(profile.native_helper),
                         Path(profile.asr_model), Path(profile.asr_tokens),
                         lambda token, event, detail: self.bridge.native.emit(token, event, detail),
-                        vad_only=vad_only)
+                        vad_only=vad_only,
+                        on_pcm=lambda token, frames: self.bridge.native_pcm.emit(token, frames))
                     native.start()
                     self.bridge.native_ready.emit(session, native, '')
                 except Exception as exc:
@@ -1408,7 +1416,7 @@ def run_gui() -> int:
                 return
             self.native_audio = native
             self.validation_trace.emit('native_ready', session=self.controller.session,
-                vad_only=bool(native.vad_only))
+                vad_only=bool(native.vad_only), audio_pid=native.pid)
             self.note('Native process audio ready (VAD-only)'  if native.vad_only else 'Native process audio and ASR ready')
             token = self.controller.token
             if (token and self.controller.utterance and not self.controller.sent and
@@ -1422,10 +1430,15 @@ def run_gui() -> int:
                 elif self.native_token != token or self.controller.reason == 'native_audio_unavailable':
                     self.present(token)
 
+        def on_native_pcm(self, token, frames):
+            if token is not None and token == self.controller.token:
+                self.validation_trace.emit('native_pcm', session=token.session, line=token.line,
+                    frames=frames, audio_pid=self.native_audio.pid if self.native_audio else 0)
+
         def on_native(self, token, event, detail):
             if token == self.controller.token and token is not None:
                 self.validation_trace.emit('native_event', session=token.session, line=token.line,
-                    status=event)
+                    status=event, method='vad' if (self.native_audio and self.native_audio.vad_only) else 'asr')
             if not token or token != self.controller.token:
                 return
             current = self.controller.utterance
@@ -1553,8 +1566,11 @@ def run_gui() -> int:
             return focus == target.hwnd and pid.value == target.pid
 
         def send_input(self, target: Target, virtual_key: int):
-            WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
             token = self.controller.token
+            if token:
+                self.validation_trace.emit('advance_attempt', session=token.session,
+                    line=token.line)
+            WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
             if token:
                 self.validation_trace.emit('advance_input', session=token.session,
                     line=token.line)
@@ -1570,6 +1586,7 @@ def run_gui() -> int:
 
         def expire_next_line(self, token):
             if self.controller.expire_next_line(token):
+                self.validation_trace.emit('next_line_timeout', session=token.session, line=token.line)
                 self.note('No next dialogue output after advance; manual control restored')
                 self.refresh_status()
 

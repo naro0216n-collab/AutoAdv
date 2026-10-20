@@ -28,7 +28,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
         only_header = [{"event": "trace_started", "at_ns": 1}]
         result = validate(only_header)
         self.assertFalse(result["ok"])
-        self.assertIn("no Irodori TTS dialogue through playback completion and real input", result["errors"])
+        self.assertIn("no live dialogue observed", result["errors"])
 
 
 if __name__ == "__main__":

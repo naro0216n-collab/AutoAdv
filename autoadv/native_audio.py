@@ -42,8 +42,11 @@ class NativeAudio:
     """Owns one process's capture and one active line; never injects game input."""
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
-                 *, recognizer=None, activity=None, clock=None, vad_only: bool = False):
+                 *, recognizer=None, activity=None, clock=None, vad_only: bool = False,
+                 on_pcm: Callable[[Token, int], None] | None = None):
+        self.pid = pid
         self.notify = notify
+        self.on_pcm = on_pcm
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=10000)
         self.vad_only = vad_only
@@ -67,6 +70,7 @@ class NativeAudio:
         self._closed = False
         self._last_vad = False
         self._vad_voicing_since = -1
+        self._pcm_reported = False
 
     def start(self):
         self._capture.start()
@@ -84,6 +88,7 @@ class NativeAudio:
             self.active = self.attributed = self.completed = False
             self._inference_at = -1
             self._vad_voicing_since = -1
+            self._pcm_reported = False
             self._last_vad = False
             self.rise_ms = -1
 
@@ -109,6 +114,12 @@ class NativeAudio:
         with self._lock:
             if self._closed:
                 return
+            if activity.frames_analyzed and self.token is not None and not self._pcm_reported:
+                self._pcm_reported = True
+                # A real process-loopback PCM packet reached production analysis.
+                # This is evidence of capture, not evidence of matching speech.
+                if self.on_pcm is not None:
+                    self.on_pcm(self.token, len(chunk.frames) // 8)
             if activity.frames_analyzed:
                 if activity.active and not self._last_vad:
                     self.rise_ms = chunk.at_ms

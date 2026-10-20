@@ -28,7 +28,7 @@ class ValidationTrace:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # Refuse to append to a previous session; comparison must use one run.
             with self.path.open("x", encoding="utf-8") as stream:
-                stream.write(json.dumps({"event": "trace_started", "version": 1,
+                stream.write(json.dumps({"event": "trace_started", "version": 2,
                     "at_ns": time.monotonic_ns()}, ensure_ascii=False) + "\n")
 
     def emit(self, event: str, **fields: object) -> None:
