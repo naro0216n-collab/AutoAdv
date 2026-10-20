@@ -12,7 +12,7 @@ import uuid
 
 from .contracts import (
     ContentKind, ControllerState as S, Effect, EffectKind as FX, Envelope,
-    EventKind as EK, Evidence, Playback, Presentation, ScreenState,
+    EventKind as EK, Evidence, Playback, Presentation,
     TTSPolicy, VoicePresence,
 )
 from .text import Utterance, TextInterpreter, GameTextConfig
@@ -92,7 +92,6 @@ class Controller:
         self.interpreter = interpreter or TextInterpreter(GameTextConfig(name_readings=dict(self.settings.name_readings)))
         self.session_id = session_id or str(uuid.uuid4())
         self.state = S.WAIT_LINE
-        self.screen = ScreenState.UNKNOWN  # optional diagnostic, never input authorization
         self.gate_allowed = False
         self.gate_proof_id: str | None = None
         self.gate_source: str | None = None
@@ -226,10 +225,7 @@ class Controller:
                 # callbacks from the invalidated epoch cannot match any line.
                 self.line.token = self._token
             return effects
-        if e.kind is EK.SCREEN_CHANGED:
-            # Legacy visual classification is diagnostics only, never a grant.
-            self.screen = e.screen or ScreenState.UNKNOWN
-        elif e.kind is EK.CHOICE_REQUIRED:
+        if e.kind is EK.CHOICE_REQUIRED:
             return self._manual_choice()
         elif e.kind is EK.CHOICE_RESOLVED:
             if self.state is S.WAIT_MANUAL_CHOICE and e.gate_proof_id and e.gate_source:

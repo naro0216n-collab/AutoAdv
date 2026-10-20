@@ -8,7 +8,6 @@ from autoadv.preferences import Preferences,LegacyPreferencesDetected
 from autoadv.services import AutoAdvService
 from autoadv.text import GameTextConfig
 from autoadv.live import LiveConfig
-from autoadv.screen import ScreenProfile
 
 
 class PersistenceTests(TestCase):
@@ -37,7 +36,7 @@ class PersistenceTests(TestCase):
 class MonitorProfilePersistence(TestCase):
     @staticmethod
     def profile(root):
-        for filename in ('loopback.dll','model.onnx','tokens.txt','dialogue.png','ready.png'):
+        for filename in ('loopback.dll','model.onnx','tokens.txt'):
             (root/filename).write_bytes(b'sample')
         live={
             'pid':123,'hwnd':456,'loopback_helper':str(root/'loopback.dll'),
@@ -46,9 +45,7 @@ class MonitorProfilePersistence(TestCase):
             'tts_speed':1.0,'silent_dwell':{'base_ms':700,'min_ms':1000,'reading_chars_per_sec':12},
             'tts_required':False,'advance_input':{'mode':'keyboard','virtual_key':13},
         }
-        screen={'markers':{'dialogue':{'image':str(root/'dialogue.png'),'rect':[0,0,40,20],'min_score':.96},
-                           'text_ready':{'image':str(root/'ready.png'),'rect':[50,0,40,20],'min_score':.96}},
-                'minimum_ready_observations':2,'minimum_ready_span_ms':120}
+        screen={}  # Default HOOK monitoring must not require image calibration.
         return live,screen
 
     def test_monitor_is_atomic_in_single_profile_not_secondary_json(self):
@@ -67,18 +64,17 @@ class MonitorProfilePersistence(TestCase):
             self.assertNotIn('hwnd',observed)
             self.assertNotIn('screen_profile',observed)
             self.assertEqual(observed['advance_input']['virtual_key'],13)
-            self.assertEqual(markers['markers']['dialogue']['rect'],[0,0,40,20])
+            self.assertEqual(markers,{})
             configured,temporary=current.runtime_snapshot(999,888)
             try:
                 self.assertEqual((configured.pid,configured.hwnd),(999,888))
-                self.assertEqual(len(ScreenProfile.load(configured.screen_profile).markers),2)
-                self.assertTrue(configured.screen_profile.is_file())
+                self.assertIsNone(configured.screen_profile)
                 self.assertEqual(LiveConfig.load(Path(temporary.name)/'monitor.json'),configured)
             finally:
                 temporary.cleanup()
             self.assertFalse(Path(temporary.name).exists())
             before=path.read_bytes()
-            invalid={**screen,'markers':{'dialogue':{'image':'missing.png','rect':[0,0,40,20]}}}
+            invalid={'markers':{'advance_allowed':{'image':'missing.png','rect':[0,0,40,20]}}}
             with self.assertRaises(ValueError):current.save_monitor(live,invalid)
             self.assertEqual(path.read_bytes(),before)
             duplicated=current.profile_duplicate('別設定')
@@ -91,7 +87,12 @@ class MonitorProfilePersistence(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);path=root/'settings.json'
             live,screen=self.profile(root)
-            screen_path=root/'old-screen.json';screen_path.write_text(json.dumps(screen))
+            # Explicit migration of old AutoAdv files must preserve the original
+            # screen document in the backup but NEVER imply input permission.
+            old_screen={'markers':{
+                'dialogue':{'image':'old-dialogue.png','rect':[0,0,40,20]},
+                'text_ready':{'image':'old-ready.png','rect':[50,0,40,20]}}}
+            screen_path=root/'old-screen.json';screen_path.write_text(json.dumps(old_screen))
             live['screen_profile']=str(screen_path)
             live_path=root/'old-live.json';live_path.write_text(json.dumps(live))
             raw={'selected_game':'game','games':{'game':GameTextConfig().to_dict()},
@@ -108,5 +109,5 @@ class MonitorProfilePersistence(TestCase):
             self.assertNotIn('pid',observed)
             self.assertNotIn('hwnd',observed)
             self.assertEqual(observed['asr_model'],str(root/'model.onnx'))
-            self.assertEqual(markers['markers']['dialogue']['image'],str(root/'dialogue.png'))
+            self.assertEqual(markers,{})
             self.assertNotIn('live_profiles',json.loads(path.read_text()))

@@ -16,7 +16,7 @@ class ContentKind(Enum):
 
 
 class ScreenState(Enum):
-    DIALOGUE = auto()
+    ADVANCE_INDICATOR = auto()
     MANUAL_REQUIRED = auto()
     TRANSITION = auto()
     UNKNOWN = auto()
@@ -76,7 +76,6 @@ class EventKind(Enum):
     LINE_UPDATED = auto()
     LINE_READY = auto()
     LINE_INVALIDATED = auto()
-    SCREEN_CHANGED = auto()
     CAPTURE_HEALTH = auto()
     VOICE_PRESENCE = auto()
     NATIVE_STARTED = auto()
@@ -106,7 +105,6 @@ class Envelope:
     source_origin: Optional[str] = None
     source_generation: Optional[int] = None
     text_ready: bool = False
-    screen: Optional[ScreenState] = None
     capture_ok: Optional[bool] = None
     voice: Optional[VoicePresence] = None
     evidence: Evidence = Evidence.NONE

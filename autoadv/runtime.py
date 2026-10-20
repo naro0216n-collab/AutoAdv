@@ -6,7 +6,7 @@ from typing import Callable, Protocol
 import hashlib
 import time
 
-from .contracts import Effect, EffectKind, Envelope, EventKind, ScreenState
+from .contracts import Effect, EffectKind, Envelope, EventKind
 from .controller import Controller
 
 
@@ -72,7 +72,6 @@ class Runtime:
                                  "native_evidence": event.evidence.name,
                                  "voice_presence": event.voice.name if event.voice else None,
                                  "capture_ok": event.capture_ok,
-                                 "screen_state": event.screen.name if event.screen else None,
                                  "tts_success": event.tts_success})
         previous = self.controller.line
         effects = self.controller.accept(event)
@@ -136,7 +135,6 @@ class Runtime:
             'source_generation':line.source_generation,
             'raw_sha256':hashlib.sha256(line.text.observed_original.encode('utf-8')).hexdigest(),
             'content_kind':line.text.content_kind.name,
-            'screen_state':c.screen.name,
             'tts_policy':c.tts_policy.name,
             'tts_selected_voice':c.voice_id if c.tts_policy.name=='SELECTED' else c.default_voice_id if c.tts_policy.name=='DEFAULT' else None,
             'presentation':line.presentation.name,

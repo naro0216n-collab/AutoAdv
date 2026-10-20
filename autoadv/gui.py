@@ -365,16 +365,16 @@ def run_gui() -> int:
             self.tts_required=QCheckBox('TTS必須（失敗時は停止）')
             live_form.addRow(self.heuristic_absence);live_form.addRow(self.tts_required)
             self.min_ready_count=QLineEdit();self.min_ready_span=QLineEdit()
-            live_form.addRow('表示完了の連続確認数',self.min_ready_count)
-            live_form.addRow('表示完了の観測期間 ms',self.min_ready_span)
+            live_form.addRow('入力許可指標の連続確認数',self.min_ready_count)
+            live_form.addRow('入力許可指標の観測期間 ms',self.min_ready_span)
             for widget in (self.min_ready_count,self.min_ready_span):
                 widget.textEdited.connect(self.mark_monitor_dirty)
             for widget in (self.input_mode,self.heuristic_absence,self.tts_required):
                 (widget.currentIndexChanged if isinstance(widget,QComboBox) else widget.toggled).connect(self.mark_monitor_dirty)
-            monitor_layout.addWidget(QLabel('任意：自動入力には作品固有の明示的 advance_allowed 指標が必要。台詞表示マーカーだけでは不可'))
+            monitor_layout.addWidget(QLabel('任意：自動入力は作品固有の検証済み advance_allowed 指標が必要。取得済み台詞だけでは不可'))
             self.markers=table(['役割','画像ファイル','x','y','幅','高さ','一致しきい値'],180)
             monitor_layout.addWidget(self.markers)
-            for role in ('dialogue','text_ready','manual_block','transition','advance_allowed'):
+            for role in ('manual_block','transition','advance_allowed'):
                 append(self.markers,[role,'','0','0','40','20','0.96'])
                 self.markers.item(self.markers.rowCount()-1,0).setFlags(Qt.ItemFlag.ItemIsEnabled)
             marker_browse=QPushButton('選択行の画像ファイルを指定')
@@ -651,7 +651,7 @@ def run_gui() -> int:
                 self._marker_client_sizes={role:(tuple(record['source_client_size'])
                     if record.get('source_client_size') else None)
                     for role,record in screen.get('markers',{}).items()}
-                for r,role in enumerate(('dialogue','text_ready','manual_block','transition','advance_allowed')):
+                for r,role in enumerate(('manual_block','transition','advance_allowed')):
                     marker=screen.get('markers',{}).get(role,{})
                     rect=marker.get('rect',[0,0,40,20])
                     for c,value in enumerate([role,marker.get('image',''),*rect,marker.get('min_score',.96)]):
@@ -771,8 +771,8 @@ def run_gui() -> int:
                 for column,value in enumerate((str(target),x,y,w,h),start=1):
                     self.markers.item(row,column).setText(str(value))
                 self.mark_monitor_dirty()
-                pending=[key for key in ('dialogue','text_ready','manual_block','transition','advance_allowed')
-                         if self.markers.item(('dialogue','text_ready','manual_block','transition','advance_allowed').index(key),1).text().strip()
+                pending=[key for key in ('manual_block','transition','advance_allowed')
+                         if self.markers.item(('manual_block','transition','advance_allowed').index(key),1).text().strip()
                          and self._marker_client_sizes.get(key)!=captured_size]
                 detail=(' / サイズ変更のため再校正が必要: '+', '.join(pending)) if pending else ''
                 self.calibration_state.setText(

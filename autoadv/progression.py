@@ -43,7 +43,7 @@ class VisualGate:
         sample = self.observer.observe(now_ms)
         if sample.state is ScreenState.MANUAL_REQUIRED:
             return GateObservation(now_ms, GateState.MANUAL_REQUIRED, 'visual-manual', 'calibrated-visual')
-        if (sample.state is ScreenState.DIALOGUE and sample.ready and sample.positive
+        if (sample.state is ScreenState.ADVANCE_INDICATOR and sample.ready and sample.positive
                 and sample.evidence == 'advance_allowed-marker'):
             # Only an explicit opt-in calibration can establish this result.
             return GateObservation(now_ms, GateState.ALLOW, 'visual-ready', 'calibrated-visual')

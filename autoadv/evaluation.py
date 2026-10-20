@@ -52,17 +52,25 @@ def evaluate_audit(events:list[dict],labels:list[dict]|None=None)->dict:
         'ground_truth_metrics':None,
     }
     if labels is None:return result
-    eligible={k:{'false_advance':False,'silent_eligible':False,
-                   'should_advance':False,'choice_map_blocker':False}
-              for k in summaries}
+    # Only explicitly labeled trials belong to ground-truth populations.
+    # In particular, an omitted CSV row/column must never mean "safe".
+    eligible={}
     missing=[]
+    fields=('false_advance','silent_eligible','should_advance','manual_required')
     for item in labels:
         key=(item['session_id'],str(item['line_epoch']))
-        if key not in eligible:
+        if key not in summaries:
             missing.append({'session_id':key[0],'line_epoch':key[1]})
             continue
-        eligible[key]={k:item.get(k,'').strip().lower()=='true'
-                       for k in eligible[key]}
+        observations={}
+        for field in fields:
+            value=str(item.get(field,'')).strip().lower()
+            if not value:
+                continue
+            if value not in ('true','false'):
+                raise ValueError(f'invalid ground truth flag {field}: {value}')
+            observations[field]=(value=='true')
+        eligible[key]=observations
     def rate(predicate,success):
         population=[(key,summaries[key]) for key,label in eligible.items() if predicate(label)]
         if not population:return {'n':0,'count':0,'rate':None}
@@ -71,17 +79,17 @@ def evaluate_audit(events:list[dict],labels:list[dict]|None=None)->dict:
     # Labels explicitly mark an advance that was incorrect; no attempt is
     # made to reconstruct truth from model outputs or current screen state.
     input_trials=[(k,summaries[k],eligible[k]) for k in eligible
-                  if summaries[k].get('input_at_ms') is not None]
+                  if summaries[k].get('input_at_ms') is not None and 'false_advance' in eligible[k]]
     false_count=sum(l['false_advance'] for _,_,l in input_trials)
     result['ground_truth_metrics']={
         'false_advance_rate':{
             'n':len(input_trials),'count':false_count,
             'rate':round(false_count/len(input_trials),6) if input_trials else None},
-        'silent_completion_rate':rate(lambda x:x['silent_eligible'],
+        'silent_completion_rate':rate(lambda x:x.get('silent_eligible',False),
             lambda s,l:s.get('presentation')=='SILENT' and s.get('final_status')=='advanced_and_acknowledged'),
-        'unnecessary_pause_rate':rate(lambda x:x['should_advance'],
+        'unnecessary_pause_rate':rate(lambda x:x.get('should_advance',False),
             lambda s,l:s.get('final_status')=='paused'),
-        'choice_map_stop_recall':rate(lambda x:x['choice_map_blocker'],
+        'manual_required_stop_recall':rate(lambda x:x.get('manual_required',False),
             lambda s,l:s.get('input_at_ms') is None),
         'unmatched_labels':missing,
         'native_end_latency_ms':None, # Requires independently labeled actual voice end times.

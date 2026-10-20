@@ -101,7 +101,7 @@ class IrodoriTests(unittest.TestCase):
     def test_cancelled_synthesis_allows_verified_native_end_in_runtime(self):
         from autoadv.controller import Controller,Settings
         from autoadv.text import TextInterpreter,GameTextConfig
-        from autoadv.contracts import Envelope, Evidence, ScreenState, TTSPolicy, VoicePresence
+        from autoadv.contracts import Envelope, Evidence, TTSPolicy, VoicePresence
         from autoadv.runtime import Runtime, FreshSnapshot
         started=threading.Event();release=threading.Event();finished=threading.Event()
         played=[]
@@ -127,7 +127,6 @@ class IrodoriTests(unittest.TestCase):
             rt.post(Envelope(kind,'s',at,line_epoch=line.epoch if line else None,
                              cancel_token=line.token if line else None,**fields))
             rt.step()
-        step(EventKind.SCREEN_CHANGED,100,screen=ScreenState.DIALOGUE)
         step(EventKind.FOCUS_CHANGED,101,focused=True)
         step(EventKind.CAPTURE_HEALTH,102,capture_ok=True)
         step(EventKind.LINE_CANDIDATE,103,source_seq=1,source_line_id='a',

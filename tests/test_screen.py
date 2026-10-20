@@ -1,68 +1,64 @@
-"""Positive screen-evidence contracts; unit tests do not require Windows, CV2 or NumPy."""
+"""The optional visual provider may only report independently calibrated input evidence.
+
+Text acquisition, OCR readiness and transition ACK are not visual permission.
+"""
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from pathlib import Path
-from autoadv.screen import Marker,ScreenProfile,ScreenObserver,recognize_markers
+
 from autoadv.contracts import ScreenState
+from autoadv.progression import VisualGate
+from autoadv.screen import Marker, ScreenObserver, ScreenProfile, recognize_markers
 
-ROLES=('dialogue','text_ready','manual_block','transition','advance_allowed')
+ROLES=('manual_block','transition','advance_allowed')
 
-class FakePatch:
+
+class Patch:
     shape=(4,4,3)
     def __init__(self,value):self.value=value
     def astype(self,unused):return self
-    def __sub__(self,other):return FakePatch(self.value-other.value)
-    def __abs__(self):return FakePatch(abs(self.value))
+    def __sub__(self,other):return Patch(self.value-other.value)
+    def __abs__(self):return Patch(abs(self.value))
 
-class FakeFrame:
-    def __init__(self,roles):self.roles=roles
+
+class Frame:
+    shape=(4,12,3)
+    def __init__(self,roles):self.roles=set(roles)
     def __getitem__(self,slices):
-        return FakePatch(255 if ROLES[slices[1].start//4] in self.roles else 0)
+        return Patch(255 if ROLES[slices[1].start//4] in self.roles else 0)
 
-class ScreenEvidenceTests(unittest.TestCase):
+
+class CalibratedEvidence(unittest.TestCase):
     def setUp(self):
-        self.templates={name:(Marker(Path(name),(i*4,0,4,4)),FakePatch(255))
-                        for i,name in enumerate(ROLES)}
-        self.numpy=SimpleNamespace(mean=lambda patch:patch.value,abs=lambda patch:abs(patch))
-    def see(self,*roles):
-        with patch.dict('sys.modules',{'numpy':self.numpy}):
-            return recognize_markers(FakeFrame(set(roles)),self.templates)
-    def test_requires_positive_dialogue(self):
-        self.assertEqual(self.see()[0],ScreenState.UNKNOWN)
-        self.assertEqual(self.see('dialogue')[:2],(ScreenState.DIALOGUE,False))
-        self.assertEqual(self.see('dialogue','text_ready')[:2],(ScreenState.DIALOGUE,True))
-    def test_manual_block_wins_and_transition_is_not_permission(self):
-        self.assertEqual(self.see('dialogue','manual_block')[0],ScreenState.MANUAL_REQUIRED)
-        self.assertEqual(self.see('transition')[0],ScreenState.TRANSITION)
-        self.assertEqual(self.see('dialogue','transition')[0],ScreenState.UNKNOWN)
-    def test_schema_no_text_ocr_or_six_special_screens(self):
-        self.assertEqual(set(ScreenProfile({k:v[0] for k,v in self.templates.items()}).markers),set(ROLES))
-        self.assertEqual(set(ScreenProfile({'dialogue':self.templates['dialogue'][0]}).markers),{'dialogue'})
-        with self.assertRaises(ValueError):ScreenProfile({})
-    def test_advance_permission_requires_distinct_explicit_indicator(self):
-        from autoadv.progression import VisualGate
-        from autoadv.screen import ScreenSample
-        class Observer:
-            def __init__(self):self.sample=None
-            def observe(self,now_ms):return self.sample
-        obs=Observer();gate=VisualGate(obs)
-        obs.sample=ScreenSample(100,ScreenState.DIALOGUE,True,True,'dialogue + text readiness (not input permission)')
-        self.assertFalse(gate.observe(100).may_advance)
-        obs.sample=ScreenSample(150,ScreenState.DIALOGUE,True,True,'advance_allowed-marker')
-        self.assertTrue(gate.observe(150).may_advance)
-        obs.sample=ScreenSample(200,ScreenState.MANUAL_REQUIRED,False,False,'manual_block marker')
-        self.assertFalse(gate.observe(200).may_advance)
-        self.assertEqual(self.see('advance_allowed')[:2],(ScreenState.DIALOGUE,True))
-        self.assertEqual(self.see('advance_allowed','manual_block')[0],ScreenState.MANUAL_REQUIRED)
-        self.assertEqual(self.see('advance_allowed','transition')[0],ScreenState.UNKNOWN)
+        self.markers={name:Marker(Path(name),(i*4,0,4,4)) for i,name in enumerate(ROLES)}
+        self.numpy=SimpleNamespace(mean=lambda p:p.value,abs=lambda p:abs(p))
 
-    def test_stable_readiness_requires_multiple_positive_observations(self):
-        templates=self.templates
-        profile=ScreenProfile({k:v[0] for k,v in templates.items()},2,100)
-        cv2=SimpleNamespace(IMREAD_COLOR=1,imread=lambda filename,mode:FakePatch(255))
+    def test_only_verified_advance_marker_can_allow_and_conflicts_block(self):
+        templates={key:(value,Patch(255)) for key,value in self.markers.items()}
+        with patch.dict('sys.modules',{'numpy':self.numpy}):
+            self.assertEqual(recognize_markers(Frame({}),templates)[0],ScreenState.UNKNOWN)
+            self.assertEqual(recognize_markers(Frame({'transition'}),templates)[0],ScreenState.TRANSITION)
+            self.assertEqual(recognize_markers(Frame({'advance_allowed'}),templates)[:2],
+                             (ScreenState.ADVANCE_INDICATOR,True))
+            self.assertEqual(recognize_markers(Frame({'advance_allowed','transition'}),templates)[0],
+                             ScreenState.UNKNOWN)
+            self.assertEqual(recognize_markers(Frame({'advance_allowed','manual_block'}),templates)[0],
+                             ScreenState.MANUAL_REQUIRED)
+
+    def test_permission_requires_stability_and_is_revoked_by_manual_or_unknown(self):
+        roles={'advance_allowed'}
+        profile=ScreenProfile(self.markers,minimum_ready_observations=2,minimum_ready_span_ms=100)
+        cv2=SimpleNamespace(IMREAD_COLOR=1,imread=lambda *args:Patch(255))
         with patch.dict('sys.modules',{'cv2':cv2,'numpy':self.numpy}):
-            observer=ScreenObserver(profile,lambda:FakeFrame({'dialogue','text_ready'}))
-            self.assertFalse(observer.observe(100).ready)
-            self.assertFalse(observer.observe(150).ready)
-            self.assertTrue(observer.observe(205).ready)
+            gate=VisualGate(ScreenObserver(profile,lambda:Frame(roles)))
+            self.assertFalse(gate.observe(100).may_advance)
+            self.assertFalse(gate.observe(150).may_advance)
+            self.assertTrue(gate.observe(210).may_advance)
+            roles.add('manual_block')
+            self.assertFalse(gate.observe(220).may_advance)
+            roles.clear()
+            self.assertFalse(gate.observe(230).may_advance)
+            roles.add('advance_allowed')
+            self.assertFalse(gate.observe(240).may_advance)
+            self.assertTrue(gate.observe(360).may_advance)

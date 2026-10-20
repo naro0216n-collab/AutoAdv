@@ -52,7 +52,14 @@ class CatalogContracts(TestCase):
             self.assertEqual([x.code for x in p.keys()],['/HS1','/HS2'])
             self.assertEqual(p.inserted_hooks,['/HS3'])
             self.assertEqual(p.quality['rank'],['trim'])
-            self.assertNotIn('111',json.dumps(c.to_dict()))
+            self.assertEqual(p.selected_hooks,[
+                {'code':'/HS1','name':'voice','context':333,'context2':444},
+                {'code':'/HS2','name':'body','context':3,'context2':4},
+            ])
+            # PID and absolute hook addresses are not part of the HookKey
+            # storage contract. Random stable game/profile IDs are unrelated.
+            for hook in p.selected_hooks:
+                self.assertEqual(set(hook),{'code','name','context','context2'})
             before=c.to_dict()
             file.write_text('[]',encoding='utf-8')
             with self.assertRaises(ValueError):import_luna(c,file)

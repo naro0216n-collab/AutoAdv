@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import json
 import unittest
 from autoadv.live import JsonAudit,LiveConfig
-from autoadv.contracts import Envelope,EventKind as E,ScreenState as SS,Evidence,VoicePresence
+from autoadv.contracts import Envelope,EventKind as E,Evidence,VoicePresence
 from autoadv.controller import Controller,Settings
 from autoadv.runtime import Runtime,FreshSnapshot
 
@@ -29,7 +29,6 @@ class TelemetryContracts(unittest.TestCase):
                 rt.post(Envelope(kind,'s',at,line_epoch=line.epoch if line else None,
                                   cancel_token=line.token if line else None,**fields))
                 rt.step()
-            step(E.SCREEN_CHANGED,1,screen=SS.DIALOGUE)
             step(E.FOCUS_CHANGED,2,focused=True)
             step(E.CAPTURE_HEALTH,3,capture_ok=True)
             step(E.LINE_CANDIDATE,4,source_seq=1,source_line_id='a',text='おはよう',text_ready=True)

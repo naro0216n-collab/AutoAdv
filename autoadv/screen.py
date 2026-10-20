@@ -10,7 +10,7 @@ from typing import Callable
 import json
 from .contracts import ScreenState
 
-ROLES = frozenset(('dialogue','text_ready','manual_block','transition','advance_allowed'))
+ROLES = frozenset(('manual_block','transition','advance_allowed'))
 
 
 @dataclass(frozen=True)
@@ -80,19 +80,16 @@ def recognize_markers(frame,templates:dict[str,tuple[Marker,object]]) -> tuple[S
         score=1-float(np.mean(np.abs(roi.astype('float32')-template.astype('float32'))))/255
         if score>=marker.min_score:matched.append(role)
     if 'manual_block' in matched:
-        # Manual-required proof wins over any coincident dialogue indicator.
+        # Positive evidence of a manual-only state always blocks input.
         return ScreenState.MANUAL_REQUIRED,False,'manual_block marker'
     if 'transition' in matched:
-        if 'dialogue' not in matched and 'advance_allowed' not in matched:
-            return ScreenState.TRANSITION,False,'transition marker'
-        return ScreenState.UNKNOWN,False,'conflicting transition and dialogue markers'
+        if 'advance_allowed' in matched:
+            return ScreenState.UNKNOWN,False,'conflicting transition and advance indicators'
+        # Transition observation is NOT a transition ACK.
+        return ScreenState.TRANSITION,False,'transition marker'
     if 'advance_allowed' in matched:
-        # Only a game-specific, separately calibrated affirmative advance indicator can grant permission.
-        return ScreenState.DIALOGUE,True,'advance_allowed-marker'
-    if 'dialogue' in matched:
-        # Legacy readiness markers may describe observed text, NEVER game input permission.
-        return ScreenState.DIALOGUE,'text_ready' in matched,'dialogue + text readiness (not input permission)'
-    return ScreenState.UNKNOWN,False,'no affirmative normal-dialogue evidence'
+        return ScreenState.ADVANCE_INDICATOR,True,'advance_allowed-marker'
+    return ScreenState.UNKNOWN,False,'no verified advance indicator'
 
 
 class ScreenObserver:
@@ -116,7 +113,7 @@ class ScreenObserver:
             self._ready_count=0
             return ScreenSample(at_ms,ScreenState.UNKNOWN,False,False,'client size changed; recalibration required')
         state,ready_marker,evidence=recognize_markers(frame,self.templates)
-        if state is ScreenState.DIALOGUE and ready_marker:
+        if state is ScreenState.ADVANCE_INDICATOR and ready_marker:
             if self._ready_first_at is None:self._ready_first_at=at_ms
             self._ready_count+=1
         else:
@@ -125,7 +122,7 @@ class ScreenObserver:
         stable=(self._ready_count>=self.profile.minimum_ready_observations and
                 self._ready_first_at is not None and
                 at_ms-self._ready_first_at>=self.profile.minimum_ready_span_ms)
-        return ScreenSample(at_ms,state,stable,state is ScreenState.DIALOGUE,evidence)
+        return ScreenSample(at_ms,state,stable,state is ScreenState.ADVANCE_INDICATOR and ready_marker,evidence)
 
 
 class WindowsClientCapture:

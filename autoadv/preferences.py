@@ -106,20 +106,17 @@ class Preferences:
             profile.text=GameTextConfig.from_dict(games.get(name,{})).to_dict()
             if name in monitors:
                 from .live import LiveConfig
-                from .screen import ScreenProfile
                 source=Path(monitors[name])
                 conf=LiveConfig.load(source)
                 doc=json.loads(source.read_text(encoding='utf-8'))
-                img=json.loads(conf.screen_profile.read_text(encoding='utf-8'))
                 # Runtime process identity is re-established for each session.
                 doc.pop('pid',None);doc.pop('hwnd',None);doc.pop('screen_profile',None)
                 for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
                     doc[key]=str(getattr(conf,key))
-                ScreenProfile.load(conf.screen_profile)
-                for marker in img.get('markers',{}).values():
-                    marker['image']=str((conf.screen_profile.parent/marker['image']).resolve())
+                # Old dialogue/readiness markers never proved input safety.
+                # Keep their original data in the checksum backup, not in the
+                # new profile as a purported positive advancement provider.
                 profile.monitor=doc
-                profile.screen=img
         selected=raw.get('selected_game','')
         if selected and selected in mapping:
             prefs.catalog.choose(mapping[selected])

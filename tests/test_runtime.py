@@ -1,6 +1,6 @@
 import unittest
 from autoadv.runtime import Runtime, FreshSnapshot
-from autoadv.contracts import Envelope, EventKind as E, Evidence, VoicePresence as V, ScreenState as SS
+from autoadv.contracts import Envelope, EventKind as E, Evidence, VoicePresence as V
 from autoadv.controller import Controller,Settings
 
 
@@ -30,7 +30,6 @@ class RuntimeTests(unittest.TestCase):
             l=ctrl.line
             runner.post(Envelope(k,"s",at,line_epoch=l.epoch if l else None,
                         cancel_token=l.token if l else None,**kwargs));runner.step()
-        post(E.SCREEN_CHANGED,100,screen=SS.DIALOGUE)
         post(E.FOCUS_CHANGED,101,focused=True)
         post(E.CAPTURE_HEALTH,102,capture_ok=True)
         post(E.LINE_CANDIDATE,103,source_seq=1,text="あ",text_ready=True,source_line_id="a")
@@ -43,8 +42,7 @@ class RuntimeTests(unittest.TestCase):
     def test_input_only_once(self):
         ctrl=Controller(Settings(autoplay=True),session_id="s")
         inp=MockInput();runner=Runtime(ctrl,MockGuard(),inp,MockTTS(),clock=lambda:9000)
-        seq=[(E.SCREEN_CHANGED,100,{"screen":SS.DIALOGUE}),
-             (E.FOCUS_CHANGED,101,{"focused":True}),
+        seq=[(E.FOCUS_CHANGED,101,{"focused":True}),
              (E.CAPTURE_HEALTH,102,{"capture_ok":True}),
              (E.LINE_CANDIDATE,103,{"source_seq":1,"text":"あ","text_ready":True,"source_line_id":"a"}),
              (E.ADVANCE_GATE,104,{"gate_allowed":True,"gate_proof_id":"verified-gate","gate_source":"game-state"}),

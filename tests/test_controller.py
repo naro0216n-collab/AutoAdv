@@ -3,7 +3,7 @@ import itertools
 import unittest
 from autoadv.contracts import (
     ContentKind, ControllerState as S, EffectKind as FX, Envelope, EventKind as E,
-    Evidence, Playback, Presentation, ScreenState as SS, TTSPolicy as TP,
+    Evidence, Playback, Presentation, TTSPolicy as TP,
     VoicePresence as V,
 )
 from autoadv.controller import Controller, Settings
@@ -16,7 +16,6 @@ class Harness:
                                      allow_heuristic_absence=calibrated), 'session', interpreter=TextInterpreter(
             GameTextConfig(unknown_route=policy,unknown_voice=voice,default_voice=voice)))
         self.now = 1000
-        self.send(E.SCREEN_CHANGED, screen=SS.DIALOGUE)
         self.send(E.FOCUS_CHANGED, focused=True)
         self.send(E.CAPTURE_HEALTH, capture_ok=True)
 

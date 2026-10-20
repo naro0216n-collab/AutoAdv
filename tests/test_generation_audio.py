@@ -33,7 +33,7 @@ class GenerationAudioTests(unittest.TestCase):
         p,pcm,v,events=self.make()
         v.active=True
         p.feed(pcm)
-        # A line may only be registered after the visual state becomes known.
+        # Audio can start before a HOOK line is stabilized; retain its onset.
         p.begin(TargetLine('s',1,1,'おはよう',2100))
         self.assertTrue(p.fresh_onset)
         p._infer(p.target,p.history.since(0))
@@ -55,15 +55,15 @@ class GenerationAudioTests(unittest.TestCase):
         p._infer(p.target,p.history.since(0))
         self.assertEqual(events,[])
 
-    def test_new_voice_onset_after_visual_transition_floor_is_retained(self):
+    def test_new_voice_onset_after_verified_line_boundary_is_retained(self):
         p,pcm,v,events=self.make()
         v.active=True;p.feed(pcm)
         # A pre-transition rise cannot be attributed to the next line.
         p.mark_boundary(2200)
         p.begin(TargetLine('s',2,2,'おはよう',2300))
         self.assertFalse(p.fresh_onset)
-        # A rise after the observed disappearance of the ready marker, but
-        # before next visual TEXT_READY, belongs to the next candidate.
+        # A fresh audio rise after the previous line boundary must be retained
+        # until it can be attributed to the next candidate.
         v.active=False
         p.feed(PCMChunk(2300,pcm.frames,48000,2,4))
         v.active=True
