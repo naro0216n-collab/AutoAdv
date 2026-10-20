@@ -1,17 +1,9 @@
-# Publish Gateway の導入境界
+# AutoAdv Publish Gateway 運用
 
-正準仕様は `docs/integration-spec.md`。Publishの管理手順にはSpace-Idleの標準経路を流用する。
+通常開発は`develop`。`main`の更新とversion変更はユーザーの明示承認後のみ。通常開発の中継に`temp`や追加worktreeを使用しない。
 
-## コピー対象
+最新`develop`のFast CIによる`source-snapshot`（`repository.bundle`と`.source-*`）からローカルrepoを復元し、repo-local identityを設定して`scripts/publish_request.py init`を実行する。
 
-`python scripts/port_publish_gateway.py --write` はSpace-Idleの固定develop commitから次のcontrol planeを取得する：`publish_request.py`、`publish_gateway_validate.py`、`publish_connector_launch.js`、`publish_connector_executor.js`、`workflow_maintenance.py`、`publish_control_maintenance.py`、`publish-gateway.yml`。転送スロット・manifest生成・再送/record手順は変更しない。
+実装・関連検証・ローカルcommit後は`scripts/publish_request.py prepare`を実行する。publish直前のremote `develop`と`publish` HEADを取得し、helperが出力するconnector-planと固定Launcherの手順を**一切改変せず**記載順に実行する。Gateway成功後、結果を`scripts/publish_request.py record`に渡す。次のpublish前に直前のFast CI結果を確認し、失敗原因を解消する。標準経路に失敗した場合は`DEVELOPMENT.md`の指定手順を参照し、独自経路を作らない。
 
-`AutoAdv`のリポジトリ識別子と `refs/autoadv/` に限って置換し、Fast CIは本プロジェクトのPython test / clean install用に置き換える。
-
-## 初回導入
-
-リモートが空の場合は`main`、`develop`、`publish`のcommitもFast CI `source-snapshot`も存在しない。通常の `publish_request.py init` はこの状態では動作しない。**既存のSpace-IdleのsnapshotをAutoAdvの初期snapshotと偽って使ってはならない。**
-
-まず正式な初期セットアップにより`develop`/`publish`とGitHub Actionsを成立させ、成功した`develop` Fast CIの `source-snapshot` artifactを生成すること。`main`の既存承認条件は変更しない。その後は通常通りartifactをgit bundleとして復元し、`scripts/publish_request.py init`、必要な実装・検証・commit、`prepare`、最新両HEAD取得、`connector-plan`、固定Launcher、成功runの`record`を厳守する。
-
-現在この環境からのGitHubへの初回branch生成・Gateway経由publishは未成立である。ローカルの実装やテストをFast CI成功と読み替えない。
+Fast CIは継続検証であり設計妥当性の証明ではない。Lunaネイティブ取込み時はx86/x64 Windows実ビルドと接続検証を別途実施し、既存のWindows CIが新規ソースで発火することを確認する。Windows実ゲーム検証をモック成功で代替しない。
