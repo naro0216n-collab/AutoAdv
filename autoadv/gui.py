@@ -1103,8 +1103,15 @@ def run_gui() -> int:
             self.native_audio = native
             self.note('Native process audio and ASR ready')
             token = self.controller.token
-            if token and self.controller.utterance and self.controller.utterance.mode in (AudioMode.NATIVE, AudioMode.AUTO):
-                self.present(token)
+            if (token and self.controller.utterance and not self.controller.sent and
+                    not self.controller.completed and
+                    self.controller.utterance.mode in (AudioMode.NATIVE, AudioMode.AUTO)):
+                if self.native_token == token and self.controller.utterance.mode == AudioMode.AUTO:
+                    # The capture worker may become ready during AUTO's fallback window.
+                    # Start attribution without restarting or duplicating TTS presentation.
+                    native.begin(token, self.controller.utterance.match_text)
+                elif self.native_token != token or self.controller.reason == 'native_audio_unavailable':
+                    self.present(token)
 
         def on_native(self, token, event, detail):
             if not token or token != self.controller.token:
@@ -1114,8 +1121,13 @@ def run_gui() -> int:
                 return
             if event == 'error':
                 self.note('Native audio: ' + detail)
-                if current.mode == AudioMode.NATIVE:
+                if current.mode == AudioMode.NATIVE or self.native_started:
                     self.controller.pause('native_audio_failure')
+                    self.jobs.cancel()
+                elif current.mode == AudioMode.AUTO and not self.auto_tts_started:
+                    # Capture or recognition failure is not proof that game speech is absent.
+                    # AUTO's explicitly configured TTS policy can still present this line.
+                    self.auto_fallback(token)
             elif event == 'started':
                 self.native_started = True
                 if current.mode == AudioMode.AUTO:
@@ -1127,7 +1139,8 @@ def run_gui() -> int:
 
         def auto_fallback(self, token):
             if (token != self.controller.token or not self.controller.utterance or
-                    self.controller.utterance.mode != AudioMode.AUTO or self.native_started):
+                    self.controller.utterance.mode != AudioMode.AUTO or self.native_started or
+                    self.auto_tts_started or self.controller.completed or self.controller.sent):
                 return
             current = self.controller.utterance
             if not current.voice:
@@ -1167,8 +1180,11 @@ def run_gui() -> int:
                     self.complete(token, False, 'TTS requires a Voice')
                 else:
                     self.jobs.start(token, self.catalog.irodori_url, u.reading, u.voice)
+            elif self.native_audio is None and u.mode == AudioMode.AUTO:
+                self.note('AUTO audio capture unavailable; using configured TTS fallback')
+                QTimer.singleShot(self.controller.profile.native_wait_ms, lambda t=token: self.auto_fallback(t))
             elif self.native_audio is None:
-                self.note(f'{u.mode.value} requires configured native audio/ASR; advance held')
+                self.note('Native voice requires configured audio capture and ASR; advance held')
                 self.controller.pause('native_audio_unavailable')
             elif u.mode == AudioMode.AUTO:
                 QTimer.singleShot(self.controller.profile.native_wait_ms, lambda t=token: self.auto_fallback(t))

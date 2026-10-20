@@ -44,6 +44,7 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source: str | None = None
+        self.verified_text_gap = False
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
               available_sources: tuple[str, ...] = ()) -> int:
@@ -76,6 +77,7 @@ class Controller:
         self.pending_speakers.clear()
         self.ocr_blank = False
         self.active_text_source = None
+        self.verified_text_gap = False
         self.reason = reason
 
     def observe(self, *, generation: str, connection: int, sequence: int,
@@ -103,16 +105,21 @@ class Controller:
             else:
                 self.pending_speakers.pop(identity, None)
             return None
-        if not text.strip():
-            return None
         identity = matched[0].identity
+        if not text.strip():
+            if identity == self.active_text_source and self.sent:
+                self.verified_text_gap = True
+            return None
         if self.active_text_source is None:
             # Once chosen, another source cannot silently replace the line owner.
             self.active_text_source = identity
         if identity != self.active_text_source:
             return None
+        boundary = self.verified_text_gap
+        self.verified_text_gap = False
         return self._accept_line(sequence=sequence, text=text, origin=identity,
-                                 side_speaker=self._paired_speaker(matched[0].identity, sequence, received_ns))
+                                 side_speaker=self._paired_speaker(matched[0].identity, sequence, received_ns),
+                                 verified_boundary=boundary)
 
     def _paired_speaker(self, text_source: str, sequence: int, received_ns: int) -> str:
         if not self.profile:
@@ -149,12 +156,18 @@ class Controller:
     def _accept_line(self, *, sequence: int, text: str, origin: str, side_speaker: str,
                      verified_boundary: bool = False) -> Token | None:
         old = self.utterance
-        if old and old.raw == text and not self.sent and not verified_boundary:
+        if old and not self.sent and old.raw == text and not verified_boundary:
             return None
-        if (old and self.sent and text == old.raw and self.profile.repeat_rule == 'distinct_only'
-                and not verified_boundary):
-            self.reason = 'ambiguous_identical_line'
-            return None
+        if old and self.sent and not verified_boundary:
+            if text == old.raw:
+                if self.profile.repeat_rule != 'each_after_input':
+                    self.pause('ambiguous_identical_line')
+                    return None
+            elif text.startswith(old.raw):
+                # The tail of a progressively rendered line is not a fresh line.
+                # After input we cannot safely decide whether the hook advanced.
+                self.pause('ambiguous_partial_after_input')
+                return None
         self.line_no += 1
         self.pending_speakers.clear()
         self.utterance = interpret(text, self.profile, session=self.session,

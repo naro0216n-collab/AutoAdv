@@ -48,9 +48,11 @@ class DialogueContractTests(unittest.TestCase):
         self.controller.try_advance()
         self.assertIsNone(self.output('同じ台詞', 2))
         self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
+        self.assertFalse(self.controller.authorized)
         second = self.output('違う台詞', 3)
         self.assertNotEqual(second, first)
         self.controller.mark_complete(second)
+        self.controller.permit(True)
         self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
 
@@ -146,3 +148,58 @@ class DialogueContractTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class HookBoundaryContractTests(unittest.TestCase):
+    """Source event boundaries, not a post-input clock, own the next line."""
+
+    def setUp(self):
+        self.sent = []
+        self.controller = Controller(lambda *_: self.sent.append(1), lambda _: True)
+        self.controller.begin(profile(), Target(101, 202), 'host-a', 1)
+        self.controller.permit(True)
+
+    def out(self, text, seq):
+        return self.controller.observe(generation='host-a', connection=1, sequence=seq,
+                                       source=SOURCE, text=text, pid=101)
+
+    def sent_line(self, text):
+        token = self.out(text, 1)
+        self.assertTrue(self.controller.mark_complete(token))
+        self.assertTrue(self.controller.try_advance())
+        return token
+
+    def test_late_prefix_after_input_does_not_advance_again(self):
+        before = self.sent_line('あ')
+        self.assertIsNone(self.out('あい', 2))
+        self.assertEqual(self.controller.token, before)
+        self.assertEqual(self.controller.reason, 'ambiguous_partial_after_input')
+        self.assertFalse(self.controller.authorized)
+        self.assertIsNone(self.out('あいう', 3))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_explicit_empty_notification_distinguishes_identical_new_line(self):
+        first = self.sent_line('同じ')
+        self.assertIsNone(self.out('', 2))
+        second = self.out('同じ', 3)
+        self.assertNotEqual(first, second)
+        self.assertFalse(self.controller.completed)
+        self.controller.mark_complete(second)
+        self.assertTrue(self.controller.try_advance())
+        self.assertEqual(len(self.sent), 2)
+
+    def test_source_gap_does_not_come_from_unselected_hook(self):
+        before = self.sent_line('同じ')
+        other = SimpleNamespace(hook_code='other', context=3, context2=4, identity='other|3|4')
+        self.assertIsNone(self.controller.observe(generation='host-a', connection=1, sequence=2,
+                source=other, text='', pid=101))
+        self.assertIsNone(self.out('同じ', 3))
+        self.assertEqual(self.controller.token, before)
+        self.assertFalse(self.controller.authorized)
+
+    def test_old_session_clear_does_not_authorize_new_game(self):
+        first = self.sent_line('同じ')
+        self.out('', 2)
+        self.controller.begin(profile(), Target(102, 203), 'host-b', 2)
+        self.assertFalse(self.controller.mark_complete(first))
+        self.assertFalse(self.controller.authorized)
+        self.assertIsNone(self.out('同じ', 3))
