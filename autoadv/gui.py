@@ -11,7 +11,7 @@ from .luna import run_origin_listener
 
 
 def run_gui() -> int:
-    from PySide6.QtCore import Qt, Signal, QThread
+    from PySide6.QtCore import Qt, Signal, QThread, QTimer
     from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,
         QFormLayout,QLabel,QLineEdit,QPushButton,QPlainTextEdit,QScrollArea,QTableWidget,
         QTableWidgetItem,QCheckBox,QComboBox,QFileDialog,QMessageBox,QGroupBox,QSplitter)
@@ -24,6 +24,14 @@ def run_gui() -> int:
         def run(self):
             try:self.result.emit(self.service.connect_server() if self.start_server else self.service.refresh_voices())
             except Exception as exc:self.failed.emit(f'{type(exc).__name__}: {exc}')
+
+    class ServerShutdown(QThread):
+        failed=Signal(str)
+        def __init__(self,service:AutoAdvService):
+            super().__init__();self.service=service
+        def run(self):
+            try:self.service.close()
+            except Exception as exc:self.failed.emit(f'Irodori終了時のエラー: {exc}')
 
     class LunaWorker(QThread):
         received=Signal(str)
@@ -85,7 +93,10 @@ def run_gui() -> int:
             self.luna_worker=None
             self.game_worker=None
             self.live_control=None
+            self.active_target=None
             self._other_workers=[]
+            self._closing=False
+            self._shutdown_worker=None
             self.setWindowTitle('AutoAdv — 音声同期オート進行')
             self.resize(1160,920)
             top=QWidget();self.setCentralWidget(top)
@@ -288,7 +299,8 @@ def run_gui() -> int:
         def game_changed(self,text):
             # Changes are intentionally explicit; typing a new name must not discard editor state.
             if self.game_worker and self.game_worker.isRunning():
-                self.pause_live()
+                self.game_name.setCurrentText(self.service.preferences.selected_game)
+                self.issue.setText('監視中は作品を変更できません。監視を終了してください')
                 return
             self.service.preferences.selected_game=text
             self.load_profile()
@@ -556,6 +568,7 @@ def run_gui() -> int:
             self.service.luna_connected=False
             self.show_status('最新Luna原文','新しい監視セッションの受信待ち')
             self.live_control=LiveControl()
+            self.active_target=(profile.pid,profile.hwnd)
             self.game_worker=GameWorker(profile,self.service,self.live_control)
             self.game_worker.status.connect(self.game_status)
             self.game_worker.finished_status.connect(self.game_finished)
@@ -594,8 +607,11 @@ def run_gui() -> int:
             if 'reason' in state:self.show_status('停止理由',state['reason'] or 'なし')
             if 'presentation' in state:self.show_status('提示経路',state['presentation'])
             if 'capture_ok' in state:self.show_status('音声監視','正常' if state['capture_ok'] else '未確認/異常')
-            if 'focused' in state:self.show_status('対象ウィンドウ/フォーカス',
-                          '対象が前面' if state['focused'] else '非フォーカス')
+            if 'focused' in state:
+                target=(f'PID={self.active_target[0]} HWND={self.active_target[1]}'
+                        if self.active_target else '対象未設定')
+                self.show_status('対象ウィンドウ/フォーカス',
+                                 target + (' / 前面' if state['focused'] else ' / 非フォーカス'))
             if 'sent' in state:self.show_status('入力/ACK',
                           '遷移ACK待ち' if state.get('awaiting_ack') else '送出済み' if state['sent'] else '未送出')
             if 'controller' in state:self.monitor_state.setText('Controller: '+state['controller'])
@@ -615,7 +631,7 @@ def run_gui() -> int:
                         '設定版: '+u['config_revision'])))
                     self.show_status('現在Utterance',str(u['speaker'] or '不明')+' / '+u['body'][:75])
             if state.get('speaker') or state.get('body'):
-                self.show_status('対象ゲーム',self.service.preferences.selected_game+' / '+str(state.get('speaker') or '話者不明'))
+                self.show_status('対象ゲーム',self.service.preferences.selected_game or '未選択')
 
         def game_finished(self,message):
             self.show_status('停止理由',message)
@@ -655,20 +671,27 @@ def run_gui() -> int:
             worker.finished.connect(lambda:self._other_workers.remove(worker))
             worker.start()
         def closeEvent(self,event):
-            self.stop_all()
-            self.service.autoplay_allowed=False
-            if self.luna_worker is not None and self.luna_worker.isRunning():
-                self.luna_worker.stopping.set()
-                self.luna_worker.wait(3500)
-            if self.game_worker is not None and self.game_worker.isRunning():
-                self.live_control.stop.set()
-                self.game_worker.wait(5000)
-            if any(worker is not None and worker.isRunning() for worker in
-                   (self.luna_worker,self.game_worker,self.server_worker,*self._other_workers)):
-                self.issue.setText('ワーカー停止中です。完了後に閉じてください。')
+            # Closing never restores input permission. Let Qt process worker
+            # shutdown without blocking its event loop on QThread.wait().
+            if not self._closing:
+                self._closing=True
+                self.stop_all()
+                self.service.autoplay_allowed=False
+            workers=(self.luna_worker,self.game_worker,self.server_worker,*self._other_workers)
+            if any(worker is not None and worker.isRunning() for worker in workers):
+                self.issue.setText('監視・試聴ワーカーの終了を確認しています')
                 event.ignore()
+                QTimer.singleShot(120,self.close)
                 return
-            self.service.close()
+            if self._shutdown_worker is None:
+                self._shutdown_worker=ServerShutdown(self.service)
+                self._shutdown_worker.failed.connect(self.issue.setText)
+                self._shutdown_worker.start()
+            if self._shutdown_worker.isRunning():
+                self.issue.setText('Irodoriの所有プロセスを終了しています')
+                event.ignore()
+                QTimer.singleShot(120,self.close)
+                return
             super().closeEvent(event)
 
     app=QApplication.instance() or QApplication([])

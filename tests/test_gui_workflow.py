@@ -51,8 +51,12 @@ class GameSettingsGUI(unittest.TestCase):
                         failures.append(exc)
                     finally:
                         if window is not None:window.close()
-                        app.quit()
                 QTimer.singleShot(0,inspect)
+                def timeout():
+                    if any(x.isVisible() for x in app.topLevelWidgets() if isinstance(x,QMainWindow)):
+                        failures.append(TimeoutError('GUI shutdown did not complete'))
+                    app.quit()
+                QTimer.singleShot(15000,timeout)
                 with patch('autoadv.gui.AutoAdvService',lambda:AutoAdvService(settings_file=settings)):
                     run_gui()
                 if failures:raise failures[0]
