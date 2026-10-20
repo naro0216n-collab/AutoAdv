@@ -44,7 +44,6 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source: str | None = None
-        self.verified_text_gap = False
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
               available_sources: tuple[str, ...] = ()) -> int:
@@ -77,7 +76,6 @@ class Controller:
         self.pending_speakers.clear()
         self.ocr_blank = False
         self.active_text_source = None
-        self.verified_text_gap = False
         self.reason = reason
 
     def observe(self, *, generation: str, connection: int, sequence: int,
@@ -107,19 +105,15 @@ class Controller:
             return None
         identity = matched[0].identity
         if not text.strip():
-            if identity == self.active_text_source and self.sent:
-                self.verified_text_gap = True
             return None
         if self.active_text_source is None:
             # Once chosen, another source cannot silently replace the line owner.
             self.active_text_source = identity
         if identity != self.active_text_source:
             return None
-        boundary = self.verified_text_gap
-        self.verified_text_gap = False
         return self._accept_line(sequence=sequence, text=text, origin=identity,
                                  side_speaker=self._paired_speaker(matched[0].identity, sequence, received_ns),
-                                 verified_boundary=boundary)
+                                 verified_boundary=False)
 
     def _paired_speaker(self, text_source: str, sequence: int, received_ns: int) -> str:
         if not self.profile:
@@ -163,11 +157,6 @@ class Controller:
                 if self.profile.repeat_rule != 'each_after_input':
                     self.pause('ambiguous_identical_line')
                     return None
-            elif text.startswith(old.raw):
-                # The tail of a progressively rendered line is not a fresh line.
-                # After input we cannot safely decide whether the hook advanced.
-                self.pause('ambiguous_partial_after_input')
-                return None
         self.line_no += 1
         self.pending_speakers.clear()
         self.utterance = interpret(text, self.profile, session=self.session,

@@ -1,0 +1,70 @@
+#include "engine64/Godot.h"
+#include "engine64/V8.h"
+#include "engine64/AGES7.h"
+#include "engine64/Artemis.h"
+#include "engine64/KiriKiri.h"
+#include "engine64/YOX.h"
+#include "engine64/Suika2.h"
+#include "engine64/livecaptions.h"
+#include "engine64/CMVS.h"
+#include "engine64/5pb.h"
+#include "engine64/CAPCOM.h"
+#include "engine64/Chunsoft.h"
+#include "engine64/THLabyrinth3.h"
+#include "engine64/lucasystem.h"
+#include "engine64/WillPlus.h"
+#include "engine64/UnrealEngine.h"
+#include "engine64/TYPEMOON.h"
+#include "engine64/GameMaker.h"
+#include "engine64/Kincaid.h"
+#include "engine64/BGI.h"
+#include "engine64/LightVN.h"
+#include "engine64/MKXPZ.h"
+#include "engines/unity/unity.h"
+#include "engines/lua/lua51.h"
+#include "engines/python/Renpy.h"
+#include "emulators/ppsspp.h"
+#include "emulators/yuzu.h"
+#include "emulators/Ryujinx.h"
+#include "emulators/vita3k.h"
+#include "emulators/rpcs3.h"
+#include "emulators/PCSX2.h"
+#include "engine64/sakanagl.h"
+std::vector<ENGINE *> check_engines()
+{
+    return {
+        new Godot,
+        new V8,
+        new Renpy,
+        new Unity,
+        new yuzu,
+        new Ryujinx,
+        new PPSSPPWindows,
+        new vita3k,
+        new rpcs3,
+        new PCSX2,
+        new livecaptions,
+        new Suika2,
+        new lucasystem,
+        new LightVN,
+        new Artemis,
+        new KiriKiri,
+        new YOX,
+        new CMVS,
+        new AGES7,
+        new _5pb,
+        new TYPEMOON,
+        new UnrealEngine,
+        new Kincaid,
+        new lua51,
+        new MKXPZ,
+        new BGI,
+        new GameMaker,
+        new Chunsoft,
+        new sakanagl,
+        new WillPlus,
+        new THLabyrinth3,
+        new CAPCOM,
+        new _5pb_2,
+    };
+}

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .conversation import Controller, Target, Token
 from .hook_host import HookHost
+from .luna_runtime import runtime_dir, adopted_runtime, RELEASE
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
 from .model import AudioMode, HookSelection, Profile, StructureRule, ReplacementRule
@@ -93,11 +94,11 @@ def run_gui() -> int:
                 return form
             environment = group('Common environment')
             self.irodori_path = QLineEdit(self.catalog.irodori_root)
-            self.dll_path = QLineEdit(self.catalog.host_dll)
+            self.luna_runtime_status = QLabel(f'{RELEASE}: {runtime_dir()}')
             self.irodori_url = QLineEdit(self.catalog.irodori_url)
             environment.addRow('Installed Irodori folder', self.irodori_path)
             environment.addRow('Irodori URL', self.irodori_url)
-            environment.addRow('LunaHost64.dll / LunaHost32.dll (matching Host Python bitness)', self.dll_path)
+            environment.addRow('Adopted Luna runtime (fixed, not downloaded on launch)', self.luna_runtime_status)
             self.btn_server = QPushButton('Connect / start Irodori and read Voices')
             environment.addRow(self.btn_server)
             self.btn_server.clicked.connect(self.start_server)
@@ -331,9 +332,15 @@ def run_gui() -> int:
             self.reading_ms.setRange(0, 600000)
             self.reading_ms.setValue(1200)
             speech.addRow('Reading time (ms)', self.reading_ms)
-            self.settle_ms = QSpinBox()
-            self.settle_ms.setRange(0, 10000)
-            speech.addRow('HOOK text update settling (ms)', self.settle_ms)
+            self.hook_flush = QSpinBox()
+            self.hook_flush.setRange(0, 10000)
+            speech.addRow('Luna HOOK flush delay (ms)', self.hook_flush)
+            self.hook_codepage = QSpinBox()
+            self.hook_codepage.setRange(1, 65535)
+            speech.addRow('Luna HOOK codepage', self.hook_codepage)
+            self.hook_buffer = QSpinBox()
+            self.hook_buffer.setRange(1, 1000000)
+            speech.addRow('Luna HOOK max buffer (characters)', self.hook_buffer)
             self.input_key = QSpinBox()
             self.input_key.setRange(1, 254)
             speech.addRow('Advance virtual key code', self.input_key)
@@ -386,7 +393,6 @@ def run_gui() -> int:
         def persist(self):
             self.catalog.irodori_root = self.irodori_path.text().strip()
             self.catalog.irodori_url = self.irodori_url.text().strip()
-            self.catalog.host_dll = self.dll_path.text().strip()
             save(self.catalog)
 
         def fill_games(self):
@@ -426,7 +432,9 @@ def run_gui() -> int:
             self.default_mode.setCurrentText(profile.default_mode.value)
             self.default_voice.setEditText(profile.default_voice)
             self.reading_ms.setValue(profile.reading_ms)
-            self.settle_ms.setValue(profile.settle_ms)
+            self.hook_flush.setValue(profile.hook_flush_ms)
+            self.hook_codepage.setValue(profile.hook_codepage)
+            self.hook_buffer.setValue(profile.hook_max_buffer)
             self.input_key.setValue(profile.input_key)
             self.repeat.setCurrentText(profile.repeat_rule)
             self.source_mode.setCurrentText(profile.source)
@@ -480,7 +488,9 @@ def run_gui() -> int:
                 updated.default_mode = AudioMode(self.default_mode.currentText())
                 updated.default_voice = self.default_voice.currentText().strip()
                 updated.reading_ms = self.reading_ms.value()
-                updated.settle_ms = self.settle_ms.value()
+                updated.hook_flush_ms = self.hook_flush.value()
+                updated.hook_codepage = self.hook_codepage.value()
+                updated.hook_max_buffer = self.hook_buffer.value()
                 updated.input_key = self.input_key.value()
                 updated.repeat_rule = self.repeat.currentText()
                 updated.validate()
@@ -754,9 +764,9 @@ def run_gui() -> int:
                 self.hook_host.close()
             self.host_generation = ''
             self.clear_hook_observations()
-            self.hook_host = HookHost(Path(self.catalog.host_dll),
-                                      self.bridge.hook.emit, self.bridge.closed.emit)
             try:
+                runtime = adopted_runtime()
+                self.hook_host = HookHost(runtime.host, self.bridge.hook.emit, self.bridge.closed.emit)
                 self.hook_host.start()
                 self.host_status.setText('LunaHook Host: launched')
             except Exception as exc:
@@ -807,6 +817,11 @@ def run_gui() -> int:
                 self.note('Start LunaHook Host first')
                 return
             try:
+                p = self.current_profile()
+                if p is None:
+                    raise ValueError('select a game and profile')
+                self.hook_host.command('settings', flush_ms=p.hook_flush_ms,
+                    codepage=p.hook_codepage, max_buffer=p.hook_max_buffer, max_history=p.hook_max_history)
                 self.hook_host.command('connect', pid=self.pid.value())
                 self.note('Hook injection requested; wait for connected event')
             except Exception as exc:
@@ -1157,8 +1172,8 @@ def run_gui() -> int:
             if not u:
                 return
             self.preview.setPlainText(f'Original: {u.raw}\nSpeaker: {u.speaker}\nText: {u.text}\nReading: {u.reading}\nMatch: {u.match_text}\nRoute: {u.mode.value}; Voice: {u.voice}')
-            settling = self.controller.profile.settle_ms
-            QTimer.singleShot(settling, lambda t=token: self.present(t) if self.controller.token == t else None)
+            # Luna emits an already-flushed sentence; do not reimplement a second flush timer.
+            self.present(token)
             self.refresh_status()
 
         def present(self, token: Token):

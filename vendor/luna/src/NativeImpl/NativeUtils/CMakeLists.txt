@@ -1,0 +1,85 @@
+include(libmecab.cmake)
+include(FetchContent)
+
+FetchContent_Declare(md4c
+    GIT_REPOSITORY https://github.com/mity/md4c
+    GIT_TAG release-0.5.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_Declare(tiny-aes 
+    GIT_REPOSITORY https://github.com/kokke/tiny-AES-c
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_Declare(rapidfuzz 
+    GIT_REPOSITORY https://github.com/rapidfuzz/rapidfuzz-cpp 
+    GIT_TAG main
+    GIT_SHALLOW TRUE
+)
+option(BUILD_MD2HTML_EXECUTABLE "Whether to compile the md2html executable" OFF)
+FetchContent_MakeAvailable(tiny-aes rapidfuzz md4c)
+
+add_library(md4c-all INTERFACE)
+target_include_directories(md4c-all INTERFACE ${md4c_SOURCE_DIR}/src)
+target_link_libraries(md4c-all INTERFACE md4c md4c-html)
+
+aux_source_directory(loopbackaudio loopbackaudio)
+aux_source_directory(winrt winrt)
+add_subdirectory(webview)
+add_subdirectory(bass)
+add_library(NativeUtils SHARED
+    memory.cpp
+    devices.cpp
+    dllanalysis.cpp
+    globalmessagelistener.cpp AreoAcrylic.cpp screenshot.cpp hwnd.cpp theme.cpp lnk.cpp muteprocess.cpp sapi_dll.cpp tools.cpp icon.cpp adapters.cpp winutils.cpp
+    ${loopbackaudio} ${winrt} ${versioninfo}
+)
+target_precompile_headers(NativeUtils REUSE_FROM pch)
+target_link_libraries(NativeUtils PRIVATE 
+                    pdh 
+                    Mpr
+                    Psapi
+                    tiny-aes 
+                    Dbghelp 
+                    libmecab 
+                    rapidfuzz 
+                    bassimp 
+                    libbass 
+                    webview 
+                    mfuuid 
+                    md4c-all 
+                    dwmapi 
+                    d3d11 
+                    version 
+                    iphlpapi
+                    Mfplat 
+                    DXGI 
+                    Msimg32
+                    setupapi
+                    delayimp
+                    ${YY_Thunks}
+                    magic_enum
+)
+
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:Dbghelp.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:SETUPAPI.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:MSIMG32.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:pdh.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:GDI32.dll")
+if(NOT WINXP)
+    target_link_libraries(NativeUtils PRIVATE ShCore)
+    target_link_libraries(NativeUtils PRIVATE Mmdevapi)
+endif()
+
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:IPHLPAPI.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:MMDevAPI.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:MFPlat.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:dxgi.dll")
+target_link_options(NativeUtils PRIVATE "/DELAYLOAD:d3d11.dll")
+
+if(WIN10ABOVE)
+	target_link_libraries(NativeUtils PRIVATE windowsapp)
+endif()
+
+add_subdirectory(needprotobuf)
+target_link_libraries(NativeUtils PRIVATE needprotobuf)

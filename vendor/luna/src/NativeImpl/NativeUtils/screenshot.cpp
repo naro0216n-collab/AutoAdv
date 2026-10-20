@@ -1,0 +1,450 @@
+#include "bmpx.hpp"
+
+HBITMAP GetBitmap(RECT &rect, HDC hDC)
+{
+    HDC hMemDC;
+    HBITMAP hBitmap, hOldBitmap;
+
+    hMemDC = CreateCompatibleDC(hDC);
+    hBitmap = CreateCompatibleBitmap(hDC, rect.right - rect.left, rect.bottom - rect.top);
+    hOldBitmap = (HBITMAP)SelectObject(hMemDC, hBitmap);
+
+    BitBlt(hMemDC, 0, 0, rect.right - rect.left, rect.bottom - rect.top, hDC, rect.left, rect.top, SRCCOPY);
+
+    hBitmap = (HBITMAP)SelectObject(hMemDC, hOldBitmap);
+
+    DeleteDC(hMemDC);
+
+    return hBitmap;
+}
+namespace
+{
+    bool checkempty(HWND hwnd, RECT &rect)
+    {
+        if (rect.bottom != rect.top && rect.left != rect.right)
+            return false;
+        if (rect.top != -1 || rect.left != -1)
+            return true;
+        if (!hwnd)
+            return true;
+        if (!GetClientRect(hwnd, &rect))
+            return true;
+        return rect.bottom == rect.top || rect.left == rect.right;
+    }
+}
+extern HWND globalmessagehwnd;
+std::optional<SimpleBMP> parseBMP(std::optional<SimpleBMP> &&bmp, bool needcheck = false)
+{
+    if (!bmp)
+        return {};
+    if (needcheck)
+    {
+        if (std::all_of(bmp.value().pixels,
+                        bmp.value().pixels + bmp.value().pixelsize,
+                        [](unsigned char c)
+                        { return c == 0 || c == 255; }))
+        {
+            return {};
+        }
+    }
+    return std::move(bmp);
+}
+std::optional<SimpleBMP> __gdi_screenshot(HWND hwnd, RECT rect)
+{
+    if (checkempty(hwnd, rect))
+        return {};
+    bool needcheck = hwnd;
+    if (!hwnd)
+    {
+        hwnd = GetDesktopWindow();
+    }
+    else
+    {
+        auto dpi = GetDpiForWindow(hwnd); // 链接到yythunks里的实现也是一样的
+        auto thisdpi = GetDpiForWindow(globalmessagehwnd);
+        rect.bottom = MulDiv(rect.bottom, dpi, thisdpi);
+        rect.right = MulDiv(rect.right, dpi, thisdpi);
+        rect.left = MulDiv(rect.left, dpi, thisdpi);
+        rect.top = MulDiv(rect.top, dpi, thisdpi);
+    }
+    auto hdc = GetDC(hwnd);
+    if (!hdc)
+        return {};
+    auto bm = GetBitmap(rect, hdc);
+    ReleaseDC(hwnd, hdc);
+    return parseBMP(CreateBMP(bm, false), needcheck);
+}
+DECLARE_API void GdiGrabWindow(HWND hwnd, void (*cb)(byte *, size_t))
+{
+    RECT rect{-1, -1, -1, -1};
+    auto bf = __gdi_screenshot(hwnd, rect);
+    if (bf)
+        cb(bf.value().data.get(), bf.value().size);
+}
+DECLARE_API bool GdiCropImage(HWND hwnd, int x1, int y1, int x2, int y2, void (*cb)(byte *, size_t), int curr = -1)
+{
+    if (x1 == x2 || y1 == y2)
+        return false;
+    RECT rect;
+    rect.left = x1;
+    rect.top = y1;
+    rect.right = x2;
+    rect.bottom = y2;
+    for (int i = 0; i < 2; i++)
+    {
+        // curr >= 0：只执行指定的一次（0 = HWND，1 = 桌面），由调用方
+        // 决定何时落桌面（落桌面前先隐藏自己的窗口）；-1 = 自动兜底
+        if (curr != -1 && i != curr)
+            continue;
+        switch (i)
+        {
+        case 0:
+        {
+            if (!hwnd)
+                continue;
+            if (IsIconic(hwnd))
+                return false;
+            RECT r;
+            if (!GetWindowRect(hwnd, &r))
+                continue;
+            POINT p1{rect.left, rect.top}, p2{rect.right, rect.bottom};
+            if (!ScreenToClient(hwnd, &p1))
+                continue;
+            if (!ScreenToClient(hwnd, &p2))
+                continue;
+            RECT check{0, 0, r.right - r.left, r.bottom - r.top};
+            if (!(PtInRect(&check, p1) && PtInRect(&check, p2)))
+                continue;
+            RECT r2{p1.x, p1.y, p2.x, p2.y};
+            auto bf = __gdi_screenshot(hwnd, r2);
+            if (bf)
+            {
+                cb(bf.value().data.get(), bf.value().size);
+                return true;
+            }
+        }
+        break;
+        case 1:
+        {
+            auto bf = __gdi_screenshot(NULL, rect);
+            if (bf)
+            {
+                cb(bf.value().data.get(), bf.value().size);
+                return !hwnd;
+            }
+        }
+        }
+    }
+    return false;
+}
+
+DECLARE_API float GetDevicePixelRatioF(HWND hwnd)
+{
+    return 1.0f * GetDpiForWindow(hwnd) / USER_DEFAULT_SCREEN_DPI;
+}
+namespace
+{
+    struct SoleOpaqueWindowParam
+    {
+        int x1, y1, x2, y2;
+        DWORD exclude_pid;
+        HWND result;
+    };
+
+    bool IsWindowCloaked(HWND hwnd)
+    {
+        // DWMWA_CLOAKED 仅 Vista+；XP 无 dwmapi，动态取，失败视为未 cloak
+        static auto pDwmGetWindowAttribute = (BOOL(WINAPI *)(HWND, DWORD, PVOID, DWORD))GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmGetWindowAttribute");
+        if (!pDwmGetWindowAttribute)
+            return false;
+        DWORD cloaked = 0;
+        return pDwmGetWindowAttribute(hwnd, 14 /*DWMWA_CLOAKED*/, &cloaked, sizeof(cloaked)) == S_OK && cloaked;
+    }
+}
+
+DECLARE_API HWND FindSoleOpaqueWindow(int x1, int y1, int x2, int y2, DWORD exclude_pid)
+{
+    // 选区可见内容所属的唯一窗口：按 Z 序自顶向下找第一个与选区真实
+    // 相交的未过滤窗口——它完全覆盖选区则返回它（其下的窗口都被它挡
+    // 住，不可见，单窗口截图不失真）；只覆盖选区一部分（可见内容是多
+    // 窗口的合成）返回 NULL。过滤：不可见/最小化/exclude_pid（本程序
+    // ——覆盖层/范围框/主窗口要"看穿"）/桌面（Progman、WorkerW，覆盖
+    // 整个屏幕永远算数会误判）/cloak（挂起的 UWP 等）/点击穿透/分层
+    // 半透明。无相交窗口返回 NULL。
+    SoleOpaqueWindowParam param{x1, y1, x2, y2, exclude_pid, NULL};
+    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL
+                {
+        auto &param = *(SoleOpaqueWindowParam *)lParam;
+        if (!IsWindowVisible(hwnd))
+            return TRUE;
+        if (IsIconic(hwnd))
+            return TRUE;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == param.exclude_pid)
+            return TRUE;
+        wchar_t clsname[32];
+        if (GetClassNameW(hwnd, clsname, 32) &&
+            (!wcscmp(clsname, L"Progman") || !wcscmp(clsname, L"WorkerW")))
+            return TRUE; // 桌面壁纸/图标层
+        if (IsWindowCloaked(hwnd))
+            return TRUE;
+        auto exstyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        if (exstyle & WS_EX_TRANSPARENT)
+            return TRUE; // 点击穿透的悬浮层，可见内容在其下方
+        if (exstyle & WS_EX_LAYERED)
+        {
+            COLORREF cr;
+            BYTE alpha;
+            DWORD flags;
+            if (GetLayeredWindowAttributes(hwnd, &cr, &alpha, &flags) && alpha < 255)
+                return TRUE; // 半透明窗口
+        }
+        RECT r;
+        if (!GetWindowRect(hwnd, &r))
+            return TRUE;
+        if (std::max((int)r.left, param.x1) < std::min((int)r.right, param.x2) &&
+            std::max((int)r.top, param.y1) < std::min((int)r.bottom, param.y2))
+        {
+            // 完全覆盖判定用客户区：GetDC(hwnd) 截图只含客户区内容
+            // （GdiCropImage 的 PtInRect 校验的也是客户区坐标），选区压在
+            // 标题栏/边框上时 hwnd 截图必失败，不如当作不可指定
+            POINT tl{};
+            RECT cr;
+            if (!ClientToScreen(hwnd, &tl) || !GetClientRect(hwnd, &cr))
+                return TRUE;
+            // 第一个（最上层）相交者：完全覆盖 → 唯一可见来源；
+            // 部分覆盖 → 选区是合成画面，停止并放弃
+            if (tl.x <= param.x1 && tl.y <= param.y1 &&
+                tl.x + (int)cr.right >= param.x2 && tl.y + (int)cr.bottom >= param.y2)
+                param.result = hwnd;
+            return FALSE;
+        }
+        return TRUE; },
+                (LPARAM)&param);
+    return param.result;
+}
+std::pair<HWND, WNDCLASS> CreateWindowForWndProc(WNDPROC WNDPROC_1, HWND parent, int x, int y, int, int h, HCURSOR cursor, DWORD style, DWORD exstyle);
+namespace
+{
+    HDC hMemDCBitmapmask;
+    HDC hMemDCBitmap;
+    HBITMAP g_hScreenBitmap = NULL;
+    HBITMAP g_hScreenBitmapmask = NULL;
+    HBITMAP g_hMemBitmap = NULL; // 用于双缓冲的内存位图
+    HDC g_hMemDC = NULL;         // 用于双缓冲的内存DC
+    POINT g_startPoint = {0, 0};
+    POINT g_endPoint = {0, 0};
+    BOOL g_isSelecting = FALSE;
+    float ocrselectalpha;
+    float ocrrangewidth;
+    int range_r;
+    int range_g;
+    int range_b;
+    typedef void (*callback_t)(int x1, int y1, int x2, int y2, int xoff, int yoff, byte *, size_t);
+    callback_t callback;
+}
+static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+static std::atomic<bool> onlyonewindow = false;
+DECLARE_API void CreateSelectRangeWindow(HWND parent, float _ocrselectalpha, int _range_r, int _range_g, int _range_b, float _ocrrangewidth, callback_t _callback)
+{
+    {
+        bool _ = false;
+        if (!onlyonewindow.compare_exchange_strong(_, true))
+            return;
+    }
+    /*
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    由于它的存在，Qt方无法正常创建截图窗口。
+    */
+    callback = _callback;
+    ocrrangewidth = _ocrrangewidth;
+    ocrselectalpha = _ocrselectalpha;
+    range_r = _range_r;
+    range_g = _range_g;
+    range_b = _range_b;
+    g_hMemBitmap = NULL; // 用于双缓冲的内存位图
+    g_hMemDC = NULL;     // 用于双缓冲的内存DC
+    g_startPoint = {0, 0};
+    g_endPoint = {0, 0};
+    g_isSelecting = FALSE;
+
+    int screenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+    HDC hScreenDC = GetDC(NULL);
+    hMemDCBitmap = CreateCompatibleDC(hScreenDC);
+    g_hScreenBitmap = CreateCompatibleBitmap(hScreenDC, screenWidth, screenHeight);
+    SelectObject(hMemDCBitmap, g_hScreenBitmap);
+    BitBlt(hMemDCBitmap, 0, 0, screenWidth, screenHeight, hScreenDC, screenX, screenY, SRCCOPY);
+
+    hMemDCBitmapmask = CreateCompatibleDC(hScreenDC);
+    g_hScreenBitmapmask = CreateCompatibleBitmap(hScreenDC, screenWidth, screenHeight);
+    SelectObject(hMemDCBitmapmask, g_hScreenBitmapmask);
+    BitBlt(hMemDCBitmapmask, 0, 0, screenWidth, screenHeight, hMemDCBitmap, 0, 0, SRCCOPY);
+
+    BLENDFUNCTION blendFunction = {0};
+    blendFunction.BlendOp = AC_SRC_OVER;
+    blendFunction.BlendFlags = 0;
+    blendFunction.SourceConstantAlpha = 255 * ocrselectalpha; // 设置全局透明度为 128 (约50%)
+    blendFunction.AlphaFormat = 0;                            // 使用 SourceConstantAlpha
+
+    // 创建一个临时的黑色位图用于混合
+    HDC hdcBlack = CreateCompatibleDC(hMemDCBitmapmask);
+    HBITMAP hbmBlack = CreateCompatibleBitmap(hMemDCBitmapmask, 1, 1); // 1x1像素就够了
+    SelectObject(hdcBlack, hbmBlack);
+    SetBkColor(hdcBlack, RGB(0, 0, 0));                          // 设置背景为黑色
+    ExtTextOut(hdcBlack, 0, 0, ETO_OPAQUE, NULL, NULL, 0, NULL); // 填充这个1x1像素
+
+    // 将这个1x1的黑色位图拉伸并半透明地混合到整个内存DC上
+    StretchBlt(hdcBlack, 0, 0, screenWidth, screenHeight, hdcBlack, 0, 0, 1, 1, SRCCOPY);
+    AlphaBlend(hMemDCBitmapmask, 0, 0, screenWidth, screenHeight, hdcBlack, 0, 0, 1, 1, blendFunction);
+
+    DeleteObject(hbmBlack);
+    DeleteDC(hdcBlack);
+
+    ReleaseDC(NULL, hScreenDC);
+    auto &&[hwnd, _] = CreateWindowForWndProc(WindowProc, parent, screenX, screenY, screenWidth, screenHeight, LoadCursor(NULL, IDC_CROSS), WS_POPUP, WS_EX_TOPMOST | WS_EX_NOACTIVATE);
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg = {}; // 必须这里加上事件循环，否则会直接PostQuitMessage(0)会退出Qt的事件循环然后退出程序。
+    while (GetMessage(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    onlyonewindow = false;
+}
+
+static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg)
+    {
+    case WM_CREATE:
+    {
+        // 为双缓冲创建内存DC和位图
+        HDC hdc = GetDC(hwnd);
+        g_hMemDC = CreateCompatibleDC(hdc);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        g_hMemBitmap = CreateCompatibleBitmap(hdc, rc.right - rc.left, rc.bottom - rc.top);
+        SelectObject(g_hMemDC, g_hMemBitmap);
+        ReleaseDC(hwnd, hdc);
+    }
+    break;
+
+    case WM_DESTROY:
+    {
+        // 清理GDI资源
+        DeleteObject(g_hScreenBitmapmask);
+        DeleteObject(g_hScreenBitmap);
+        DeleteObject(g_hMemBitmap);
+        DeleteDC(g_hMemDC);
+        DeleteDC(hMemDCBitmapmask);
+        DeleteDC(hMemDCBitmap);
+        PostQuitMessage(0);
+    }
+    break;
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        RECT clientRect;
+        GetClientRect(hwnd, &clientRect);
+        int width = clientRect.right - clientRect.left;
+        int height = clientRect.bottom - clientRect.top;
+
+        BitBlt(g_hMemDC, clientRect.left, clientRect.top, width, height, hMemDCBitmapmask, 0, 0, SRCCOPY);
+
+        if (g_isSelecting)
+        {
+            int r_left = std::min(g_startPoint.x, g_endPoint.x);
+            int r_top = std::min(g_startPoint.y, g_endPoint.y);
+            int r_right = std::max(g_startPoint.x, g_endPoint.x);
+            int r_bottom = std::max(g_startPoint.y, g_endPoint.y);
+            int r_width = r_right - r_left;
+            int r_height = r_bottom - r_top;
+            auto scale = GetDevicePixelRatioF(hwnd);
+            int r = (int)std::lround(scale * ocrrangewidth);
+            if (r < 1)
+                r = 1;
+            RECT frame{r_left - r, r_top - r, r_right + r, r_bottom + r};
+            HBRUSH hFrameBrush = CreateSolidBrush(RGB(range_r, range_g, range_b));
+            FillRect(g_hMemDC, &frame, hFrameBrush);
+            DeleteObject(hFrameBrush);
+
+            BitBlt(g_hMemDC, r_left, r_top, r_width, r_height, hMemDCBitmap, r_left, r_top, SRCCOPY);
+        }
+
+        BitBlt(hdc, 0, 0, width, height, g_hMemDC, 0, 0, SRCCOPY);
+
+        EndPaint(hwnd, &ps);
+    }
+    break;
+
+    case WM_LBUTTONDOWN:
+    {
+        g_startPoint.x = LOWORD(lParam);
+        g_startPoint.y = HIWORD(lParam);
+        g_endPoint = g_startPoint;
+        g_isSelecting = TRUE;
+        SetCapture(hwnd);
+    }
+    break;
+
+    case WM_MOUSEMOVE:
+    {
+        if (g_isSelecting)
+        {
+            g_endPoint.x = LOWORD(lParam);
+            g_endPoint.y = HIWORD(lParam);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+    }
+    break;
+
+    case WM_LBUTTONUP:
+    {
+        if (g_isSelecting)
+        {
+            if ((g_endPoint.x == g_startPoint.x) || (g_endPoint.y == g_startPoint.y))
+            {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            auto &&bmp = CreateBMP(g_hScreenBitmap, false).value_or(SimpleBMP{});
+            RECT rect;
+            GetWindowRect(hwnd, &rect);
+            ReleaseCapture();
+            DestroyWindow(hwnd);
+            callback(g_startPoint.x, g_startPoint.y, g_endPoint.x, g_endPoint.y, rect.left, rect.top, bmp.data.get(), bmp.size);
+        }
+    }
+    break;
+
+    case WM_RBUTTONUP:
+    {
+        DestroyWindow(hwnd);
+    }
+    break;
+    case WM_KEYDOWN:
+    {
+        if (wParam == VK_ESCAPE)
+        {
+            DestroyWindow(hwnd);
+        }
+    }
+    break;
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+    return 0;
+}

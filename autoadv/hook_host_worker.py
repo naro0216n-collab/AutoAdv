@@ -1,8 +1,4 @@
-"""Subprocess owning LunaHost.dll; NDJSON IPC, never controller or input.
-
-Injection uses the pinned upstream Host implementation, enabled in the
-verifiable build copy. Collision with another Host stops before pipe creation.
-"""
+"""Isolated upstream LunaHost/Hook subprocess. Never controls game input."""
 from __future__ import annotations
 import argparse
 import ctypes
@@ -12,6 +8,7 @@ import time
 import threading
 import uuid
 from pathlib import Path
+from .luna_runtime import LunaRuntime, inject
 from .luna_abi import (ThreadParam,SearchParam,PROCESS,CREATE,THREAD,OUTPUT,INFO,
                        INSERT,EMBED,I18N,EMU,FIND,HISTORY,load_exports,validate_abi)
 
@@ -27,6 +24,8 @@ class NativeHost:
         self.managed=set()
         self.find_callbacks=[]
         self.dll_path=dll_path
+        self.runtime = LunaRuntime(dll_path.parent)
+        self.runtime.verify()
         if sys.platform!='win32':raise OSError('LunaHost requires Windows')
         validate_abi()
         if not dll_path.is_file():raise FileNotFoundError(dll_path)
@@ -63,7 +62,7 @@ class NativeHost:
             EMU(lambda game,title,version:self.emit('emulator',text=game,detail=json.dumps({'title':title,'version':version},ensure_ascii=False))),
         ]
         self.dll.Luna_Start(*self.callbacks)
-        self.dll.Luna_Settings(500,932,3000,100000,False)
+        self.dll.Luna_Settings(500,932,3000,1000000,False)
         self.emit('diagnostic',detail='native_host_ready')
 
     def _connected(self,pid):
@@ -81,7 +80,14 @@ class NativeHost:
     def command(self,message):
         action=message.get('action')
         pid=message.get('pid')
-        if action=='connect':
+        if action=='settings':
+            values = tuple(message[key] for key in ('flush_ms', 'codepage', 'max_buffer', 'max_history'))
+            if (any(type(v) is not int for v in values) or not 0 <= values[0] <= 10000
+                    or not 1 <= values[1] <= 65535 or not 1 <= values[2] <= 1000000
+                    or not 1 <= values[3] <= 10000000):
+                raise ValueError('invalid Luna text thread settings')
+            self.dll.Luna_Settings(*values, False)
+        elif action=='connect':
             if type(pid) is not int or pid<=0:raise ValueError('positive pid required')
             if pid in self.managed:
                 raise ValueError('PID already managed')
@@ -92,8 +98,14 @@ class NativeHost:
                 return True
             self.connection_generation+=1
             self.managed.add(pid)
-            self.dll.Luna_ConnectAndInjectProcess(pid)
-            self.emit('diagnostic',pid=pid,detail='native_injection_requested')
+            self.dll.Luna_ConnectProcess(pid)
+            try:
+                inject(pid, self.runtime)
+            except Exception:
+                self.managed.discard(pid)
+                self.connection_generation += 1
+                raise
+            self.emit('diagnostic',pid=pid,detail='upstream_injection_requested')
         elif action=='detach':
             if type(pid) is not int or pid<=0:raise ValueError('positive pid required')
             # Detach only a connection that this Host actually observed.

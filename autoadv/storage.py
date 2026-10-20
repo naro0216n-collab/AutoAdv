@@ -74,6 +74,8 @@ def _profile_payload(p: Profile) -> dict:
                 source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
                 asr_model=p.asr_model, asr_tokens=p.asr_tokens, native_wait_ms=p.native_wait_ms,
                 reading_ms=p.reading_ms, settle_ms=p.settle_ms,
+                hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
+                hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
                 repeat_rule=p.repeat_rule, input_key=p.input_key)
 
 
@@ -103,6 +105,8 @@ def _read_profile(raw: dict) -> Profile:
                 native_helper=raw.get('native_helper', ''), asr_model=raw.get('asr_model', ''),
                 asr_tokens=raw.get('asr_tokens', ''), native_wait_ms=raw.get('native_wait_ms', 1200),
                 reading_ms=int(raw.get('reading_ms', 1200)), settle_ms=int(raw.get('settle_ms', 180)),
+                hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
+                hook_max_buffer=int(raw.get('hook_max_buffer', 3000)), hook_max_history=int(raw.get('hook_max_history', 1000000)),
                 repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))
     if not p.id or not p.name or p.reading_ms < 0 or p.settle_ms < 0:
         raise ValueError('invalid stored profile')

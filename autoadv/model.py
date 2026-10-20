@@ -109,6 +109,10 @@ class Profile:
     name_readings: dict[str, str] = field(default_factory=dict)
     reading_ms: int = 1200
     settle_ms: int = 180
+    hook_flush_ms: int = 500
+    hook_codepage: int = 932
+    hook_max_buffer: int = 3000
+    hook_max_history: int = 1000000
     repeat_rule: str = 'distinct_only'
     input_key: int = 13
     source: str = 'hook'
@@ -121,6 +125,9 @@ class Profile:
     def validate(self) -> None:
         if not self.id or not self.name or self.reading_ms < 0 or self.settle_ms < 0:
             raise ValueError('invalid profile')
+        if (not 0 <= self.hook_flush_ms <= 10000 or not 1 <= self.hook_codepage <= 65535
+                or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
+            raise ValueError('invalid Luna capture settings')
         if self.repeat_rule not in ('distinct_only', 'each_after_input') or not 1 <= self.input_key <= 254:
             raise ValueError('invalid advancement settings')
         if len(self.hooks) != len({(h.code, h.context, h.context2) for h in self.hooks}):

@@ -1,0 +1,689 @@
+import json
+import os
+import time
+import uuid
+import re
+import gobject
+from traceback import print_exc
+from language import Languages
+import shutil
+import copy
+from gobject import (
+    runtime_for_xp,
+    runtime_for_win10,
+    runtime_bit_64,
+    GetDllpath,
+    sys_win10_release_supported,
+)
+
+
+def relpath(path):
+    try:
+        # https://bugs.python.org/issue36689
+        # commonpath在低版本上不能跨盘比较
+        if os.path.commonpath((os.getcwd(), path)) == os.getcwd():
+            return os.path.relpath(path)
+    except:
+        pass
+    return os.path.normpath(path)
+
+
+def mayberelpath(path):
+    p = relpath(path)
+    if os.path.exists(p):
+        return p
+    return path
+
+
+def tryreadconfig(path, default=None):
+    path = gobject.getconfig(path)
+    try:
+        with open(path, "r", encoding="utf-8") as ff:
+            return json.load(ff)
+    except:
+        return default if default else {}
+
+
+def tryreadconfig_1(path, default=None, pathold=None):
+    try:
+        if not pathold:
+            raise Exception()
+        pathold = gobject.getconfig(pathold)
+        with open(pathold, "r", encoding="utf-8") as ff:
+            old = json.load(ff)
+        os.remove(pathold)
+        return old
+    except:
+        return tryreadconfig(path, default)
+
+
+def tryreadconfig2(path):
+    path = os.path.join("LunaTranslator/defaultconfig", path)
+    with open(path, "r", encoding="utf-8") as ff:
+        x = json.load(ff)
+    return x
+
+
+ui_settings: "dict[str, dict[str, str|dict|list] | list[str|dict] | str]" = tryreadconfig("ui_settings.json")
+static_data: "dict[str, dict[str, str|dict|list] | list[str|dict] | str]" = (
+    tryreadconfig2("static_data.json")
+)
+defaultpost = tryreadconfig2("postprocessconfig.json")
+defaultglobalconfig = tryreadconfig2("config.json")
+defaulterrorfix = tryreadconfig2("transerrorfixdictconfig.json")
+dfmagpie_config = tryreadconfig2("Magpie/config.json")
+translatordfsetting = tryreadconfig2("translatorsetting.json")
+ocrdfsetting = tryreadconfig2("ocrsetting.json")
+ocrerrorfixdefault = tryreadconfig2("ocrerrorfix.json")
+
+ocrerrorfix = tryreadconfig("ocrerrorfix.json")
+globalconfig: "dict[str, dict[str, str|dict|list] | list[str|dict] | str]" = (
+    tryreadconfig("config.json")
+)
+magpie_config = tryreadconfig_1("Magpie/config.json", pathold="magpie_config.json")
+postprocessconfig = tryreadconfig("postprocessconfig.json")
+
+transerrorfixdictconfig = tryreadconfig("transerrorfixdictconfig.json")
+_savehook = tryreadconfig("savegamedata_5.3.1.json")
+if _savehook:
+    # 新版
+    # savehook_new_list: [uid,...]
+    # savehook_new_data:{uid:dict,...}
+    # savegametaged:[ None, {'games':[uid,...],'title':str,'opened':bool,'uid':str},...]
+    # gamepath2uid:{gamepath:uid}
+    savehook_new_list: list = _savehook[0]
+    savehook_new_data: "dict[str, dict]" = _savehook[1]
+    savegametaged = _savehook[2]
+    # gamepath2uid = _savehook[3] 不再使用，允许重复的path
+
+else:
+
+    _savehook = tryreadconfig("savehook_new_1.39.4.json", default=[[], {}])
+
+    # savehook_new_list: [gamepath,...]
+    # savehook_new_data:{gamepath:dict,...}
+    # savegametaged: 可能没有该项 [ None, {'games':[gamepath,...],'title':str,'opened':bool,'uid':str},...]
+    try:
+        savehook_new_list = _savehook[0]
+        savehook_new_data = _savehook[1]
+    except:
+        savehook_new_list = []
+        savehook_new_data = {}
+
+    try:
+        savegametaged = _savehook[2]
+    except:
+        savegametaged = [None]
+    # 将savehook_new_data转换为新的格式
+    __gamepath2uid = {}
+    __savehook_new_data = {}
+    for k in savehook_new_data:
+        uid = "{}_{}".format(time.time(), uuid.uuid4())
+
+        __savehook_new_data[uid] = savehook_new_data[k]
+        __savehook_new_data[uid].update(gamepath=k)
+        __gamepath2uid[k] = uid
+    savehook_new_data = __savehook_new_data
+
+    # 将global游戏表和自定义子列表都转换成新格式
+    def parselist(ls):
+        for i in range(len(ls)):
+            ori = ls[i]
+            if ori not in __gamepath2uid:
+                continue
+            ls[i] = __gamepath2uid[ori]
+
+    parselist(savehook_new_list)
+    for sub in savegametaged:
+        if sub is None:
+            continue
+        parselist(sub["games"])
+
+if None not in savegametaged:
+    savegametaged.append(None)
+if 1 not in savegametaged:
+    savegametaged.append(1)
+
+try:
+    extradatas = _savehook[4]
+except:
+    extradatas = {}
+translatorsetting = tryreadconfig("translatorsetting.json")
+ocrsetting = tryreadconfig("ocrsetting.json")
+
+if "localedpath" not in extradatas:
+    extradatas["localedpath"] = {}
+if "imagefrom" not in extradatas:
+    extradatas["imagefrom"] = {}
+
+
+def getdefaultsavehook(title=None):
+    default = {
+        "gamepath": "",  # 不要直接访问，要通过uid2gamepath来间接访问
+        # "launchpath": "",
+        # "hooksetting_follow_default": True,
+        # "embed_follow_default": True,
+        "embed_setting_private": {},
+        "hooksetting_private": {},  # 显示时再加载，缺省用global中的键
+        # "textproc_follow_default": True,
+        "save_text_process_info": {
+            "postprocessconfig": {},
+            "rank": [],
+            # "mypost":# 设置时再加载
+        },
+        # "lang_follow_default": True,
+        # "private_srclang_2": 0,# 显示时再加载，缺省用global中的键
+        # "private_tgtlang_2": 0,
+        # "onloadautochangemode2": 0,
+        # "embedablehook": [],
+        # "statistic_wordcount": 0,
+        # "hook": [],
+        # "inserthooktimeout": 500,
+        # "insertpchooks_string": False,
+        # "needinserthookcode": [],
+        # "removeforeverhook": [],
+        # "tts_follow_default": True,
+        # "tts_repair": False,
+        # "tts_repair_regex": [{"regex": True, "key": "(.*?)「", "value": ""}],
+        # "tts_skip": False,
+        # "transoptimi_followdefault": True,
+        # "tts_skip_regex": [],
+        # "gamejsonfile": [],  # 之前是"",后面改成[]
+        # "gamesqlitefile": "",
+        # "istitlesetted": False,
+        # "currentvisimage": None,
+        # "currentmainimage": "",
+        # "currenticon": "",
+        # "noundictconfig_ex": [],
+        # "noundict_use": False,
+        # "noundict_merge": False,
+        # "vndbnamemap_use": True,
+        # "vndbnamemap_merge": False,
+        # "transerrorfix_use": False,
+        # "transerrorfix_merge": False,
+        # "transerrorfix": [],
+        # 元数据
+        # "namemap2": [],
+        # "namemap": {},  # 人名翻译映射，vndb独占，用于优化翻译
+        #
+        # "vid": 0,
+        # "bgmsid": 0,
+        # "dlsiteid": "RJ/VJXXXX",
+        # "steamid": 0,
+        "title": "",
+        # "imagepath_all": [],
+        "developers": [],
+        "webtags": [],  # 标签
+        # "createtime":xx  添加时间
+    }
+    if title and len(title):
+        default["title"] = title  # metadata
+
+    return default
+
+
+_dfsavehook = getdefaultsavehook("")
+for gameconfig in savehook_new_data.values():
+
+    for __k, __v in _dfsavehook.items():
+        if __k not in gameconfig:
+            if isinstance(__v, (list, dict)):
+                __v = copy.deepcopy(__v)
+            gameconfig[__k] = __v
+
+
+class __uid2gamepath:
+    def __setitem__(self, uid, value):
+
+        savehook_new_data[uid]["gamepath"] = value
+
+    def __getitem__(self, uid):
+        return savehook_new_data.get(uid, {}).get("gamepath", None)
+
+
+uid2gamepath = __uid2gamepath()
+
+# 建立索引，当游戏特别多的时候，节省时间
+gamepath2uid_index: "dict[str, list[str]]" = {}
+for uid in savehook_new_data:
+    _p = os.path.abspath(savehook_new_data[uid]["gamepath"])
+    if _p not in gamepath2uid_index:
+        gamepath2uid_index[_p] = []
+    gamepath2uid_index[_p].append(uid)
+
+
+def get_launchpath(uid) -> str:
+    launch = savehook_new_data[uid].get("launchpath", "")
+    if not launch:
+        launch = uid2gamepath[uid]
+    return launch
+
+
+def findgameuidofpath(gamepath, findall=False):
+    if not gamepath:
+        # getpidexe在部分情况下可能为None，导致崩溃
+        if findall:
+            return []
+        else:
+            return None, None
+    gamepath = os.path.normpath(gamepath)
+    uids = gamepath2uid_index.get(gamepath, [])
+    if findall:
+        return uids
+    collect = []
+    for sub in savegametaged:
+        if sub == 1:
+            continue
+        if sub is None:
+            use = savehook_new_list
+        else:
+            use = sub["games"]
+        minidx = len(use)
+        minuid = None
+        for uid in uids:
+            if uid in use:
+                idx = use.index(uid)
+                if minidx > idx:
+                    minidx = idx
+                    minuid = uid
+        if minuid:
+            return minuid, use
+    if findall:
+        return collect
+    else:
+        return None, None
+
+
+def findgameuidofemugame(gameid, findall=False):
+    uids = []
+    for uid in savehook_new_data:
+        if gameid == savehook_new_data[uid].get("emugameid"):
+            uids.append(uid)
+    if findall:
+        return uids
+    collect = []
+    for sub in savegametaged:
+        if sub == 1:
+            continue
+        if sub is None:
+            use = savehook_new_list
+        else:
+            use = sub["games"]
+        minidx = len(use)
+        minuid = None
+        for uid in uids:
+            if uid in use:
+                idx = use.index(uid)
+                if minidx > idx:
+                    minidx = idx
+                    minuid = uid
+        if minuid:
+            return minuid, use
+    if findall:
+        return collect
+    else:
+        return None, None
+
+
+def syncconfig(config1, default, drop=False, deep=0):
+
+    for key in default:
+        if key not in config1:
+            config1[key] = default[key]
+
+        elif key in ("name", "tip", "argstype", "type"):
+            config1[key] = default[key]
+        elif key == "args":
+            _nuse = []
+            for k in default[key]:
+                if k not in config1[key]:
+                    config1[key][k] = default[key][k]
+            for k in config1[key]:
+                if k not in default[key]:
+                    _nuse.append(k)
+            for k in _nuse:
+                config1[key].pop(k)
+
+        else:
+            if type(default[key]) != type(config1[key]) and (
+                type(default[key]) == dict or type(default[key]) == list
+            ):
+                config1[key] = default[key]
+            elif type(default[key]) == dict:
+                syncconfig(config1[key], default[key], drop, deep - 1)
+
+    if isinstance(config1, dict) and isinstance(default, dict):
+        for key in ("name", "tip", "argstype", "args"):
+            if key in config1 and key not in default:
+                config1.pop(key)
+    if drop and deep > 0:
+        for key in list(config1.keys()):
+            if key not in default:
+                config1.pop(key)
+
+
+syncconfig(globalconfig, defaultglobalconfig)
+syncconfig(transerrorfixdictconfig, defaulterrorfix)
+
+syncconfig(magpie_config, dfmagpie_config)
+for profile in magpie_config["profiles"]:
+    syncconfig(
+        profile,
+        dfmagpie_config["profiles"][0],
+    )
+syncconfig(translatorsetting, translatordfsetting)
+
+syncconfig(ocrsetting, ocrdfsetting)
+syncconfig(ocrerrorfix, ocrerrorfixdefault)
+syncconfig(postprocessconfig, defaultpost, deep=3)
+
+
+def _checkcpsetting(_d):
+    if "codepage_index" in _d:
+        _d["codepage_value"] = static_data["codepage_real"][_d.pop("codepage_index")]
+
+
+_checkcpsetting(globalconfig)
+for _ in savehook_new_data.values():
+    _checkcpsetting(_.get("hooksetting_private", {}))
+
+for key in defaultglobalconfig["toolbutton"]["buttons"]:
+    if key not in globalconfig["toolbutton"]["rank2"]:
+        globalconfig["toolbutton"]["rank2"].append(key)
+___ = []
+for key in globalconfig["toolbutton"]["rank2"]:
+    if key not in defaultglobalconfig["toolbutton"]["buttons"]:
+        ___.append(key)
+for key in ___:
+    globalconfig["toolbutton"]["rank2"].remove(key)
+
+
+def migrate_ui_settings():
+    for k in (
+        "dialog_savegame_layout",
+        "transparent_pic",
+        "backtransparent",
+        "transparent_EX",
+        "transparent",
+        "transparent_tool",
+        "backgroundpic",
+        "backcolor",
+        "backcolor_tool",
+        "darklight2",
+        "button_color_normal",
+        "buttoncolor_1",
+        "buttoncolor",
+        "buttonsize",
+        "yuanjiao_r",
+        "yuanjiao_sys",
+        "WindowEffect",
+        "WindowEffect_shadow",
+        "text_area_background",
+        "text_area_background_color",
+        "text_area_background_alpha",
+        "text_area_background_r",
+        "text_area_background_w",
+        "text_area_background_h",
+
+        "WordViewTooltipColor",
+        "WordViewTooltipContentColor",
+        "WordViewTooltipHideFocus",
+        "WordViewTooltipHideLeave",
+        "WordViewTooltipRadius",
+        "WordViewTooltipRadiusSys",
+        "WordViewTooltipBorder",
+        "WordViewTooltipDWM",
+        "WordViewTooltipDWM_1",
+        "word_hover_bg_color",
+        "word_hover_text_color",
+        "word_hover_border_R",
+        "word_hover_border_R_SYS",
+        "word_hover_border",
+        "word_hover_DWM",
+        "word_hover_DWM_1",
+        "min_auto_height",
+
+    ):
+        if k in globalconfig:
+            ui_settings[k] = globalconfig.pop(k)
+    if "dialog_savegame_layout" not in ui_settings:
+        ui_settings["dialog_savegame_layout"] = {}
+
+
+migrate_ui_settings()
+
+language_last = None
+
+languageshow = {}
+
+
+def getlanguse() -> Languages:
+    return Languages.fromcode(globalconfig["languageuse2"])
+
+
+def langfile(lang) -> str:
+    return "files/lang/{}.json".format(lang)
+
+
+def loadlanguage():
+    global language_last, languageshow
+    _language = getlanguse()
+    if _language == language_last:
+        return
+    language_last = _language
+    try:
+        with open(langfile(_language), "r", encoding="utf8") as ff:
+            languageshow = json.load(ff)
+    except:
+        languageshow = {}
+
+
+def __parsenottr(match: re.Match):
+    return "{}{}{}".format(_TR(match.group(1)), match.group(2), _TR(match.group(3)))
+
+
+def __partagA(match: re.Match):
+    return "{}{}{}".format(match.group(1), _TR(match.group(2)), match.group(3))
+
+
+def ___TR(k: str) -> str:
+    if "\n" in k:
+        return "\n".join(_TR(k.split("\n")))
+    if not k:
+        return ""
+    if k == "√":
+        return k
+    if "[[" in k and "]]" in k:
+        return re.sub(r"(.*)\[\[(.*?)\]\](.*)", __parsenottr, k)
+    if k.startswith("(") and k.endswith(")"):
+        return "(" + ___TR(k[1:-1]) + ")"
+    if k.startswith("<a") and k.endswith("</a>"):
+        return re.sub("(<a.*?>)(.*?)(</a>)", __partagA, k)
+    if "_" in k:
+        fnd = k.find("_")
+        return ___TR(k[:fnd]) + " " + ___TR(k[fnd + 1 :])
+    if k.isascii():
+        return k
+    loadlanguage()
+    __ = languageshow.get(k)
+    if __:
+        return __
+    languageshow[k] = ""
+    return k
+
+
+def _TR(k: "str | list[str]") -> "str | list[str]":
+    if isinstance(k, str):
+        return ___TR(k)
+    return [___TR(_) for _ in k]
+
+
+def unsafesave(fname: str, js, beatiful=True):
+    # 有时保存时意外退出，会导致config文件被清空
+
+    js = json.dumps(
+        js, ensure_ascii=False, sort_keys=False, indent=4 if beatiful else None
+    )
+    with open(fname + ".tmp", "w", encoding="utf-8") as ff:
+        ff.write(js)
+    os.replace(fname + ".tmp", fname)
+
+
+def safesave(errorcollect: list, *argc, **kw):
+    try:
+        unsafesave(*argc, **kw)
+    except Exception as e:
+        errorcollect.append((e, argc[0]))
+        print_exc()
+
+
+_is_config_saving = False
+
+
+def saveallconfig(test=False):
+    # 保存过程中直接忽略其他保存请求
+    global _is_config_saving
+    if _is_config_saving:
+        return
+    _is_config_saving = True
+    errorcollect = []
+    safesave(errorcollect, gobject.getconfig("config.json"), globalconfig)
+    safesave(errorcollect, gobject.getconfig("ui_settings.json"), ui_settings)
+    safesave(
+        errorcollect, gobject.getconfig("postprocessconfig.json"), postprocessconfig
+    )
+    safesave(
+        errorcollect,
+        gobject.getconfig("transerrorfixdictconfig.json"),
+        transerrorfixdictconfig,
+    )
+    safesave(
+        errorcollect, gobject.getconfig("translatorsetting.json"), translatorsetting
+    )
+    safesave(errorcollect, gobject.getconfig("ocrerrorfix.json"), ocrerrorfix)
+    safesave(errorcollect, gobject.getconfig("ocrsetting.json"), ocrsetting)
+    safesave(
+        errorcollect,
+        gobject.getconfig("savegamedata_5.3.1.json"),
+        [savehook_new_list, savehook_new_data, savegametaged, None, extradatas],
+        beatiful=False,
+    )
+    safesave(errorcollect, gobject.getconfig("Magpie/config.json"), magpie_config)
+    if not test:
+        safesave(errorcollect, "files/lang/{}.json".format(getlanguse()), languageshow)
+    _is_config_saving = False
+    return errorcollect
+
+
+def dynamicapiname(apiuid):
+    my = globalconfig["fanyi"][apiuid].get("name_self_set")
+    if my:
+        return my
+    return _TR(globalconfig["fanyi"][apiuid]["name"])
+
+
+def getcopyfrom(uid):
+    xx = uid
+    while True:
+        cp = globalconfig["fanyi"].get(xx, {}).get("copyfrom")
+        if not cp:
+            return xx
+        xx = cp
+
+
+def copyllmapi(fanyi, newname=None, uid=None, args: dict = None, use=False):
+    if not uid:
+        uid = str(uuid.uuid4())
+    if not (uid in globalconfig["fanyi"]):
+        _f11 = "Lunatranslator/translator/{}.py".format(fanyi)
+        _f12 = gobject.getconfig("copyed/{}.py".format(fanyi))
+        _f2 = gobject.getconfig("copyed/{}.py".format(uid))
+        try:
+            shutil.copy(_f11, _f2)
+        except:
+            shutil.copy(_f12, _f2)
+        copyfrom = getcopyfrom(fanyi)
+        globalconfig["fanyi"][uid] = copy.deepcopy(globalconfig["fanyi"][fanyi])
+        globalconfig["fanyi"][uid]["copyfrom"] = copyfrom
+        globalconfig["fanyi"][uid]["use"] = use
+        globalconfig["fanyi"][uid]["type"] = globalconfig["fanyi"][fanyi]["type"]
+        if fanyi in translatorsetting:
+            translatorsetting[uid] = copy.deepcopy(translatorsetting[fanyi])
+    globalconfig["fanyi"][uid]["name"] = (
+        newname if newname else (dynamicapiname(fanyi) + "_copy")
+    )
+    if "name_self_set" in globalconfig["fanyi"][uid]:
+        globalconfig["fanyi"][uid].pop("name_self_set")
+    if args:
+        for k in translatorsetting[uid]["args"]:
+            if not (k in args):
+                continue
+            translatorsetting[uid]["args"][k] = args[k]
+    return uid
+
+
+def urlpathjoin(*argc: str):
+    urlx = []
+    for i, u in enumerate(argc):
+        if u.startswith("/") and i != 0:
+            u = u[1:]
+        if u.endswith("/") and i != len(argc) - 1:
+            u = u[:-1]
+        urlx.append(u)
+    return "/".join(urlx)
+
+
+def dynamiclink(text: str = "", docs=False) -> str:
+    base = static_data[("main_server", "docs_server")[docs]][
+        [gobject.serverindex, gobject.serverindex2][docs]
+    ]
+    _ = [base, text]
+    if docs:
+        _.insert(1, str(getlanguse()))
+    return urlpathjoin(*_)
+
+
+def checkintegrity():
+
+    if runtime_for_win10 and not sys_win10_release_supported:
+        return 1, _TR("软件当前版本需要 Windows 10 1803 及以上。请使用软件的其他版本。")
+    dll3264 = [
+        "NativeUtils.dll",
+        "onnxruntime.dll" if not runtime_for_xp else None,
+        "DirectML.dll" if runtime_for_win10 else None,
+        "CVUtils.dll",
+        "bass.dll",
+        "bass_spx.dll",
+        "bass_aac.dll",
+    ]
+
+    dll3264.append(("libcurl.dll", "libcurl-x64.dll")[runtime_bit_64])
+
+    flist = []
+    for f in dll3264:
+        if f:
+            flist.append(GetDllpath(f))
+
+    dllshared = [
+        "LunaHook/" + ("LunaHost32.dll", "LunaHost64.dll")[runtime_bit_64],
+        "LunaSubProcess32.exe",
+        "LunaSubProcess64.exe",
+        "Magpie/Magpie.Core.exe" if not runtime_for_xp else None,
+        "LunaHook/LunaHook32.dll",
+        "LunaHook/LunaHook64.dll",
+        "LunaHook/LunaTmpFontLoader.dll",
+    ]
+    for f in dllshared:
+        if f:
+            flist.append("files/" + f)
+    collect = []
+    for f in flist:
+        if not os.path.exists(f):
+            collect.append(os.path.normpath(os.path.abspath(f)))
+    if len(collect):
+        return 1, _TR(
+            "找不到重要组件：\n{modules}\n请重新下载并关闭杀毒软件后重试"
+        ).format(modules="\n".join(collect)) + '\n<a href="{}">{}</a>'.format(
+            dynamiclink("README.html#anchor-commonerrors", docs=True), _TR("说明")
+        )
+    return None

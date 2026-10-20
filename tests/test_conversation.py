@@ -168,24 +168,40 @@ class HookBoundaryContractTests(unittest.TestCase):
         self.assertTrue(self.controller.try_advance())
         return token
 
-    def test_late_prefix_after_input_does_not_advance_again(self):
+    def test_luna_finalized_outputs_replace_prefix_guessing(self):
         before = self.sent_line('あ')
-        self.assertIsNone(self.out('あい', 2))
-        self.assertEqual(self.controller.token, before)
-        self.assertEqual(self.controller.reason, 'ambiguous_partial_after_input')
-        self.assertFalse(self.controller.authorized)
-        self.assertIsNone(self.out('あいう', 3))
-        self.assertEqual(len(self.sent), 1)
-
-    def test_explicit_empty_notification_distinguishes_identical_new_line(self):
-        first = self.sent_line('同じ')
-        self.assertIsNone(self.out('', 2))
-        second = self.out('同じ', 3)
-        self.assertNotEqual(first, second)
+        # Luna has already flushed the buffer; a new notification is not
+        # classified solely by a string prefix relationship.
+        after = self.out('あい', 2)
+        self.assertNotEqual(before, after)
         self.assertFalse(self.controller.completed)
-        self.controller.mark_complete(second)
+        self.assertTrue(self.controller.authorized)
+        self.assertTrue(self.controller.mark_complete(after))
         self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
+
+    def test_empty_hook_notification_does_not_invent_boundary(self):
+        first = self.sent_line('同じ')
+        self.assertIsNone(self.out('', 2))
+        self.assertIsNone(self.out('同じ', 3))
+        self.assertEqual(first, self.controller.token)
+        self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
+        self.assertFalse(self.controller.authorized)
+
+    def test_same_text_as_two_flushed_lines_when_configured(self):
+        p = profile()
+        p.repeat_rule = 'each_after_input'
+        self.controller.begin(p, Target(101, 202), 'host-b', 2)
+        self.controller.permit(True)
+        first = self.controller.observe(generation='host-b', connection=2, sequence=1,
+                                        source=SOURCE, text='同じ', pid=101)
+        self.assertTrue(self.controller.mark_complete(first))
+        self.assertTrue(self.controller.try_advance())
+        second = self.controller.observe(generation='host-b', connection=2, sequence=2,
+                                         source=SOURCE, text='同じ', pid=101)
+        self.assertNotEqual(first, second)
+        self.assertTrue(self.controller.mark_complete(second))
+        self.assertTrue(self.controller.try_advance())
 
     def test_source_gap_does_not_come_from_unselected_hook(self):
         before = self.sent_line('同じ')
