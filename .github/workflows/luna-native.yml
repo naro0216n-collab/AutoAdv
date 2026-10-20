@@ -50,7 +50,7 @@ jobs:
 
   native-build:
     name: Windows x86 and x64 native build
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 60
     needs: pinned-source
     strategy:
