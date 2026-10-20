@@ -42,9 +42,12 @@ class Controller:
         self.line_no = 0
         self.pending_speaker: tuple[str, int] | None = None
         self.awaiting_next = False
+        self.ocr_blank = False
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
         profile.validate()
+        if profile.source == 'hook' and not any(h.role == 'text' for h in profile.hooks):
+            raise ValueError('select at least one text HOOK to monitor')
         if not host_generation or connection_generation <= 0:
             raise ValueError('Host connection must be identified')
         self.close('session_changed')
@@ -65,11 +68,12 @@ class Controller:
         self.authorized = self.completed = self.sent = False
         self.awaiting_next = False
         self.pending_speaker = None
+        self.ocr_blank = False
         self.reason = reason
 
     def observe(self, *, generation: str, connection: int, sequence: int,
                 source: object, text: str, pid: int) -> Token | None:
-        if not self.profile or not self.target:
+        if not self.profile or not self.target or self.profile.source != 'hook':
             return None
         if pid != self.target.pid:
             return None
@@ -90,19 +94,41 @@ class Controller:
             return None
         if not text.strip():
             return None
-        old = self.utterance
-        if old and old.raw == text and not self.sent:
+        return self._accept_line(sequence=sequence, text=text, origin=getattr(source, 'identity', ''), side_speaker=self._paired_speaker(sequence))
+
+    def _paired_speaker(self, sequence: int) -> str:
+        return (self.pending_speaker[0] if self.pending_speaker and
+                self.pending_speaker[1] == sequence - 1 else '')
+
+    def observe_ocr(self, *, sequence: int, text: str, pid: int, session: int) -> Token | None:
+        if (not self.profile or self.profile.source != 'ocr' or not self.target
+                or pid != self.target.pid or session != self.session
+                or sequence <= self.highest_sequence):
             return None
-        if old and self.sent and text == old.raw and self.profile.repeat_rule == 'distinct_only':
+        self.highest_sequence = sequence
+        if not text.strip():
+            self.ocr_blank = True
+            return None
+        if self.utterance and text == self.utterance.raw and not self.ocr_blank:
+            return None
+        had_blank = self.ocr_blank
+        self.ocr_blank = False
+        return self._accept_line(sequence=sequence, text=text, origin='ocr', side_speaker='', verified_boundary=had_blank)
+
+    def _accept_line(self, *, sequence: int, text: str, origin: str, side_speaker: str,
+                     verified_boundary: bool = False) -> Token | None:
+        old = self.utterance
+        if old and old.raw == text and not self.sent and not verified_boundary:
+            return None
+        if (old and self.sent and text == old.raw and self.profile.repeat_rule == 'distinct_only'
+                and not verified_boundary):
             self.reason = 'ambiguous_identical_line'
             return None
         self.line_no += 1
-        paired = (self.pending_speaker[0] if self.pending_speaker
-                  and self.pending_speaker[1] == sequence - 1 else '')
         self.pending_speaker = None
         self.utterance = interpret(text, self.profile, session=self.session,
-                                   line=self.line_no, source=getattr(source, 'identity', ''),
-                                   sequence=sequence, side_speaker=paired)
+                                   line=self.line_no, source=origin,
+                                   sequence=sequence, side_speaker=side_speaker)
         self.completed = False
         self.sent = False
         self.awaiting_next = False

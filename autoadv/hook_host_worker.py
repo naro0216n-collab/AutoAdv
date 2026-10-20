@@ -127,7 +127,7 @@ class NativeHost:
             for field,value in parameters.items():
                 setattr(sp,field,value)
             def found(code,sample):
-                self.emit('hook_found',pid=pid,code=code,text=sample)
+                self.emit('hook_found',pid=pid,text=sample,detail=code)
             cb=FIND(found)
             self.find_callbacks.append(cb)  # Native search may finish asynchronously.
             self.dll.Luna_FindHooks(pid,sp,cb,message.get('addresses',''))

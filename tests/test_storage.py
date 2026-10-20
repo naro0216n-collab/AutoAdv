@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from autoadv.model import AudioMode, HookSelection
+from autoadv.model import AudioMode, HookSelection, ReplacementRule
 from autoadv.storage import Catalog, load, save
 
 
@@ -17,7 +17,7 @@ class SettingsContract(unittest.TestCase):
             p.hooks = [HookSelection('HX', 1, 2, 'text'), HookSelection('HY', 5, 6, 'speaker')]
             p.speaker_modes = {'大和': AudioMode.TTS}
             p.speaker_voices = {'大和': 'voice-m'}
-            p.replacements = {'京': 'みやこ'}
+            p.replacements = [ReplacementRule('東京', 'とうきょう')]
             a.default_profile = p.id
             save(c, path)
             restored = load(path)
@@ -26,7 +26,7 @@ class SettingsContract(unittest.TestCase):
             self.assertEqual(q.hooks, p.hooks)
             self.assertEqual(q.speaker_modes['大和'], AudioMode.TTS)
             self.assertEqual(q.speaker_voices['大和'], 'voice-m')
-            self.assertEqual(q.replacements['京'], 'みやこ')
+            self.assertEqual(q.replacements, p.replacements)
             self.assertNotIn('pid', path.read_text(encoding='utf-8'))
 
     def test_unrecognized_old_settings_are_not_overwritten(self):

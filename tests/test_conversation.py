@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from autoadv.conversation import Controller, Target, Token
-from autoadv.model import Profile, HookSelection, AudioMode, interpret
+from autoadv.model import Profile, HookSelection, AudioMode, interpret, ReplacementRule
 
 
 SOURCE = SimpleNamespace(hook_code='H/A', context=3, context2=4, identity='H/A|3|4')
@@ -130,7 +130,7 @@ class DialogueContractTests(unittest.TestCase):
         p = profile()
         p.default_mode = AudioMode.TTS
         p.default_voice = 'narrator'
-        p.replacements = {'東京': 'とうきょう'}
+        p.replacements = [ReplacementRule('東京', 'とうきょう')]
         p.speaker_modes = {'京': AudioMode.READING}
         result = interpret('京「東京へ行く(いく)」', p, session=2, line=3, source='x', sequence=6)
         self.assertEqual(result.reading, 'とうきょうへ行く(いく)')
