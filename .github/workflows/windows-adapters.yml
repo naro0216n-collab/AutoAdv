@@ -36,4 +36,4 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Validate Windows adapter imports
         run: |
-          python -c "import numpy,cv2,mss,pytesseract,webrtcvad,sherpa_onnx,sounddevice,psutil; from autoadv.live import LiveConfig; print('Windows adapter imports OK')"
+          python -c "import numpy,cv2,mss,webrtcvad,sherpa_onnx,sounddevice,psutil; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.live import LiveConfig; print('Windows adapter imports OK')"
