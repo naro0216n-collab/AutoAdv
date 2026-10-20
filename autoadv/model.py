@@ -108,27 +108,29 @@ class Profile:
     replacements: list[ReplacementRule] = field(default_factory=list)
     name_readings: dict[str, str] = field(default_factory=dict)
     reading_ms: int = 1200
-    settle_ms: int = 180
     hook_flush_ms: int = 500
     hook_codepage: int = 932
     hook_max_buffer: int = 3000
     hook_max_history: int = 1000000
     repeat_rule: str = 'distinct_only'
     input_key: int = 13
+    next_line_timeout_ms: int = 8000
     source: str = 'hook'
     ocr: OCRSettings = field(default_factory=OCRSettings)
     native_helper: str = ''
     asr_model: str = ''
     asr_tokens: str = ''
+    native_vad_only: bool = False
     native_wait_ms: int = 1200
 
     def validate(self) -> None:
-        if not self.id or not self.name or self.reading_ms < 0 or self.settle_ms < 0:
+        if not self.id or not self.name or self.reading_ms < 0:
             raise ValueError('invalid profile')
         if (not 0 <= self.hook_flush_ms <= 10000 or not 1 <= self.hook_codepage <= 65535
                 or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
             raise ValueError('invalid Luna capture settings')
-        if self.repeat_rule not in ('distinct_only', 'each_after_input') or not 1 <= self.input_key <= 254:
+        if (self.repeat_rule not in ('distinct_only', 'each_after_input') or not 1 <= self.input_key <= 254
+                or not 1000 <= self.next_line_timeout_ms <= 120000):
             raise ValueError('invalid advancement settings')
         if len(self.hooks) != len({(h.code, h.context, h.context2) for h in self.hooks}):
             raise ValueError('one HOOK cannot have multiple conflicting roles')
@@ -142,6 +144,8 @@ class Profile:
             raise ValueError('invalid manual HOOK')
         if any(not k or not v for k, v in self.name_readings.items()):
             raise ValueError('invalid name reading')
+        if type(self.native_vad_only) is not bool:
+            raise ValueError('invalid native voice evidence setting')
         if self.native_wait_ms < 0:
             raise ValueError('invalid native wait')
         self.ocr.validate()

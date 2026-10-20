@@ -80,6 +80,11 @@ def run_gui() -> int:
             self.native_started = False
             self.auto_tts_started = False
             self._known_game_pid = None
+            self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
+            self._output_group: list[HookEvent] = []
+            self._output_timer = QTimer(self)
+            self._output_timer.setSingleShot(True)
+            self._output_timer.timeout.connect(self.flush_selected_outputs)
             scroller = QScrollArea()
             scroller.setWidgetResizable(True)
             self.setCentralWidget(scroller)
@@ -350,9 +355,14 @@ def run_gui() -> int:
             self.native_wait = QSpinBox()
             self.native_wait.setRange(0, 20000)
             speech.addRow('Process audio helper DLL (native/auto only)', self.native_helper)
+            self.native_vad_only = QCheckBox('Native voice-only game audio: allow VAD without ASR (cannot identify BGM)')
+            speech.addRow(self.native_vad_only)
             speech.addRow('Japanese ASR model (native/auto only)', self.asr_model)
             speech.addRow('ASR tokens', self.asr_tokens)
             speech.addRow('Auto fallback wait (ms)', self.native_wait)
+            self.next_line_timeout = QSpinBox()
+            self.next_line_timeout.setRange(1000, 120000)
+            speech.addRow('Next line wait limit (ms)', self.next_line_timeout)
             self.repeat = QComboBox()
             self.repeat.addItems(['distinct_only', 'each_after_input'])
             speech.addRow('HOOK repeated-line behavior', self.repeat)
@@ -444,7 +454,9 @@ def run_gui() -> int:
             self.native_helper.setText(profile.native_helper)
             self.asr_model.setText(profile.asr_model)
             self.asr_tokens.setText(profile.asr_tokens)
+            self.native_vad_only.setChecked(profile.native_vad_only)
             self.native_wait.setValue(profile.native_wait_ms)
+            self.next_line_timeout.setValue(profile.next_line_timeout_ms)
             self.refresh_rules()
             self.refresh_selected_hooks()
             self.refresh_speaker_choices()
@@ -484,7 +496,9 @@ def run_gui() -> int:
                 updated.native_helper = self.native_helper.text().strip()
                 updated.asr_model = self.asr_model.text().strip()
                 updated.asr_tokens = self.asr_tokens.text().strip()
+                updated.native_vad_only = self.native_vad_only.isChecked()
                 updated.native_wait_ms = self.native_wait.value()
+                updated.next_line_timeout_ms = self.next_line_timeout.value()
                 updated.default_mode = AudioMode(self.default_mode.currentText())
                 updated.default_voice = self.default_voice.currentText().strip()
                 updated.reading_ms = self.reading_ms.value()
@@ -983,16 +997,29 @@ def run_gui() -> int:
                     self.sources[key] = source
                 self.update_candidate(source, event.text if event.kind == 'output' else None)
                 self.refresh_hook_connection()
+            if event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value():
+                self.sync_hook_threads()
             if event.kind == 'output' and event.source:
                 if (event.process_id == self.pid.value() and event.source.identity not in self.ambiguous_sources
                         and event.host_generation == self.host_generation
                         and event.connection_generation == self.connection_generation):
-                    result = self.controller.observe(generation=event.host_generation,
-                        connection=event.connection_generation, sequence=event.sequence,
-                        source=event.source, text=event.text, pid=event.process_id or 0,
-                        received_ns=event.received_ns)
-                    if result and self.controller.utterance:
-                        self.display_utterance(result)
+                    selected = self.controller.profile.hooks if self.controller.profile else ()
+                    if len(selected) > 1 and any(h.matches(event.source) for h in selected):
+                        # Luna's Python multi-HOOK collector groups already-flushed
+                        # outputs; it does not re-flush or reconstruct raw bytes.
+                        self._output_group.append(event)
+                        if len(self._output_group) >= 32:
+                            self._output_timer.stop()
+                            self.flush_selected_outputs()
+                        else:
+                            self._output_timer.start(max(10, min(100, self.controller.profile.hook_flush_ms)))
+                    else:
+                        result = self.controller.observe(generation=event.host_generation,
+                            connection=event.connection_generation, sequence=event.sequence,
+                            source=event.source, text=event.text, pid=event.process_id or 0,
+                            received_ns=event.received_ns)
+                        if result and self.controller.utterance:
+                            self.display_utterance(result)
             if event.kind == 'diagnostic' and event.detail.startswith(('command_failed', 'injection_conflict')):
                 self.note(event.detail)
 
@@ -1072,6 +1099,7 @@ def run_gui() -> int:
                     self.controller.begin(p, Target(self.pid.value(), hwnd),
                                           self.host_generation, self.connection_generation,
                                           tuple(self.sources))
+                    self.sync_hook_threads()
                 if sys.platform == 'win32':
                     self.manual_monitor = WindowsManualMonitor(hwnd)
                 self.start_native_audio_if_needed(p)
@@ -1081,12 +1109,53 @@ def run_gui() -> int:
                 self.note(f'Monitor not started: {exc}')
             self.refresh_status()
 
+        def sync_hook_threads(self, *, clear: bool = False):
+            """Apply Luna's selected-thread flush synchronization, not our own."""
+            profile = None if clear else self.controller.profile
+            selected = (profile.hooks if profile and profile.source == 'hook' and
+                        len(profile.hooks) > 1 else ())
+            desired = {}
+            for source in self.sources.values():
+                if (source.process_id == self.pid.value() and
+                        source.identity not in self.ambiguous_sources and
+                        any(h.matches(source) for h in selected)):
+                    key = (source.process_id, source.address, source.context, source.context2)
+                    desired[key] = source
+            for key, source in tuple(self._synced_sources.items()):
+                if key not in desired:
+                    try:
+                        if self.hook_host:
+                            self.hook_host.command('sync_thread', source=source.__dict__, enabled=False)
+                    except (RuntimeError, OSError, ValueError):
+                        pass
+                    self._synced_sources.pop(key, None)
+            if self.hook_host:
+                for key, source in desired.items():
+                    if key not in self._synced_sources:
+                        try:
+                            self.hook_host.command('sync_thread', source=source.__dict__, enabled=True)
+                            self._synced_sources[key] = source
+                        except (RuntimeError, OSError, ValueError) as exc:
+                            self.note('Luna selected-HOOK sync unavailable: ' + str(exc))
+
+        def flush_selected_outputs(self):
+            group, self._output_group = self._output_group, []
+            if not group or not self.controller.profile:
+                return
+            result = self.controller.observe_group(group)
+            if result and self.controller.utterance:
+                self.display_utterance(result)
+            else:
+                self.refresh_status()
+
         def start_native_audio_if_needed(self, profile: Profile):
             modes = {profile.default_mode, *profile.speaker_modes.values()}
             if not modes.intersection({AudioMode.NATIVE, AudioMode.AUTO}):
                 return
-            if not (profile.native_helper and profile.asr_model and profile.asr_tokens):
-                self.note('Native/AUTO requires Process Loopback helper and ASR paths; TTS and reading remain available')
+            has_asr = bool(profile.asr_model and profile.asr_tokens)
+            vad_only = not has_asr and profile.native_vad_only and AudioMode.NATIVE in modes
+            if not profile.native_helper or not (has_asr or vad_only):
+                self.note('Native matching needs Process Loopback and ASR, or explicit VAD-only native mode; TTS/reading remain available')
                 return
             target = self.controller.target
             if not target:
@@ -1097,14 +1166,15 @@ def run_gui() -> int:
                 try:
                     native = NativeAudio(target.pid, Path(profile.native_helper),
                         Path(profile.asr_model), Path(profile.asr_tokens),
-                        lambda token, event, detail: self.bridge.native.emit(token, event, detail))
+                        lambda token, event, detail: self.bridge.native.emit(token, event, detail),
+                        vad_only=vad_only)
                     native.start()
                     self.bridge.native_ready.emit(session, native, '')
                 except Exception as exc:
                     if native:
                         native.close()
                     self.bridge.native_ready.emit(session, None, str(exc))
-            self.note('Loading native audio/ASR without blocking game UI')
+            self.note('Loading native audio capture without blocking game UI')
             threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
 
         def on_native_ready(self, session, native, reason):
@@ -1116,7 +1186,7 @@ def run_gui() -> int:
                 self.note('Native audio unavailable: ' + reason)
                 return
             self.native_audio = native
-            self.note('Native process audio and ASR ready')
+            self.note('Native process audio ready (VAD-only)' if native.vad_only else 'Native process audio and ASR ready')
             token = self.controller.token
             if (token and self.controller.utterance and not self.controller.sent and
                     not self.controller.completed and
@@ -1124,7 +1194,8 @@ def run_gui() -> int:
                 if self.native_token == token and self.controller.utterance.mode == AudioMode.AUTO:
                     # The capture worker may become ready during AUTO's fallback window.
                     # Start attribution without restarting or duplicating TTS presentation.
-                    native.begin(token, self.controller.utterance.match_text)
+                    if not native.vad_only:
+                        native.begin(token, self.controller.utterance.match_text)
                 elif self.native_token != token or self.controller.reason == 'native_audio_unavailable':
                     self.present(token)
 
@@ -1184,9 +1255,12 @@ def run_gui() -> int:
             self.native_token = token
             self.native_started = False
             self.auto_tts_started = False
+            native_ready_for_mode = bool(self.native_audio and
+                (u.mode == AudioMode.NATIVE or
+                 (u.mode == AudioMode.AUTO and not getattr(self.native_audio, 'vad_only', False))))
             if self.native_audio:
                 self.native_audio.cancel()
-                if u.mode in (AudioMode.NATIVE, AudioMode.AUTO):
+                if native_ready_for_mode:
                     self.native_audio.begin(token, u.match_text)
             if u.mode == AudioMode.READING:
                 QTimer.singleShot(self.controller.profile.reading_ms, lambda: self.complete(token, True))
@@ -1195,11 +1269,11 @@ def run_gui() -> int:
                     self.complete(token, False, 'TTS requires a Voice')
                 else:
                     self.jobs.start(token, self.catalog.irodori_url, u.reading, u.voice)
-            elif self.native_audio is None and u.mode == AudioMode.AUTO:
+            elif not native_ready_for_mode and u.mode == AudioMode.AUTO:
                 self.note('AUTO audio capture unavailable; using configured TTS fallback')
                 QTimer.singleShot(self.controller.profile.native_wait_ms, lambda t=token: self.auto_fallback(t))
-            elif self.native_audio is None:
-                self.note('Native voice requires configured audio capture and ASR; advance held')
+            elif not native_ready_for_mode:
+                self.note('Native voice requires configured audio capture and evidence; advance held')
                 self.controller.pause('native_audio_unavailable')
             elif u.mode == AudioMode.AUTO:
                 QTimer.singleShot(self.controller.profile.native_wait_ms, lambda t=token: self.auto_fallback(t))
@@ -1214,7 +1288,7 @@ def run_gui() -> int:
 
         def complete(self, token, success, reason=''):
             if self.controller.mark_complete(token, success=success):
-                self.controller.try_advance()
+                self.advance_if_ready()
             elif reason:
                 self.note(reason)
             self.refresh_status()
@@ -1249,11 +1323,23 @@ def run_gui() -> int:
             if self.native_audio:
                 self.native_audio.boundary()
 
+        def advance_if_ready(self):
+            if not self.controller.try_advance():
+                return
+            token = self.controller.token
+            timeout = self.controller.profile.next_line_timeout_ms
+            QTimer.singleShot(timeout, lambda t=token: self.expire_next_line(t))
+
+        def expire_next_line(self, token):
+            if self.controller.expire_next_line(token):
+                self.note('No next dialogue output after advance; manual control restored')
+                self.refresh_status()
+
         def permit(self):
             if self.manual_monitor:
                 self.manual_monitor.reset_after_authorization()
             self.controller.permit(True)
-            self.controller.try_advance()
+            self.advance_if_ready()
             self.refresh_status()
 
         def pause(self):
@@ -1270,6 +1356,11 @@ def run_gui() -> int:
                 self.active_hook_status.setText('Active dialogue HOOK: not monitoring')
 
         def stop_session(self):
+            if hasattr(self, '_output_timer'):
+                self._output_timer.stop()
+                self._output_group.clear()
+            if hasattr(self, '_synced_sources') and self._synced_sources:
+                self.sync_hook_threads(clear=True)
             if self.manual_monitor:
                 monitor, self.manual_monitor = self.manual_monitor, None
                 threading.Thread(target=monitor.close, daemon=True).start()
@@ -1283,6 +1374,8 @@ def run_gui() -> int:
             self.jobs.cancel()
             self.preview_jobs.cancel()
             self.controller.close('session_changed')
+            if hasattr(self, 'preview'):
+                self.preview.clear()
             if hasattr(self, 'status'):
                 self.refresh_status()
 

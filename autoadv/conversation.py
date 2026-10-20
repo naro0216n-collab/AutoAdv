@@ -2,7 +2,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from copy import deepcopy
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from .hook_protocol import HookEvent
 from .model import Profile, Utterance, interpret
 
 
@@ -79,7 +80,8 @@ class Controller:
         self.reason = reason
 
     def observe(self, *, generation: str, connection: int, sequence: int,
-                source: object, text: str, pid: int, received_ns: int = 0) -> Token | None:
+                source: object, text: str, pid: int, received_ns: int = 0,
+                paired_speaker: str | None = None) -> Token | None:
         if not self.profile or not self.target or self.profile.source != 'hook':
             return None
         if pid != self.target.pid:
@@ -112,8 +114,72 @@ class Controller:
         if identity != self.active_text_source:
             return None
         return self._accept_line(sequence=sequence, text=text, origin=identity,
-                                 side_speaker=self._paired_speaker(matched[0].identity, sequence, received_ns),
+                                 side_speaker=(paired_speaker if paired_speaker is not None else
+                                               self._paired_speaker(matched[0].identity, sequence, received_ns)),
                                  verified_boundary=False)
+
+    def observe_group(self, events: Sequence[HookEvent]) -> Token | None:
+        """Join selected Luna-flushed sources like Luna's multi-HOOK collector.
+
+        This groups *outputs*, not bytes or incremental text. Never guess a
+        pairing when a batch has multiple possible lines or speakers.
+        """
+        if not self.profile or self.profile.source != 'hook' or not events:
+            return None
+        ordered = sorted(events, key=lambda e: e.sequence)
+        if any(e.kind != 'output' or e.source is None for e in ordered):
+            return None
+        if any(e.host_generation != self.source_generation or
+               e.connection_generation != self.connection_generation for e in ordered):
+            self.pause('host_changed')
+            return None
+        if any(e.process_id != self.target.pid for e in ordered):
+            return None
+        if ordered[0].sequence <= self.highest_sequence:
+            return None
+        roles = {h.identity: h.role for h in self.profile.hooks}
+        matching = [e for e in ordered if e.source.identity in roles and e.text.strip()]
+        text_events = [e for e in matching if roles[e.source.identity] == 'text']
+        speaker_events = [e for e in matching if roles[e.source.identity] == 'speaker']
+        if len(text_events) > 1:
+            self.highest_sequence = ordered[-1].sequence
+            self.pause('ambiguous_multihook_lines')
+            return None
+        if not text_events:
+            # Persist an unambiguous speaker for a subsequent flush group.
+            if len(speaker_events) == 1:
+                e = speaker_events[0]
+                self.observe(generation=e.host_generation, connection=e.connection_generation,
+                             sequence=e.sequence, source=e.source, text=e.text,
+                             pid=e.process_id, received_ns=e.received_ns)
+            elif len(speaker_events) > 1:
+                self.pause('ambiguous_multihook_speakers')
+            self.highest_sequence = ordered[-1].sequence
+            return None
+        text_event = text_events[0]
+        selected = next((h for h in self.profile.hooks if h.matches(text_event.source)), None)
+        if selected is None:
+            return None
+        speaker_identity = self.profile.speaker_links.get(selected.identity)
+        if not speaker_identity:
+            speaker_hooks = [h.identity for h in self.profile.hooks if h.role == 'speaker']
+            speaker_identity = speaker_hooks[0] if len(speaker_hooks) == 1 else ''
+        linked = [e for e in speaker_events if e.source.identity == speaker_identity]
+        if len(linked) > 1 or (speaker_events and not speaker_identity):
+            self.highest_sequence = ordered[-1].sequence
+            self.pause('ambiguous_multihook_speakers')
+            return None
+        side_speaker = linked[0].text.strip() if linked else self._paired_speaker(
+            selected.identity, text_event.sequence, text_event.received_ns)
+        # Do not update high-water before feeding the selected dialogue output.
+        result = self.observe(generation=text_event.host_generation,
+                              connection=text_event.connection_generation,
+                              sequence=text_event.sequence, source=text_event.source,
+                              text=text_event.text, pid=text_event.process_id,
+                              received_ns=text_event.received_ns,
+                              paired_speaker=side_speaker)
+        self.highest_sequence = max(self.highest_sequence, ordered[-1].sequence)
+        return result
 
     def _paired_speaker(self, text_source: str, sequence: int, received_ns: int) -> str:
         if not self.profile:
@@ -190,6 +256,17 @@ class Controller:
     def pause(self, reason: str = 'manual_intervention') -> None:
         self.authorized = False
         self.reason = reason
+
+    def expire_next_line(self, token: Token) -> bool:
+        """Return input authority to the user after an unanswered advance.
+
+        A late response may still be displayed, but cannot reauthorize input.
+        """
+        if token != self.token or not self.sent or not self.awaiting_next:
+            return False
+        self.awaiting_next = False
+        self.pause('next_line_timeout')
+        return True
 
     def try_advance(self) -> bool:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):

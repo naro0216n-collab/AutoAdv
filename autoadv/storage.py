@@ -73,7 +73,8 @@ def _profile_payload(p: Profile) -> dict:
                 replacements=[vars(x) for x in p.replacements], name_readings=p.name_readings,
                 source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
                 asr_model=p.asr_model, asr_tokens=p.asr_tokens, native_wait_ms=p.native_wait_ms,
-                reading_ms=p.reading_ms, settle_ms=p.settle_ms,
+                native_vad_only=p.native_vad_only, next_line_timeout_ms=p.next_line_timeout_ms,
+                reading_ms=p.reading_ms,
                 hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
                 hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
                 repeat_rule=p.repeat_rule, input_key=p.input_key)
@@ -104,11 +105,13 @@ def _read_profile(raw: dict) -> Profile:
                                    'region': tuple(raw.get('ocr', {}).get('region', (0, 0, 640, 180)))}),
                 native_helper=raw.get('native_helper', ''), asr_model=raw.get('asr_model', ''),
                 asr_tokens=raw.get('asr_tokens', ''), native_wait_ms=raw.get('native_wait_ms', 1200),
-                reading_ms=int(raw.get('reading_ms', 1200)), settle_ms=int(raw.get('settle_ms', 180)),
+                native_vad_only=raw.get('native_vad_only', False),
+                next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
+                reading_ms=int(raw.get('reading_ms', 1200)),
                 hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
                 hook_max_buffer=int(raw.get('hook_max_buffer', 3000)), hook_max_history=int(raw.get('hook_max_history', 1000000)),
                 repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))
-    if not p.id or not p.name or p.reading_ms < 0 or p.settle_ms < 0:
+    if not p.id or not p.name or p.reading_ms < 0:
         raise ValueError('invalid stored profile')
     return p
 

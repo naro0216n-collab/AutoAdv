@@ -1,0 +1,3 @@
+# Official Luna upstream assets are byte-for-byte pinned; never CRLF-convert them.
+/vendor/luna/** -text
+/autoadv/luna_assets/** -text

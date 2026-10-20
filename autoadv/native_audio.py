@@ -42,11 +42,12 @@ class NativeAudio:
     """Owns one process's capture and one active line; never injects game input."""
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
-                 *, recognizer=None, activity=None, clock=None):
+                 *, recognizer=None, activity=None, clock=None, vad_only: bool = False):
         self.notify = notify
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=10000)
-        self.asr = recognizer or JapaneseASR(model, tokens)
+        self.vad_only = vad_only
+        self.asr = None if vad_only else (recognizer if recognizer is not None else JapaneseASR(model, tokens))
         self.activity = activity or VoiceActivity()
         self._lock = RLock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='autoadv-asr')
@@ -65,6 +66,7 @@ class NativeAudio:
         self._generation = 0
         self._closed = False
         self._last_vad = False
+        self._vad_voicing_since = -1
 
     def start(self):
         self._capture.start()
@@ -81,6 +83,9 @@ class NativeAudio:
             self.start_ms = self.clock()
             self.active = self.attributed = self.completed = False
             self._inference_at = -1
+            self._vad_voicing_since = -1
+            self._last_vad = False
+            self.rise_ms = -1
 
     def cancel(self):
         with self._lock:
@@ -100,6 +105,7 @@ class NativeAudio:
         except Exception as exc:
             self.notify(self.token, 'error', 'VAD failure: ' + str(exc))
             return
+        events: list[str] = []
         with self._lock:
             if self._closed:
                 return
@@ -108,14 +114,36 @@ class NativeAudio:
                     self.rise_ms = chunk.at_ms
                 self._last_vad = activity.active
             self.tail_ms = activity.tail_silence_ms
-            if (self.token is None or self._inflight or self.completed or
-                    (self._inference_at >= 0 and chunk.at_ms - self._inference_at < 500)):
-                return
-            token, generation = self.token, self._generation
-            self._inflight = True
-            self._inference_at = chunk.at_ms
-            samples = self.history.since(max(self.boundary_ms, self.start_ms - 2000))
-        self._pool.submit(self._infer, token, generation, samples)
+            if self.vad_only:
+                # Only explicitly selected NATIVE lines may use unverified
+                # acoustic evidence. Never infer native/TTS in AUTO from VAD.
+                token = self.token
+                if token is None or not activity.frames_analyzed or self.completed:
+                    return
+                if activity.active:
+                    if self._vad_voicing_since < 0:
+                        self._vad_voicing_since = chunk.at_ms
+                    if not self.attributed and chunk.at_ms - self._vad_voicing_since >= 350:
+                        self.attributed = True
+                        events.append('started')
+                elif not self.attributed:
+                    self._vad_voicing_since = -1
+                if self.attributed and activity.tail_silence_ms >= 450:
+                    self.completed = True
+                    events.append('completed')
+            else:
+                if (self.token is None or self._inflight or self.completed or
+                        (self._inference_at >= 0 and chunk.at_ms - self._inference_at < 500)):
+                    return
+                token, generation = self.token, self._generation
+                self._inflight = True
+                self._inference_at = chunk.at_ms
+                samples = self.history.since(max(self.boundary_ms, self.start_ms - 2000))
+        if self.vad_only:
+            for event in events:
+                self.notify(token, event, '')
+        else:
+            self._pool.submit(self._infer, token, generation, samples)
 
     def _infer(self, token, generation, samples):
         try:
