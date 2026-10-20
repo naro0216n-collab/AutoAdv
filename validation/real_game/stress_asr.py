@@ -18,7 +18,9 @@ from autoadv.audio_match import phonetic_key
 from autoadv.native_audio import JapaneseASR
 from .benchmark_asr import _edit_distance, _load_pcm
 from .verify_trace import _summary
-from .prepare_stress_audio import STRESS, VOICE, HERE
+HERE = Path(__file__).resolve().parent
+STRESS = HERE / 'ASR_STRESS.json'
+VOICE = HERE / 'renpy' / 'game' / 'audio' / 'voice'
 from .prepare_asr_model import MODEL_DIR
 
 
@@ -45,8 +47,8 @@ def _load_cases(*, selection: str = 'all'):
             file = VOICE / external[source_id]['filename']
             if not file.is_file():
                 raise FileNotFoundError(f'Actual nonverbal audio required: {file}. '
-                                        'Run python -m validation.real_game.prepare_stress_audio')
-            audio[source_id] = _load_pcm(file, hashlib.sha256(file.read_bytes()).hexdigest())
+                                        'The pinned CC0 voice fixture is missing')
+            audio[source_id] = _load_pcm(file, external[source_id]['prepared_sha256'])
         else:
             raise ValueError(f'Unknown voice recording in ASR stress scenario: {source_id}')
     return cases, audio

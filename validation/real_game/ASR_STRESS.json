@@ -1,17 +1,111 @@
 {
   "description": "Independent difficult-audio reference. Never loaded by AutoAdv. Sources marked foreground=null do not speak the displayed line.",
   "cases": [
-    {"id": "clean_control", "kind": "lexical", "display": "えっ嘘でしょ。", "foreground": "normal-001", "background": null, "background_offset_ms": 0, "background_gain": 0, "attribution": "foreground"},
-    {"id": "background_over_foreground", "kind": "overlap", "display": "えっ嘘でしょ。", "foreground": "normal-001", "background": "normal-030", "background_offset_ms": 0, "background_gain": 0.4, "attribution": "ambiguous_mix"},
-    {"id": "background_outlasts_foreground", "kind": "overlap", "display": "えっ嘘でしょ。", "foreground": "normal-001", "background": "normal-030", "background_offset_ms": 900, "background_gain": 0.4, "attribution": "ambiguous_mix"},
-    {"id": "background_only_mismatch", "kind": "distractor", "display": "これは表示されただけの文章です。", "foreground": null, "background": "normal-020", "background_offset_ms": 0, "background_gain": 1, "attribution": "not_foreground"},
-    {"id": "background_only_same_text", "kind": "distractor", "display": "ヒューズが飛んだ。", "foreground": null, "background": "normal-020", "background_offset_ms": 0, "background_gain": 1, "attribution": "not_foreground"},
-    {"id": "nonlexical_cry", "kind": "nonlexical", "display": "うっ……うう……", "foreground": "stress_cry", "background": null, "background_offset_ms": 0, "background_gain": 0, "attribution": "untranscribable"},
-    {"id": "nonlexical_scream", "kind": "nonlexical", "display": "あああっ！", "foreground": "stress_scream", "background": null, "background_offset_ms": 0, "background_gain": 0, "attribution": "untranscribable"},
-    {"id": "cry_with_background_voice", "kind": "nonlexical_overlap", "display": "うっ……うう……", "foreground": "stress_cry", "background": "normal-020", "background_offset_ms": 600, "background_gain": 0.35, "attribution": "ambiguous_mix"}
+    {
+      "id": "clean_control",
+      "kind": "lexical",
+      "display": "えっ嘘でしょ。",
+      "foreground": "normal-001",
+      "background": null,
+      "background_offset_ms": 0,
+      "background_gain": 0,
+      "attribution": "foreground"
+    },
+    {
+      "id": "background_over_foreground",
+      "kind": "overlap",
+      "display": "えっ嘘でしょ。",
+      "foreground": "normal-001",
+      "background": "normal-030",
+      "background_offset_ms": 0,
+      "background_gain": 0.4,
+      "attribution": "ambiguous_mix"
+    },
+    {
+      "id": "background_outlasts_foreground",
+      "kind": "overlap",
+      "display": "えっ嘘でしょ。",
+      "foreground": "normal-001",
+      "background": "normal-030",
+      "background_offset_ms": 900,
+      "background_gain": 0.4,
+      "attribution": "ambiguous_mix"
+    },
+    {
+      "id": "background_only_mismatch",
+      "kind": "distractor",
+      "display": "これは表示されただけの文章です。",
+      "foreground": null,
+      "background": "normal-020",
+      "background_offset_ms": 0,
+      "background_gain": 1,
+      "attribution": "not_foreground"
+    },
+    {
+      "id": "background_only_same_text",
+      "kind": "distractor",
+      "display": "ヒューズが飛んだ。",
+      "foreground": null,
+      "background": "normal-020",
+      "background_offset_ms": 0,
+      "background_gain": 1,
+      "attribution": "not_foreground"
+    },
+    {
+      "id": "nonlexical_cry",
+      "kind": "nonlexical",
+      "display": "うっ……うう……",
+      "foreground": "stress_cry",
+      "background": null,
+      "background_offset_ms": 0,
+      "background_gain": 0,
+      "attribution": "untranscribable"
+    },
+    {
+      "id": "nonlexical_scream",
+      "kind": "nonlexical",
+      "display": "あああっ！",
+      "foreground": "stress_scream",
+      "background": null,
+      "background_offset_ms": 0,
+      "background_gain": 0,
+      "attribution": "untranscribable"
+    },
+    {
+      "id": "cry_with_background_voice",
+      "kind": "nonlexical_overlap",
+      "display": "うっ……うう……",
+      "foreground": "stress_cry",
+      "background": "normal-020",
+      "background_offset_ms": 600,
+      "background_gain": 0.35,
+      "attribution": "ambiguous_mix"
+    }
   ],
   "external_assets": [
-    {"id": "stress_cry", "filename": "stress_cry.wav", "commons_page": "https://commons.wikimedia.org/wiki/File:Cry_of_woman.ogg", "url": "https://upload.wikimedia.org/wikipedia/commons/5/5f/Cry_of_woman.ogg", "source_sha1": "35b42259d69dcc55c70174e086d1395a4ad655a7", "license": "CC0-1.0", "author": "AlucardsBride", "trim_start_s": 0, "trim_duration_s": 8},
-    {"id": "stress_scream", "filename": "stress_scream.wav", "commons_page": "https://commons.wikimedia.org/wiki/File:NOW_screaming.ogg", "url": "https://upload.wikimedia.org/wikipedia/commons/0/0d/NOW_screaming.ogg", "source_sha1": null, "license": "CC0-1.0", "author": "Ranch9613", "trim_start_s": 0, "trim_duration_s": 4.2}
+    {
+      "id": "stress_cry",
+      "filename": "stress_cry.wav",
+      "commons_page": "https://commons.wikimedia.org/wiki/File:Cry_of_woman.ogg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/5/5f/Cry_of_woman.ogg",
+      "source_sha1": "35b42259d69dcc55c70174e086d1395a4ad655a7",
+      "license": "CC0-1.0",
+      "author": "AlucardsBride",
+      "trim_start_s": 0,
+      "trim_duration_s": 8,
+      "prepared_sha256": "bb077953062cef4d9f46db1f32faa4c9520f29f532ceb9b84960ac3094b9cac9"
+    },
+    {
+      "id": "stress_scream",
+      "filename": "stress_scream.wav",
+      "commons_page": "https://commons.wikimedia.org/wiki/File:NOW_screaming.ogg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/0d/NOW_screaming.ogg",
+      "source_sha1": "4f3a425ec7e690bd7566a032e62732ac8930846d",
+      "license": "CC0-1.0",
+      "author": "Ranch9613",
+      "trim_start_s": 0,
+      "trim_duration_s": 4.2,
+      "prepared_sha256": "116c4b75a4d03e8c894565d703c98bc8bb1ac30ce1c128eed59c567e06392d71"
+    }
   ]
 }

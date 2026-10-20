@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from validation.real_game import stress_asr
-from validation.real_game.prepare_stress_audio import STRESS
+from validation.real_game.stress_asr import STRESS, VOICE
 
 
 class StressScenarios(unittest.TestCase):
@@ -27,6 +27,21 @@ class StressScenarios(unittest.TestCase):
         outlasts = next(c for c in cases if c['id'] == 'background_outlasts_foreground')
         self.assertGreater(len(stress_asr._mix(outlasts, recordings)),
                            len(recordings[outlasts['foreground']]))
+
+    def test_pinned_real_nonlexical_recordings_are_committed_and_integral(self):
+        import wave
+        from validation.real_game.benchmark_asr import _load_pcm
+        assets = json.loads(STRESS.read_text(encoding='utf-8'))['external_assets']
+        self.assertEqual({x['id'] for x in assets}, {'stress_cry', 'stress_scream'})
+        for asset in assets:
+            with self.subTest(asset=asset['id']):
+                file = VOICE / asset['filename']
+                self.assertEqual(hashlib.sha256(file.read_bytes()).hexdigest(),
+                                 asset['prepared_sha256'])
+                with wave.open(str(file), 'rb') as recording:
+                    self.assertEqual((recording.getframerate(), recording.getnchannels(),
+                                      recording.getsampwidth()), (48000, 1, 2))
+                self.assertGreater(len(_load_pcm(file, asset['prepared_sha256'])), 48000)
 
     def test_missing_actual_cry_scream_cannot_silently_pass(self):
         # The separate nonlexical source must be recorded human vocalization,

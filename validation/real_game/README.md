@@ -125,16 +125,15 @@ python -m validation.real_game.prepare_asr_model --verify-only
 ```
 
 隔離ディレクトリを変更する場合は `--directory` を指定し、ベンチマークへも `--model`・`--tokens` を渡す。
-モデルの取得に失敗した場合、実モデルASR検証は**未検収**であり、FakeRecognizer / VAD-onlyの結果を代替しない。
+モデルまたはtokensの取得に失敗した場合、実モデルASR検証は**未検収**であり、FakeRecognizer / VAD-onlyの結果を代替しない。
 
 ## ASR特殊音声・背景ボイスの挑戦シナリオ（Irodori不要）
 
 Ren'Pyゲームの手動メニュー「ASR非言語発声・背景音声テスト」から、通常原音対照例・同時背景発話・
 原音より後に続く背景声・背景声だけ・表示文と完全一致する背景声・泣き声・叫び声を検証できる。
-泣き声と叫び声の実録音は公開権利条件の確認後、明示実行でのみ準備する。未配置は検収成功としない。
+泣き声と叫び声の実録音はCC0音源を固定の48 kHz mono PCMに変換して同梱し、SHA-256で内容を検証する。取得元の403などを理由に検証を迂回しない。
 
 ```powershell
-python -m validation.real_game.prepare_stress_audio
 python -m validation.real_game.stress_asr --selection all --rounds 2 --output asr-stress.json
 .\validation\real_game\run_live_check.ps1 -Phase stress
 ```
