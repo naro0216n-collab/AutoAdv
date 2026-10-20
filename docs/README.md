@@ -1,16 +1,12 @@
 # AutoAdv 正準文書
 
-AutoAdvは個人利用のWindows GUIアプリである。目的は、**LunaHookによるゲーム台詞取得、話者・読み・Voiceを柔軟に指定できる選択的Irodori TTS、既存音声の有無にかかわらない会話自動進行**を一つの操作で実現すること。
+AutoAdvは個人利用のWindows GUIアプリである。LunaHookによるゲーム台詞取得、柔軟な話者別Irodori TTS、ゲームの音声収録状況にかかわらない会話自動進行を一つの操作体系で提供する。
 
-文書の役割は次のとおり。
+- [`integration-spec.md`](integration-spec.md)：完成時の**製品仕様**。利用手順、機能、実行時の動作、設定、受入条件を定める。
+- [`development-principles.md`](development-principles.md)：設計・実装・検証の判断原則。
+- [`rebuild-transition.md`](rebuild-transition.md)：現行実装から完成時モデルへ移るための、**製品仕様とは別の**作業計画。
+- [`publish.md`](publish.md)：ローカル作業環境、branch、Publish Gateway、CIの運用手順。
 
-- [`integration-spec.md`](integration-spec.md)：完成時の**唯一の製品仕様**。機能、実行時の振舞い、状態所有、受入条件を定義する。
-- [`development-principles.md`](development-principles.md)：設計・実装・検証の判断原則。実装の存在自体を要求する文書ではない。
-- [`publish.md`](publish.md)：開発branch、ローカル作業環境、既存Publish Gatewayの運用手順。
-- [`rebuild-transition.md`](rebuild-transition.md)：ゼロベース再構築へ移るための**作業計画**。旧コードの仕分けと移行順序を記載し、製品仕様の正本にはしない。
+完成時の要件は`integration-spec.md`を正本とし、`development-principles.md`で実装の妥当性を判断する。移行計画・現行コード・既存テスト・過去の指示書は完成時の仕様を上書きしない。矛盾が見つかった場合は仕様と実装を照合し、実用上の結果を基準に是正する。
 
-要件・仕様を判断するときは`integration-spec.md`を最優先する。現在のコード、既存テスト、fixture、過去の実装指示書、移行文書に書かれた旧構成は完成時仕様の根拠としない。矛盾時は現行コードを正当化するために仕様を読み替えず、仕様から実装・テストを再評価する。
-
-既存機能を利用して製品の中核以外のことが実現可能でも、それ自体は廃止理由にならない。対象外機能を*不可能にすること*は要求ではなく、その不成立を保証するテストも設けない。
-
-`main`とversion変更は明示承認後に限る。通常開発の共有正本は`develop`とし、作業・publishの規則は`publish.md`に従う。
+通常の共有開発branchは`develop`。`main`とversion変更は利用者の承認後に限る。
