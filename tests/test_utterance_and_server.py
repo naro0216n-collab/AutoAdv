@@ -66,9 +66,9 @@ class ServerStartupOwnership(TestCase):
             def launch(argv,**kwargs):
                 nonlocal connected
                 connected=True
-                self.assertEqual(argv[0],str(exe))
+                self.assertTrue(Path(argv[0]).samefile(exe))
                 self.assertEqual(argv[1:3],['-m','irodori_openai_tts'])
-                self.assertEqual(kwargs['cwd'],str(root))
+                self.assertTrue(Path(kwargs['cwd']).samefile(root))
                 return spawned
             from unittest.mock import patch
             manager=IrodoriServer(root,opener=opener,process_factory=launch)
