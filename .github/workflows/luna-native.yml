@@ -7,6 +7,7 @@ on:
       - 'autoadv/hook_*.py'
       - 'autoadv/luna_abi.py'
       - 'scripts/sync_luna_upstream.py'
+      - 'scripts/prepare_luna_native.py'
       - 'vendor/luna/**'
       - '.github/workflows/luna-native.yml'
       - 'docs/integration-spec.md'
@@ -80,8 +81,9 @@ jobs:
       - name: Verify runtime DLL exports from patched build
         shell: pwsh
         run: |
-          $hostDlls = @(Get-ChildItem "${{ runner.temp }}/luna-build" -Recurse -Filter LunaHost.dll)
-          if ($hostDlls.Count -lt 1) { throw 'Expected LunaHost.dll not found in patched build' }
+          $suffix = if ('${{ matrix.arch }}' -eq 'x64') { '64' } else { '32' }
+          $hostDlls = @(Get-ChildItem "${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook/builds" -Recurse -Filter "LunaHost$suffix.dll")
+          if ($hostDlls.Count -ne 1) { throw "Expected exactly one LunaHost$suffix.dll from patched build" }
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -property installationPath
           $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC" -Recurse -Filter dumpbin.exe |
@@ -93,5 +95,11 @@ jobs:
               if ($exports -notmatch [regex]::Escape($symbol)) { throw "Missing $symbol from $($hostDll.FullName)" }
             }
           }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-native-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook/builds
+          if-no-files-found: error
+          retention-days: 15
       - name: Validate ABI declarations and IPC contract
         run: python -m unittest discover -s tests -p 'test_luna_abi_and_ipc.py' -v
