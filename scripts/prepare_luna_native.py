@@ -48,7 +48,7 @@ def prepare(source: Path, target: Path) -> None:
     (target / 'NATIVE_PATCH.json').write_text(json.dumps({
         'upstream_revision': manifest['revision'],
         'purpose': 'Enable unmodified upstream Host cross-bitness injection routine in build copy',
-        'patched_paths': [str(HOST_DLL), str(HOST_CMAKE)]
+        'patched_paths': [HOST_DLL.as_posix(), HOST_CMAKE.as_posix()]
     }, indent=2) + '\n', encoding='utf-8')
 
 

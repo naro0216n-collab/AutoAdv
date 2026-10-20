@@ -24,7 +24,7 @@ class NativeBuildContract(unittest.TestCase):
             dll.write_text(original_dll, encoding='utf-8')
             cmake.write_text(original_cmake, encoding='utf-8')
             manifest = {'revision': '51884b6c88cba8c42e98ce3e43c4f408017082a1',
-                'sha256': {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest()
+                'sha256': {path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                            for path in (dll, cmake)}}
             (source / 'manifest.json').write_text(json.dumps(manifest))
             prepared = root / 'built'
@@ -35,7 +35,8 @@ class NativeBuildContract(unittest.TestCase):
             self.assertIn('injector.cpp', (prepared / HOST_CMAKE).read_text())
             self.assertEqual(dll.read_text(), original_dll)
             self.assertEqual(cmake.read_text(), original_cmake)
-            self.assertTrue((prepared / 'NATIVE_PATCH.json').is_file())
+            patch_info = json.loads((prepared / 'NATIVE_PATCH.json').read_text(encoding='utf-8'))
+            self.assertEqual(patch_info['patched_paths'], [HOST_DLL.as_posix(), HOST_CMAKE.as_posix()])
             with self.assertRaises(FileExistsError):
                 prepare(source, prepared)
             dll.write_text('modified')

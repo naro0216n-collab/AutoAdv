@@ -97,7 +97,7 @@ def run_gui() -> int:
             self.irodori_url = QLineEdit(self.catalog.irodori_url)
             environment.addRow('Installed Irodori folder', self.irodori_path)
             environment.addRow('Irodori URL', self.irodori_url)
-            environment.addRow('LunaHost.dll (matching build)', self.dll_path)
+            environment.addRow('LunaHost64.dll / LunaHost32.dll (matching Host Python bitness)', self.dll_path)
             self.btn_server = QPushButton('Connect / start Irodori and read Voices')
             environment.addRow(self.btn_server)
             self.btn_server.clicked.connect(self.start_server)
