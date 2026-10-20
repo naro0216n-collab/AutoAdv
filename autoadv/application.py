@@ -33,6 +33,9 @@ class ObservationOrchestrator:
         self._fall_at_ms:int|None=None
         self._saw_fresh_candidate_after_sent=False
         self._last_manual_seq=0
+        self._manual_prior_original: str | None = None
+        self._manual_pending: OriginObservation | None = None
+        self._manual_pending_at_ms: int | None = None
         self._line_counter=0
 
     def _post(self,kind:EK,now:int,**fields):
@@ -45,14 +48,27 @@ class ObservationOrchestrator:
     def disconnected(self,at_ms:int):
         self.pending=None
         self.pending_at_ms=None
+        self._manual_pending=None
+        self._manual_pending_at_ms=None
+        self._manual_prior_original=None
         self._post(EK.MANUAL_OVERRIDE,at_ms)
 
-    def candidate(self,packet:OriginObservation,at_ms:int):
+    def candidate(self,packet:OriginObservation,at_ms:int,*,manual_intervened:bool=False):
         if packet.sequence<=self._seen_source_seq:return
         self._seen_source_seq=packet.sequence
         if not packet.text.strip():return  # no invented empty event
         if not self.binding_ok():return
-        if self.ctrl.state in (ControllerState.PAUSED,ControllerState.WAIT_MANUAL_CHOICE):return
+        if self.ctrl.state is ControllerState.PAUSED:return
+        if self.ctrl.state is ControllerState.WAIT_MANUAL_CHOICE:
+            # A selected option can cause Luna to publish the next dialogue
+            # before the screen observer sees the choice disappear. Hold only
+            # an observation following real user input; it is NOT a line until
+            # a separately observed positive normal dialogue boundary arrives.
+            if (manual_intervened and packet.sequence>self._last_manual_seq
+                and packet.text!=self._manual_prior_original):
+                self._manual_pending=packet
+                self._manual_pending_at_ms=at_ms
+            return
         if self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK:
             if self._saw_fall_after_sent:
                 if self.pending is None:self.pending_at_ms=at_ms
@@ -82,21 +98,34 @@ class ObservationOrchestrator:
             return
         was_manual=self.ctrl.state is ControllerState.WAIT_MANUAL_CHOICE
         if sample.state!=self._last_screen:
+            if sample.state is ScreenState.MANUAL_REQUIRED:
+                self._manual_prior_original=(self.ctrl.line.text.observed_original
+                                             if self.ctrl.line is not None else None)
             self._last_screen=sample.state
             self._post(EK.SCREEN_CHANGED,now,screen=sample.state)
         if sample.state is ScreenState.MANUAL_REQUIRED:
             self.pending=None
             self.pending_at_ms=None
-            self._last_manual_seq=self._seen_source_seq
+            if not was_manual:
+                self._manual_pending=None
+                self._manual_pending_at_ms=None
+                self._last_manual_seq=self._seen_source_seq
         if focused!=self.ctrl.focused:self._post(EK.FOCUS_CHANGED,now,focused=focused)
         if capture_ok!=self.ctrl.capture_ok:self._post(EK.CAPTURE_HEALTH,now,capture_ok=capture_ok)
         if self.ctrl.state in (ControllerState.PAUSED,ControllerState.WAIT_MANUAL_CHOICE):return
         if was_manual:
-            # Require a fresh post-choice candidate; leaving a choice by itself proves nothing.
-            self.pending=None
-            self.pending_at_ms=None
-            self._last_manual_seq=self._seen_source_seq
-            return
+            # Exit alone is not an input permission. A candidate seen after
+            # actual selection may only be consumed once positive dialogue and
+            # text-ready evidence is stable. Never synthesize same-text events.
+            if self.ctrl.state is not ControllerState.WAIT_LINE:
+                return
+            if (self._manual_pending is not None and sample.state is ScreenState.DIALOGUE
+                and sample.positive):
+                self.pending=self._manual_pending
+                self.pending_at_ms=self._manual_pending_at_ms
+            self._manual_pending=None
+            self._manual_pending_at_ms=None
+            self._manual_prior_original=None
         if self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK:
             if not sample.ready:
                 if not self._saw_fall_after_sent:self._fall_at_ms=now

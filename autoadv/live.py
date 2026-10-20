@@ -239,7 +239,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                         app.disconnected(_clock())
                 elif kind=='text':
                     status({'original':payload.text})
-                    app.candidate(payload,_clock())
+                    app.candidate(payload,_clock(),manual_intervened=manual.intervened())
             if control.pause.is_set():
                 control.bound.clear()
                 for effect in ctrl.pause('explicit_pause'):

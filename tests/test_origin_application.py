@@ -27,9 +27,9 @@ class OriginApplicationContracts(unittest.TestCase):
     def sample(self,now,state=ScreenState.DIALOGUE,ready=True,positive=True,manual=False):
         self.now=now
         self.app.observe(ScreenSample(now,state,ready,positive,'calibrated-marker'),focused=True,capture_ok=True,manual_intervened=manual)
-    def packet(self,n,t,now):
+    def packet(self,n,t,now,*,manual=False):
         self.now=now
-        self.app.candidate(OriginObservation(n,t,t),now)
+        self.app.candidate(OriginObservation(n,t,t),now,manual_intervened=manual)
     def absent(self,now):
         self.now=now
         line=self.ctrl.line
@@ -73,6 +73,37 @@ class OriginApplicationContracts(unittest.TestCase):
         self.sample(80)
         self.assertEqual(self.ctrl.line.text.body,'選択後')
         self.assertEqual(self.ctrl.line.epoch,2)
+    def test_post_selection_origin_precedes_visual_exit(self):
+        self.packet(1,'選択前',10);self.sample(20)
+        self.sample(30,ScreenState.MANUAL_REQUIRED,False,False)
+        self.packet(2,'選択後',40,manual=True)
+        self.assertIsNone(self.ctrl.line)
+        self.assertEqual(self.ctrl.state,ControllerState.WAIT_MANUAL_CHOICE)
+        self.sample(50,ScreenState.TRANSITION,False,False)
+        self.assertIsNone(self.ctrl.line)
+        self.sample(80,ScreenState.DIALOGUE,False,True)
+        self.assertIsNotNone(self.ctrl.line)
+        self.assertIsNone(self.ctrl.line.ready_ms)
+        self.sample(150)
+        self.assertEqual(self.ctrl.line.text.body,'選択後')
+        self.assertEqual(self.ctrl.line.epoch,2)
+        self.assertEqual(self.input.count,0)
+
+    def test_early_menu_candidate_without_user_action_is_not_a_line(self):
+        self.packet(1,'選択前',10);self.sample(20)
+        self.sample(30,ScreenState.MANUAL_REQUIRED,False,False)
+        self.packet(2,'メニューラベル',40)
+        self.sample(50,ScreenState.DIALOGUE,True,True)
+        self.assertIsNone(self.ctrl.line)
+        self.assertEqual(self.input.count,0)
+
+    def test_same_original_cannot_restore_choice_from_early_packet(self):
+        self.packet(1,'同文',10);self.sample(20)
+        self.sample(30,ScreenState.MANUAL_REQUIRED,False,False)
+        self.packet(2,'同文',40,manual=True)
+        self.sample(50,ScreenState.DIALOGUE,True,True)
+        self.assertIsNone(self.ctrl.line)
+
     def test_pause_and_disconnect_do_not_auto_return(self):
         self.packet(1,'本文',10);self.sample(20)
         self.app.disconnected(30)
