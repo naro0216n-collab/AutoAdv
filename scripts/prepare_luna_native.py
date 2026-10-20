@@ -22,9 +22,11 @@ def prepare(source: Path, target: Path) -> None:
     manifest = json.loads((source / 'manifest.json').read_text(encoding='utf-8'))
     if manifest['revision'] != '51884b6c88cba8c42e98ce3e43c4f408017082a1':
         raise ValueError('unexpected upstream commit')
-    for filename in (str(HOST_DLL), str(HOST_CMAKE)):
+    for filename in (HOST_DLL, HOST_CMAKE):
+        # Manifest keys are repository-relative POSIX paths on every OS.
+        key = filename.as_posix()
         digest = hashlib.sha256((source / filename).read_bytes()).hexdigest()
-        if digest != manifest['sha256'][filename]:
+        if digest != manifest['sha256'][key]:
             raise ValueError(f'modified upstream input: {filename}')
     if target.exists():
         raise FileExistsError(f'build-copy exists: {target}')
