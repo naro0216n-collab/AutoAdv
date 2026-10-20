@@ -24,6 +24,10 @@ class HookSelection:
         if not self.code or min(self.context, self.context2) < 0 or self.role not in ('text', 'speaker'):
             raise ValueError('invalid selected HOOK')
 
+    @property
+    def identity(self) -> str:
+        return f'{self.code}|{self.context}|{self.context2}'
+
     def matches(self, source: object) -> bool:
         return (getattr(source, 'hook_code', None) == self.code
                 and getattr(source, 'context', -1) == self.context
@@ -95,6 +99,7 @@ class Profile:
     name: str
     hooks: list[HookSelection] = field(default_factory=list)
     inserted_hooks: list[str] = field(default_factory=list)
+    speaker_links: dict[str, str] = field(default_factory=dict)
     default_mode: AudioMode = AudioMode.READING
     default_voice: str = ''
     speaker_modes: dict[str, AudioMode] = field(default_factory=dict)
@@ -120,6 +125,10 @@ class Profile:
             raise ValueError('invalid advancement settings')
         if len(self.hooks) != len({(h.code, h.context, h.context2) for h in self.hooks}):
             raise ValueError('one HOOK cannot have multiple conflicting roles')
+        selected_roles = {h.identity: h.role for h in self.hooks}
+        for text_source, speaker_source in self.speaker_links.items():
+            if selected_roles.get(text_source) != 'text' or selected_roles.get(speaker_source) != 'speaker':
+                raise ValueError('speaker-to-text mapping requires selected HOOK roles')
         if self.source not in ('hook', 'ocr'):
             raise ValueError('invalid acquisition mode')
         if any(not code.strip() for code in self.inserted_hooks):

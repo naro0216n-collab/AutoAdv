@@ -40,7 +40,7 @@ class Controller:
         self.sent = False
         self.reason = 'not_monitoring'
         self.line_no = 0
-        self.pending_speaker: tuple[str, int] | None = None
+        self.pending_speakers: dict[str, tuple[str, int, int]] = {}
         self.awaiting_next = False
         self.ocr_blank = False
 
@@ -67,12 +67,12 @@ class Controller:
         self.line_no = 0
         self.authorized = self.completed = self.sent = False
         self.awaiting_next = False
-        self.pending_speaker = None
+        self.pending_speakers.clear()
         self.ocr_blank = False
         self.reason = reason
 
     def observe(self, *, generation: str, connection: int, sequence: int,
-                source: object, text: str, pid: int) -> Token | None:
+                source: object, text: str, pid: int, received_ns: int = 0) -> Token | None:
         if not self.profile or not self.target or self.profile.source != 'hook':
             return None
         if pid != self.target.pid:
@@ -89,16 +89,34 @@ class Controller:
             return None
         role = matched[0].role
         if role == 'speaker':
-            # Use paired speaker output only when provenance and event order support it.
-            self.pending_speaker = (text.strip(), sequence) if text.strip() else None
+            # Each speaker HOOK remains source-scoped until a corresponding text HOOK arrives.
+            identity = matched[0].identity
+            if text.strip():
+                self.pending_speakers[identity] = (text.strip(), sequence, received_ns)
+            else:
+                self.pending_speakers.pop(identity, None)
             return None
         if not text.strip():
             return None
-        return self._accept_line(sequence=sequence, text=text, origin=getattr(source, 'identity', ''), side_speaker=self._paired_speaker(sequence))
+        return self._accept_line(sequence=sequence, text=text, origin=getattr(source, 'identity', ''),
+                                 side_speaker=self._paired_speaker(matched[0].identity, sequence, received_ns))
 
-    def _paired_speaker(self, sequence: int) -> str:
-        return (self.pending_speaker[0] if self.pending_speaker and
-                self.pending_speaker[1] == sequence - 1 else '')
+    def _paired_speaker(self, text_source: str, sequence: int, received_ns: int) -> str:
+        if not self.profile:
+            return ''
+        speaker_source = self.profile.speaker_links.get(text_source)
+        if not speaker_source:
+            speaker_hooks = [h.identity for h in self.profile.hooks if h.role == 'speaker']
+            speaker_source = speaker_hooks[0] if len(speaker_hooks) == 1 else ''
+        pending = self.pending_speakers.pop(speaker_source, None) if speaker_source else None
+        if not pending:
+            return ''
+        name, previous, previous_ns = pending
+        if (previous >= sequence or
+                (received_ns > 0 and previous_ns > 0 and received_ns - previous_ns > 2_000_000_000) or
+                (received_ns == 0 and sequence != previous + 1)):
+            return ''
+        return name
 
     def observe_ocr(self, *, sequence: int, text: str, pid: int, session: int) -> Token | None:
         if (not self.profile or self.profile.source != 'ocr' or not self.target
@@ -125,7 +143,7 @@ class Controller:
             self.reason = 'ambiguous_identical_line'
             return None
         self.line_no += 1
-        self.pending_speaker = None
+        self.pending_speakers.clear()
         self.utterance = interpret(text, self.profile, session=self.session,
                                    line=self.line_no, source=origin,
                                    sequence=sequence, side_speaker=side_speaker)

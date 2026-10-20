@@ -1,28 +1,34 @@
 # AutoAdv
 
-AutoAdv is a Windows desktop application under zero-base reconstruction. The authoritative product requirements are in [docs/integration-spec.md](docs/integration-spec.md). The archived original implementation is held on branch `temp`; the `develop` working tree contains only explicitly selected adapters and new implementation.
+AutoAdv is a personal Windows GUI application for LunaHook dialogue acquisition, per-speaker Irodori TTS and authorized automatic dialogue advancement. The authoritative requirements are [docs/integration-spec.md](docs/integration-spec.md); code and former tests are not specifications.
 
-## Current executable path
+The rebuilt `develop` application uses one `Controller` for dialogue identity, presentation completion and game-input authority. Selectively reused Luna native Host/ABI, Irodori and Windows input adapters are attached to that single runtime contract. Salvaged Windows Process Loopback, Japanese ASR/VAD, Tesseract OCR, manual input monitoring, Luna settings import and text-rule interpretation have also been integrated. Previous controllers, simulators and diagnostic CLI are not alternative execution paths.
 
-The PySide6 window registers games and profiles, starts a pinned-compatible LunaHook Host from a selected local DLL, attaches to a game PID, previews observed HOOK threads, lets the user choose a dialogue HOOK and an optional speaker HOOK, and interprets text into speaker, reading, and per-speaker audio mode and Voice. Its settings are saved atomically as a new schema in `%APPDATA%/AutoAdv/settings-v3.json` without rewriting existing settings.
-
-Irodori-TTS uses an existing installation and voice enumeration. Selected TTS is generated asynchronously and considered complete only when the local audio device finishes playback. Silent/reading mode waits the configured reading time. The conversation controller is the sole owner of advance permission and sends at most one input per accepted line, after the configured game window and PID are verified in the foreground. Permission is always separate from monitoring.
-
-**Not yet connected:** Process Loopback/VAD/ASR presentation completion for native speech; AUTO mode switching; optional OCR; automatic game detection; interactive HOOK searching and restoring manually inserted HOOKs; existing-settings import and full text-rule editing. Native/AUTO routing deliberately **does not authorize input** in the current implementation. `temp` retains the former technical assets for selective adaptation. Domain tests are not a substitute for Windows game acceptance.
-
-## Running
+## Install and operate
 
 ```powershell
-py -3.11 -m pip install -e ".[gui,audio]"
+py -3.11 -m pip install -e ".[gui,audio,ocr,native]"
 py -3.11 -m autoadv
 ```
 
-Provide an existing Irodori-TTS-Server installation folder and a built LunaHost.dll. Set the current game PID/HWND, attach Host, observe and select a dialogue HOOK, save routing, and start monitoring. Advance remains disabled until separately authorized. The executable does not install models or modify the Irodori environment.
+Use a compatible built LunaHost.dll, an existing Irodori-TTS-Server directory and configured Irodori Voices. Only native/AUTO sessions require a built Windows loopback helper, a SenseVoice-compatible sherpa-onnx model and tokens. Only OCR sessions require an installed Tesseract CLI. Installing models, the .NET runtime, and other upstream environments requires deliberate user action; AutoAdv does not alter those installations.
 
-## Tests
+For the optional process-scoped audio adapter, build the preserved helper on Windows with .NET 9:
+
+```powershell
+dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
+```
+
+In the GUI, register a game and executable path, select a matching visible game window or enter its PID/HWND, start LunaHost and attach. Search/insert HOOK codes or select observed text/speaker HOOKs, save rules and voice assignments, and start monitoring. For OCR, select the explicit OCR acquisition option and set the client-relative region. Monitoring and automatic advancement are separate actions: **game input is not authorized until requested**.
+
+Voice modes are **native** (ASR-attributed original speech completion), **tts** (Irodori playback completion), **auto** (original speech evidence or a configured TTS fallback), and **reading** (configured viewing duration). The AUTO wait is an explicit fallback policy, not proof that original speech is absent. The Controller verifies the foreground PID/HWND and manual-intervention state before each game input and never blindly retries an uncertain send. See [OPERATING.md](OPERATING.md) for details.
+
+## Validation scope
 
 ```sh
 python -m unittest discover -s tests -v
 ```
 
-Publishing uses the repository's [standard Publish Gateway](docs/publish.md). `main` and version are not modified without user approval.
+Local Linux tests verify domain contracts, import/storage, process-audio handling and generation invalidation, but do not certify Windows game compatibility. Windows CI validates Qt/adapter installation and the loopback helper build. Real games and real audio input remain separate acceptance requirements; unverified modes must never be described as universally supported.
+
+Changes are published to `develop` via [Publish Gateway](docs/publish.md). `main` and the product version remain unchanged without explicit approval.

@@ -65,7 +65,7 @@ def user_settings_path() -> Path:
 
 
 def _profile_payload(p: Profile) -> dict:
-    return dict(id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks], inserted_hooks=p.inserted_hooks,
+    return dict(id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks], inserted_hooks=p.inserted_hooks, speaker_links=p.speaker_links,
                 default_mode=p.default_mode.value, default_voice=p.default_voice,
                 speaker_modes={k: AudioMode(v).value for k, v in p.speaker_modes.items()},
                 speaker_voices=p.speaker_voices,
@@ -90,7 +90,7 @@ def _read_replacements(raw: list | dict) -> list[ReplacementRule]:
 def _read_profile(raw: dict) -> Profile:
     p = Profile(id=raw['id'], name=raw['name'],
                 hooks=[HookSelection(**h) for h in raw.get('hooks', [])],
-                inserted_hooks=list(raw.get('inserted_hooks', [])),
+                inserted_hooks=list(raw.get('inserted_hooks', [])), speaker_links=dict(raw.get('speaker_links', {})),
                 default_mode=AudioMode(raw.get('default_mode', 'reading')),
                 default_voice=raw.get('default_voice', ''),
                 speaker_modes={k: AudioMode(v) for k, v in raw.get('speaker_modes', {}).items()},

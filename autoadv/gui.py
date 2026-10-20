@@ -2,6 +2,7 @@
 from __future__ import annotations
 import ctypes
 import sys
+import subprocess
 import threading
 import copy
 from pathlib import Path
@@ -119,6 +120,9 @@ def run_gui() -> int:
             self.game_exe = QLineEdit()
             self.game_exe.setPlaceholderText('Optional game executable path for future sessions')
             games.addRow('Game executable', self.game_exe)
+            self.btn_launch = QPushButton('Launch registered game')
+            self.btn_launch.clicked.connect(self.launch_game)
+            games.addRow(self.btn_launch)
             self.btn_import = QPushButton('Import existing Luna game settings (preview and confirm)')
             games.addRow(self.btn_import)
             self.btn_import.clicked.connect(self.import_luna)
@@ -200,6 +204,13 @@ def run_gui() -> int:
             capture.addRow(self.btn_unselect_hook)
             self.selected_hooks = QLabel('Selected HOOKs: none')
             capture.addRow(self.selected_hooks)
+            self.paired_text_hook = QComboBox()
+            self.paired_speaker_hook = QComboBox()
+            capture.addRow('Dialogue HOOK to associate', self.paired_text_hook)
+            capture.addRow('Speaker HOOK to associate', self.paired_speaker_hook)
+            self.btn_pair = QPushButton('Assign speaker HOOK to dialogue HOOK')
+            self.btn_pair.clicked.connect(self.pair_hooks)
+            capture.addRow(self.btn_pair)
             self.btn_monitor = QPushButton('Start monitoring selected HOOK')
             self.btn_monitor.clicked.connect(self.begin_monitor)
             capture.addRow(self.btn_monitor)
@@ -290,6 +301,12 @@ def run_gui() -> int:
             self.reading_ms.setRange(0, 600000)
             self.reading_ms.setValue(1200)
             speech.addRow('Reading time (ms)', self.reading_ms)
+            self.settle_ms = QSpinBox()
+            self.settle_ms.setRange(0, 10000)
+            speech.addRow('HOOK text update settling (ms)', self.settle_ms)
+            self.input_key = QSpinBox()
+            self.input_key.setRange(1, 254)
+            speech.addRow('Advance virtual key code', self.input_key)
             self.native_helper = QLineEdit()
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
@@ -356,6 +373,10 @@ def run_gui() -> int:
 
         def choose_game(self, *_):
             self.stop_session()
+            self.sources.clear()
+            self.source_samples.clear()
+            self.source_choice.clear()
+            self.hook_preview.clear()
             self.game_id = self.game_choice.currentData() or ''
             self.profile_choice.blockSignals(True)
             self.profile_choice.clear()
@@ -378,6 +399,8 @@ def run_gui() -> int:
             self.default_mode.setCurrentText(profile.default_mode.value)
             self.default_voice.setEditText(profile.default_voice)
             self.reading_ms.setValue(profile.reading_ms)
+            self.settle_ms.setValue(profile.settle_ms)
+            self.input_key.setValue(profile.input_key)
             self.repeat.setCurrentText(profile.repeat_rule)
             self.source_mode.setCurrentText(profile.source)
             self.ocr_exe.setText(profile.ocr.executable)
@@ -390,6 +413,7 @@ def run_gui() -> int:
             self.refresh_rules()
             self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in profile.hooks))
             self.refresh_speaker_choices()
+            self.refresh_hook_pairs()
 
         def add_game(self):
             try:
@@ -429,6 +453,8 @@ def run_gui() -> int:
                 updated.default_mode = AudioMode(self.default_mode.currentText())
                 updated.default_voice = self.default_voice.currentText().strip()
                 updated.reading_ms = self.reading_ms.value()
+                updated.settle_ms = self.settle_ms.value()
+                updated.input_key = self.input_key.value()
                 updated.repeat_rule = self.repeat.currentText()
                 updated.validate()
                 game = self.catalog.games[self.game_id]
@@ -711,6 +737,20 @@ def run_gui() -> int:
             except Exception as exc:
                 self.host_status.setText(f'LunaHook Host: {exc}')
 
+        def launch_game(self):
+            game = self.catalog.games.get(self.game_id)
+            if not game or not game.executable.strip():
+                self.note('Specify the game executable before launching')
+                return
+            try:
+                target = Path(game.executable)
+                if not target.is_file():
+                    raise FileNotFoundError(target)
+                subprocess.Popen([str(target)], cwd=str(target.parent))
+                self.note('Game launch requested; choose its window after startup')
+            except Exception as exc:
+                self.note('Game launch failed: ' + str(exc))
+
         def detect_game(self):
             game = self.catalog.games.get(self.game_id)
             if not game:
@@ -779,7 +819,8 @@ def run_gui() -> int:
                         self.show_hook_preview()
                 result = self.controller.observe(generation=event.host_generation,
                     connection=event.connection_generation, sequence=event.sequence,
-                    source=event.source, text=event.text, pid=event.process_id or 0)
+                    source=event.source, text=event.text, pid=event.process_id or 0,
+                    received_ns=event.received_ns)
                 if result and self.controller.utterance:
                     self.display_utterance(result)
             if event.kind == 'diagnostic' and event.detail.startswith(('command_failed', 'injection_conflict')):
@@ -801,6 +842,26 @@ def run_gui() -> int:
                 p.hooks.append(selection)
             self.persist()
             self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in p.hooks))
+            self.refresh_hook_pairs()
+
+        def refresh_hook_pairs(self):
+            self.paired_text_hook.clear()
+            self.paired_speaker_hook.clear()
+            p = self.current_profile()
+            if p:
+                for hook in p.hooks:
+                    control = self.paired_text_hook if hook.role == 'text' else self.paired_speaker_hook
+                    control.addItem(hook.identity, hook.identity)
+
+        def pair_hooks(self):
+            p = self.current_profile()
+            text_source = self.paired_text_hook.currentData()
+            speaker_source = self.paired_speaker_hook.currentData()
+            if p and text_source and speaker_source:
+                p.speaker_links[text_source] = speaker_source
+                p.validate()
+                self.persist()
+                self.note(f'Speaker HOOK {speaker_source} paired to {text_source}')
 
         def unselect_hook(self):
             p = self.current_profile()
@@ -808,8 +869,11 @@ def run_gui() -> int:
             if p and source:
                 self.stop_session()
                 p.hooks = [h for h in p.hooks if not h.matches(source)]
+                p.speaker_links = {t: v for t, v in p.speaker_links.items()
+                                   if t != source.identity and v != source.identity}
                 self.persist()
                 self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in p.hooks))
+            self.refresh_hook_pairs()
 
         def show_hook_preview(self, *_):
             self.hook_preview.setPlainText(self.source_samples.get(self.source_choice.currentData(), ''))
