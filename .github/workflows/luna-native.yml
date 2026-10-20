@@ -1,0 +1,77 @@
+name: Luna Native Source and ABI Validation
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'autoadv/hook_*.py'
+      - 'autoadv/luna_abi.py'
+      - 'scripts/sync_luna_upstream.py'
+      - 'vendor/luna/**'
+      - '.github/workflows/luna-native.yml'
+      - 'docs/integration-spec.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-source:
+    name: Pinned Luna source acquisition
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Acquire coherent upstream source (no runtime update)
+        run: python scripts/sync_luna_upstream.py --write
+      - name: Verify manifest coverage and revision
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.sync_luna_upstream import PIN
+          root=Path('vendor/luna')
+          m=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+          assert m['revision']==PIN
+          assert m['file_count']>=100, m['file_count']
+          assert (root/'src/NativeImpl/LunaHook/LunaHost/LunaHostDll.cpp').is_file()
+          assert (root/'src/LunaTranslator/textio/textsource/texthook.py').is_file()
+          assert (root/'LICENSE').is_file()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-pinned-sources
+          path: vendor/luna
+          if-no-files-found: error
+          retention-days: 15
+
+  native-build:
+    name: Windows x86 and x64 native build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    needs: pinned-source
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: luna-pinned-sources
+          path: vendor/luna
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build complete Luna Hook and Host native targets
+        shell: pwsh
+        run: |
+          cmake -S vendor/luna/src/NativeImpl/LunaHook -B "${{ runner.temp }}/luna-build" -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DBUILD_GUI=OFF -DBUILD_HOST=ON -DBUILD_HOOK=ON -DWIN10ABOVE=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "${{ runner.temp }}/luna-build" --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate ABI declarations and IPC contract
+        run: python -m unittest discover -s tests -p 'test_luna_abi_and_ipc.py' -v
