@@ -118,7 +118,9 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
         game = catalog.create_game('Sample game')
         events = []
         def check_widgets(*_):
-            window = next(w for w in QApplication.topLevelWidgets() if w.windowTitle().startswith('AutoAdv'))
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if w.windowTitle().startswith('AutoAdv') and getattr(w, 'catalog', None) is catalog)
+            self.assertIsNotNone(window.current_profile())
             try:
                 window.pid.setValue(101)
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
