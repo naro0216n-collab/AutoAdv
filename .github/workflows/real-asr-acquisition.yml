@@ -1,0 +1,67 @@
+name: Real ASR Acquisition and Verification
+
+# Expensive, independent of Fast CI. The first commit adding this workflow
+# invokes it once; further execution is explicit via workflow_dispatch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - '.github/workflows/real-asr-acquisition.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  real-asr:
+    name: Pinned SenseVoice and human-vocalization acquisition with actual inference
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install product native ASR dependencies
+        run: python -m pip install '.[native]'
+      - name: Confirm audio converter
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+          }
+          ffmpeg -version | Select-Object -First 1
+      - name: Retrieve pinned model outside checkout and verify SHA-256
+        shell: pwsh
+        run: |
+          python -m validation.real_game.prepare_asr_model | Tee-Object -FilePath asr-model-acquisition.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m validation.real_game.prepare_asr_model --verify-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retrieve CC0 nonverbal voice recordings and transcode to real PCM
+        shell: pwsh
+        run: |
+          python -m validation.real_game.prepare_stress_audio | Tee-Object -FilePath asr-voice-acquisition.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run actual product SenseVoice recognition and latency measurement
+        shell: pwsh
+        run: |
+          python -m validation.real_game.benchmark_asr --conditions clean quiet noise clipped truncated bgm --rounds 1 --output asr-benchmark.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run actual nonverbal and competing-background-voice recognition
+        shell: pwsh
+        run: |
+          python -m validation.real_game.stress_asr --selection all --rounds 1 --output asr-stress.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publish integrity and inference observations, never model/audio binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-asr-acquisition-report
+          path: |
+            asr-model-acquisition.json
+            asr-voice-acquisition.json
+            asr-benchmark.json
+            asr-stress.json
+          if-no-files-found: warn
+          retention-days: 30
