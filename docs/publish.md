@@ -1,6 +1,6 @@
 # AutoAdv Publish Gateway 運用
 
-通常開発は`develop`。`main`の更新とversion変更はユーザーの明示承認後のみ。通常開発の中継に`temp`や追加worktreeを使用しない。
+通常開発は`develop`。`main`の更新とversion変更はユーザーの明示承認後のみ。通常開発の中継に`temp`や追加worktreeを使用しない。今回のゼロベース再構築では、利用者指定の例外として旧実装を`temp`に固定保管する。`temp`を開発・公開経路へ転用しない。
 
 最新`develop`のFast CIによる`source-snapshot`（`repository.bundle`と`.source-*`）からローカルrepoを復元し、repo-local identityを設定して`scripts/publish_request.py init`を実行する。
 

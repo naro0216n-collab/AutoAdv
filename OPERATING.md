@@ -1,36 +1,15 @@
-# AutoAdv — Windows use and verification
+# AutoAdv 操作と検証状況
 
-This guide documents **current implementation behavior during zero-base reconstruction**, not the future acceptance contract. For the required completed product, use [`docs/integration-spec.md`](docs/integration-spec.md); for the migration steps, use [`docs/rebuild-transition.md`](docs/rebuild-transition.md).
+完成仕様は `docs/integration-spec.md` に定義する。この文書は現行 `develop` の実装済み経路のみ説明する。
 
-## Prerequisites
+1. Python 3.11 / PySide6 の環境で `python -m autoadv` を起動する。
+2. 既存 Irodori-TTS-Server のパスを設定する。起動・接続・Voice一覧をGUIで確認する。
+3. LunaHost.dll の場所を設定してHostを起動する。ゲームのPIDを入力して接続する。
+4. 候補HOOKが表示されたら本文用HOOKを選択し、必要なら別の話者用HOOKも割り当てる。
+5. 作品・プロファイル・原文処理とVoiceを設定し、監視を開始する。
+6. 閲覧モードまたはTTSモードでは提示が終了するまで送りを保留する。GUIで自動送りを明示許可した場合のみ入力を送る。
+7. 手動操作前に一時停止し、再開時に明示許可する。プロファイル・接続を変更すると旧セッションの完了通知は無効になる。
 
-Windows 10 build 19041 or newer; Python 3.11; .NET SDK 9 for the Process Loopback helper; existing Irodori-TTS-Server installation, an installed native LunaHook Host/Hook build for the relevant target game, and local ASR model/tokens for native speech synchronization. Tesseract with Japanese trained data is needed **only** for an OCR profile. No separate running LunaTranslator is part of the normal HOOK workflow. AutoAdv does not download/update engines or models or modify other programs' installations on startup.
+原音／自動選択モードは現時点で原音再生完了の確認源が未接続であり、自動送りを停止する。OCRと旧設定取込も未実装。実ゲーム・ASR・GUI操作の最終的な成立はWindows実機で検証する必要がある。
 
-```powershell
-py -3.11 -m pip install -e ".[live]"
-dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
-py -3.11 -m autoadv
-```
-
-## Normal GUI operation
-
-1. Register the game and choose its profile. A new profile selects **HOOK** by default. For that path, configure a managed LunaHook Host, choose and preview one verified HOOK, save its selection and confirm the actual target PID. Multiple independent HOOKs cannot yet be accepted as one verified combined utterance; do not treat separate speaker and text outputs as synchronized. For an unsupported HOOK, manually select **OCR**, an already installed Tesseract executable, language (e.g. `jpn`) and the target client-area rectangle. OCR does not fall back to HOOK, or vice versa, without explicit intervention.
-2. Configure speaker/body extraction, ruby and name reading, voice routing and SKIP in the one game/profile record. The editable preview and active `Utterance` remain distinct. Configure the installed Irodori server root once; subsequent AutoAdv starts connect or start the installed server, then update available voice IDs. An absent voice ID is never silently replaced.
-3. Select the target window and audio helper/model/tokens, along with timing and input method. HOOK requires **no** screen-marker calibration. For optional OCR, select a Tesseract installation and specify its client-area text rectangle; OCR is observation/audio-only by default.
-4. Start monitoring without granting input. When a selected HOOK is receiving text, you can explicitly authorize auto-input. Audio attribution and completion precede each input, and the fresh guard checks target PID/HWND, foreground, capture health, TTS/native state and user intervention.
-5. After one input, AutoAdv waits for a changed selected-HOOK candidate in the same session. A timer or same text cannot cause another input. A timeout, manually pressed key/button, process/window/source change or unresolved audio stops automation. Choices/special screens that cannot be identified are handled manually; the application does not promise game-state recognition.
-
-Continuous advancement and choice-screen behavior must be verified with each real game; a changed HOOK candidate is not proof of a fully observed game transition.
-
-## Diagnostic validation
-
-```powershell
-py -3.11 -m unittest discover -s tests -q
-py -3.11 -m autoadv --help
-```
-
-Windows acceptance must separately check 32/64-bit Host/Hook build and attachment, actual HOOK events and sources, optional installed OCR recognition, native Process Loopback and VAD/ASR, Irodori playback completion, repeated/split/same text, late audio, same/partial HOOK text, manual choice intervention, focus loss, profile and process switches, and one-input-per-candidate behavior. Passing synthetic tests or CI is not evidence that a particular game is safely operable.
-
-## Imported legacy settings
-
-Old Luna `savegamedata_5.3.1.json` can be read **without modifying Luna's original file**. Data are transferred explicitly to the AutoAdv catalog; there is no parallel Luna settings authority. Old screen templates remain in the preserved original backup but are not imported as operational settings. An old third-party Luna patch or bridge must not run concurrently with the managed Host. No external process is killed, detached or overwritten automatically.
+検証: `python -m unittest discover -s tests -v`。CIによるクリーンインストール・Windows ABI検証と、実ゲーム受入は別々に扱う。

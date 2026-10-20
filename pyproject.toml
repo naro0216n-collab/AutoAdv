@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autoadv"
 version = "0.1.0.dev0"
-description = "Safety-first native LunaHook voice synchronization and auto-advance controller"
+description = "LunaHook dialogue acquisition, Irodori voice routing, and authorized conversation advancement"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -19,7 +19,6 @@ autoadv-gui = "autoadv.gui:run_gui"
 audio = ["sounddevice>=0.5,<1"]
 dev = ["pytest>=8,<10"]
 gui = ["PySide6>=6.8,<7"]
-live = ["PySide6>=6.8,<7", "psutil>=5.9,<9", "mss>=9,<12", "numpy>=2,<3", "opencv-python>=4.8,<5", "webrtcvad-wheels>=2.0.14,<3", "sherpa-onnx>=1.10,<2", "sounddevice>=0.5,<1"]
 
 [tool.setuptools.packages.find]
 include = ["autoadv*"]

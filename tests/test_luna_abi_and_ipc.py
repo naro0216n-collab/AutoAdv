@@ -1,32 +1,26 @@
-import ctypes
-from unittest import TestCase
-from autoadv import luna_abi
+import unittest
 from autoadv.hook_host import parse_host_event
+from autoadv.luna_abi import validate_abi
+from autoadv.windows_input import input_types
 
-class HostContractTests(TestCase):
-    def test_abi_uses_all_ten_callbacks(self):
-        self.assertEqual(len(luna_abi.START_CALLBACKS),10)
-        self.assertEqual(ctypes.sizeof(luna_abi.ThreadParam),32)
-        self.assertEqual([getattr(luna_abi.ThreadParam,k).offset for k in ('processId','addr','ctx','ctx2')],[0,8,16,24])
-        class Method:
-            pass
-        class DLL:
-            def __getattr__(self,name):
-                if name not in self.__dict__:setattr(self,name,Method())
-                return object.__getattribute__(self,name)
-        dll=luna_abi.load_exports(DLL())
-        self.assertEqual(len(dll.Luna_Start.argtypes),10)
-        self.assertEqual(len(dll.Luna_FindHooks.argtypes),4)
-        self.assertEqual(len(dll.Luna_ConnectAndInjectProcess.argtypes),1)
 
-    def test_provenance_preserved_through_ipc(self):
-        p={'kind':'output','host_generation':'abc','connection_generation':3,
-           'sequence':2,'received_ns':150,'process_id':123,
-           'source':{'process_id':123,'address':5,'context':4,'context2':6,
-                    'hook_code':'/HS1','hook_name':'text'},'text':'日本語','detail':''}
-        event=parse_host_event(p)
-        self.assertEqual(event.text,'日本語')
-        self.assertEqual(event.source.key.code,'/HS1')
-        p['process_id']=999
-        with self.assertRaises(ValueError):parse_host_event(p)
-        with self.assertRaises(RuntimeError):parse_host_event({'kind':'fatal','reason':'DLL not found'})
+class NativeBoundary(unittest.TestCase):
+    def test_native_packet_requires_provenance(self):
+        packet = dict(kind='output', host_generation='h', connection_generation=1,
+                      sequence=2, received_ns=5, process_id=31,
+                      source=dict(process_id=31, address=5, context=3, context2=4,
+                                  hook_code='AA', hook_name='text'), text='Hello')
+        event = parse_host_event(packet)
+        self.assertEqual(event.source.identity, 'AA|3|4')
+        packet['process_id'] = 32
+        with self.assertRaises(ValueError):
+            parse_host_event(packet)
+
+    def test_abi_definitions_remain_valid(self):
+        validate_abi()
+        structures = input_types()
+        self.assertEqual(len(structures), 3)
+
+
+if __name__ == '__main__':
+    unittest.main()

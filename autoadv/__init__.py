@@ -1,4 +1,5 @@
-"""AutoAdv: line-aware, safety-first visual novel presentation controller."""
-from .controller import Controller, Settings
+"""AutoAdv rebuilt product model."""
+from .conversation import Controller, Target, Token
+from .model import AudioMode, Profile, HookSelection, Utterance, interpret
 
-__all__ = ["Controller", "Settings"]
+__all__ = ['Controller', 'Target', 'Token', 'AudioMode', 'Profile', 'HookSelection', 'Utterance', 'interpret']

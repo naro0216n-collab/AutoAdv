@@ -1,34 +1,28 @@
 # AutoAdv
 
-**Rebuild in progress.** The target product behavior is defined in [`docs/integration-spec.md`](docs/integration-spec.md). The selective-salvage implementation plan is [`docs/rebuild-transition.md`](docs/rebuild-transition.md). This README and [`OPERATING.md`](OPERATING.md) describe the currently available code, not the acceptance criteria for the rebuilt application.
+AutoAdv is a Windows desktop application under zero-base reconstruction. The authoritative product requirements are in [docs/integration-spec.md](docs/integration-spec.md). The archived original implementation is held on branch `temp`; the `develop` working tree contains only explicitly selected adapters and new implementation.
 
-Windows PySide6 GUI application for game-text acquisition, selective Irodori TTS, native game-audio synchronization and conservative, explicitly authorized advancement.
+## Current executable path
 
-**HOOK is the default text source**, using a managed LunaHook Host. It does not require a separate running LunaTranslator or its public WebSocket. An existing Tesseract installation is an **optional, explicitly selected OCR source** for games where HOOK cannot be used. HOOK and OCR do not run in parallel to create or merge dialogue. Game/profile-specific rules feed a single shared `Utterance` interpretation, voice routing and Controller.
+The PySide6 window registers games and profiles, starts a pinned-compatible LunaHook Host from a selected local DLL, attaches to a game PID, previews observed HOOK threads, lets the user choose a dialogue HOOK and an optional speaker HOOK, and interprets text into speaker, reading, and per-speaker audio mode and Voice. Its settings are saved atomically as a new schema in `%APPDATA%/AutoAdv/settings-v3.json` without rewriting existing settings.
 
-## Starting
+Irodori-TTS uses an existing installation and voice enumeration. Selected TTS is generated asynchronously and considered complete only when the local audio device finishes playback. Silent/reading mode waits the configured reading time. The conversation controller is the sole owner of advance permission and sends at most one input per accepted line, after the configured game window and PID are verified in the foreground. Permission is always separate from monitoring.
+
+**Not yet connected:** Process Loopback/VAD/ASR presentation completion for native speech; AUTO mode switching; optional OCR; automatic game detection; interactive HOOK searching and restoring manually inserted HOOKs; existing-settings import and full text-rule editing. Native/AUTO routing deliberately **does not authorize input** in the current implementation. `temp` retains the former technical assets for selective adaptation. Domain tests are not a substitute for Windows game acceptance.
+
+## Running
 
 ```powershell
-py -3.11 -m pip install -e ".[live]"
-dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
+py -3.11 -m pip install -e ".[gui,audio]"
 py -3.11 -m autoadv
 ```
 
-Select an installed Irodori-TTS-Server folder in the GUI once; AutoAdv reuses a running server or launches the existing environment on future starts and reads available Voice IDs. It does not install models, convert references or install Tesseract for you.
-
-Register a game and optional additional profiles. HOOK profiles select managed HOOK candidates and their order, then configure text parsing, readings, Voice and audio synchronization. OCR profiles must explicitly choose OCR, set an installed OCR executable, language and the client-area rectangle. Both use the same per-game/profile settings store and text interpreter. Audio capture, ASR files, target window and game-input configuration are supplied in the GUI. Existing standalone monitor JSON files may be imported explicitly; they are not a second settings authority.
-
-HOOK text is matched against native game speech through Process Loopback, VAD and ASR. Native voice takes priority; Irodori TTS is used selectively when needed, and audio playback must finish before an explicitly authorized advance. The Controller checks window/PID, focus, live capture, manual intervention and previous input before pressing the configured key. It then waits for a **new, different candidate from the same selected HOOK and session**, not a generic screen-state proof or artificial game-transition ACK. Identical output or time alone cannot repeat a keypress. OCR provides text/audio processing but does not automatically inject input.
-
-AutoAdv does **not** try to recognize every menu, choice screen or game state. Choices that are not identifiable from the HOOK may require manual pause/selection and explicit reauthorization. Per-game continuous advancement and audio synchronization still require verification on Windows real games; unit tests cannot establish compatibility.
-
-See [OPERATING.md](OPERATING.md) for current operation and validation; the canonical rebuilt-product contract is [`docs/integration-spec.md`](docs/integration-spec.md).
+Provide an existing Irodori-TTS-Server installation folder and a built LunaHost.dll. Set the current game PID/HWND, attach Host, observe and select a dialogue HOOK, save routing, and start monitoring. Advance remains disabled until separately authorized. The executable does not install models or modify the Irodori environment.
 
 ## Tests
 
 ```sh
-python -m unittest discover -s tests -q
-python -m autoadv --help
+python -m unittest discover -s tests -v
 ```
 
-Normal development targets `develop` through the standard Publish Gateway. `main` and version changes require explicit approval.
+Publishing uses the repository's [standard Publish Gateway](docs/publish.md). `main` and version are not modified without user approval.
