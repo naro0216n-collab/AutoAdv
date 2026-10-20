@@ -1396,7 +1396,8 @@ def run_gui() -> int:
                         Path(profile.asr_model), Path(profile.asr_tokens),
                         lambda token, event, detail: self.bridge.native.emit(token, event, detail),
                         vad_only=vad_only,
-                        on_pcm=lambda token, frames: self.bridge.native_pcm.emit(token, frames))
+                        on_pcm=(lambda token, frames: self.bridge.native_pcm.emit(token, frames))
+                        if self.validation_trace.path else None)
                     native.start()
                     self.bridge.native_ready.emit(session, native, '')
                 except Exception as exc:
@@ -1433,12 +1434,12 @@ def run_gui() -> int:
         def on_native_pcm(self, token, frames):
             if token is not None and token == self.controller.token:
                 self.validation_trace.emit('native_pcm', session=token.session, line=token.line,
-                    frames=frames, audio_pid=self.native_audio.pid if self.native_audio else 0)
+                    frames=frames, audio_pid=getattr(self.native_audio, 'pid', 0))
 
         def on_native(self, token, event, detail):
             if token == self.controller.token and token is not None:
                 self.validation_trace.emit('native_event', session=token.session, line=token.line,
-                    status=event, method='vad' if (self.native_audio and self.native_audio.vad_only) else 'asr')
+                    status=event, method='vad' if getattr(self.native_audio, 'vad_only', False) else 'asr')
             if not token or token != self.controller.token:
                 return
             current = self.controller.utterance

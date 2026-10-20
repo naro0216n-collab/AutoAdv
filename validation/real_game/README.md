@@ -48,7 +48,7 @@ Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
    `native` はProcess Loopback＋ASR照合を推奨。VAD-onlyの利用条件を満たさない環境で使わない。
 4. 自動送りを明示的に許可し、ゲームの通常会話を実行する。
    選択肢では一時停止・手動選択・再許可する。
-5. GUIを閉じて `python -m validation.real_game.verify_trace --trace "$env:AUTOADV_VALIDATION_TRACE"`。
+5. GUIを閉じて `python -m validation.real_game.verify_trace --phase mixed --trace "$env:AUTOADV_VALIDATION_TRACE"`。
 
 本検証は、実HOOKの通知、Utteranceの話者／本文、NativeAudio完了、
 TTSの再生完了、実SendInputから得た**同一GUI実行経路の事実**を照合する。

@@ -75,9 +75,11 @@ class RealRecordedAudioContracts(unittest.TestCase):
         with wave.open(str(file), "rb") as wav:
             audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
         events = []
+        observed_pcm = []
         native = NativeAudio(
             42, Path("not-used.dll"), Path("unused.onnx"), Path("unused.tokens"),
             lambda token, kind, _: events.append((token, kind)), vad_only=True,
+            on_pcm=lambda token, frames: observed_pcm.append((token, frames)),
             clock=lambda: 0,
         )
         old = Token(20, 5)
@@ -87,6 +89,8 @@ class RealRecordedAudioContracts(unittest.TestCase):
                 pcm = audio[index:index + 960].astype("<f4") / 32768.0
                 frames = np.column_stack((pcm, pcm)).astype("<f4").tobytes()
                 native.feed(PCMChunk(index // 48, frames, 48000, 2, 4))
+            self.assertEqual(len(observed_pcm), 1)
+            self.assertEqual(observed_pcm[0], (old, 960))
             native.cancel()
             for ms in range(2000, 3200, 20):
                 native.feed(PCMChunk(ms, bytes(960 * 8), 48000, 2, 4))
