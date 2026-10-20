@@ -1,3 +1,6 @@
 # Official Luna upstream assets are byte-for-byte pinned; never CRLF-convert them.
 /vendor/luna/** -text
 /autoadv/luna_assets/** -text
+
+# Keep legal, in-game speech assets byte-for-byte identical to licensed originals.
+/validation/real_game/renpy/game/audio/** -text

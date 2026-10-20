@@ -24,6 +24,7 @@ from .import_luna import inspect_luna, add_luna_games
 from .import_legacy import inspect_legacy, add_legacy_games
 from .game_windows import find_game_windows, find_game_processes
 from .windows_input import WindowsAdvancementInput
+from .validation_trace import ValidationTrace, text_digest
 
 
 def run_gui() -> int:
@@ -64,6 +65,7 @@ def run_gui() -> int:
             self.jobs = VoiceJobs(lambda token, done, reason: self.bridge.voice.emit(token, done, reason))
             self.preview_jobs = VoiceJobs(lambda token, done, reason: self.bridge.preview.emit(done, reason))
             self.controller = Controller(self.send_input, self.preflight)
+            self.validation_trace = ValidationTrace()
             self.hook_host: HookHost | None = None
             self.host_generation = ''
             self.connection_generation = 0
@@ -1205,6 +1207,15 @@ def run_gui() -> int:
             if event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value():
                 self.sync_hook_threads()
             if event.kind == 'output' and event.source:
+                if (self.controller.profile and self.controller.profile.source == 'hook'
+                        and event.process_id == (self.controller.target.hook_pid or self.controller.target.pid)
+                        and event.host_generation == self.controller.source_generation
+                        and event.connection_generation == self.controller.connection_generation
+                        and any(h.matches(event.source) for h in self.controller.profile.hooks)):
+                    self.validation_trace.emit('hook_output', session=self.controller.session,
+                        generation=event.host_generation, connection=event.connection_generation,
+                        hook_sequence=event.sequence, source=event.source.identity,
+                        raw_hash=text_digest(event.text))
                 if (event.process_id == self.pid.value() and event.source.identity not in self.ambiguous_sources
                         and event.host_generation == self.host_generation
                         and event.connection_generation == self.connection_generation):
@@ -1309,6 +1320,10 @@ def run_gui() -> int:
                 if sys.platform == 'win32':
                     self.manual_monitor = WindowsManualMonitor(target.hwnd)
                 self.start_native_audio_if_needed(p)
+                self.validation_trace.emit('monitor_started', session=self.controller.session,
+                    source=p.source, game_id=self.game_id, profile_id=self.profile_id,
+                    hook_pid=target.hook_pid or target.pid, audio_pid=target.audio_pid or target.pid,
+                    input_pid=target.pid)
                 self.note('Monitoring started; auto advance remains unauthorized')
             except Exception as exc:
                 self.stop_session()
@@ -1392,7 +1407,9 @@ def run_gui() -> int:
                 self.note('Native audio unavailable: ' + reason)
                 return
             self.native_audio = native
-            self.note('Native process audio ready (VAD-only)' if native.vad_only else 'Native process audio and ASR ready')
+            self.validation_trace.emit('native_ready', session=self.controller.session,
+                vad_only=bool(native.vad_only))
+            self.note('Native process audio ready (VAD-only)'  if native.vad_only else 'Native process audio and ASR ready')
             token = self.controller.token
             if (token and self.controller.utterance and not self.controller.sent and
                     not self.controller.completed and
@@ -1406,6 +1423,9 @@ def run_gui() -> int:
                     self.present(token)
 
         def on_native(self, token, event, detail):
+            if token == self.controller.token and token is not None:
+                self.validation_trace.emit('native_event', session=token.session, line=token.line,
+                    status=event)
             if not token or token != self.controller.token:
                 return
             current = self.controller.utterance
@@ -1448,7 +1468,10 @@ def run_gui() -> int:
             u = self.controller.utterance
             if not u:
                 return
-            self.preview.setPlainText(f'Original: {u.raw}\nSpeaker: {u.speaker}\nText: {u.text}\nReading: {u.reading}\nMatch: {u.match_text}\nRoute: {u.mode.value}; Voice: {u.voice}')
+            self.preview.setPlainText(f'Original: {u.raw}\\nSpeaker: {u.speaker}\\nText: {u.text}\\nReading: {u.reading}\\nMatch: {u.match_text}\\nRoute: {u.mode.value}; Voice: {u.voice}')
+            self.validation_trace.emit('utterance', session=token.session, line=token.line,
+                source=u.source, hook_sequence=u.sequence, raw_hash=text_digest(u.raw),
+                body_hash=text_digest(u.text), speaker=u.speaker, mode=u.mode.value)
             # Luna emits an already-flushed sentence; do not reimplement a second flush timer.
             self.present(token)
             self.refresh_status()
@@ -1487,6 +1510,9 @@ def run_gui() -> int:
                 self.note('Waiting for matching native speech to finish')
 
         def on_voice(self, token, success, reason):
+            if token == self.controller.token and token is not None:
+                self.validation_trace.emit('tts_result', session=token.session,
+                    line=token.line, success=bool(success))
             if (token == self.controller.token and self.controller.utterance and
                     self.controller.utterance.mode == AudioMode.AUTO and self.native_started):
                 return  # Once native speech is attributed, cancelled TTS may not advance.
@@ -1494,6 +1520,8 @@ def run_gui() -> int:
 
         def complete(self, token, success, reason=''):
             if self.controller.mark_complete(token, success=success):
+                self.validation_trace.emit('presentation_complete', session=token.session,
+                    line=token.line, success=True)
                 self.advance_if_ready()
             elif reason:
                 self.note(reason)
@@ -1526,6 +1554,10 @@ def run_gui() -> int:
 
         def send_input(self, target: Target, virtual_key: int):
             WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
+            token = self.controller.token
+            if token:
+                self.validation_trace.emit('advance_input', session=token.session,
+                    line=token.line)
             if self.native_audio:
                 self.native_audio.boundary()
 
@@ -1542,6 +1574,7 @@ def run_gui() -> int:
                 self.refresh_status()
 
         def permit(self):
+            self.validation_trace.emit('permit_requested', session=self.controller.session)
             if self.manual_monitor:
                 self.manual_monitor.reset_after_authorization()
             self.controller.permit(True)
@@ -1549,6 +1582,7 @@ def run_gui() -> int:
             self.refresh_status()
 
         def pause(self):
+            self.validation_trace.emit('pause_requested', session=self.controller.session)
             self.controller.pause()
             self.refresh_status()
 
@@ -1565,6 +1599,7 @@ def run_gui() -> int:
                 self.active_hook_status.setText('Active dialogue HOOK: not monitoring')
 
         def stop_session(self):
+            self.validation_trace.emit('monitor_ended', session=self.controller.session)
             if hasattr(self, '_output_timer'):
                 self._output_timer.stop()
                 self._output_group.clear()
