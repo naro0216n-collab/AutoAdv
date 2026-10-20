@@ -15,12 +15,12 @@ from .contracts import (
     EventKind as EK, Evidence, Playback, Presentation, ScreenState,
     TTSPolicy, VoicePresence,
 )
-from .text import LineText, normalize
+from .text import Utterance, TextInterpreter, GameTextConfig
 
 
 @dataclass(frozen=True)
 class Settings:
-    autoplay: bool = True
+    autoplay: bool = False
     grace_ms: int = 500
     silent_base_ms: int = 700
     silent_min_ms: int = 1000
@@ -28,7 +28,6 @@ class Settings:
     symbolic_short_ms: int = 1500
     symbolic_long_ms: int = 2500
     symbolic_other_ms: int = 1000
-    empty_ms: int = 1000
     tts_required: bool = False
     # Until a game profile is independently calibrated, heuristic absence is
     # never sufficient to authorize silent progression.
@@ -53,7 +52,7 @@ class Settings:
 class Line:
     epoch: int
     token: int
-    text: LineText
+    text: Utterance
     source_line_id: Optional[str]
     first_seen_ms: int
     source_seq: int
@@ -85,8 +84,9 @@ class Controller:
     independent adapters before an auto-advance request can be emitted.
     """
 
-    def __init__(self, settings: Settings | None = None, session_id: str | None = None):
+    def __init__(self, settings: Settings | None = None, session_id: str | None = None, interpreter: TextInterpreter | None = None):
         self.settings = settings or Settings()
+        self.interpreter = interpreter or TextInterpreter(GameTextConfig(name_readings=dict(self.settings.name_readings)))
         self.session_id = session_id or str(uuid.uuid4())
         self.state = S.WAIT_LINE
         self.screen = ScreenState.UNKNOWN
@@ -101,6 +101,7 @@ class Controller:
         # A polling timer must never erase a delayed choice/audio/focus event.
         self._last_kind_at_ms: dict[tuple[EK, int | None], int] = {}
         self.pause_reason: Optional[str] = None
+        self.autoplay_authorized = bool(self.settings.autoplay)
         self.tts_policy = TTSPolicy.UNASSIGNED
         self.voice_id: Optional[str] = None
         self.default_voice_id: Optional[str] = None
@@ -115,12 +116,22 @@ class Controller:
         self.voice_id = selected_voice
         self.default_voice_id = default_voice
 
+    def authorize(self) -> None:
+        if self.state is not S.WAIT_LINE or self.line is not None:
+            raise RuntimeError('permission can be granted only at a new session boundary')
+        self.autoplay_authorized=True
+
+    def pause(self,reason:str='explicit_pause') -> list[Effect]:
+        self.autoplay_authorized=False
+        return self._pause(reason)
+
     def _effect(self, kind: FX, reason: str = "", voice: str | None = None) -> Effect:
         assert self.line is not None
         return Effect(kind, self.session_id, self.line.epoch, self.line.token,
-                      text=self.line.text.spoken, voice_id=voice, reason=reason)
+                      text=self.line.text.tts_text, voice_id=voice, reason=reason)
 
     def _pause(self, reason: str) -> list[Effect]:
+        self.autoplay_authorized=False
         if self.line is None:
             self.state = S.PAUSED
             self.pause_reason = reason
@@ -135,12 +146,25 @@ class Controller:
         effects.append(self._effect(FX.STOPPED, reason))
         return effects
 
+    def _manual_choice(self) -> list[Effect]:
+        effects=[]
+        if self.line is not None and self.line.tts_job_started and not self.line.tts_finished and not self.line.tts_canceled:
+            self.line.tts_canceled=True
+            effects.append(self._effect(FX.CANCEL_TTS,'manual_choice'))
+        self._token+=1
+        self.line=None
+        self.state=S.WAIT_MANUAL_CHOICE
+        return effects
+
     def _new_line(self, e: Envelope) -> None:
         self._epoch += 1
         self._token += 1
-        self.line = Line(self._epoch, self._token,
-                         normalize(e.text or "", empty_confirmed=e.empty_confirmed, names=dict(self.settings.name_readings)),
+        utterance=self.interpreter.parse(e.text or "")
+        self.line = Line(self._epoch, self._token, utterance,
                          e.source_line_id, e.at_ms, e.source_seq or 0)
+        self.tts_policy = utterance.tts_route
+        self.voice_id = utterance.voice_id
+        self.default_voice_id = self.interpreter.config.default_voice
         self.state = S.WAIT_TEXT_READY
         self.pause_reason = None
         if e.text_ready:
@@ -193,6 +217,11 @@ class Controller:
             if e.screen is None:
                 return self._pause("invalid_screen_observation")
             self.screen = e.screen
+            if self.screen is ScreenState.MANUAL_REQUIRED and self.state is not S.PAUSED:
+                return self._manual_choice()
+            if self.state is S.WAIT_MANUAL_CHOICE and self.screen is ScreenState.DIALOGUE:
+                self.state=S.WAIT_LINE
+                return []
             if self.screen is not ScreenState.DIALOGUE and self.line is not None:
                 # After an input has been emitted, a verified scene TRANSITION
                 # is normal; never send again before an independently observed
@@ -202,7 +231,7 @@ class Controller:
                     return self._pause(f"screen_{self.screen.name.lower()}")
         elif e.kind is EK.FOCUS_CHANGED:
             self.focused = e.focused is True
-            if not self.focused and self.line is not None:
+            if not self.focused and (self.line is not None or self.state is S.WAIT_MANUAL_CHOICE):
                 return self._pause("window_unfocused")
         elif e.kind is EK.CAPTURE_HEALTH:
             self.capture_ok = e.capture_ok is True
@@ -226,12 +255,14 @@ class Controller:
                 elif e.source_line_id and e.source_line_id == self.line.source_line_id:
                     # A partial replacement is still the same line; never alter
                     # text after readiness without invalidating the decision.
-                    if self.line.ready_ms is not None and e.text != self.line.text.raw:
+                    if self.line.ready_ms is not None and e.text != self.line.text.observed_original:
                         return self._pause("text_changed_after_ready")
-                    self.line.text = normalize(e.text or "", empty_confirmed=e.empty_confirmed, names=dict(self.settings.name_readings))
+                    self.line.text = self.interpreter.parse(e.text or "")
+                    self.tts_policy = self.line.text.tts_route
+                    self.voice_id = self.line.text.voice_id
                 elif e.source_line_id and self.line.source_line_id and e.source_line_id != self.line.source_line_id:
                     return self._pause("unexpected_line_boundary")
-                elif e.text != self.line.text.raw:
+                elif e.text != self.line.text.observed_original:
                     return self._pause("unattributed_line_change")
                 else:
                     return []
@@ -250,10 +281,12 @@ class Controller:
             assert self.line is not None
             if self.line.ready_ms is not None:
                 return self._pause("text_changed_after_ready")
-            self.line.text = normalize(e.text or "", empty_confirmed=e.empty_confirmed, names=dict(self.settings.name_readings))
+            self.line.text = self.interpreter.parse(e.text or "")
+            self.tts_policy = self.line.text.tts_route
+            self.voice_id = self.line.text.voice_id
         elif e.kind is EK.LINE_READY:
             assert self.line is not None
-            if self.line.text.kind is ContentKind.NON_DIALOGUE:
+            if self.line.text.content_kind is ContentKind.NON_DIALOGUE:
                 return self._pause("no_confirmed_dialogue_event")
             if self.line.ready_ms is None:
                 self.line.ready_ms = e.at_ms
@@ -323,10 +356,9 @@ class Controller:
                 self.line.tts_finished = True
                 self.line.tts_ended_at_ms = e.at_ms
             else:
-                if self.settings.tts_required or self.line.voice is not VoicePresence.ABSENT:
-                    return self._pause("tts_failed")
-                self.line.tts_canceled = True
-                self.line.presentation = Presentation.SILENT
+                # A requested voice that failed synthesis/playback is not
+                # evidence that silent viewing is an authorized substitute.
+                return self._pause("tts_failed")
         elif e.kind is not EK.TIMER:
             return []
         return self._evaluate(e.at_ms)
@@ -349,11 +381,9 @@ class Controller:
     def _dwell(self) -> int:
         assert self.line is not None
         line = self.line.text
-        if line.kind is ContentKind.EMPTY_EVENT:
-            return self.settings.empty_ms
-        if line.kind is ContentKind.SYMBOLIC:
-            if "…" in line.raw or "・" in line.raw:
-                return (self.settings.symbolic_long_ms if line.raw.count("…") >= 4
+        if line.content_kind is ContentKind.SYMBOLIC:
+            if "…" in line.body or "・" in line.body:
+                return (self.settings.symbolic_long_ms if line.body.count("…") >= 4
                         else self.settings.symbolic_short_ms)
             return self.settings.symbolic_other_ms
         return max(self.settings.silent_min_ms,
@@ -361,7 +391,7 @@ class Controller:
 
     def _eligible_for_request(self) -> bool:
         l = self.line
-        return bool(l and self.settings.autoplay and self.focused and
+        return bool(l and self.autoplay_authorized and self.focused and
                     self.screen is ScreenState.DIALOGUE and self.capture_ok and
                     l.ready_ms is not None and not l.sent and not l.request_pending and
                     l.presentation is not Presentation.UNRESOLVED and
@@ -379,7 +409,7 @@ class Controller:
         if l.ready_ms is None:
             self.state = S.WAIT_TEXT_READY
             return []
-        if l.text.kind is ContentKind.NON_DIALOGUE:
+        if l.text.content_kind is ContentKind.NON_DIALOGUE:
             return self._pause("non_dialogue")
         if l.playback is Playback.ACTIVE:
             l.presentation = Presentation.NATIVE
@@ -405,13 +435,13 @@ class Controller:
                 voice = self.voice_id if self.tts_policy is TTSPolicy.SELECTED else self.default_voice_id if self.tts_policy is TTSPolicy.DEFAULT else None
                 if self.tts_policy is TTSPolicy.ERROR:
                     return self._pause("tts_configuration_error")
-                if voice and l.text.kind is ContentKind.SPEAKABLE:
+                if voice and l.text.content_kind is ContentKind.SPEAKABLE:
                     l.presentation = Presentation.TTS
                     l.tts_job_started = True
                     l.tts_started_at_ms = at_ms
                     self.state = S.WAIT_TTS_END
                     return [self._effect(FX.START_TTS, voice=voice)]
-                if self.settings.tts_required and l.text.kind is ContentKind.SPEAKABLE:
+                if self.settings.tts_required and l.text.content_kind is ContentKind.SPEAKABLE:
                     return self._pause("tts_required_unassigned")
                 l.presentation = Presentation.SILENT
                 l.silent_started_at_ms = l.ready_ms

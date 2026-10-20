@@ -1,7 +1,7 @@
 import unittest
 from autoadv.runtime import Runtime, FreshSnapshot
 from autoadv.contracts import Envelope, EventKind as E, Evidence, VoicePresence as V, ScreenState as SS
-from autoadv.controller import Controller
+from autoadv.controller import Controller,Settings
 
 
 class MockTTS:
@@ -21,8 +21,8 @@ class MockGuard:
 
 class RuntimeTests(unittest.TestCase):
     def test_guard_prevents_input(self):
-        ctrl=Controller(session_id="s")
-        guard=MockGuard(SS.CHOICE); inp=MockInput(); clock=iter(range(10000,20000))
+        ctrl=Controller(Settings(autoplay=True),session_id="s")
+        guard=MockGuard(SS.UNKNOWN); inp=MockInput(); clock=iter(range(10000,20000))
         runner=Runtime(ctrl,guard,inp,MockTTS(),clock=lambda:next(clock))
         def post(k,at,**kwargs):
             l=ctrl.line
@@ -38,7 +38,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(ctrl.pause_reason,"advance_preflight_rejected")
 
     def test_input_only_once(self):
-        ctrl=Controller(session_id="s")
+        ctrl=Controller(Settings(autoplay=True),session_id="s")
         inp=MockInput();runner=Runtime(ctrl,MockGuard(),inp,MockTTS(),clock=lambda:9000)
         seq=[(E.SCREEN_CHANGED,100,{"screen":SS.DIALOGUE}),
              (E.FOCUS_CHANGED,101,{"focused":True}),

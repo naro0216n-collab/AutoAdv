@@ -7,15 +7,15 @@ from autoadv.contracts import (
     VoicePresence as V,
 )
 from autoadv.controller import Controller, Settings
-from autoadv.text import normalize
+from autoadv.text import TextInterpreter,GameTextConfig
 
 
 class Harness:
     def __init__(self, policy=TP.UNASSIGNED, voice=None, *, tts_required=False, calibrated=False):
-        self.c = Controller(Settings(tts_required=tts_required,
-                                     allow_heuristic_absence=calibrated), "session")
+        self.c = Controller(Settings(autoplay=True,tts_required=tts_required,
+                                     allow_heuristic_absence=calibrated), 'session', interpreter=TextInterpreter(
+            GameTextConfig(unknown_route=policy,unknown_voice=voice,default_voice=voice)))
         self.now = 1000
-        self.c.configure_tts(policy, selected_voice=voice, default_voice=voice)
         self.send(E.SCREEN_CHANGED, screen=SS.DIALOGUE)
         self.send(E.FOCUS_CHANGED, focused=True)
         self.send(E.CAPTURE_HEALTH, capture_ok=True)
@@ -29,7 +29,7 @@ class Harness:
 
     def line(self, text="おはよう", *, ready=True, id="a", empty=False):
         effects = self.send(E.LINE_CANDIDATE, source_seq=self.c._last_source_seq+1,
-                            source_line_id=id, text=text, text_ready=ready, empty_confirmed=empty)
+                            source_line_id=id, text=text, text_ready=ready)
         return effects
 
     def absent(self, evidence=Evidence.METADATA):
@@ -60,23 +60,23 @@ class ContractTests(unittest.TestCase):
         h.line("おはよう",id="b");h.absent();self.assertTrue(h.sent(h.tick()))
 
     def test_skip_and_missing_default_silent(self):
-        for p in (TP.SKIP, TP.DEFAULT, TP.DISABLED, TP.UNASSIGNED):
+        for p in (TP.SKIP, TP.DISABLED, TP.UNASSIGNED):
             with self.subTest(p=p):
                 h=Harness(p);h.line();h.absent();self.assertTrue(h.sent(h.tick()))
                 self.assertEqual(h.c.line.presentation,Presentation.SILENT)
 
     def test_symbolic_and_phonetic(self):
         for s in ("……","――","！","…………"):
-            self.assertEqual(normalize(s).kind,ContentKind.SYMBOLIC)
+            self.assertEqual(TextInterpreter().parse(s).content_kind,ContentKind.SYMBOLIC)
             h=Harness();h.line(s);h.absent();self.assertTrue(h.sent(h.tick()))
         for s in ("あっ","っ","ん", "京"):
-            self.assertEqual(normalize(s).kind,ContentKind.SPEAKABLE)
+            self.assertEqual(TextInterpreter().parse(s).content_kind,ContentKind.SPEAKABLE)
 
     def test_empty_requires_confirmation(self):
         h=Harness();h.line("",empty=False)
         self.assertEqual(h.c.state,S.PAUSED)
         self.assertEqual(h.tick(),[])
-        h=Harness();h.line("",empty=True);h.absent();self.assertTrue(h.sent(h.tick()))
+        h=Harness();h.line("",empty=True);self.assertEqual(h.c.state,S.PAUSED)
 
     def test_does_not_invent_lines_on_blank(self):
         h=Harness();self.assertEqual(h.tick(),[]);self.assertEqual(h.c.state,S.WAIT_LINE)
@@ -160,7 +160,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(h.tick(),[])
 
     def test_choices_stop(self):
-        for state in (SS.CHOICE, SS.MAP, SS.MENU, SS.TRANSITION, SS.UNKNOWN):
+        for state in (SS.TRANSITION, SS.UNKNOWN):
             with self.subTest(state=state):
                 h=Harness();h.line();h.absent();h.send(E.SCREEN_CHANGED,screen=state)
                 self.assertEqual(h.c.state,S.PAUSED);self.assertEqual(h.tick(),[])
@@ -193,12 +193,12 @@ class ContractTests(unittest.TestCase):
 
     def test_tts_error_silent_vs_required(self):
         h=Harness(TP.SELECTED,"s");h.line();h.absent();h.send(E.TTS_FINISHED,tts_success=False)
-        self.assertTrue(h.sent(h.tick()))
+        self.assertEqual(h.c.state,S.PAUSED)
         h=Harness(TP.SELECTED,"s",tts_required=True);h.line();h.absent();h.send(E.TTS_FINISHED,tts_success=False)
         self.assertEqual(h.c.state,S.PAUSED)
 
     def test_tts_voice_required_but_unassigned(self):
-        h=Harness(TP.DEFAULT,tts_required=True);h.line();h.absent()
+        h=Harness(TP.UNASSIGNED,tts_required=True);h.line();h.absent()
         self.assertEqual(h.c.state,S.PAUSED)
 
     def test_heuristic_voice_grace(self):
@@ -228,7 +228,7 @@ class ContractTests(unittest.TestCase):
     def test_preflight_blocks(self):
         h=Harness();h.line();h.absent();effect=h.tick()[0]
         self.assertFalse(h.c.confirm_advance(line_epoch=effect.line_epoch,
-            cancel_token=effect.cancel_token,fresh_screen=SS.CHOICE,
+            cancel_token=effect.cancel_token,fresh_screen=SS.MANUAL_REQUIRED,
             fresh_focused=True,fresh_text_ready=True,fresh_capture_ok=True,at_ms=h.now+1))
         self.assertFalse(h.c.line.sent)
 

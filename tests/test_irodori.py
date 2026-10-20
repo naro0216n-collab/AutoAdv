@@ -99,7 +99,8 @@ class IrodoriTests(unittest.TestCase):
         self.assertEqual(events,[])
 
     def test_cancelled_synthesis_allows_verified_native_end_in_runtime(self):
-        from autoadv.controller import Controller
+        from autoadv.controller import Controller,Settings
+        from autoadv.text import TextInterpreter,GameTextConfig
         from autoadv.contracts import Envelope, Evidence, ScreenState, TTSPolicy, VoicePresence
         from autoadv.runtime import Runtime, FreshSnapshot
         started=threading.Event();release=threading.Event();finished=threading.Event()
@@ -115,8 +116,8 @@ class IrodoriTests(unittest.TestCase):
             def observe(self):
                 return FreshSnapshot(ScreenState.DIALOGUE,True,True,True,
                                      False,self.worker.is_active(),True,True,True,False,False)
-        ctrl=Controller(session_id='s')
-        ctrl.configure_tts(TTSPolicy.SELECTED,selected_voice='voice')
+        ctrl=Controller(Settings(autoplay=True),session_id='s',interpreter=TextInterpreter(
+            GameTextConfig(unknown_route=TTSPolicy.SELECTED,unknown_voice='voice')))
         input_driver=Input()
         # The actual TTS worker is used, not a fake cancellation protocol.
         worker=TTSWorker(BlockingClient(),lambda e:None,

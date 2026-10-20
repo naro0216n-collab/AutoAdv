@@ -131,8 +131,8 @@ class Runtime:
         return {
             'session_id':c.session_id, 'line_epoch':line.epoch,
             'source_line_id':line.source_line_id,
-            'raw_sha256':hashlib.sha256(line.text.raw.encode('utf-8')).hexdigest(),
-            'content_kind':line.text.kind.name,
+            'raw_sha256':hashlib.sha256(line.text.observed_original.encode('utf-8')).hexdigest(),
+            'content_kind':line.text.content_kind.name,
             'screen_state':c.screen.name,
             'tts_policy':c.tts_policy.name,
             'tts_selected_voice':c.voice_id if c.tts_policy.name=='SELECTED' else c.default_voice_id if c.tts_policy.name=='DEFAULT' else None,

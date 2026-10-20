@@ -166,9 +166,12 @@ class WindowsManualMonitor:
             self._manual.set()
         return self._manual.is_set()
 
-    def reset_after_transition(self):
-        # Transition to the next line is never permission to erase user input.
-        pass
+    def reset_after_authorization(self):
+        # Only explicit new-session authorization or positively verified choice
+        # completion can clear physical input observed during setup/selection.
+        with self._origin_lock:
+            self._origin = InputOriginTracker(self._last_input())
+            self._manual.clear()
 
     def close(self):
         self._stop.set()
@@ -183,10 +186,12 @@ class LiveGuard:
                  manual:WindowsManualMonitor, tts_active:Callable[[],bool],
                  capture_alive:Callable[[],bool],
                  audio_activity:Callable[[],bool] = lambda: True,
+                 binding_confirmed:Callable[[],bool] = lambda: False,
                  clock:Callable[[],int]=lambda:time.monotonic_ns()//1_000_000):
         self.ctrl,self.screen,self.hwnd,self.pid=controller,screen,hwnd,pid
         self.manual,self.tts_active,self.capture_alive,self.clock=manual,tts_active,capture_alive,clock
         self.audio_activity=audio_activity
+        self.binding_confirmed=binding_confirmed
 
     def observe(self)->FreshSnapshot:
         try:
@@ -200,12 +205,12 @@ class LiveGuard:
             valid=pid.value==self.pid and bool(user32.IsWindowVisible(self.hwnd)) and bool(user32.IsWindowEnabled(self.hwnd))
             line=self.ctrl.line
             if line is None:raise RuntimeError('no current line')
-            s=self.screen.observe(line.text.raw,self.clock())
+            s=self.screen.observe(self.clock())
             return FreshSnapshot(
                 screen=s.state,focused=foreground and valid,
                 text_ready=s.ready,capture_ok=self.capture_alive(),
                 native_voice_active=(line.playback is Playback.ACTIVE or self.audio_activity()),
-                tts_playing=self.tts_active(),line_matches=s.text_matches,
+                tts_playing=self.tts_active(),line_matches=s.positive and self.binding_confirmed(),
                 target_window_matches=valid,input_available=valid,
                 manual_override=self.manual.intervened(),
                 transition_pending=self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK,

@@ -5,7 +5,7 @@ import json
 import unittest
 from autoadv.live import JsonAudit,LiveConfig
 from autoadv.contracts import Envelope,EventKind as E,ScreenState as SS,Evidence,VoicePresence
-from autoadv.controller import Controller
+from autoadv.controller import Controller,Settings
 from autoadv.runtime import Runtime,FreshSnapshot
 
 class FakeInput:
@@ -20,7 +20,7 @@ class TelemetryContracts(unittest.TestCase):
     def test_summary_has_hash_timestamps_and_asr_metrics(self):
         with TemporaryDirectory() as td:
             sink=JsonAudit(Path(td)/'result.jsonl',context={'asr_model_id':'model.int8.onnx'})
-            ctrl=Controller(session_id='s')
+            ctrl=Controller(Settings(autoplay=True),session_id='s')
             clock=[1]
             driver=FakeInput()
             rt=Runtime(ctrl,FakeGuard(),driver,FakeTTS(),clock=lambda:clock[0],audit=sink)

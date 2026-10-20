@@ -12,16 +12,13 @@ from typing import Optional
 class ContentKind(Enum):
     SPEAKABLE = auto()
     SYMBOLIC = auto()
-    EMPTY_EVENT = auto()
     NON_DIALOGUE = auto()
 
 
 class ScreenState(Enum):
     DIALOGUE = auto()
-    CHOICE = auto()
-    MAP = auto()
+    MANUAL_REQUIRED = auto()
     TRANSITION = auto()
-    MENU = auto()
     UNKNOWN = auto()
 
 
@@ -70,6 +67,7 @@ class ControllerState(Enum):
     WAIT_SILENT_DWELL = auto()
     READY_TO_ADVANCE = auto()
     WAIT_TRANSITION_ACK = auto()
+    WAIT_MANUAL_CHOICE = auto()
     PAUSED = auto()
 
 
@@ -102,8 +100,6 @@ class Envelope:
     text: Optional[str] = None
     source_line_id: Optional[str] = None
     text_ready: bool = False
-    # Empty events require independently verified game-side evidence.
-    empty_confirmed: bool = False
     screen: Optional[ScreenState] = None
     capture_ok: Optional[bool] = None
     voice: Optional[VoicePresence] = None

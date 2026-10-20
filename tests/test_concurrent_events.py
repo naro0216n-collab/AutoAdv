@@ -17,7 +17,7 @@ class ConcurrentEventContracts(unittest.TestCase):
         return self.c.accept(Envelope(kind,'s',at,line_epoch=line.epoch,cancel_token=line.token,**kwargs))
 
     def test_paused_is_latched_against_native_events_and_ready_timers(self):
-        self.c.accept(Envelope(E.SCREEN_CHANGED,'s',102,screen=S.CHOICE))
+        self.c.accept(Envelope(E.SCREEN_CHANGED,'s',102,screen=S.UNKNOWN))
         self.assertEqual(self.c.state,CS.PAUSED)
         for kind, extra in [
             (E.NATIVE_STARTED,{'native_utterance_id':'voice','evidence':Evidence.AUDIO_CONFIRMED}),
@@ -27,18 +27,18 @@ class ConcurrentEventContracts(unittest.TestCase):
             (E.LINE_READY,{})]:
             self.assertEqual(self.event(kind,103,**extra),[])
             self.assertEqual(self.c.state,CS.PAUSED)
-        self.assertEqual(self.c.pause_reason,'screen_choice')
+        self.assertEqual(self.c.pause_reason,'screen_unknown')
 
     def test_delayed_choice_observation_not_discarded_by_newer_timer(self):
         self.event(E.TIMER,200)
-        self.c.accept(Envelope(E.SCREEN_CHANGED,'s',150,screen=S.CHOICE))
+        self.c.accept(Envelope(E.SCREEN_CHANGED,'s',150,screen=S.UNKNOWN))
         self.assertEqual(self.c.state,CS.PAUSED)
-        self.assertEqual(self.c.screen,S.CHOICE)
+        self.assertEqual(self.c.screen,S.UNKNOWN)
 
     def test_old_screen_observation_same_source_is_not_resurrected(self):
-        self.c.accept(Envelope(E.SCREEN_CHANGED,'s',200,screen=S.CHOICE))
+        self.c.accept(Envelope(E.SCREEN_CHANGED,'s',200,screen=S.UNKNOWN))
         self.c.accept(Envelope(E.SCREEN_CHANGED,'s',150,screen=S.DIALOGUE))
-        self.assertEqual(self.c.screen,S.CHOICE)
+        self.assertEqual(self.c.screen,S.UNKNOWN)
         self.assertEqual(self.c.state,CS.PAUSED)
 
 if __name__=='__main__':unittest.main()
