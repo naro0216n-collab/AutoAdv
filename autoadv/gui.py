@@ -251,6 +251,9 @@ def run_gui() -> int:
 
         def save_profile(self):
             try:
+                if (self.game_worker is not None and self.game_worker.isRunning() and
+                    self.game_name.currentText()!=self.service.preferences.selected_game):
+                    raise ValueError('監視中は対象作品を変更できません。監視終了後に切り替えてください')
                 c=self.current_editor_config()
                 available=self.service.server.state.voices
                 assigned=[voice for policy,voice in c.speaker_routes.values()
@@ -345,6 +348,9 @@ def run_gui() -> int:
                 return
             # The running game uses the saved profile snapshot, not unsaved widgets.
             self.stop_luna()
+            self.service.latest_original=''
+            self.service.luna_connected=False
+            self.show_status('最新Luna原文','新しい監視セッションの受信待ち')
             self.live_control=LiveControl()
             self.game_worker=GameWorker(profile,self.service,self.live_control)
             self.game_worker.status.connect(self.game_status)
@@ -358,6 +364,9 @@ def run_gui() -> int:
 
         def grant_live(self):
             if not self.game_worker or not self.game_worker.isRunning() or not self.live_control:return
+            if not self.service.luna_connected or not self.service.latest_original.strip():
+                self.show_status('停止理由','現在の監視セッションでLuna原文と対象ゲームの一致を確認できません')
+                return
             # This user action confirms the selected Luna hook, target window,
             # and last original correspond to the same game. The worker still
             # requires a live WS connection, window focus and fresh preflight.
@@ -372,7 +381,10 @@ def run_gui() -> int:
 
         def game_status(self,state):
             if 'original' in state:self.receive_original(state['original'])
-            if 'luna' in state:self.show_status('Luna 接続',state['luna']+' '+state.get('luna_reason',''))
+            if 'luna' in state:
+                self.service.luna_connected=state['luna']=='connected'
+                self.show_status('Luna 接続',state['luna']+' '+state.get('luna_reason',''))
+                if not self.service.luna_connected:self.disallow_until_verified()
             if 'monitor' in state:self.monitor_state.setText('ゲーム監視: '+state['monitor'])
             if 'advance' in state:self.show_status('自動進行許可',state['advance'])
             if 'reason' in state:self.show_status('停止理由',state['reason'] or 'なし')

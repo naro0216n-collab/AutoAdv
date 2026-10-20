@@ -90,7 +90,8 @@ class GameTextConfig:
         for policy,voice in (*self.speaker_routes.values(),(self.unknown_route,self.unknown_voice)):
             if policy is TTSPolicy.SELECTED and not voice:
                 raise ValueError('selected voice requires an ID')
-        if self.unknown_route is TTSPolicy.DEFAULT and not self.default_voice:
+        if (self.unknown_route is TTSPolicy.DEFAULT or
+            any(route is TTSPolicy.DEFAULT for route, _ in self.speaker_routes.values())) and not self.default_voice:
             raise ValueError('default voice requires an ID')
 
     @classmethod

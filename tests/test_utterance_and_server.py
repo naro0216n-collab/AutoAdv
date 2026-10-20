@@ -98,3 +98,12 @@ class ServerStartupOwnership(TestCase):
             (root/'.env').write_text('IRODORI_VOICE_ALIASES_FILE=alias.json\n',encoding='utf-8')
             (root/'alias.json').write_text('{"voice_alias":"v.wav"}',encoding='utf-8')
             self.assertIn('voice_alias',local_voice_ids(root))
+
+class VoiceAssignmentValidation(TestCase):
+    def test_default_routing_requires_a_real_configured_default(self):
+        with self.assertRaises(ValueError):
+            GameTextConfig(speaker_routes={'大和':(TTSPolicy.DEFAULT,None)})
+        with self.assertRaises(ValueError):
+            GameTextConfig(unknown_route=TTSPolicy.SELECTED)
+        config=GameTextConfig(speaker_routes={'大和':(TTSPolicy.DEFAULT,None)},default_voice='existing_id')
+        self.assertEqual(TextInterpreter(config).parse('大和「本文」').voice_id,'existing_id')
