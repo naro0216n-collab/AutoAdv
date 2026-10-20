@@ -1,14 +1,10 @@
 name: Windows Adapter Validation
 
 on:
-  push:
+  workflow_run:
+    workflows: ['Fast CI']
+    types: [completed]
     branches: [develop]
-    paths:
-      - 'autoadv/**'
-      - 'integrations/windows-loopback/**'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - '.github/workflows/windows-adapters.yml'
   workflow_dispatch:
 
 permissions:
@@ -16,10 +12,14 @@ permissions:
 
 jobs:
   windows-adapters:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.head_branch == 'develop' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_run points at the default branch unless explicitly pinned.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
