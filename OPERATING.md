@@ -1,5 +1,7 @@
 # AutoAdv — Windows use and verification
 
+This guide documents **current implementation behavior during zero-base reconstruction**, not the future acceptance contract. For the required completed product, use [`docs/integration-spec.md`](docs/integration-spec.md); for the migration steps, use [`docs/rebuild-transition.md`](docs/rebuild-transition.md).
+
 ## Prerequisites
 
 Windows 10 build 19041 or newer; Python 3.11; .NET SDK 9 for the Process Loopback helper; existing Irodori-TTS-Server installation, an installed native LunaHook Host/Hook build for the relevant target game, and local ASR model/tokens for native speech synchronization. Tesseract with Japanese trained data is needed **only** for an OCR profile. No separate running LunaTranslator is part of the normal HOOK workflow. AutoAdv does not download/update engines or models or modify other programs' installations on startup.

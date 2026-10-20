@@ -1,5 +1,7 @@
 # AutoAdv
 
+**Rebuild in progress.** The target product behavior is defined in [`docs/integration-spec.md`](docs/integration-spec.md). The selective-salvage implementation plan is [`docs/rebuild-transition.md`](docs/rebuild-transition.md). This README and [`OPERATING.md`](OPERATING.md) describe the currently available code, not the acceptance criteria for the rebuilt application.
+
 Windows PySide6 GUI application for game-text acquisition, selective Irodori TTS, native game-audio synchronization and conservative, explicitly authorized advancement.
 
 **HOOK is the default text source**, using a managed LunaHook Host. It does not require a separate running LunaTranslator or its public WebSocket. An existing Tesseract installation is an **optional, explicitly selected OCR source** for games where HOOK cannot be used. HOOK and OCR do not run in parallel to create or merge dialogue. Game/profile-specific rules feed a single shared `Utterance` interpretation, voice routing and Controller.
@@ -20,7 +22,7 @@ HOOK text is matched against native game speech through Process Loopback, VAD an
 
 AutoAdv does **not** try to recognize every menu, choice screen or game state. Choices that are not identifiable from the HOOK may require manual pause/selection and explicit reauthorization. Per-game continuous advancement and audio synchronization still require verification on Windows real games; unit tests cannot establish compatibility.
 
-See [OPERATING.md](OPERATING.md) for operation and validation, and `docs/integration-spec.md` for the canonical product contract.
+See [OPERATING.md](OPERATING.md) for current operation and validation; the canonical rebuilt-product contract is [`docs/integration-spec.md`](docs/integration-spec.md).
 
 ## Tests
 
