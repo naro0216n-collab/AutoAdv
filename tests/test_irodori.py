@@ -116,7 +116,7 @@ class IrodoriTests(unittest.TestCase):
             def observe(self):
                 return FreshSnapshot(focused=True,capture_ok=True,native_voice_active=False,tts_playing=self.worker.is_active(),target_window_matches=True,input_available=True,manual_override=False)
         ctrl=Controller(Settings(autoplay=True),session_id='s',interpreter=TextInterpreter(
-            GameTextConfig(unknown_route=TTSPolicy.SELECTED,unknown_voice='voice')))
+            GameTextConfig(unknown_route=TTSPolicy.AUTO,unknown_voice='voice')))
         input_driver=Input()
         # The actual TTS worker is used, not a fake cancellation protocol.
         worker=TTSWorker(BlockingClient(),lambda e:None,

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
-from .contracts import ContentKind, TTSPolicy
+from .contracts import AudioRoute, ContentKind, TTSPolicy
 import hashlib
 import json
 import re
@@ -59,6 +59,7 @@ class Utterance:
     effective_chars: int
     tts_route: TTSPolicy
     voice_id: str | None
+    audio_route: AudioRoute
     config_revision: str
     matching: str
     conflicts: tuple[str, ...] = ()
@@ -93,6 +94,17 @@ class GameTextConfig:
         if (self.unknown_route is TTSPolicy.DEFAULT or
             any(route is TTSPolicy.DEFAULT for route, _ in self.speaker_routes.values())) and not self.default_voice:
             raise ValueError('default voice requires an ID')
+
+    def resolve_voice(self,speaker:str | None) -> tuple[TTSPolicy,str | None]:
+        """One owner of speaker policy and effective voice across GUI/runtime."""
+        policy,voice=self.speaker_routes.get(speaker,(self.unknown_route,self.unknown_voice))
+        if policy is TTSPolicy.DEFAULT:
+            voice=self.default_voice
+        elif policy in (TTSPolicy.AUTO,TTSPolicy.UNASSIGNED):
+            voice=voice or self.default_voice
+        elif policy is not TTSPolicy.SELECTED:
+            voice=None
+        return policy,voice
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> 'GameTextConfig':
@@ -155,9 +167,11 @@ class TextInterpreter:
                 tts=re.sub(rule.pattern,rule.replacement,tts) if rule.regex else tts.replace(rule.pattern,rule.replacement)
             if rule.target in ('asr','both'):
                 asr=re.sub(rule.pattern,rule.replacement,asr) if rule.regex else asr.replace(rule.pattern,rule.replacement)
-        policy,voice=self.config.speaker_routes.get(speaker,(self.config.unknown_route,self.config.unknown_voice))
-        if policy is TTSPolicy.DEFAULT: voice=self.config.default_voice
-        if policy is not TTSPolicy.SELECTED and policy is not TTSPolicy.DEFAULT: voice=None
+        policy,voice=self.config.resolve_voice(speaker)
+        route=(AudioRoute.NATIVE if policy is TTSPolicy.NATIVE else
+               AudioRoute.TTS if policy in (TTSPolicy.SELECTED,TTSPolicy.DEFAULT) else
+               AudioRoute.AUTO if policy in (TTSPolicy.AUTO,TTSPolicy.UNASSIGNED) else
+               AudioRoute.SILENT)
         return Utterance(original,speaker,body,chosen.rule_id if chosen else None,kind,tts,asr,
-                         len(meaningful),policy,voice,self.config.revision,
+                         len(meaningful),policy,voice,route,self.config.revision,
                          re.sub(r'\s+','',asr),tuple(x.rule_id for x,_ in matched[1:]))

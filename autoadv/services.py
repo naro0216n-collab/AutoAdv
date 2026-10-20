@@ -212,7 +212,7 @@ class AutoAdvService:
             lfile.write_text(json.dumps(probe,ensure_ascii=False),encoding='utf-8')
             config=LiveConfig.load(lfile)
             for file in (config.loopback_helper,config.asr_model,config.asr_tokens):
-                if not file.is_file():raise ValueError(f'missing runtime dependency: {file}')
+                if file is not None and not file.is_file():raise ValueError(f'missing runtime dependency: {file}')
         previous=copy.deepcopy(self.active()[1])
         try:
             self.active()[1].monitor=live

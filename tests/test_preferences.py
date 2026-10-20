@@ -98,6 +98,30 @@ class MonitorProfilePersistence(TestCase):
             current.profile_set_default()
             self.assertEqual(AutoAdvService(settings_file=path).active()[1].profile_id,duplicated.profile_id)
 
+    def test_tts_only_monitor_does_not_require_asr_or_loopback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            service=AutoAdvService(settings_file=root/'settings.json')
+            service.new_game('無音声作品')
+            document=self.profile(root)
+            for key in ('loopback_helper','asr_model','asr_tokens'):
+                document[key]=''
+            service.save_monitor(document)
+            configured,temporary=service.runtime_snapshot(111,222)
+            try:
+                self.assertFalse(configured.native_audio_enabled)
+                self.assertIsNone(configured.loopback_helper)
+                self.assertIsNone(configured.asr_model)
+                self.assertIsNone(configured.asr_tokens)
+                self.assertEqual(configured.log_path,root/'log.jsonl')
+            finally:
+                temporary.cleanup()
+            self.assertEqual(service.monitor_document()['asr_model'],'')
+            for key in ('loopback_helper','asr_model','asr_tokens'):
+                partial={**document,key:str(root/'model.onnx')}
+                with self.subTest(partial=key),self.assertRaises(ValueError):service.save_monitor(partial)
+            self.assertEqual(service.monitor_document()['asr_model'],'')
+
     def test_explicit_legacy_import_keeps_original_and_never_persists_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);path=root/'settings.json'

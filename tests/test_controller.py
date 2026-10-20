@@ -206,15 +206,73 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(h.c.line.epoch,old.epoch+1)
         self.assertEqual(h.tick(),[])
 
+    def test_explicit_tts_survives_native_metadata_and_playback(self):
+        h=Harness(TP.SELECTED,'speaker1')
+        self.assertEqual([e.kind for e in h.line()],[FX.START_TTS])
+        self.assertEqual(h.send(E.VOICE_PRESENCE,voice=V.PRESENT,evidence=Evidence.METADATA),[])
+        self.assertEqual(h.c.line.presentation,Presentation.TTS)
+        self.assertEqual(h.send(E.NATIVE_STARTED,native_utterance_id='native',evidence=Evidence.AUDIO_CONFIRMED),[])
+        self.assertEqual(h.c.line.presentation,Presentation.TTS)
+        self.assertEqual(h.send(E.TTS_FINISHED,tts_success=True),[])
+        self.assertTrue(h.sent(h.send(E.NATIVE_COMPLETED,native_utterance_id='native',evidence=Evidence.AUDIO_CONFIRMED)))
+        self.assertTrue(h.c.line.tts_finished)
+
+    def test_tts_without_audio_capture_ignores_absence_evidence_requirements(self):
+        h=Harness(TP.SELECTED,'voice')
+        h.send(E.CAPTURE_HEALTH,capture_ok=False)
+        self.assertEqual([x.kind for x in h.line()],[FX.START_TTS])
+        request=h.send(E.TTS_FINISHED,tts_success=True)
+        self.assertEqual([x.kind for x in request],[FX.REQUEST_ADVANCE])
+        effect=request[0]
+        self.assertTrue(h.c.confirm_advance(line_epoch=effect.line_epoch,cancel_token=effect.cancel_token,
+            fresh_focused=True,fresh_capture_ok=False,fresh_native_voice_active=False,fresh_tts_playing=False,
+            fresh_target_window_matches=True,fresh_input_available=True,fresh_manual_override=False,at_ms=h.now+1))
+
+    def test_silent_without_audio_capture_waits_dwell_and_guards_input(self):
+        h=Harness(TP.SILENT)
+        h.send(E.CAPTURE_HEALTH,capture_ok=False)
+        self.assertEqual(h.line('こんにちは'),[])
+        self.assertEqual(h.tick(delta=300),[])
+        effect=h.tick(delta=2000)[0]
+        self.assertEqual(effect.kind,FX.REQUEST_ADVANCE)
+        self.assertFalse(h.c.confirm_advance(line_epoch=effect.line_epoch,cancel_token=effect.cancel_token,
+            fresh_focused=True,fresh_capture_ok=False,fresh_native_voice_active=True,fresh_tts_playing=False,
+            fresh_target_window_matches=True,fresh_input_available=True,fresh_manual_override=False,at_ms=h.now+1))
+        self.assertTrue(h.c.confirm_advance(line_epoch=effect.line_epoch,cancel_token=effect.cancel_token,
+            fresh_focused=True,fresh_capture_ok=False,fresh_native_voice_active=False,fresh_tts_playing=False,
+            fresh_target_window_matches=True,fresh_input_available=True,fresh_manual_override=False,at_ms=h.now+1))
+
+    def test_auto_route_requires_verified_audio_absence(self):
+        h=Harness(TP.AUTO,'voice')
+        h.send(E.CAPTURE_HEALTH,capture_ok=False)
+        self.assertEqual(h.line(),[])
+        self.assertEqual(h.tick(delta=100000),[])
+        self.assertEqual(h.c.line.presentation,Presentation.UNRESOLVED)
+        self.assertFalse(h.c.line.sent)
+        self.assertEqual(h.c.state,S.RESOLVE_PRESENTATION)
+
+    def test_native_route_does_not_fallback_to_tts_or_silent(self):
+        h=Harness(TP.NATIVE,'ignored')
+        self.assertEqual(h.line(),[])
+        self.assertEqual(h.absent(),[])
+        self.assertEqual(h.tick(delta=10000)[0].kind,FX.STOPPED)
+        h=Harness(TP.NATIVE)
+        h.line()
+        h.send(E.VOICE_PRESENCE,voice=V.PRESENT,evidence=Evidence.METADATA)
+        self.assertEqual(h.send(E.NATIVE_STARTED,native_utterance_id='n',evidence=Evidence.METADATA),[])
+        self.assertTrue(h.sent(h.send(E.NATIVE_COMPLETED,native_utterance_id='n',evidence=Evidence.METADATA)))
+        self.assertEqual(h.c.line.presentation,Presentation.NATIVE)
+
     def test_tts_emits_start_and_finish(self):
-        h=Harness(TP.SELECTED,"speaker1");h.line();effects=h.absent()
+        h=Harness(TP.SELECTED,"speaker1");effects=h.line()
         self.assertEqual(effects[0].kind,FX.START_TTS)
+        self.assertEqual(h.absent(),[])
         self.assertEqual(effects[0].voice_id,"speaker1")
         self.assertEqual(h.tick(),[])
         self.assertTrue(h.sent(h.send(E.TTS_FINISHED,tts_success=True)))
 
     def test_tts_native_late_cancels_and_waits(self):
-        h=Harness(TP.SELECTED,"speaker1");h.line();h.absent()
+        h=Harness(TP.AUTO,"speaker1");h.line();self.assertEqual(h.absent()[0].kind,FX.START_TTS)
         effects=h.send(E.NATIVE_STARTED,native_utterance_id="native",evidence=Evidence.AUDIO_CONFIRMED)
         self.assertEqual([e.kind for e in effects],[FX.CANCEL_TTS])
         self.assertEqual(h.c.state,S.WAIT_NATIVE_END)
@@ -223,7 +281,7 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(h.sent(h.send(E.NATIVE_COMPLETED,native_utterance_id="native",evidence=Evidence.AUDIO_CONFIRMED)))
 
     def test_late_metadata_cancels_tts_before_sound(self):
-        h=Harness(TP.SELECTED,"s");h.line();h.absent()
+        h=Harness(TP.AUTO,"s");h.line();self.assertEqual(h.absent()[0].kind,FX.START_TTS)
         effects=h.send(E.VOICE_PRESENCE,voice=V.PRESENT,evidence=Evidence.METADATA)
         self.assertEqual(effects[0].kind,FX.CANCEL_TTS)
         self.assertEqual(h.tick(),[])
@@ -276,7 +334,7 @@ class ContractTests(unittest.TestCase):
                         fresh_focused=True,fresh_capture_ok=True,at_ms=h.now+1))
 
     def test_delayed_stale_audio_does_not_cross_hook_line(self):
-        h=Harness(TP.SELECTED,'s');h.line();h.absent();old=h.c.line
+        h=Harness(TP.AUTO,'s');h.line();h.absent();old=h.c.line
         h.send(E.NATIVE_STARTED,native_utterance_id='n',evidence=Evidence.AUDIO_CONFIRMED)
         req=h.send(E.NATIVE_COMPLETED,native_utterance_id='n',evidence=Evidence.AUDIO_CONFIRMED)
         self.assertTrue(h.sent(req))
@@ -297,7 +355,7 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(h.sent(h.tick(delta=120000)))
 
     def test_no_advance_when_tts_canceled_from_native(self):
-        h=Harness(TP.SELECTED,"s");h.line();h.absent()
+        h=Harness(TP.AUTO,"s");h.line();h.absent()
         h.send(E.NATIVE_STARTED,native_utterance_id="v",evidence=Evidence.AUDIO_CONFIRMED)
         h.send(E.TTS_FINISHED,tts_success=True)
         self.assertEqual(h.tick(),[])

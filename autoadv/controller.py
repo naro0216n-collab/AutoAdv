@@ -13,7 +13,7 @@ import uuid
 from .contracts import (
     ContentKind, ControllerState as S, Effect, EffectKind as FX, Envelope,
     EventKind as EK, Evidence, Playback, Presentation,
-    TTSPolicy, VoicePresence,
+    AudioRoute, TTSPolicy, VoicePresence,
 )
 from .text import Utterance, TextInterpreter, GameTextConfig
 
@@ -104,19 +104,6 @@ class Controller:
         self._last_kind_at_ms: dict[tuple[EK, int | None], int] = {}
         self.pause_reason: Optional[str] = None
         self.autoplay_authorized = bool(self.settings.autoplay)
-        self.tts_policy = TTSPolicy.UNASSIGNED
-        self.voice_id: Optional[str] = None
-        self.default_voice_id: Optional[str] = None
-
-    def configure_tts(self, policy: TTSPolicy, *, selected_voice: str | None = None,
-                      default_voice: str | None = None) -> None:
-        if (self.line is not None and self.state is not S.PAUSED and
-            (self.line.ready_ms is not None or self.line.tts_job_started)):
-            raise RuntimeError("TTS policy can only change before text readiness")
-        self.tts_policy = policy
-        self.voice_id = selected_voice
-        self.default_voice_id = default_voice
-
     def authorize(self) -> None:
         """Permit advancement of the currently observed utterance or next one.
 
@@ -186,9 +173,6 @@ class Controller:
                          e.source_line_id, e.at_ms, e.source_seq or 0,
                          e.source_kind,e.source_origin,e.source_generation,
                          observation_since_ms=e.at_ms if self.focused and self.capture_ok else None)
-        self.tts_policy = utterance.tts_route
-        self.voice_id = utterance.voice_id
-        self.default_voice_id = self.interpreter.config.default_voice
         self.state = S.WAIT_TEXT_READY
         self.pause_reason = None
         if e.text_ready:
@@ -272,8 +256,6 @@ class Controller:
                     if self.line.ready_ms is not None and e.text != self.line.text.observed_original:
                         return self._pause("text_changed_after_ready")
                     self.line.text = self.interpreter.parse(e.text or "")
-                    self.tts_policy = self.line.text.tts_route
-                    self.voice_id = self.line.text.voice_id
                 elif e.source_line_id and self.line.source_line_id and e.source_line_id != self.line.source_line_id:
                     return self._pause("unexpected_line_boundary")
                 elif e.text != self.line.text.observed_original:
@@ -285,8 +267,6 @@ class Controller:
             if self.line.ready_ms is not None:
                 return self._pause("text_changed_after_ready")
             self.line.text = self.interpreter.parse(e.text or "")
-            self.tts_policy = self.line.text.tts_route
-            self.voice_id = self.line.text.voice_id
         elif e.kind is EK.LINE_READY:
             assert self.line is not None
             if self.line.text.content_kind is ContentKind.NON_DIALOGUE:
@@ -309,7 +289,8 @@ class Controller:
             self.line.evidence = e.evidence
             if e.evidence is Evidence.METADATA:
                 self.line.native_asset_id = e.native_asset_id if e.voice is VoicePresence.PRESENT else None
-            if e.voice is VoicePresence.PRESENT and self.line.presentation is Presentation.TTS:
+            if (e.voice is VoicePresence.PRESENT and self.line.presentation is Presentation.TTS
+                and self.line.text.audio_route is AudioRoute.AUTO):
                 effects: list[Effect] = []
                 if self.line.tts_job_started and not self.line.tts_canceled and not self.line.tts_finished:
                     self.line.tts_canceled = True
@@ -333,10 +314,13 @@ class Controller:
             self.line.native_started_at_ms = e.at_ms
             self.line.utterance_id = e.native_utterance_id
             effects: list[Effect] = []
-            if self.line.tts_job_started and not self.line.tts_canceled and not self.line.tts_finished:
-                self.line.tts_canceled = True
-                effects.append(self._effect(FX.CANCEL_TTS, "late_native_onset"))
-            self.line.presentation = Presentation.NATIVE
+            if self.line.text.audio_route in (AudioRoute.AUTO,AudioRoute.NATIVE):
+                if self.line.tts_job_started and not self.line.tts_canceled and not self.line.tts_finished:
+                    self.line.tts_canceled = True
+                    effects.append(self._effect(FX.CANCEL_TTS, "late_native_onset"))
+                self.line.presentation = Presentation.NATIVE
+            # Explicit TTS never loses its playback choice to native metadata.
+            # An attributed, active native clip still blocks advancing over it.
             self.line.request_pending = False
             self.state = S.WAIT_NATIVE_END
             return effects
@@ -350,7 +334,8 @@ class Controller:
                 return []
             self.line.playback = Playback.COMPLETE
             self.line.native_completed_at_ms = e.at_ms
-            self.line.presentation = Presentation.NATIVE
+            if self.line.text.audio_route in (AudioRoute.AUTO,AudioRoute.NATIVE):
+                self.line.presentation = Presentation.NATIVE
         elif e.kind is EK.TTS_FINISHED:
             assert self.line is not None
             if not self.line.tts_job_started or self.line.tts_canceled or self.line.presentation is not Presentation.TTS:
@@ -392,84 +377,94 @@ class Controller:
         return max(self.settings.silent_min_ms,
                    self.settings.silent_base_ms + round(1000 * line.effective_chars / self.settings.reading_chars_per_sec))
 
+    def _requires_capture(self) -> bool:
+        return bool(self.line and self.line.text.audio_route in (AudioRoute.AUTO,AudioRoute.NATIVE))
+
     def _eligible_for_request(self) -> bool:
         l = self.line
         return bool(l and self.autoplay_authorized and self.focused and
-                    self.capture_ok and
+                    (self.capture_ok or not self._requires_capture()) and
                     l.ready_ms is not None and not l.sent and not l.request_pending and
                     l.presentation is not Presentation.UNRESOLVED and
-                    l.playback is not Playback.ACTIVE and not (l.tts_job_started and not (l.tts_finished or l.tts_canceled)) and
+                    l.playback is not Playback.ACTIVE and
+                    not (l.tts_job_started and not (l.tts_finished or l.tts_canceled)) and
                     self.state not in (S.PAUSED, S.WAIT_NEXT_HOOK))
 
     def _evaluate(self, at_ms: int) -> list[Effect]:
         l = self.line
         if l is None or self.state in (S.PAUSED, S.WAIT_NEXT_HOOK):
             return []
-        if not self.focused:
-            # A GUI visit is not a fault and cannot expire the utterance.
-            return []
-        if not self.capture_ok:
-            # The selected voice route may eventually be TTS-only; no audio
-            # observation is sufficient to issue an advance here.
-            return []
         if l.ready_ms is None:
             self.state = S.WAIT_TEXT_READY
             return []
         if l.text.content_kind is ContentKind.NON_DIALOGUE:
             return self._pause("non_dialogue")
+        route = l.text.audio_route
+        if l.text.tts_route is TTSPolicy.ERROR:
+            return self._pause("tts_configuration_error")
+
+        # An attributed clip currently playing is an independent safety blocker,
+        # not permission to override an explicit TTS/SILENT preference.
         if l.playback is Playback.ACTIVE:
-            l.presentation = Presentation.NATIVE
             self.state = S.WAIT_NATIVE_END
-            if (l.native_started_at_ms is not None and
+            if (self.autoplay_authorized and self.focused and l.native_started_at_ms is not None and
                 at_ms >= l.native_started_at_ms + self.settings.native_end_timeout_ms):
                 return self._pause("native_end_unconfirmed")
             return []
-        if l.voice is VoicePresence.PRESENT:
-            l.presentation = Presentation.NATIVE
-            if l.playback is not Playback.COMPLETE:
-                self.state = S.WAIT_NATIVE_END
-                if (self.autoplay_authorized and
-                    at_ms >= (l.observation_since_ms or at_ms) + self.settings.native_start_timeout_ms):
-                    return self._pause("native_start_or_end_unconfirmed")
+
+        if route in (AudioRoute.AUTO, AudioRoute.NATIVE):
+            # Native routing needs capture and attributed evidence. A transient
+            # capture failure does not destroy the text-only monitor.
+            if not self.focused or not self.capture_ok:
                 return []
-        elif not self._voice_can_resolve(at_ms):
-            self.state = S.RESOLVE_PRESENTATION
-            if (self.autoplay_authorized and
-                at_ms >= (l.observation_since_ms or at_ms) + self.settings.unresolved_timeout_ms):
-                return self._pause("native_voice_unresolved")
-            return []
-        else:
-            if l.presentation not in (Presentation.TTS, Presentation.SILENT):
-                voice = self.voice_id if self.tts_policy is TTSPolicy.SELECTED else self.default_voice_id if self.tts_policy is TTSPolicy.DEFAULT else None
-                if self.tts_policy is TTSPolicy.ERROR:
-                    return self._pause("tts_configuration_error")
-                if voice and l.text.content_kind is ContentKind.SPEAKABLE:
-                    l.presentation = Presentation.TTS
-                    l.tts_job_started = True
-                    l.tts_started_at_ms = at_ms
-                    self.state = S.WAIT_TTS_END
-                    return [self._effect(FX.START_TTS, voice=voice)]
-                if self.settings.tts_required and l.text.content_kind is ContentKind.SPEAKABLE:
+            if l.voice is VoicePresence.PRESENT:
+                l.presentation = Presentation.NATIVE
+                if l.playback is not Playback.COMPLETE:
+                    self.state = S.WAIT_NATIVE_END
+                    if (self.autoplay_authorized and
+                        at_ms >= (l.observation_since_ms or at_ms) + self.settings.native_start_timeout_ms):
+                        return self._pause("native_start_or_end_unconfirmed")
+                    return []
+            elif route is AudioRoute.NATIVE or not self._voice_can_resolve(at_ms):
+                self.state = S.RESOLVE_PRESENTATION
+                if (self.autoplay_authorized and
+                    at_ms >= (l.observation_since_ms or at_ms) + self.settings.unresolved_timeout_ms):
+                    return self._pause("native_voice_unresolved")
+                return []
+        # Explicit TTS/SILENT do not require ASR or Loopback just to present
+        # and advance. AUTO may use TTS only after absence is evidenced.
+        if l.presentation is not Presentation.NATIVE:
+            if l.presentation not in (Presentation.TTS,Presentation.SILENT):
+                voice=l.text.voice_id
+                if route in (AudioRoute.TTS,AudioRoute.AUTO) and voice and l.text.content_kind is ContentKind.SPEAKABLE:
+                    l.presentation=Presentation.TTS
+                    l.tts_job_started=True
+                    l.tts_started_at_ms=at_ms
+                    self.state=S.WAIT_TTS_END
+                    return [self._effect(FX.START_TTS,voice=voice)]
+                if (route is AudioRoute.TTS or
+                    (route is AudioRoute.AUTO and self.settings.tts_required)) and l.text.content_kind is ContentKind.SPEAKABLE:
                     return self._pause("tts_required_unassigned")
-                l.presentation = Presentation.SILENT
-                l.silent_started_at_ms = l.ready_ms
+                l.presentation=Presentation.SILENT
+                l.silent_started_at_ms=l.ready_ms
             if l.presentation is Presentation.TTS:
                 if not l.tts_finished:
-                    self.state = S.WAIT_TTS_END
+                    self.state=S.WAIT_TTS_END
                     return []
             else:
-                # Onset grace and reading time run concurrently.
-                grace_until = l.first_seen_ms + self.settings.grace_ms
-                dwell_until = l.ready_ms + self._dwell()
-                if at_ms < max(grace_until, dwell_until):
-                    self.state = S.WAIT_SILENT_DWELL
+                # The original metadata grace is relevant only in AUTO mode;
+                # explicit silent viewing is timed from text readiness.
+                grace_until=l.first_seen_ms+self.settings.grace_ms if route is AudioRoute.AUTO else l.ready_ms
+                dwell_until=l.ready_ms+self._dwell()
+                if at_ms < max(grace_until,dwell_until):
+                    self.state=S.WAIT_SILENT_DWELL
                     return []
         if not self._eligible_for_request():
             return []
-        l.request_pending = True
-        l.presentation_complete_at_ms = at_ms
-        self.state = S.READY_TO_ADVANCE
-        return [self._effect(FX.REQUEST_ADVANCE, "presentation_complete")]
+        l.request_pending=True
+        l.presentation_complete_at_ms=at_ms
+        self.state=S.READY_TO_ADVANCE
+        return [self._effect(FX.REQUEST_ADVANCE,"presentation_complete")]
 
     def confirm_advance(self, *, line_epoch: int, cancel_token: int,
                         fresh_focused: bool, fresh_capture_ok: bool,
@@ -486,8 +481,9 @@ class Controller:
         l = self.line
         if (l is None or l.epoch != line_epoch or l.token != cancel_token or
             self.state is not S.READY_TO_ADVANCE or not l.request_pending or
-            not self.autoplay_authorized or not self.focused or not self.capture_ok or
-            not fresh_focused or not fresh_capture_ok or
+            not self.autoplay_authorized or not self.focused or
+            (self._requires_capture() and (not self.capture_ok or not fresh_capture_ok)) or
+            not fresh_focused or
             fresh_native_voice_active or fresh_tts_playing or
             not fresh_target_window_matches or
             not fresh_input_available or fresh_manual_override or

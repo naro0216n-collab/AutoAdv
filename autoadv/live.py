@@ -74,9 +74,9 @@ def _clock() -> int:
 class LiveConfig:
     pid:int
     hwnd:int
-    loopback_helper:Path
-    asr_model:Path
-    asr_tokens:Path
+    loopback_helper:Path | None
+    asr_model:Path | None
+    asr_tokens:Path | None
     grace_ms:int
     allow_heuristic_absence:bool
     log_path:Path
@@ -104,10 +104,14 @@ class LiveConfig:
             or type(advance['virtual_key']) is not int
             or type(data['allow_heuristic_absence']) is not bool
             or type(data['tts_required']) is not bool
-            or any(not isinstance(data[name],str) or not data[name].strip()
-                   for name in ('loopback_helper','asr_model','asr_tokens','log_path'))):
+            or any(not isinstance(data[name],str)
+                   for name in ('loopback_helper','asr_model','asr_tokens'))
+            or not isinstance(data['log_path'],str) or not data['log_path'].strip()):
             raise ValueError('invalid monitor field types / required paths')
-        absolute=lambda x:(base/data[x]).resolve()
+        audio_configured=[bool(data[name].strip()) for name in ('loopback_helper','asr_model','asr_tokens')]
+        if any(audio_configured) and not all(audio_configured):
+            raise ValueError('native audio monitoring requires loopback helper, ASR model and tokens together')
+        absolute=lambda x:(base/data[x]).resolve() if data[x].strip() else None
         value=cls(int(data['pid']),int(data['hwnd']),
                   absolute('loopback_helper'),absolute('asr_model'),absolute('asr_tokens'),
                   int(data['grace_ms']),data['allow_heuristic_absence'],absolute('log_path'),
@@ -123,6 +127,10 @@ class LiveConfig:
             raise ValueError('invalid game window or input settings')
         return value
 
+    @property
+    def native_audio_enabled(self) -> bool:
+        return self.loopback_helper is not None
+
 
 def utterance_view(line) -> dict | None:
     """Publish the exact active Utterance without interpreting Luna text again."""
@@ -132,7 +140,7 @@ def utterance_view(line) -> dict | None:
             'body':u.body,'structure_rule_id':u.structure_rule_id,
             'content_kind':u.content_kind.name,'tts_text':u.tts_text,
             'asr_target':u.asr_target,'effective_chars':u.effective_chars,
-            'tts_route':u.tts_route.name,'voice_id':u.voice_id,
+            'tts_route':u.tts_route.name,'audio_route':u.audio_route.name,'voice_id':u.voice_id,
             'config_revision':u.config_revision,'conflicts':list(u.conflicts)}
 
 
@@ -247,8 +255,8 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
         'config_version':config.config_sha256,
         'text_config_revision':game_config.revision,
         'profile_schema':'live-profile-v2',
-        'asr_model_id':config.asr_model.name,
-        'asr_tokens_id':config.asr_tokens.name,
+        'asr_model_id':config.asr_model.name if config.asr_model else None,
+        'asr_tokens_id':config.asr_tokens.name if config.asr_tokens else None,
         'source_policy': 'hook-preferred'})
     tts=None;asr=None;runtime=None;capture=None
     packets=Queue()
@@ -305,7 +313,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
     try:
         guard=LiveGuard(ctrl,config.hwnd,config.pid,manual,
             lambda:tts.is_active() if tts else True,
-            health.alive,lambda:asr.potentially_active() if asr else True,
+            health.alive,lambda:asr.potentially_active() if asr else False,
             binding_confirmed=lambda:control.bound.is_set() and source_connected.is_set())
         runtime=Runtime(ctrl,guard if enable_input else GuardNoInput(guard),
                         WindowsAdvancementInput(config.hwnd,mode=config.input_mode,
@@ -315,16 +323,19 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                                           speed=config.tts_speed))
         tts=TTSWorker(client,runtime.post)
         runtime.tts=tts
-        asr=AudioRecognitionPipeline(history,JapaneseASR(config.asr_model,config.asr_tokens),runtime.post,audit=audit)
+        if config.native_audio_enabled:
+            assert config.asr_model is not None and config.asr_tokens is not None and config.loopback_helper is not None
+            asr=AudioRecognitionPipeline(history,JapaneseASR(config.asr_model,config.asr_tokens),runtime.post,audit=audit)
         app=ObservationOrchestrator(runtime,
-            on_line_started=lambda epoch,token,text,now:asr.begin(TargetLine(ctrl.session_id,epoch,token,text,now)),
-            on_line_updated=lambda epoch,token,text:asr.retarget(epoch,token,text),
-            on_line_boundary=asr.mark_boundary,
-            heuristic_absence_ready=asr.can_heuristically_exclude_voice,
+            on_line_started=(lambda epoch,token,text,now:asr.begin(TargetLine(ctrl.session_id,epoch,token,text,now))) if asr else None,
+            on_line_updated=(lambda epoch,token,text:asr.retarget(epoch,token,text)) if asr else None,
+            on_line_boundary=asr.mark_boundary if asr else None,
+            heuristic_absence_ready=asr.can_heuristically_exclude_voice if asr else None,
             binding_ok=lambda:control.bound.is_set() and source_connected.is_set(),
             stable_ms=acquisition.stable_ms)
-        capture=ProcessCapture(config.pid,config.loopback_helper,history,asr.feed,health.report)
-        capture.start()
+        if asr is not None:
+            capture=ProcessCapture(config.pid,config.loopback_helper,history,asr.feed,health.report)
+            capture.start()
         if host is not None:
             host.start()
             host.command('connect',pid=config.pid)
@@ -332,7 +343,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             source_connected.set();control.bound.set()
             ocr_worker.start()
         status({'monitor':'running','acquisition':acquisition.kind.value,'advance':'disabled',
-                'reason':'Awaiting selected source and audio; no game-state scanner'})
+                'reason':'Awaiting selected source; native audio monitoring '+('enabled' if asr else 'disabled')})
         while not control.stop.is_set():
             while True:
                 try:kind,payload=packets.get_nowait()
@@ -399,13 +410,15 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                   line.sent if line else False, focused,
                   line.text if line else None)
             if view!=last_state:
-                status({'controller':ctrl.state.name,'reason':ctrl.pause_reason or '',
+                status({'controller':ctrl.state.name,'reason':(ctrl.pause_reason or
+                                  ('選択中の音声方針は原音判定を要求します。音声監視を設定してください'
+                                   if line and line.text.audio_route.name in ('AUTO','NATIVE') and not config.native_audio_enabled else '')),
                         'epoch':line.epoch if line else None,
                         'presentation':line.presentation.name if line else 'NONE',
                         'speaker':line.text.speaker if line else None,
                         'body':line.text.body if line else None,
                         'sent':line.sent if line else False,'focused':focused,
-                        'capture_ok':health.alive(),'advance':'authorized' if ctrl.autoplay_authorized else 'disabled','awaiting_next_hook':ctrl.state is ControllerState.WAIT_NEXT_HOOK,
+                        'capture_ok':health.alive(),'native_audio_enabled':config.native_audio_enabled,'advance':'authorized' if ctrl.autoplay_authorized else 'disabled','awaiting_next_hook':ctrl.state is ControllerState.WAIT_NEXT_HOOK,
                         'utterance':utterance_view(line)})
                 last_state=view
             if ctrl.state is ControllerState.PAUSED:

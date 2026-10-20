@@ -100,6 +100,23 @@ class ServerStartupOwnership(TestCase):
             self.assertIn('voice_alias',local_voice_ids(root))
 
 class VoiceAssignmentValidation(TestCase):
+    def test_audio_route_uses_one_interpreted_speaker_policy_and_fallback(self):
+        from autoadv.contracts import AudioRoute
+        cfg=GameTextConfig(speaker_routes={
+            '有声':(TTSPolicy.NATIVE,None),'主人公':(TTSPolicy.SELECTED,'main'),
+            '未確定':(TTSPolicy.AUTO,'optional'),'ナレーション':(TTSPolicy.SILENT,None)},
+            unknown_route=TTSPolicy.AUTO,default_voice='fallback')
+        interpreter=TextInterpreter(cfg)
+        actual={name:interpreter.parse(name+'「こんにちは」') for name in cfg.speaker_routes}
+        self.assertEqual({name:u.audio_route for name,u in actual.items()},
+            {'有声':AudioRoute.NATIVE,'主人公':AudioRoute.TTS,
+             '未確定':AudioRoute.AUTO,'ナレーション':AudioRoute.SILENT})
+        self.assertEqual(actual['主人公'].voice_id,'main')
+        self.assertEqual(actual['未確定'].voice_id,'optional')
+        self.assertIsNone(actual['有声'].voice_id)
+        self.assertEqual(interpreter.parse('新キャラ「台詞」').voice_id,'fallback')
+        self.assertEqual(GameTextConfig.from_dict(cfg.to_dict()),cfg)
+
     def test_default_routing_requires_a_real_configured_default(self):
         with self.assertRaises(ValueError):
             GameTextConfig(speaker_routes={'大和':(TTSPolicy.DEFAULT,None)})

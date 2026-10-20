@@ -42,6 +42,17 @@ class TTSPolicy(Enum):
     DISABLED = auto()
     UNASSIGNED = auto()
     ERROR = auto()
+    NATIVE = auto()
+    AUTO = auto()
+    SILENT = auto()
+
+
+class AudioRoute(Enum):
+    """Configured playback selection, distinct from the observed presentation."""
+    NATIVE = auto()
+    TTS = auto()
+    AUTO = auto()
+    SILENT = auto()
 
 
 class Presentation(Enum):

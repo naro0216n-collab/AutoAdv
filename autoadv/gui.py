@@ -181,18 +181,34 @@ def run_gui() -> int:
         t.horizontalHeader().setStretchLastSection(True)
         return t
 
+    ROUTE_LABELS={
+        'AUTO':'状況から選択（AUTO）',
+        'NATIVE':'ゲーム原音（NATIVE）',
+        'SELECTED':'指定VoiceでTTS（SELECTED）',
+        'DEFAULT':'既定VoiceでTTS（DEFAULT）',
+        'SILENT':'読み上げず閲覧（SILENT）',
+        'UNASSIGNED':'状況から選択（UNASSIGNED）',
+        'SKIP':'読み上げず閲覧（SKIP）',
+        'DISABLED':'読み上げず閲覧（DISABLED）',
+    }
+
     def append(t, values):
         row=t.rowCount();t.insertRow(row)
         for i,value in enumerate(values):
-            if t.property('voice_routing') and i==2:
-                combo=QComboBox();combo.setEditable(True)
-                combo.addItems(t.property('voice_ids') or ())
-                combo.setCurrentText(str(value))
+            if t.property('voice_routing') and i in (1,2):
+                combo=QComboBox();combo.setEditable(i==2)
+                if i==1:
+                    for key,label in ROUTE_LABELS.items():combo.addItem(label,key)
+                    combo.setCurrentIndex(max(0,combo.findData(value)))
+                else:
+                    combo.addItems(t.property('voice_ids') or ())
+                    combo.setCurrentText(str(value))
                 t.setCellWidget(row,i,combo)
             else:t.setItem(row,i,QTableWidgetItem(str(value)))
 
     def rows(t):
-        return [[t.cellWidget(r,c).currentText() if isinstance(t.cellWidget(r,c),QComboBox)
+        return [[(t.cellWidget(r,c).currentData() if t.property('voice_routing') and c==1
+                  else t.cellWidget(r,c).currentText()) if isinstance(t.cellWidget(r,c),QComboBox)
                  else t.item(r,c).text() if t.item(r,c) is not None else ''
                  for c in range(t.columnCount())] for r in range(t.rowCount())]
 
@@ -261,11 +277,11 @@ def run_gui() -> int:
             self.rules=table(['規則ID','名前付き正規表現','有効(1/0)','適用条件'])
             self.replacements=table(['置換対象/原語','置換結果','正規表現(1/0)','有効(1/0)','用途(tts/asr/both)'])
             self.readings=table(['名前・漢字','読み'])
-            self.routes=table(['話者','SELECTED/DEFAULT/SKIP/UNASSIGNED','Voice ID'])
+            self.routes=table(['話者','音声方針 (NATIVE / SELECTED / DEFAULT / AUTO / SILENT)','Voice ID'])
             self.routes.setProperty('voice_routing',True)
             for title,t in [('話者・本文分離（優先順位は上から）',self.rules),
                             ('読み置換（優先順位は上から）',self.replacements),
-                            ('読み辞書',self.readings),('話者ごとのTTS',self.routes)]:
+                            ('読み辞書',self.readings),('話者別の原音・TTS・自動選択・閲覧',self.routes)]:
                 group=QGroupBox(title);gl=QVBoxLayout(group);gl.addWidget(t)
                 rr=QHBoxLayout();gl.addLayout(rr)
                 add=QPushButton('行追加');add.clicked.connect(lambda _=False,x=t:append(x,['']*x.columnCount()))
@@ -282,7 +298,8 @@ def run_gui() -> int:
                 up.clicked.connect(move_up)
                 for b in (add,remove,up):rr.addWidget(b)
                 form.addWidget(group)
-            self.fallback=QComboBox();self.fallback.addItems(['UNASSIGNED','SKIP','DEFAULT','SELECTED'])
+            self.fallback=QComboBox()
+            for policy,label in ROUTE_LABELS.items():self.fallback.addItem(label,policy)
             self.unknown_voice=QLineEdit();self.default_voice=QComboBox();self.default_voice.setEditable(True)
             defaults=QFormLayout();defaults.addRow('未知話者の動作',self.fallback)
             defaults.addRow('未知話者のVoice ID',self.unknown_voice)
@@ -339,8 +356,8 @@ def run_gui() -> int:
             self._loading_monitor=False
             monitor_fields=(
                 ('pid','対象ゲームPID',False),('hwnd','対象HWND',False),
-                ('loopback_helper','Process Loopback helper (DLL)',True),
-                ('asr_model','日本語ASRモデル',True),('asr_tokens','ASR tokens',True),
+                ('loopback_helper','Process Loopback helper (原音用・任意)',True),
+                ('asr_model','日本語ASRモデル (原音用・任意)',True),('asr_tokens','ASR tokens (原音用・任意)',True),
                 ('log_path','ログ出力先',True),('grace_ms','native開始猶予 ms',False),
                 ('tts_speed','TTS速度',False),('silent_base_ms','無音基準閲覧 ms',False),
                 ('silent_min_ms','無音最低閲覧 ms',False),
@@ -556,7 +573,7 @@ def run_gui() -> int:
             for t,data in tables:
                 t.setRowCount(0)
                 for row in data:append(t,row)
-            self.fallback.setCurrentText(c.unknown_route.name)
+            self.fallback.setCurrentIndex(self.fallback.findData(c.unknown_route.name))
             self.unknown_voice.setText(c.unknown_voice or '')
             self.default_voice.setCurrentText(c.default_voice or '')
             self.show_status('対象ゲーム',self.service.current_game_name() or '未選択')
@@ -641,7 +658,7 @@ def run_gui() -> int:
                 config=LiveConfig.load(Path(path))
                 data=json.loads(Path(path).read_text(encoding='utf-8'))
                 for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
-                    data[key]=str(getattr(config,key))
+                    data[key]=str(getattr(config,key) or '')
                 data.pop('screen_profile',None)
                 self.load_monitor_document(data,'取り込み済み・まだ保存されていません')
                 self.mark_monitor_dirty()
@@ -707,7 +724,7 @@ def run_gui() -> int:
                                    for a,b,c,d,e in rows(self.replacements) if a),
                 name_readings={a:b for a,b in rows(self.readings) if a or b},
                 speaker_routes={a:(TTSPolicy[b],c or None) for a,b,c in rows(self.routes) if a},
-                unknown_route=TTSPolicy[self.fallback.currentText()],
+                unknown_route=TTSPolicy[self.fallback.currentData()],
                 unknown_voice=self.unknown_voice.text() or None,
                 default_voice=self.default_voice.currentText() or None)
 
@@ -719,7 +736,7 @@ def run_gui() -> int:
                 self.preview.setPlainText('\n'.join((f'構造規則: {u.structure_rule_id or "不一致"}',
                     f'話者: {u.speaker or "不明"}',f'本文: {u.body}',f'TTS文: {u.tts_text}',
                     f'ASR照合文: {u.asr_target}',f'種類: {u.content_kind.name}',
-                    f'Voice: {u.tts_route.name} / {u.voice_id or "未割当て"}',
+                    f'音声: {u.audio_route.name} ({u.tts_route.name}) / {u.voice_id or "未割当て"}',
                     f'競合: {", ".join(u.conflicts) or "なし"}',f'設定版: {u.config_revision}')))
                 self.issue.setText('プレビューのみ。保存すると次の安全な境界から反映できます。')
             except (ValueError,KeyError) as exc:
@@ -732,11 +749,7 @@ def run_gui() -> int:
                     raise ValueError('監視中は対象作品を変更できません。監視終了後に切り替えてください')
                 c=self.current_editor_config()
                 available=self.service.server.state.voices
-                assigned=[voice for policy,voice in c.speaker_routes.values()
-                          if policy in (TTSPolicy.SELECTED,TTSPolicy.DEFAULT) and (voice or c.default_voice)]
-                if c.unknown_route is TTSPolicy.SELECTED:assigned.append(c.unknown_voice)
-                if c.unknown_route is TTSPolicy.DEFAULT or any(p is TTSPolicy.DEFAULT for p,_ in c.speaker_routes.values()):
-                    assigned.append(c.default_voice)
+                assigned=[c.resolve_voice(name)[1] for name in (*c.speaker_routes,None)]
                 missing=[voice for voice in assigned if voice and available and voice not in available]
                 if missing:raise ValueError('APIに存在しないVoice ID: '+', '.join(missing))
                 self.service.save_game(self.service.current_game_name(),c)
@@ -901,7 +914,7 @@ def run_gui() -> int:
             if 'advance' in state:self.show_status('自動進行許可',state['advance'])
             if 'reason' in state:self.show_status('停止理由',state['reason'] or 'なし')
             if 'presentation' in state:self.show_status('提示経路',state['presentation'])
-            if 'capture_ok' in state:self.show_status('音声監視','正常' if state['capture_ok'] else '未確認/異常')
+            if 'capture_ok' in state:self.show_status('音声監視',('正常' if state['capture_ok'] else '未確認/異常') if state.get('native_audio_enabled',True) else '無効（TTS・閲覧専用）')
             if 'focused' in state:
                 target=(f'PID={self.active_target[0]} HWND={self.active_target[1]}'
                         if self.active_target else '対象未設定')
@@ -921,7 +934,7 @@ def run_gui() -> int:
                         '話者: '+str(u['speaker'] or '不明'),
                         '本文: '+u['body'], 'TTS文: '+u['tts_text'],
                         'ASR文: '+u['asr_target'],
-                        'Voice: '+u['tts_route']+' / '+str(u['voice_id'] or '未割当て'),
+                        '音声: '+u['audio_route']+' ('+u['tts_route']+') / '+str(u['voice_id'] or '未割当て'),
                         '構造規則: '+str(u['structure_rule_id'] or '不一致'),
                         '設定版: '+u['config_revision'])))
                     self.show_status('現在Utterance',str(u['speaker'] or '不明')+' / '+u['body'][:75])
