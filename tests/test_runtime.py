@@ -38,6 +38,35 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(inp.calls,0)
         self.assertEqual(ctrl.pause_reason,"advance_preflight_rejected")
 
+    def test_revocation_during_pending_effect_does_not_send_or_latch_failure(self):
+        ctrl=Controller(Settings(autoplay=True),session_id='s')
+        inp=MockInput()
+        def audit(kind, data):
+            if kind=='effect' and data['kind']=='REQUEST_ADVANCE':
+                ctrl.pause()
+        runner=Runtime(ctrl,MockGuard(),inp,MockTTS(),clock=lambda:9000,audit=audit)
+        seq=[(E.FOCUS_CHANGED,101,{'focused':True}),
+             (E.CAPTURE_HEALTH,102,{'capture_ok':True}),
+             (E.LINE_CANDIDATE,103,{'source_seq':1,'text':'あ',
+                                     'text_ready':True,'source_line_id':'a'}),
+             (E.VOICE_PRESENCE,105,{'voice':V.ABSENT,'evidence':Evidence.METADATA}),
+             (E.TIMER,5000,{})]
+        for kind,at,detail in seq:
+            line=ctrl.line
+            runner.post(Envelope(kind,'s',at,
+                line_epoch=line.epoch if line else None,
+                cancel_token=line.token if line else None,**detail))
+            runner.step()
+        self.assertEqual(inp.calls,0)
+        self.assertFalse(ctrl.autoplay_authorized)
+        self.assertNotEqual(ctrl.state.name,'PAUSED')
+        ctrl.authorize()
+        line=ctrl.line
+        runner.post(Envelope(E.TIMER,'s',6000,line_epoch=line.epoch,cancel_token=line.token))
+        runner.step()
+        # Explicit pause can be undone, but this audit callback pauses again.
+        self.assertEqual(inp.calls,0)
+
     def test_input_only_once(self):
         ctrl=Controller(Settings(autoplay=True),session_id="s")
         inp=MockInput();runner=Runtime(ctrl,MockGuard(),inp,MockTTS(),clock=lambda:9000)

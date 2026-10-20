@@ -84,6 +84,16 @@ class Runtime:
                     for stop in self.controller._pause('tts_dispatch_failed'):
                         self.audit("effect", {"kind": stop.kind.name, "reason": stop.reason})
             elif effect.kind is EffectKind.REQUEST_ADVANCE:
+                # An already-queued request is harmless after explicit pause,
+                # manual intervention or a new utterance generation. Do not
+                # turn ordinary revocation into a latched hardware failure.
+                current = self.controller.line
+                if (not self.controller.autoplay_authorized or current is None
+                    or current.epoch != effect.line_epoch
+                    or current.token != effect.cancel_token
+                    or not current.request_pending):
+                    self.audit('advance_revoked', {'epoch': effect.line_epoch})
+                    continue
                 # Read guard synchronously immediately before SendInput.
                 snapshot = self.guard.observe()
                 if not self.controller.confirm_advance(

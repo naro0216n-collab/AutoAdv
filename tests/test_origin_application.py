@@ -51,7 +51,11 @@ class OriginApplicationContracts(unittest.TestCase):
     def test_foreign_hook_invalidates_after_input(self):
         self.packet(1,'本文',10);self.tick(250);self.absent(260);self.tick(3000)
         self.packet(2,'異なる本文',3200,origin='other')
-        self.assertEqual(self.ctrl.state,S.PAUSED)
+        # Foreign source after our input invalidates the old line and revokes
+        # authority; monitoring remains available for a fresh selected source.
+        self.assertEqual(self.ctrl.state,S.WAIT_LINE)
+        self.assertIsNone(self.ctrl.line)
+        self.assertFalse(self.ctrl.autoplay_authorized)
         self.assertEqual(self.input.count,1)
     def test_input_manual_preflight_latches_pause(self):
         self.packet(1,'本文',10);self.tick(250);self.absent(260)

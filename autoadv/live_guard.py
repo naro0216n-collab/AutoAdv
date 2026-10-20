@@ -28,10 +28,17 @@ class InputOriginTracker:
     def __init__(self, initial_tick: int):
         self._last_tick = initial_tick
         self._automatic_ticks: set[int] = set()
+        self._passive_mouse_ticks: set[int] = set()
         self.manual = False
 
-    def hook_event(self, *, keyboard:bool, flags:int, extra_info:int, tick:int) -> None:
-        if is_manual_hook_event(keyboard=keyboard,flags=flags,extra_info=extra_info):
+    def hook_event(self, *, keyboard:bool, flags:int, extra_info:int, tick:int,
+                   passive_mouse_motion:bool=False) -> None:
+        if passive_mouse_motion:
+            # Mouse movement alone is not a dialogue/choice intervention.
+            self._passive_mouse_ticks.add(tick)
+            if len(self._passive_mouse_ticks)>16:
+                self._passive_mouse_ticks={t for t in self._passive_mouse_ticks if t>=tick-100}
+        elif is_manual_hook_event(keyboard=keyboard,flags=flags,extra_info=extra_info):
             self.manual = True
         else:
             self._automatic_ticks.add(tick)
@@ -42,10 +49,11 @@ class InputOriginTracker:
 
     def os_input_tick(self, tick:int) -> bool:
         if tick != self._last_tick:
-            if tick not in self._automatic_ticks:
+            if tick not in self._automatic_ticks and tick not in self._passive_mouse_ticks:
                 self.manual=True
             self._last_tick=tick
             self._automatic_ticks.clear()
+            self._passive_mouse_ticks.clear()
         return self.manual
 
 
@@ -56,9 +64,10 @@ class WindowsManualMonitor:
     Because the input is explicitly tagged, there is no post-advance grace
     interval during which a genuine user action could be accidentally ignored.
     """
-    def __init__(self):
+    def __init__(self, target_hwnd:int):
         if sys.platform != 'win32':
             raise OSError('Windows required')
+        self.target_hwnd = target_hwnd
         self._manual = Event()
         self._origin_lock = Lock()
         self._origin = InputOriginTracker(self._last_input())
@@ -98,6 +107,7 @@ class WindowsManualMonitor:
             _fields_ = [('hwnd',wintypes.HWND),('message',wintypes.UINT),
                         ('wParam',ctypes.c_size_t),('lParam',ctypes.c_ssize_t),
                         ('time',wintypes.DWORD),('pt',wintypes.POINT),('lPrivate',wintypes.DWORD)]
+        user32.GetForegroundWindow.restype = wintypes.HWND
         user32.SetWindowsHookExW.argtypes = (ctypes.c_int, CALLBACK, ctypes.c_void_p, wintypes.DWORD)
         user32.SetWindowsHookExW.restype = ctypes.c_void_p
         user32.CallNextHookEx.argtypes = (ctypes.c_void_p,ctypes.c_int,ctypes.c_size_t,ctypes.c_ssize_t)
@@ -115,11 +125,11 @@ class WindowsManualMonitor:
                     info=ctypes.cast(lparam,ctypes.POINTER(struct)).contents
                     with self._origin_lock:
                         self._origin.hook_event(keyboard=keyboard,flags=info.flags,
-                                                extra_info=info.dwExtraInfo,tick=info.time)
+                                                extra_info=info.dwExtraInfo,tick=info.time,
+                                                passive_mouse_motion=(
+                                                    (not keyboard and int(message)==0x0200)
+                                                    or user32.GetForegroundWindow()!=self.target_hwnd))
                         if self._origin.manual:self._manual.set()
-                        if is_choice_selection_event(keyboard=keyboard,message=int(message),
-                                                     flags=info.flags,extra_info=info.dwExtraInfo):
-                            self._choice_input.set()
                 except Exception:
                     # ctypes callbacks otherwise swallow Python exceptions.
                     self._manual.set()

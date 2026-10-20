@@ -31,6 +31,19 @@ class FailClosedHookCrossCheck(unittest.TestCase):
         self.assertFalse(t.os_input_tick(105))
         self.assertTrue(t.os_input_tick(109))
 
+    def test_mouse_motion_and_other_window_input_do_not_stop_game(self):
+        from autoadv.live_guard import InputOriginTracker
+        t=InputOriginTracker(100)
+        # Passive hook callbacks explicitly identify non-dialogue interaction.
+        t.hook_event(keyboard=False,flags=0,extra_info=0,tick=101,
+                     passive_mouse_motion=True)
+        self.assertFalse(t.os_input_tick(101))
+        t.hook_event(keyboard=True,flags=0,extra_info=0,tick=102,
+                     passive_mouse_motion=True)
+        self.assertFalse(t.os_input_tick(102))
+        t.hook_event(keyboard=True,flags=0,extra_info=0,tick=103)
+        self.assertTrue(t.os_input_tick(103))
+
     def test_manual_input_is_latched_even_if_automatic_follows(self):
         from autoadv.live_guard import InputOriginTracker
         t=InputOriginTracker(100)

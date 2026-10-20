@@ -18,7 +18,9 @@ class ConcurrentEventContracts(unittest.TestCase):
         self.send(E.MANUAL_OVERRIDE,102)
         self.send(E.NATIVE_STARTED,104,native_utterance_id='voice',evidence=Evidence.AUDIO_CONFIRMED)
         self.send(E.TIMER,105)
-        self.assertEqual(self.c.state,S.PAUSED)
+        self.assertEqual(self.c.state,S.WAIT_LINE)
+        self.assertIsNone(self.c.line)
+        self.assertFalse(self.c.autoplay_authorized)
     def test_cross_session_audio_cannot_affect_line(self):
         l=self.c.line
         self.c.accept(Envelope(E.VOICE_PRESENCE,'other',200,line_epoch=l.epoch,

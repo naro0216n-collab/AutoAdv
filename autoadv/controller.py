@@ -59,6 +59,7 @@ class Line:
     source_origin: Optional[str] = None
     source_generation: Optional[int] = None
     ready_ms: Optional[int] = None
+    observation_since_ms: Optional[int] = None
     voice: VoicePresence = VoicePresence.UNRESOLVED
     evidence: Evidence = Evidence.NONE
     playback: Playback = Playback.NOT_STARTED
@@ -117,13 +118,44 @@ class Controller:
         self.default_voice_id = default_voice
 
     def authorize(self) -> None:
-        if self.state is not S.WAIT_LINE or self.line is not None:
-            raise RuntimeError('permission can be granted only at a new session boundary')
-        self.autoplay_authorized=True
+        """Permit advancement of the currently observed utterance or next one.
 
-    def pause(self,reason:str='explicit_pause') -> list[Effect]:
-        self.autoplay_authorized=False
-        return self._pause(reason)
+        Monitoring and presentation do not depend on this permission. A
+        fault-latched session cannot be resumed by changing a GUI button.
+        """
+        if self.state is S.PAUSED:
+            raise RuntimeError('stopped session requires a new verified session')
+        self.autoplay_authorized = True
+
+    def pause(self, reason: str = 'explicit_pause') -> list[Effect]:
+        """Revoke game-input authority without stopping observation or audio.
+
+        A pending REQUEST_ADVANCE may already be queued, so preflight must
+        also independently check autoplay_authorized before any input.
+        """
+        self.autoplay_authorized = False
+        if self.line is not None:
+            self.line.request_pending = False
+            if self.state is S.READY_TO_ADVANCE:
+                self.state = S.RESOLVE_PRESENTATION
+        return []
+
+    def _invalidate_for_manual_input(self) -> list[Effect]:
+        """Drop the old utterance and its callbacks; continue monitoring.
+
+        A fresh selected-source observation may be presented after manual
+        interaction, but it never inherits the old advance permission.
+        """
+        effects: list[Effect] = []
+        if self.line is not None and self.line.tts_job_started and not self.line.tts_finished and not self.line.tts_canceled:
+            self.line.tts_canceled = True
+            effects.append(self._effect(FX.CANCEL_TTS, 'manual_override'))
+        self.autoplay_authorized = False
+        self._token += 1
+        self.line = None
+        self.pause_reason = 'manual_override'
+        self.state = S.WAIT_LINE
+        return effects
 
     def _effect(self, kind: FX, reason: str = "", voice: str | None = None) -> Effect:
         assert self.line is not None
@@ -152,7 +184,8 @@ class Controller:
         utterance=self.interpreter.parse(e.text or "")
         self.line = Line(self._epoch, self._token, utterance,
                          e.source_line_id, e.at_ms, e.source_seq or 0,
-                         e.source_kind,e.source_origin,e.source_generation)
+                         e.source_kind,e.source_origin,e.source_generation,
+                         observation_since_ms=e.at_ms if self.focused and self.capture_ok else None)
         self.tts_policy = utterance.tts_route
         self.voice_id = utterance.voice_id
         self.default_voice_id = self.interpreter.config.default_voice
@@ -185,9 +218,9 @@ class Controller:
     def accept(self, e: Envelope) -> list[Effect]:
         if not self._check_event(e):
             return []
-        if self.state is S.PAUSED and e.kind is not EK.MANUAL_OVERRIDE:
-            # PAUSED is latched. Late native onset, metadata, TTS completion,
-            # timers and screen observations must not resume a stopped line.
+        if self.state is S.PAUSED:
+            # Safety faults remain latched even if a later manual action occurs.
+            # Only a new verified session can recover from a hard stop.
             return []
         self._last_at_ms = max(self._last_at_ms, e.at_ms)
         order_key = (e.kind, e.line_epoch if e.kind in (
@@ -197,22 +230,21 @@ class Controller:
         self._last_kind_at_ms[order_key] = max(
             e.at_ms, self._last_kind_at_ms.get(order_key, -1))
         if e.kind is EK.MANUAL_OVERRIDE:
-            effects = self._pause("manual_override")
-            self._token += 1
-            if self.line is not None:
-                # CANCEL_TTS was emitted with the OLD token. After this point,
-                # callbacks from the invalidated epoch cannot match any line.
-                self.line.token = self._token
-            return effects
+            return self._invalidate_for_manual_input()
         if e.kind is EK.FOCUS_CHANGED:
+            # The user must be able to inspect the GUI and grant permission
+            # while the game is in the background. Fresh input preflight still
+            # prohibits sending anything to an unfocused target.
             self.focused = e.focused is True
-            if not self.focused and (self.line is not None):
-                return self._pause("window_unfocused")
         elif e.kind is EK.CAPTURE_HEALTH:
             self.capture_ok = e.capture_ok is True
-            if not self.capture_ok and self.line is not None:
-                return self._pause("audio_capture_unhealthy")
-        elif e.kind is EK.LINE_CANDIDATE:
+        if e.kind in (EK.FOCUS_CHANGED, EK.CAPTURE_HEALTH) and self.line is not None:
+            if self.focused and self.capture_ok:
+                if self.line.observation_since_ms is None:
+                    self.line.observation_since_ms = e.at_ms
+            else:
+                self.line.observation_since_ms = None
+        if e.kind is EK.LINE_CANDIDATE:
             if e.source_seq is None or e.source_seq <= self._last_source_seq:
                 return []
             self._last_source_seq = e.source_seq
@@ -373,9 +405,12 @@ class Controller:
         l = self.line
         if l is None or self.state in (S.PAUSED, S.WAIT_NEXT_HOOK):
             return []
-        if not self.focused or not self.capture_ok:
-            if at_ms >= l.first_seen_ms + self.settings.unresolved_timeout_ms:
-                return self._pause("observation_unavailable")
+        if not self.focused:
+            # A GUI visit is not a fault and cannot expire the utterance.
+            return []
+        if not self.capture_ok:
+            # The selected voice route may eventually be TTS-only; no audio
+            # observation is sufficient to issue an advance here.
             return []
         if l.ready_ms is None:
             self.state = S.WAIT_TEXT_READY
@@ -393,12 +428,14 @@ class Controller:
             l.presentation = Presentation.NATIVE
             if l.playback is not Playback.COMPLETE:
                 self.state = S.WAIT_NATIVE_END
-                if at_ms >= l.first_seen_ms + self.settings.native_start_timeout_ms:
+                if (self.autoplay_authorized and
+                    at_ms >= (l.observation_since_ms or at_ms) + self.settings.native_start_timeout_ms):
                     return self._pause("native_start_or_end_unconfirmed")
                 return []
         elif not self._voice_can_resolve(at_ms):
             self.state = S.RESOLVE_PRESENTATION
-            if at_ms >= l.first_seen_ms + self.settings.unresolved_timeout_ms:
+            if (self.autoplay_authorized and
+                at_ms >= (l.observation_since_ms or at_ms) + self.settings.unresolved_timeout_ms):
                 return self._pause("native_voice_unresolved")
             return []
         else:
@@ -449,7 +486,7 @@ class Controller:
         l = self.line
         if (l is None or l.epoch != line_epoch or l.token != cancel_token or
             self.state is not S.READY_TO_ADVANCE or not l.request_pending or
-            not self.focused or not self.capture_ok or
+            not self.autoplay_authorized or not self.focused or not self.capture_ok or
             not fresh_focused or not fresh_capture_ok or
             fresh_native_voice_active or fresh_tts_playing or
             not fresh_target_window_matches or

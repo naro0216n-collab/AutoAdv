@@ -875,11 +875,8 @@ def run_gui() -> int:
 
         def grant_live(self):
             if not self.game_worker or not self.game_worker.isRunning() or not self.live_control:return
-            if self.service.active()[1].source().kind.value != 'hook':
-                self.show_status('停止理由','OCRは本文・音声監視のみ。自動送りはHOOK専用です')
-                return
             if not self.live_control.bound.is_set() or not self.service.latest_original.strip():
-                self.show_status('停止理由','監視中ゲームの選択HOOKから原文を確認できていません')
+                self.show_status('停止理由','監視中ゲームの選択取得元から原文を確認できていません')
                 return
             # Authorization is separate from HOOK text and audio; the Controller
             # still checks current input target, audio and manual intervention.
@@ -889,7 +886,8 @@ def run_gui() -> int:
         def pause_live(self):
             if self.live_control:
                 self.live_control.pause.set()
-                self.disallow_until_verified()
+                self.service.autoplay_allowed=False
+                self.show_status('自動進行許可','一時停止要求済み')
 
         def game_status(self,state):
             if 'original' in state:self.receive_original(state['original'])

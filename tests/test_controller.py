@@ -154,14 +154,57 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(h.send(E.NATIVE_COMPLETED,evidence=Evidence.AUDIO_CONFIRMED,native_utterance_id="y"),[])
         self.assertEqual(h.c.line.playback,Playback.ACTIVE)
 
-    def test_capture_failure_pauses(self):
+    def test_capture_failure_blocks_input_without_stopping_text_monitor(self):
         h=Harness();h.line();h.send(E.CAPTURE_HEALTH,capture_ok=False)
-        self.assertEqual(h.c.pause_reason,"audio_capture_unhealthy")
+        self.assertNotEqual(h.c.state,S.PAUSED)
         self.assertEqual(h.tick(),[])
+        h.send(E.CAPTURE_HEALTH,capture_ok=True)
+        self.assertTrue(h.sent(h.absent()))
 
-    def test_focus_lost_pauses(self):
-        h=Harness();h.line();h.send(E.FOCUS_CHANGED,focused=False)
-        self.assertEqual(h.c.state,S.PAUSED)
+    def test_window_focus_loss_does_not_destroy_current_utterance(self):
+        h=Harness();h.line();epoch=h.c.line.epoch
+        h.send(E.FOCUS_CHANGED,focused=False)
+        self.assertNotEqual(h.c.state,S.PAUSED)
+        self.assertEqual(h.tick(),[])
+        h.send(E.FOCUS_CHANGED,focused=True)
+        self.assertTrue(h.sent(h.absent()))
+        self.assertEqual(h.c.line.epoch,epoch)
+
+    def test_authorization_after_current_line_presentation_and_pause_resume(self):
+        h=Harness()
+        h.c.pause()
+        h.line('大和「こんばんは」')
+        h.absent()
+        self.assertEqual(h.tick(),[])
+        self.assertFalse(h.c.autoplay_authorized)
+        self.assertNotEqual(h.c.state,S.PAUSED)
+        h.c.authorize()
+        pending=h.tick()
+        # Input authority is granted to the current, previously observed line.
+        h.c.pause()
+        self.assertFalse(h.c.confirm_advance(
+            line_epoch=pending[0].line_epoch,cancel_token=pending[0].cancel_token,
+            fresh_focused=True,fresh_capture_ok=True,fresh_native_voice_active=False,
+            fresh_tts_playing=False,fresh_target_window_matches=True,
+            fresh_input_available=True,fresh_manual_override=False,at_ms=h.now+1))
+        self.assertFalse(h.c.line.sent)
+        h.c.authorize()
+        self.assertTrue(h.sent(h.tick()))
+
+    def test_manual_input_invalidates_line_and_permission_but_not_monitor(self):
+        h=Harness(TP.SELECTED,'voice1')
+        h.line();h.absent()
+        old=h.c.line
+        effects=h.send(E.MANUAL_OVERRIDE)
+        self.assertEqual([e.kind for e in effects],[FX.CANCEL_TTS])
+        self.assertIsNone(h.c.line)
+        self.assertFalse(h.c.autoplay_authorized)
+        self.assertEqual(h.c.state,S.WAIT_LINE)
+        self.assertEqual(h.send(E.TTS_FINISHED,tts_success=True,
+            line_epoch=old.epoch,cancel_token=old.token),[])
+        h.line(text='次の台詞',id='b')
+        self.assertEqual(h.c.line.epoch,old.epoch+1)
+        self.assertEqual(h.tick(),[])
 
     def test_tts_emits_start_and_finish(self):
         h=Harness(TP.SELECTED,"speaker1");h.line();effects=h.absent()

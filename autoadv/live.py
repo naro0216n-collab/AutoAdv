@@ -233,7 +233,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
     if pid.value!=config.pid:raise ValueError('HWND does not belong to target game PID')
     if any(parent.pid==config.pid for parent in psutil.Process().parents()):
         raise ValueError('AutoAdv must not be a child of target game')
-    manual=WindowsManualMonitor()
+    manual=WindowsManualMonitor(config.hwnd)
     health=CaptureLiveness()
     history=AudioHistory()
     ctrl=Controller(Settings(grace_ms=config.grace_ms,
@@ -363,20 +363,22 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                     invalidated(str(payload))
                     status({'acquisition_error':str(payload)})
             if control.pause.is_set():
-                control.bound.clear()
-                for effect in ctrl.pause('explicit_pause'):
-                    if effect.kind is EffectKind.CANCEL_TTS:tts.apply(effect)
+                ctrl.pause('explicit_pause')
+                status({'advance':'disabled','reason':'明示一時停止（取得・音声処理は継続）'})
                 control.pause.clear()
             if control.authorize.is_set():
                 control.authorize.clear()
-                if (enable_input and acquisition.kind is SourceKind.HOOK and
-                    source_connected.is_set() and control.bound.is_set() and
-                    ctrl.state is ControllerState.WAIT_LINE):
-                    manual.reset_after_authorization()
-                    ctrl.authorize()
-                    status({'advance':'authorized','reason':'Waiting for selected HOOK and audio synchronization'})
+                if enable_input and source_connected.is_set() and control.bound.is_set():
+                    try:
+                        ctrl.authorize()
+                    except RuntimeError as exc:
+                        status({'advance':'disabled','reason':str(exc)})
+                    else:
+                        manual.reset_after_authorization()
+                        status({'advance':'authorized',
+                                'reason':'許可済み（現行台詞の提示完了と入力直前確認を待機）'})
                 else:
-                    status({'advance':'disabled','reason':'Selected source / controller not ready for authorization'})
+                    status({'advance':'disabled','reason':'選択した取得元・入力対象が未確認'})
             while runtime.step():pass
             if ctrl.state is ControllerState.WAIT_LINE and ctrl.line is None:
                 config_update=control.consume_safe_config()
@@ -391,16 +393,19 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             app.tick(now,focused=focused,capture_ok=health.alive())
             while runtime.step():pass
             line=ctrl.line
-            view=(ctrl.state.name,ctrl.pause_reason,
+            view=(ctrl.state.name,ctrl.pause_reason,ctrl.autoplay_authorized,
                   line.epoch if line else None,line.presentation.name if line else 'NONE',
                   line.text.speaker if line else None,line.text.body if line else None,
                   line.sent if line else False, focused,
                   line.text if line else None)
             if view!=last_state:
-                status({'controller':view[0],'reason':view[1] or '',
-                        'epoch':view[2],'presentation':view[3],'speaker':view[4],
-                        'body':view[5],'sent':view[6],'focused':focused,
-                        'capture_ok':health.alive(),'awaiting_next_hook':ctrl.state is ControllerState.WAIT_NEXT_HOOK,
+                status({'controller':ctrl.state.name,'reason':ctrl.pause_reason or '',
+                        'epoch':line.epoch if line else None,
+                        'presentation':line.presentation.name if line else 'NONE',
+                        'speaker':line.text.speaker if line else None,
+                        'body':line.text.body if line else None,
+                        'sent':line.sent if line else False,'focused':focused,
+                        'capture_ok':health.alive(),'advance':'authorized' if ctrl.autoplay_authorized else 'disabled','awaiting_next_hook':ctrl.state is ControllerState.WAIT_NEXT_HOOK,
                         'utterance':utterance_view(line)})
                 last_state=view
             if ctrl.state is ControllerState.PAUSED:
