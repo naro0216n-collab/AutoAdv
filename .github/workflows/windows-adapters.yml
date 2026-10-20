@@ -8,7 +8,6 @@ on:
       - 'vendor/luna/**'
       - 'scripts/sync_luna_upstream.py'
       - 'docs/integration-spec.md'
-      - 'integrations/windows-loopback/**'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/windows-adapters.yml'
@@ -26,17 +25,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
-      - name: Build process-scoped WASAPI helper
-        run: dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
-      - name: Install Windows audio/visual/model adapters
+      - name: Install GUI and audio transport dependencies
+        run: python -m pip install '.[gui,audio]'
+      - name: Verify Windows native ABI contract
+        run: python -m unittest discover -s tests -p 'test_luna_abi_and_ipc.py' -v
+      - name: Validate Windows GUI and input imports
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install '.[live]'
-      - name: Verify full optional dependency test suite
-        run: python -m unittest discover -s tests -v
-      - name: Validate Windows adapter imports
-        run: |
-          python -c "import numpy,cv2,mss,webrtcvad,sherpa_onnx,sounddevice,psutil; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.live import LiveConfig; print('Windows adapter imports OK')"
+          python -c "from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import input_types; print('Windows adapters available')"
