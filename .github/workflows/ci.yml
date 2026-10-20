@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   statuses: write
+  actions: write
 
 concurrency:
   group: fast-ci-${{ github.ref }}
@@ -48,6 +49,18 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
+      - name: Dispatch Windows validation for GUI and adapter changes
+        if: ${{ github.ref_name == 'develop' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --name-only HEAD^ HEAD | grep -Eq '^(autoadv/|tests/|integrations/windows-loopback/|pyproject\.toml$|\.github/workflows/(ci|windows-adapters)\.yml$)'; then
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/windows-adapters.yml/dispatches" \
+              -f ref=develop
+          fi
 
   unit:
     name: Domain contracts
