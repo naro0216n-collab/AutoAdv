@@ -2,19 +2,24 @@
 from __future__ import annotations
 import asyncio
 import json
+from queue import Queue, Empty
 from pathlib import Path
 from threading import Event
 from .services import AutoAdvService
 from .text import GameTextConfig,StructureRule,TextReplacement
 from .contracts import TTSPolicy
-from .luna import run_origin_listener
+from .hook_host import HookHost
+from .hook_application import HookApplication
+from .hook_protocol import HookKey, ThreadSource
+from .preferences import Preferences, LegacyPreferencesDetected, settings_path
 
 
 def run_gui() -> int:
-    from PySide6.QtCore import Qt, Signal, QThread, QTimer
-    from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,
+    from PySide6.QtCore import Qt, Signal, QThread, QTimer, QPoint, QRect
+    from PySide6.QtGui import QImage, QPixmap
+    from PySide6.QtWidgets import (QDialog, QRubberBand, QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,
         QFormLayout,QLabel,QLineEdit,QPushButton,QPlainTextEdit,QScrollArea,QTableWidget,
-        QTableWidgetItem,QCheckBox,QComboBox,QFileDialog,QMessageBox,QGroupBox,QSplitter)
+        QTableWidgetItem,QCheckBox,QComboBox,QFileDialog,QMessageBox,QGroupBox,QSplitter,QListWidget)
 
     class ServerWorker(QThread):
         result=Signal(object)
@@ -33,26 +38,130 @@ def run_gui() -> int:
             try:self.service.close()
             except Exception as exc:self.failed.emit(f'Irodori終了時のエラー: {exc}')
 
-    class LunaWorker(QThread):
-        received=Signal(str)
-        status=Signal(bool,str)
-        def __init__(self,url:str):
-            super().__init__();self.url=url;self.stopping=Event()
+    class HookWorker(QThread):
+        event=Signal(object)
+        def __init__(self,dll_path:str,pid:int,hwnd:int,game_id:str,profile_id:str,keys:tuple[HookKey,...]):
+            super().__init__()
+            self.dll_path=Path(dll_path);self.pid=pid;self.hwnd=hwnd
+            self.game_id=game_id;self.profile_id=profile_id;self.keys=keys
+            self.stopping=Event();self.commands=Queue()
+
+        def issue(self,action:str,**kwargs):
+            self.commands.put((action,kwargs))
+
         def run(self):
-            try:run_origin_listener(self.url,self.stopping,
-                lambda observation:self.received.emit(observation.text),
-                lambda ok,message:self.status.emit(ok,message))
-            except Exception as exc:self.status.emit(False,str(exc))
+            messages=Queue()
+            host=HookHost(self.dll_path,
+                lambda message:messages.put(('event',message)),
+                lambda reason:messages.put(('closed',reason)))
+            app=HookApplication(self.game_id,self.profile_id,
+                lambda observation:self.event.emit({'original':observation.text}),
+                lambda reason:self.event.emit({'reason':reason}))
+            app.update_roles(hook_pids={self.pid},audio_pids={self.pid},
+                             input_pid=self.pid,input_hwnd=self.hwnd)
+            app.select(self.keys)
+            try:
+                host.start();host.command('connect',pid=self.pid)
+                while not self.stopping.is_set():
+                    try:
+                        kind,payload=messages.get(timeout=.05)
+                        if kind=='closed':
+                            app.host_closed(payload)
+                            self.event.emit({'connected':False,'reason':payload})
+                            break
+                        app.handle(payload)
+                        view=app.status()
+                        candidates=list(app.candidates.items())
+                        self.event.emit({'connected':view.state in ('connected','observing','preview_only'),
+                                         'state':view.state,'reason':view.reason,
+                                         'candidates':candidates,'search':dict(app.search_results)})
+                    except Empty:pass
+                    while True:
+                        try:action,kw=self.commands.get_nowait()
+                        except Empty:break
+                        if action=='select':app.select(tuple(kw['keys']))
+                        elif action in ('find_hooks','insert_hook','history','sync_thread'):
+                            host.command(action,**kw)
+            except Exception as exc:
+                self.event.emit({'connected':False,'reason':f'{type(exc).__name__}: {exc}'})
+            finally:
+                host.close()
+
+    class ScreenCaptureWorker(QThread):
+        captured=Signal(object)
+        failed=Signal(str)
+        def __init__(self,pid:int,hwnd:int):
+            super().__init__();self.pid=pid;self.hwnd=hwnd
+        def run(self):
+            try:
+                from .screen import WindowsClientCapture
+                self.captured.emit(WindowsClientCapture(self.hwnd,self.pid)())
+            except Exception as exc:self.failed.emit(f'{type(exc).__name__}: {exc}')
+
+    class RegionPicker(QDialog):
+        """Select a rectangle from a real captured game client area."""
+        def __init__(self,frame,parent=None):
+            super().__init__(parent)
+            self.setWindowTitle('ゲーム画面内の範囲を選択')
+            self.frame=frame
+            self.rect_pixels=None
+            layout=QVBoxLayout(self)
+            self.label=QLabel()
+            self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self.label.setMouseTracking(True)
+            height,width=frame.shape[:2]
+            self.display_width=min(width,1000)
+            self.display_height=max(1,round(height*self.display_width/width))
+            img=QImage(frame.data,width,height,int(frame.strides[0]),QImage.Format.Format_BGR888).copy()
+            self.label.setPixmap(QPixmap.fromImage(img).scaled(
+                self.display_width,self.display_height,Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            self.label.setFixedSize(self.display_width,self.display_height)
+            band=QRubberBand(QRubberBand.Shape.Rectangle,self.label)
+            self.band=band
+            self._origin=None
+            def press(event):
+                if event.button()==Qt.MouseButton.LeftButton:
+                    self._origin=event.position().toPoint()
+                    band.setGeometry(QRect(self._origin,self._origin));band.show()
+            def move(event):
+                if self._origin is not None:
+                    band.setGeometry(QRect(self._origin,event.position().toPoint()).normalized())
+            def release(event):
+                if self._origin is None:return
+                result=QRect(self._origin,event.position().toPoint()).normalized().intersected(self.label.rect())
+                self._origin=None
+                x1=round(result.left()*width/self.display_width)
+                y1=round(result.top()*height/self.display_height)
+                x2=round((result.left()+result.width())*width/self.display_width)
+                y2=round((result.top()+result.height())*height/self.display_height)
+                self.rect_pixels=(x1,y1,x2-x1,y2-y1)
+            self.label.mousePressEvent=press
+            self.label.mouseMoveEvent=move
+            self.label.mouseReleaseEvent=release
+            layout.addWidget(self.label)
+            layout.addWidget(QLabel(f'元画像 {width}×{height} px（ゲームのクライアント領域）。ドラッグで矩形を選択'))
+            actions=QHBoxLayout()
+            ok=QPushButton('この範囲を使用');cancel=QPushButton('取消')
+            actions.addWidget(ok);actions.addWidget(cancel);layout.addLayout(actions)
+            def accept_selected():
+                try:
+                    from .screen_calibration import validate_roi
+                    validate_roi(self.frame,self.rect_pixels or ())
+                    self.accept()
+                except ValueError as exc:QMessageBox.warning(self,'無効な校正範囲',str(exc))
+            ok.clicked.connect(accept_selected);cancel.clicked.connect(self.reject)
 
     class GameWorker(QThread):
         status=Signal(object)
         finished_status=Signal(str)
-        def __init__(self,config,service,control):
+        def __init__(self,config,service,control,temporary):
             super().__init__()
             self.config=config
             self.preferences=service.preferences
             self.game_config=service.current_config()
             self.control=control
+            self.temporary=temporary
         def run(self):
             from .live import run_windows
             try:
@@ -62,6 +171,8 @@ def run_gui() -> int:
                 self.finished_status.emit('Monitor ended (code '+str(code)+')')
             except Exception as exc:
                 self.finished_status.emit(f'{type(exc).__name__}: {exc}')
+            finally:
+                self.temporary.cleanup()
 
     def table(headers, minimum=180):
         t=QTableWidget(0,len(headers))
@@ -88,9 +199,17 @@ def run_gui() -> int:
     class Window(QMainWindow):
         def __init__(self):
             super().__init__()
-            self.service=AutoAdvService()
+            try:
+                self.service=AutoAdvService()
+            except LegacyPreferencesDetected:
+                answer=QMessageBox.question(self,'旧設定の移行',
+                    '旧AutoAdv設定が見つかりました。原本をバックアップし、新しい統合設定へ一回だけ取り込みますか？')
+                if answer != QMessageBox.StandardButton.Yes:
+                    raise RuntimeError('設定移行が未承認です。原本は変更していません')
+                Preferences.import_legacy(settings_path())
+                self.service=AutoAdvService()
             self.server_worker=None
-            self.luna_worker=None
+            self.hook_worker=None
             self.game_worker=None
             self.live_control=None
             self.active_target=None
@@ -103,9 +222,9 @@ def run_gui() -> int:
             root=QVBoxLayout(top)
             statuses=QGroupBox('接続・音声・進行状態（常時表示）');root.addWidget(statuses)
             status_grid=QGridLayout(statuses)
-            fields=['対象ゲーム','対象ウィンドウ/フォーカス','Luna 接続','最新Luna原文',
+            fields=['対象ゲーム','対象ウィンドウ/フォーカス','取得方式','HOOK Host接続','最新HOOK原文',
                     'Irodoriフォルダ','Irodori接続','Voice候補','提示経路','音声監視',
-                    '自動進行許可','停止理由','入力/ACK','現在Utterance']
+                    '自動進行許可','進行証拠','停止理由','入力/ACK','現在Utterance']
             self.status_labels={}
             for i,name in enumerate(fields):
                 label=QLabel(name);value=QLabel('未設定 / 不明');value.setWordWrap(True)
@@ -113,12 +232,17 @@ def run_gui() -> int:
                 self.status_labels[name]=value
             controls=QHBoxLayout();root.addLayout(controls)
             self.game_name=QComboBox();self.game_name.setEditable(True)
-            self.game_name.addItems(sorted(self.service.preferences.games))
-            self.game_name.setCurrentText(self.service.preferences.selected_game)
             controls.addWidget(QLabel('作品'));controls.addWidget(self.game_name,1)
+            self.new_game=QPushButton('作品登録');controls.addWidget(self.new_game)
+            self.profile_name=QComboBox();self.profile_name.setEditable(True)
+            controls.addWidget(QLabel('プロファイル'));controls.addWidget(self.profile_name,1)
+            self.duplicate_profile=QPushButton('複製');controls.addWidget(self.duplicate_profile)
+            self.rename_profile=QPushButton('改名');controls.addWidget(self.rename_profile)
+            self.delete_profile=QPushButton('削除');controls.addWidget(self.delete_profile)
+            self.default_profile=QPushButton('既定にする');controls.addWidget(self.default_profile)
             self.folder=QPushButton('Irodoriフォルダ指定');controls.addWidget(self.folder)
             self.retry=QPushButton('Irodori再接続・Voice更新');controls.addWidget(self.retry)
-            self.luna_button=QPushButton('Luna原文プレビュー開始');controls.addWidget(self.luna_button)
+            self.luna_button=QPushButton('HOOK探索・プレビュー開始');controls.addWidget(self.luna_button)
             self.live_button=QPushButton('ゲーム監視開始');controls.addWidget(self.live_button)
             self.stop_button=QPushButton('監視終了');controls.addWidget(self.stop_button)
             advance_controls=QHBoxLayout();root.addLayout(advance_controls)
@@ -164,7 +288,40 @@ def run_gui() -> int:
             defaults.addRow('未知話者のVoice ID',self.unknown_voice)
             defaults.addRow('既定Voice ID',self.default_voice);form.addLayout(defaults)
             self.save=QPushButton('作品ルール・Voice割当てを保存');form.addWidget(self.save)
-            monitor=QGroupBox('作品別ゲーム監視・音声・画面判定（保存後に反映）')
+            hook_group=QGroupBox('LunaHook（AutoAdv内で探索・選択・保存）')
+            form.addWidget(hook_group)
+            hbox=QVBoxLayout(hook_group)
+            self.host_dll=QLineEdit(self.service.preferences.luna_host_dll)
+            hostrow=QHBoxLayout();hostrow.addWidget(QLabel('LunaHost DLL'));hostrow.addWidget(self.host_dll,1)
+            self.browse_host=QPushButton('参照');hostrow.addWidget(self.browse_host)
+            hbox.addLayout(hostrow)
+            self.hook_candidates=QListWidget();hbox.addWidget(self.hook_candidates)
+            self.hook_selection=QListWidget();hbox.addWidget(QLabel('保存するHOOK（上から優先順）'))
+            hbox.addWidget(self.hook_selection)
+            hook_buttons=QHBoxLayout();hbox.addLayout(hook_buttons)
+            self.add_hook=QPushButton('候補を選択');self.remove_hook=QPushButton('選択解除')
+            self.move_hook_up=QPushButton('優先↑');self.save_hooks=QPushButton('HOOK選択を保存')
+            self.find_hooks=QPushButton('追加HOOK探索')
+            self.hook_code=QLineEdit();self.hook_code.setPlaceholderText('手動HOOKコード')
+            self.insert_hook=QPushButton('手動HOOK追加')
+            for button in (self.add_hook,self.remove_hook,self.move_hook_up,self.save_hooks,self.find_hooks):
+                hook_buttons.addWidget(button)
+            manual_hook=QHBoxLayout();manual_hook.addWidget(self.hook_code,1);manual_hook.addWidget(self.insert_hook)
+            hbox.addLayout(manual_hook)
+            source_group=QGroupBox('本文取得方式（HOOK標準・OCR任意）')
+            form.addWidget(source_group)
+            source_layout=QFormLayout(source_group)
+            self.source_kind=QComboBox();self.source_kind.addItems(['hook','ocr'])
+            self.ocr_executable=QLineEdit('tesseract')
+            self.ocr_language=QLineEdit('jpn')
+            self.ocr_rect=QLineEdit();self.ocr_rect.setPlaceholderText('x,y,width,height（ゲーム画面のクライアント領域）')
+            self.save_source=QPushButton('取得方式をプロファイルへ保存')
+            source_layout.addRow('取得方式（既定HOOK）',self.source_kind)
+            source_layout.addRow('OCR実行ファイル（OCR選択時）',self.ocr_executable)
+            source_layout.addRow('OCR言語（OCR選択時）',self.ocr_language)
+            source_layout.addRow('OCR領域（OCR選択時）',self.ocr_rect)
+            source_layout.addRow(self.save_source)
+            monitor=QGroupBox('作品別ゲーム監視・音声・任意画像判定（保存後に反映）')
             form.addWidget(monitor)
             monitor_layout=QVBoxLayout(monitor)
             self.monitor_location=QLabel('監視設定未保存');self.monitor_location.setWordWrap(True)
@@ -201,7 +358,7 @@ def run_gui() -> int:
                     horizontal.addWidget(choose)
                     live_form.addRow(title,row)
                 else:live_form.addRow(title,edit)
-                edit.textEdited.connect(self.mark_monitor_dirty)
+                if name not in ('pid','hwnd'):edit.textEdited.connect(self.mark_monitor_dirty)
             self.input_mode=QComboBox();self.input_mode.addItems(['keyboard','mouse_left'])
             live_form.addRow('自動入力方式',self.input_mode)
             self.heuristic_absence=QCheckBox('校正済み限定無音推定を使用')
@@ -214,10 +371,10 @@ def run_gui() -> int:
                 widget.textEdited.connect(self.mark_monitor_dirty)
             for widget in (self.input_mode,self.heuristic_absence,self.tts_required):
                 (widget.currentIndexChanged if isinstance(widget,QComboBox) else widget.toggled).connect(self.mark_monitor_dirty)
-            monitor_layout.addWidget(QLabel('肯定的通常台詞・本文表示完了・手動操作・遷移の画面テンプレート'))
+            monitor_layout.addWidget(QLabel('任意：自動入力には作品固有の明示的 advance_allowed 指標が必要。台詞表示マーカーだけでは不可'))
             self.markers=table(['役割','画像ファイル','x','y','幅','高さ','一致しきい値'],180)
             monitor_layout.addWidget(self.markers)
-            for role in ('dialogue','text_ready','manual_block','transition'):
+            for role in ('dialogue','text_ready','manual_block','transition','advance_allowed'):
                 append(self.markers,[role,'','0','0','40','20','0.96'])
                 self.markers.item(self.markers.rowCount()-1,0).setFlags(Qt.ItemFlag.ItemIsEnabled)
             marker_browse=QPushButton('選択行の画像ファイルを指定')
@@ -230,6 +387,14 @@ def run_gui() -> int:
                 if path:self.markers.item(row,1).setText(path)
             marker_browse.clicked.connect(browse_marker)
             self.markers.itemChanged.connect(self.mark_monitor_dirty)
+            capture_actions=QHBoxLayout();monitor_layout.addLayout(capture_actions)
+            self.capture_marker=QPushButton('ゲーム画面からマーカー範囲を取得')
+            self.probe_marker=QPushButton('現在のゲーム画面で検出確認')
+            self.calibration_state=QLabel('画面校正: 未確認（入力許可とは独立）')
+            capture_actions.addWidget(self.capture_marker);capture_actions.addWidget(self.probe_marker)
+            monitor_layout.addWidget(self.calibration_state)
+            self.capture_marker.clicked.connect(lambda:self.capture_screen(False))
+            self.probe_marker.clicked.connect(lambda:self.capture_screen(True))
             monitor_actions=QHBoxLayout();monitor_layout.addLayout(monitor_actions)
             self.import_monitor=QPushButton('既存監視JSONを取り込む')
             self.save_monitor=QPushButton('ゲーム監視設定を保存')
@@ -267,7 +432,23 @@ def run_gui() -> int:
             self.live_button.clicked.connect(self.start_game)
             self.allow.clicked.connect(self.grant_live)
             self.pause.clicked.connect(self.pause_live)
-            self.game_name.activated.connect(lambda _:self.game_changed(self.game_name.currentText()))
+            self.game_name.activated.connect(lambda _:self.game_changed(self.game_name.currentData()))
+            self.profile_name.activated.connect(lambda _:self.profile_changed(self.profile_name.currentData()))
+            self.new_game.clicked.connect(self.create_game)
+            self.duplicate_profile.clicked.connect(self.clone_profile)
+            self.rename_profile.clicked.connect(self.rename_current_profile)
+            self.delete_profile.clicked.connect(self.remove_profile)
+            self.default_profile.clicked.connect(self.make_default)
+            self.browse_host.clicked.connect(self.choose_host_dll)
+            self.add_hook.clicked.connect(self.add_selected_hook)
+            self.remove_hook.clicked.connect(self.remove_selected_hook)
+            self.move_hook_up.clicked.connect(self.hook_up)
+            self.save_hooks.clicked.connect(self.save_hook_profile)
+            self.save_source.clicked.connect(self.save_acquisition_profile)
+            self.find_hooks.clicked.connect(lambda:self.hook_worker.issue('find_hooks',pid=int(self.monitor_fields['pid'].text()))
+                                             if self.hook_worker and self.hook_worker.isRunning() else None)
+            self.insert_hook.clicked.connect(lambda:self.hook_worker.issue('insert_hook',pid=int(self.monitor_fields['pid'].text()),code=self.hook_code.text())
+                                              if self.hook_worker and self.hook_worker.isRunning() else None)
             self.original.textChanged.connect(self.update_preview)
             self.test.clicked.connect(self.update_preview)
             self.save.clicked.connect(self.save_profile)
@@ -279,7 +460,119 @@ def run_gui() -> int:
         def show_status(self,key,value):
             self.status_labels[key].setText(str(value))
 
+        def refresh_catalog(self):
+            selected=self.service.catalog.active()
+            self.game_name.blockSignals(True)
+            self.game_name.clear()
+            for game in self.service.catalog.games.values():
+                self.game_name.addItem(f'{game.display_name} [{game.game_id[:6]}]',game.game_id)
+            if selected:self.game_name.setCurrentIndex(self.game_name.findData(selected[0].game_id))
+            self.game_name.blockSignals(False)
+            self.profile_name.blockSignals(True)
+            self.profile_name.clear()
+            if selected:
+                for profile in selected[0].profiles.values():
+                    self.profile_name.addItem(profile.name,profile.profile_id)
+                self.profile_name.setCurrentIndex(self.profile_name.findData(selected[1].profile_id))
+            self.profile_name.blockSignals(False)
+            self.hook_selection.clear()
+            if selected:
+                for key in selected[1].keys():self.hook_selection.addItem(f'{key.code} | {key.name} | {key.context:x}:{key.context2:x}')
+                self._selected_keys=list(selected[1].keys())
+            else:self._selected_keys=[]
+
+        def create_game(self):
+            if self.game_worker and self.game_worker.isRunning():return
+            text=self.game_name.currentText().strip()
+            if not text:
+                self.issue.setText('作品名を指定してください');return
+            self.service.new_game(text)
+            self.refresh_catalog();self.load_profile()
+
+        def profile_changed(self,id):
+            if self.game_worker and self.game_worker.isRunning():return
+            if id:self.service.select(self.service.catalog.active_game_id,id)
+            self.refresh_catalog();self.load_profile()
+
+        def clone_profile(self):
+            if self.game_worker and self.game_worker.isRunning():return
+            self.service.profile_duplicate(self.profile_name.currentText().strip()+'（複製）')
+            self.refresh_catalog();self.load_profile()
+
+        def rename_current_profile(self):
+            if self.game_worker and self.game_worker.isRunning():return
+            try:
+                self.service.profile_rename(self.profile_name.currentText())
+                self.refresh_catalog();self.load_profile()
+            except ValueError as exc:self.issue.setText(str(exc))
+
+        def remove_profile(self):
+            if self.game_worker and self.game_worker.isRunning():return
+            try:
+                self.service.profile_delete();self.refresh_catalog();self.load_profile()
+            except ValueError as exc:self.issue.setText(str(exc))
+
+        def make_default(self):
+            self.service.profile_set_default()
+            self.issue.setText('この作品の既定プロファイルを設定しました')
+
+        def choose_host_dll(self):
+            if self.game_worker and self.game_worker.isRunning():return
+            path,_=QFileDialog.getOpenFileName(self,'LunaHost DLL',self.host_dll.text(),'DLL (*.dll)')
+            if path:
+                self.service.preferences.luna_host_dll=path
+                self.service.preferences.save(self.service.settings_file)
+                self.host_dll.setText(path)
+
+        def add_selected_hook(self):
+            i=self.hook_candidates.currentRow()
+            if not hasattr(self,'_hook_sources') or not 0<=i<len(self._hook_sources):return
+            key=self._hook_sources[i].key
+            if key not in self._selected_keys:
+                self._selected_keys.append(key)
+                self.hook_selection.addItem(f'{key.code} | {key.name} | {key.context:x}:{key.context2:x}')
+                if self.hook_worker:self.hook_worker.issue('select',keys=self._selected_keys[:])
+
+        def remove_selected_hook(self):
+            i=self.hook_selection.currentRow()
+            if 0<=i<len(self._selected_keys):
+                self._selected_keys.pop(i);self.hook_selection.takeItem(i)
+                if self.hook_worker:self.hook_worker.issue('select',keys=self._selected_keys[:])
+
+        def hook_up(self):
+            i=self.hook_selection.currentRow()
+            if i>0:
+                self._selected_keys[i-1],self._selected_keys[i]=self._selected_keys[i],self._selected_keys[i-1]
+                text=self.hook_selection.takeItem(i)
+                self.hook_selection.insertItem(i-1,text)
+                self.hook_selection.setCurrentRow(i-1)
+                if self.hook_worker:self.hook_worker.issue('select',keys=self._selected_keys[:])
+
+        def save_hook_profile(self):
+            try:
+                if self.game_worker and self.game_worker.isRunning():raise ValueError('監視中のHOOK変更不可')
+                self.service.save_hook_selection(tuple(self._selected_keys))
+                self.issue.setText('HOOKと選択順を現在プロファイルに保存しました')
+            except Exception as exc:self.issue.setText(str(exc))
+
+        def save_acquisition_profile(self):
+            from .acquisition import SourceSelection, SourceKind
+            try:
+                if self.game_worker and self.game_worker.isRunning():
+                    raise ValueError('監視中の取得方式変更不可')
+                kind=SourceKind(self.source_kind.currentText())
+                raw=self.ocr_rect.text().strip()
+                region=tuple(int(x.strip()) for x in raw.split(',')) if kind is SourceKind.OCR else None
+                selection=SourceSelection(kind,self.ocr_executable.text().strip(),
+                    self.ocr_language.text().strip(),region)
+                self.service.configure_acquisition(selection)
+                self.show_status('停止理由','取得源変更後は再検証と再許可が必要です')
+                self.issue.setText('取得方式を現在プロファイルに保存しました')
+            except (ValueError,TypeError) as exc:
+                self.issue.setText('取得方式保存不可: '+str(exc))
+
         def load_profile(self):
+            self.refresh_catalog()
             c=self.service.current_config()
             tables=[(self.rules,[(r.rule_id,r.pattern,'1' if r.enabled else '0',r.condition) for r in c.structure_rules]),
                     (self.replacements,[(r.pattern,r.replacement,'1' if r.regex else '0','1' if r.enabled else '0',r.target) for r in c.replacements]),
@@ -291,19 +584,26 @@ def run_gui() -> int:
             self.fallback.setCurrentText(c.unknown_route.name)
             self.unknown_voice.setText(c.unknown_voice or '')
             self.default_voice.setCurrentText(c.default_voice or '')
-            self.show_status('対象ゲーム',self.service.preferences.selected_game or '未選択')
+            self.show_status('対象ゲーム',self.service.current_game_name() or '未選択')
             self.show_status('Irodoriフォルダ',self.service.preferences.irodori_root or '未設定')
+            active=self.service.active()
+            from .acquisition import SourceSelection
+            selection=active[1].source() if active else SourceSelection()
+            self.source_kind.setCurrentText(selection.kind.value)
+            self.show_status('取得方式',selection.kind.value)
+            self.ocr_executable.setText(selection.tesseract_executable)
+            self.ocr_language.setText(selection.language)
+            self.ocr_rect.setText(','.join(map(str,selection.region)) if selection.region else '')
             self.load_monitor_profile()
             self.update_preview()
 
-        def game_changed(self,text):
-            # Changes are intentionally explicit; typing a new name must not discard editor state.
+        def game_changed(self,game_id):
             if self.game_worker and self.game_worker.isRunning():
-                self.game_name.setCurrentText(self.service.preferences.selected_game)
-                self.issue.setText('監視中は作品を変更できません。監視を終了してください')
+                self.refresh_catalog()
+                self.issue.setText('監視中は作品を変更できません')
                 return
-            self.service.preferences.selected_game=text
-            self.load_profile()
+            if game_id:self.service.select(game_id)
+            self.refresh_catalog();self.load_profile()
 
         def mark_monitor_dirty(self,*_):
             if not self._loading_monitor:
@@ -327,7 +627,7 @@ def run_gui() -> int:
             pid,hwnd,_=self._window_candidates[index]
             self.monitor_fields['pid'].setText(str(pid))
             self.monitor_fields['hwnd'].setText(str(hwnd))
-            self.mark_monitor_dirty()
+            self.show_status('対象ウィンドウ/フォーカス',f'PID={pid} / HWND={hwnd} / 未検証')
 
         def load_monitor_document(self,document,screen,path_label):
             self._loading_monitor=True
@@ -347,7 +647,11 @@ def run_gui() -> int:
                 self.tts_required.setChecked(document.get('tts_required',False))
                 self.min_ready_count.setText(str(screen.get('minimum_ready_observations',2)))
                 self.min_ready_span.setText(str(screen.get('minimum_ready_span_ms',120)))
-                for r,role in enumerate(('dialogue','text_ready','manual_block','transition')):
+                self._calibration_size=tuple(screen['client_size']) if screen.get('client_size') else None
+                self._marker_client_sizes={role:(tuple(record['source_client_size'])
+                    if record.get('source_client_size') else None)
+                    for role,record in screen.get('markers',{}).items()}
+                for r,role in enumerate(('dialogue','text_ready','manual_block','transition','advance_allowed')):
                     marker=screen.get('markers',{}).get(role,{})
                     rect=marker.get('rect',[0,0,40,20])
                     for c,value in enumerate([role,marker.get('image',''),*rect,marker.get('min_score',.96)]):
@@ -359,15 +663,7 @@ def run_gui() -> int:
         def load_monitor_profile(self):
             try:
                 data,screen=self.service.monitor_document()
-                path=self.service.monitor_path()
-                if path:
-                    from .live import LiveConfig
-                    actual=LiveConfig.load(path)
-                    for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
-                        data[key]=str(getattr(actual,key))
-                    for marker in screen.get('markers',{}).values():
-                        marker['image']=str((actual.screen_profile.parent/marker['image']).resolve())
-                self.load_monitor_document(data,screen,str(path) if path else '監視設定未保存')
+                self.load_monitor_document(data,screen,'統合プロファイルに保存済み' if data else '監視設定未保存')
             except (ValueError,OSError,KeyError) as exc:
                 self.monitor_location.setText('監視設定を読み取れません: '+str(exc))
                 self.monitor_dirty=True
@@ -376,19 +672,19 @@ def run_gui() -> int:
             if self.game_worker is not None and self.game_worker.isRunning():
                 self.issue.setText('監視終了後に監視設定を変更してください');return
             path,_=QFileDialog.getOpenFileName(self,'既存のゲーム監視JSONを指定',
-                    self.service.preferences.live_config or '', 'JSON (*.json)')
+                    '', 'JSON (*.json)')
             if not path:return
             try:
                 from .live import LiveConfig
                 from .screen import ScreenProfile
                 config=LiveConfig.load(Path(path))
                 data=json.loads(Path(path).read_text(encoding='utf-8'))
-                screen=json.loads(config.screen_profile.read_text(encoding='utf-8'))
+                screen=json.loads(config.screen_profile.read_text(encoding='utf-8')) if config.screen_profile else {}
                 for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
                     data[key]=str(getattr(config,key))
-                for marker in screen['markers'].values():
+                for marker in screen.get('markers',{}).values():
                     marker['image']=str((config.screen_profile.parent/marker['image']).resolve())
-                ScreenProfile.load(config.screen_profile)
+                if config.screen_profile:ScreenProfile.load(config.screen_profile)
                 self.load_monitor_document(data,screen,'取り込み済み・まだ保存されていません')
                 self.mark_monitor_dirty()
             except (ValueError,OSError,KeyError) as exc:
@@ -401,16 +697,17 @@ def run_gui() -> int:
             for a in rows(self.markers):
                 role,path,x,y,w,h,score=a
                 if not path.strip():
-                    if role in ('dialogue','text_ready'):
-                        raise ValueError(f'{role}の画像ファイルを指定してください')
                     continue
                 markers[role]={'image':abs_path(path),'rect':[int(x),int(y),int(w),int(h)],
                                'min_score':float(score)}
+                recorded=getattr(self,'_marker_client_sizes',{}).get(role)
+                if recorded is not None:markers[role]['source_client_size']=list(recorded)
             screen={'markers':markers,
                     'minimum_ready_observations':int(self.min_ready_count.text()),
                     'minimum_ready_span_ms':int(self.min_ready_span.text())}
-            live={'pid':int(values['pid']),'hwnd':int(values['hwnd']),
-                  'loopback_helper':abs_path(values['loopback_helper']),
+            if getattr(self,'_calibration_size',None) is not None:
+                screen['client_size']=list(self._calibration_size)
+            live={'loopback_helper':abs_path(values['loopback_helper']),
                   'asr_model':abs_path(values['asr_model']),
                   'asr_tokens':abs_path(values['asr_tokens']),
                   'log_path':abs_path(values['log_path']),
@@ -423,18 +720,76 @@ def run_gui() -> int:
                   'tts_required':self.tts_required.isChecked(),
                   'advance_input':{'mode':self.input_mode.currentText(),
                                    'virtual_key':int(values['input_virtual_key'])}}
-            return live,screen
+            return live,screen if markers else {}
+
+        def capture_screen(self,probe:bool):
+            if self.game_worker and self.game_worker.isRunning():
+                self.issue.setText('画面校正は監視を停止してから実行してください');return
+            try:
+                pid=int(self.monitor_fields['pid'].text())
+                hwnd=int(self.monitor_fields['hwnd'].text())
+                if pid<=0 or hwnd<=0:raise ValueError('ゲームの対象ウィンドウを指定してください')
+                if not probe and self.markers.currentRow() not in range(self.markers.rowCount()):
+                    raise ValueError('取得するマーカー行を選択してください')
+            except ValueError as exc:self.issue.setText(str(exc));return
+            worker=ScreenCaptureWorker(pid,hwnd)
+            self._other_workers.append(worker)
+            self.calibration_state.setText('画面校正: クライアント画像取得中（入力許可ではありません）')
+            worker.captured.connect(lambda frame:self.calibration_frame(frame,probe))
+            worker.failed.connect(lambda reason:self.calibration_state.setText('画面取得失敗: '+reason))
+            worker.finished.connect(lambda:self._other_workers.remove(worker))
+            worker.start()
+
+        def calibration_frame(self,frame,probe:bool):
+            try:
+                if probe:
+                    from .screen_calibration import probe as check
+                    _,screen=self.current_monitor_document()
+                    state,ready,reason,scores=check(frame,screen)
+                    details=', '.join(f'{role}={score:.3f}' for role,score in scores.items())
+                    self.calibration_state.setText(
+                        f'検出テストのみ（許可ではありません）: {state.name}, ready={ready}, {reason}; {details}')
+                    return
+                row=self.markers.currentRow()
+                if row<0:raise ValueError('校正するマーカー行を選んでください')
+                role=self.markers.item(row,0).text()
+                dialog=RegionPicker(frame,self)
+                if dialog.exec()!=QDialog.DialogCode.Accepted:return
+                current=self.service.active()
+                if current is None:raise ValueError('ゲーム・プロファイルの選択が必要です')
+                from .screen_calibration import save_calibration,immutable_calibration_path
+                root=(self.service.settings_file.parent/'markers'/current[0].game_id/
+                      current[1].profile_id)
+                target=immutable_calibration_path(frame,dialog.rect_pixels,root,role=role)
+                save_calibration(frame,dialog.rect_pixels,target,role=role)
+                captured_size=(frame.shape[1],frame.shape[0])
+                prior=getattr(self,'_calibration_size',None)
+                self._calibration_size=captured_size
+                if not hasattr(self,'_marker_client_sizes'):self._marker_client_sizes={}
+                self._marker_client_sizes[role]=captured_size
+                x,y,w,h=dialog.rect_pixels
+                for column,value in enumerate((str(target),x,y,w,h),start=1):
+                    self.markers.item(row,column).setText(str(value))
+                self.mark_monitor_dirty()
+                pending=[key for key in ('dialogue','text_ready','manual_block','transition','advance_allowed')
+                         if self.markers.item(('dialogue','text_ready','manual_block','transition','advance_allowed').index(key),1).text().strip()
+                         and self._marker_client_sizes.get(key)!=captured_size]
+                detail=(' / サイズ変更のため再校正が必要: '+', '.join(pending)) if pending else ''
+                self.calibration_state.setText(
+                    f'{role}: クライアント領域({x},{y},{w},{h})から取得。検出テスト後に保存してください'+detail)
+            except (OSError,ValueError,TypeError) as exc:
+                self.calibration_state.setText('画面校正エラー: '+str(exc))
 
         def save_monitor_profile(self):
             if self.game_worker and self.game_worker.isRunning():
                 self.issue.setText('監視設定を変更するにはゲーム監視を終了してください');return
-            if not self.service.preferences.selected_game or self.service.preferences.selected_game!=self.game_name.currentText():
+            if not self.service.active() or self.game_name.currentData()!=self.service.catalog.active_game_id:
                 self.issue.setText('先に作品ルールを保存し、作品を選択してください');return
             try:
                 live,screen=self.current_monitor_document()
-                path=self.service.save_monitor(self.service.preferences.selected_game,live,screen)
+                self.service.save_monitor(live,screen)
                 self.monitor_dirty=False
-                self.monitor_location.setText(str(path))
+                self.monitor_location.setText('統合プロファイルに保存済み')
                 self.issue.setText('ゲーム監視・画面・音声設定を保存しました。次の監視開始から適用します')
             except (OSError,ValueError,TypeError,KeyError) as exc:
                 self.issue.setText('監視設定を保存できません: '+str(exc))
@@ -467,7 +822,7 @@ def run_gui() -> int:
         def save_profile(self):
             try:
                 if (self.game_worker is not None and self.game_worker.isRunning() and
-                    self.game_name.currentText()!=self.service.preferences.selected_game):
+                    self.game_name.currentData()!=self.service.catalog.active_game_id):
                     raise ValueError('監視中は対象作品を変更できません。監視終了後に切り替えてください')
                 c=self.current_editor_config()
                 available=self.service.server.state.voices
@@ -478,8 +833,8 @@ def run_gui() -> int:
                     assigned.append(c.default_voice)
                 missing=[voice for voice in assigned if voice and available and voice not in available]
                 if missing:raise ValueError('APIに存在しないVoice ID: '+', '.join(missing))
-                self.service.save_game(self.game_name.currentText(),c)
-                self.show_status('対象ゲーム',self.service.preferences.selected_game)
+                self.service.save_game(self.service.current_game_name(),c)
+                self.show_status('対象ゲーム',self.service.current_game_name())
                 if self.game_worker is not None and self.game_worker.isRunning() and self.live_control is not None:
                     self.live_control.queue_config(c)
                 self.issue.setText('保存しました。監視中の変更は次の安全な行境界から適用されます。')
@@ -525,69 +880,100 @@ def run_gui() -> int:
                 combo.setCurrentText(existing)
 
         def start_luna(self):
-            if self.luna_worker and self.luna_worker.isRunning():return
-            self.luna_worker=LunaWorker(self.service.preferences.luna_url)
-            self.luna_worker.received.connect(self.receive_original)
-            self.luna_worker.status.connect(self.luna_status)
-            self.luna_worker.start()
-            self.monitor_state.setText('Luna公開WS監視: 開始')
-        def luna_status(self,ok:bool,message:str):
-            self.service.luna_connected=ok
-            self.show_status('Luna 接続',message)
-            if not ok:self.disallow_until_verified()
+            if self.hook_worker and self.hook_worker.isRunning():return
+            try:
+                game,profile=self.service.active()
+                pid=int(self.monitor_fields['pid'].text())
+                hwnd=int(self.monitor_fields['hwnd'].text())
+                if not self.service.preferences.luna_host_dll:
+                    raise ValueError('LunaHost DLLを選択してください')
+                if not Path(self.service.preferences.luna_host_dll).is_file():
+                    raise ValueError('LunaHost DLLが見つかりません')
+                if pid<=0 or hwnd<=0:raise ValueError('対象ウィンドウを選択してください')
+            except Exception as exc:
+                self.issue.setText('HOOK開始不可: '+str(exc));return
+            self.hook_worker=HookWorker(self.service.preferences.luna_host_dll,pid,hwnd,
+                                        game.game_id,profile.profile_id,profile.keys())
+            self.hook_worker.event.connect(self.hook_event)
+            self.hook_worker.start()
+            self.monitor_state.setText('HOOK探索・プレビュー中')
+
+        def hook_event(self,data):
+            if 'original' in data:self.receive_original(data['original'])
+            if 'connected' in data:
+                self.service.hook_connected=data['connected']
+                self.show_status('HOOK Host接続',data.get('state','停止')+' / '+data.get('reason',''))
+                if not self.service.hook_connected:self.disallow_until_verified()
+            if 'candidates' in data:
+                candidates=data['candidates']
+                previous=self.hook_candidates.currentRow()
+                self._hook_sources=[src for src,_ in candidates]
+                self.hook_candidates.clear()
+                for source,text in candidates:
+                    self.hook_candidates.addItem(f'{source.hook_code} | PID={source.process_id} | {source.hook_name} | {text[:70]}')
+                if 0<=previous<len(candidates):self.hook_candidates.setCurrentRow(previous)
+            if 'reason' in data:self.show_status('停止理由',data['reason'])
+
         def receive_original(self,original:str):
             self.service.latest_original=original
-            self.show_status('最新Luna原文',original[:200] or '空原文')
+            self.show_status('最新HOOK原文',original[:200] or '空原文')
             self.original.setPlainText(original)
+
         def stop_luna(self):
-            if self.luna_worker:
-                self.luna_worker.stopping.set()
-            self.service.luna_connected=False
+            if self.hook_worker:self.hook_worker.stopping.set()
+            self.service.hook_connected=False
             self.disallow_until_verified()
-            self.show_status('Luna 接続','監視停止')
+            self.show_status('HOOK Host接続','監視停止')
             self.monitor_state.setText('監視: 停止')
+
         def disallow_until_verified(self):
             self.service.autoplay_allowed=False
             self.show_status('自動進行許可','無効')
-            self.show_status('停止理由','実ゲーム・画面・音声の許可条件が未確証')
+            self.show_status('停止理由','HOOK取得元・画面・音声の許可条件が未確証')
+
         def start_game(self):
             if self.game_worker and self.game_worker.isRunning():return
+            if self.hook_worker and self.hook_worker.isRunning():
+                self.hook_worker.stopping.set()
+                self.hook_worker.finished.connect(self.start_game)
+                self.issue.setText('HOOKプレビュー接続を閉じ、監視接続へ切替えます')
+                return
             try:
-                from .live import LiveConfig,LiveControl
-                if not self.service.preferences.selected_game:raise ValueError('先に対象作品を保存してください')
-                if self.monitor_dirty:raise ValueError('監視設定に未保存の変更があります。保存してください')
-                path=self.service.monitor_path()
-                if path is None:raise ValueError('作品別のゲーム監視設定が未保存です')
-                profile=LiveConfig.load(path)
-            except (ValueError,OSError,KeyError) as exc:
+                from .live import LiveControl
+                if not self.service.active():raise ValueError('先に対象作品を登録してください')
+                if self.monitor_dirty:raise ValueError('監視設定に未保存の変更があります')
+                from .acquisition import SourceKind
+                if (self.service.active()[1].source().kind is SourceKind.HOOK and
+                    not self.service.active()[1].selected_hooks):
+                    raise ValueError('HOOK方式ではプロファイルにHOOKを保存してください')
+                pid=int(self.monitor_fields['pid'].text())
+                hwnd=int(self.monitor_fields['hwnd'].text())
+                profile,temporary=self.service.runtime_snapshot(pid,hwnd)
+            except (ValueError,OSError,KeyError,TypeError) as exc:
                 self.issue.setText(f'監視開始不可: {exc}')
                 return
-            # The running game uses the saved profile snapshot, not unsaved widgets.
-            self.stop_luna()
             self.service.latest_original=''
-            self.service.luna_connected=False
-            self.show_status('最新Luna原文','新しい監視セッションの受信待ち')
+            self.service.hook_connected=False
+            self.show_status('最新HOOK原文','新しい監視セッションの受信待ち')
             self.live_control=LiveControl()
             self.active_target=(profile.pid,profile.hwnd)
-            self.game_worker=GameWorker(profile,self.service,self.live_control)
+            self.game_worker=GameWorker(profile,self.service,self.live_control,temporary)
             self.game_worker.status.connect(self.game_status)
             self.game_worker.finished_status.connect(self.game_finished)
             self.game_worker.start()
             self.allow.setEnabled(True)
             self.pause.setEnabled(True)
             self.show_status('対象ウィンドウ/フォーカス',f'PID={profile.pid} / HWND={profile.hwnd}')
-            self.monitor_state.setText('ゲーム音声・画面監視: 起動中')
-            self.show_status('自動進行許可','無効（対象と原文を確認してください）')
+            self.monitor_state.setText('ゲーム音声・本文監視: 起動中')
+            self.show_status('自動進行許可','無効（HOOK取得元の確認待ち）')
 
         def grant_live(self):
             if not self.game_worker or not self.game_worker.isRunning() or not self.live_control:return
-            if not self.service.luna_connected or not self.service.latest_original.strip():
-                self.show_status('停止理由','現在の監視セッションでLuna原文と対象ゲームの一致を確認できません')
+            if not self.live_control.bound.is_set() or not self.service.latest_original.strip():
+                self.show_status('停止理由','監視中ゲームの選択HOOKから原文を確認できていません')
                 return
-            # This user action confirms the selected Luna hook, target window,
-            # and last original correspond to the same game. The worker still
-            # requires a live WS connection, window focus and fresh preflight.
-            self.live_control.bound.set()
+            # Controller still requires independent fresh focus/audio/game-gate
+            # evidence. Text preview alone never authorizes input.
             self.live_control.authorize.set()
             self.show_status('自動進行許可','許可要求済み（Controller検証待ち）')
 
@@ -598,10 +984,13 @@ def run_gui() -> int:
 
         def game_status(self,state):
             if 'original' in state:self.receive_original(state['original'])
-            if 'luna' in state:
-                self.service.luna_connected=state['luna']=='connected'
-                self.show_status('Luna 接続',state['luna']+' '+state.get('luna_reason',''))
-                if not self.service.luna_connected:self.disallow_until_verified()
+            if 'acquisition' in state:self.show_status('取得方式',state['acquisition'])
+            if 'gate' in state:self.show_status('進行証拠',state['gate'])
+            if 'acquisition_error' in state:self.show_status('停止理由',state['acquisition_error'])
+            if 'hook' in state:
+                self.service.hook_connected=state['hook'] in ('connected','observing','preview_only')
+                self.show_status('HOOK Host接続',state['hook']+' '+state.get('hook_reason',''))
+                if not self.service.hook_connected:self.disallow_until_verified()
             if 'monitor' in state:self.monitor_state.setText('ゲーム監視: '+state['monitor'])
             if 'advance' in state:self.show_status('自動進行許可',state['advance'])
             if 'reason' in state:self.show_status('停止理由',state['reason'] or 'なし')
@@ -631,7 +1020,7 @@ def run_gui() -> int:
                         '設定版: '+u['config_revision'])))
                     self.show_status('現在Utterance',str(u['speaker'] or '不明')+' / '+u['body'][:75])
             if state.get('speaker') or state.get('body'):
-                self.show_status('対象ゲーム',self.service.preferences.selected_game or '未選択')
+                self.show_status('対象ゲーム',self.service.current_game_name() or '未選択')
 
         def game_finished(self,message):
             self.show_status('停止理由',message)
@@ -677,7 +1066,7 @@ def run_gui() -> int:
                 self._closing=True
                 self.stop_all()
                 self.service.autoplay_allowed=False
-            workers=(self.luna_worker,self.game_worker,self.server_worker,*self._other_workers)
+            workers=(self.hook_worker,self.game_worker,self.server_worker,*self._other_workers)
             if any(worker is not None and worker.isRunning() for worker in workers):
                 self.issue.setText('監視・試聴ワーカーの終了を確認しています')
                 event.ignore()

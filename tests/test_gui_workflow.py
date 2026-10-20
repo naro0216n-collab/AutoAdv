@@ -25,7 +25,7 @@ class GameSettingsGUI(unittest.TestCase):
                 settings=Path(tmp)/'settings.json'
                 service=AutoAdvService(settings_file=settings)
                 service.save_game('つよきす',GameTextConfig())
-                for file in ('capture.dll','asr.onnx','tokens.txt','dialogue.png','ready.png'):
+                for file in ('capture.dll','asr.onnx','tokens.txt'):
                     (Path(tmp)/file).write_bytes(b'file')
                 failures=[]
                 def inspect():
@@ -37,13 +37,18 @@ class GameSettingsGUI(unittest.TestCase):
                         for key,name in [('loopback_helper','capture.dll'),('asr_model','asr.onnx'),
                                          ('asr_tokens','tokens.txt'),('log_path','session.jsonl')]:
                             window.monitor_fields[key].setText(str(Path(tmp)/name))
-                        window.markers.item(0,1).setText(str(Path(tmp)/'dialogue.png'))
-                        window.markers.item(1,1).setText(str(Path(tmp)/'ready.png'))
+                        # The standard HOOK mode must save without any visual calibration.
                         window.save_monitor_profile()
-                        profile=window.service.monitor_path()
-                        self.assertIsNotNone(profile)
-                        self.assertTrue(profile.is_file())
-                        self.assertEqual(json.loads(profile.read_text())['pid'],123)
+                        saved=json.loads(settings.read_text(encoding='utf-8'))
+                        self.assertEqual(saved['schema_version'],2)
+                        self.assertNotIn('live_profiles',saved)
+                        raw,screen=window.service.monitor_document()
+                        self.assertNotIn('pid',raw)
+                        self.assertNotIn('hwnd',raw)
+                        self.assertEqual(screen,{})
+                        self.assertIsNone(window.service.active()[1].screen.get('client_size'))
+                        self.assertTrue(window.capture_marker.isEnabled())
+                        self.assertTrue(window.probe_marker.isEnabled())
                         self.assertFalse(window.service.autoplay_allowed)
                         self.assertFalse(window.allow.isEnabled())
                         self.assertFalse(window.monitor_dirty)

@@ -114,8 +114,7 @@ class IrodoriTests(unittest.TestCase):
         class Guard:
             def __init__(self,worker):self.worker=worker
             def observe(self):
-                return FreshSnapshot(ScreenState.DIALOGUE,True,True,True,
-                                     False,self.worker.is_active(),True,True,True,False,False)
+                return FreshSnapshot(focused=True,capture_ok=True,gate_allowed=True,gate_proof_id='gate-A',native_voice_active=False,tts_playing=self.worker.is_active(),target_window_matches=True,input_available=True,manual_override=False,transition_pending=False)
         ctrl=Controller(Settings(autoplay=True),session_id='s',interpreter=TextInterpreter(
             GameTextConfig(unknown_route=TTSPolicy.SELECTED,unknown_voice='voice')))
         input_driver=Input()
@@ -133,7 +132,8 @@ class IrodoriTests(unittest.TestCase):
         step(EventKind.CAPTURE_HEALTH,102,capture_ok=True)
         step(EventKind.LINE_CANDIDATE,103,source_seq=1,source_line_id='a',
              text='おはよう',text_ready=True)
-        step(EventKind.VOICE_PRESENCE,104,voice=VoicePresence.ABSENT,
+        step(EventKind.ADVANCE_GATE,104,gate_allowed=True,gate_proof_id="gate-A",gate_source="game")
+        step(EventKind.VOICE_PRESENCE,105,voice=VoicePresence.ABSENT,
              evidence=Evidence.METADATA)
         self.assertTrue(started.wait(2))
         self.assertTrue(worker.is_active())

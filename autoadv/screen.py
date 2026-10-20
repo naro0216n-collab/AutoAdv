@@ -1,6 +1,6 @@
 """Positive visual permission, manual blocker and transition observations.
 
-Luna supplies text. This adapter never OCRs text or classifies unnecessary
+LunaHost supplies directly observed text. This adapter never OCRs text or classifies unnecessary
 screen types. A missing marker is UNKNOWN, never permission.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from typing import Callable
 import json
 from .contracts import ScreenState
 
-ROLES = frozenset(('dialogue','text_ready','manual_block','transition'))
+ROLES = frozenset(('dialogue','text_ready','manual_block','transition','advance_allowed'))
 
 
 @dataclass(frozen=True)
@@ -18,11 +18,16 @@ class Marker:
     image:Path
     rect:tuple[int,int,int,int]
     min_score:float=.96
+    source_client_size: tuple[int,int] | None = None
 
     def __post_init__(self):
         x,y,w,h=self.rect
         if min(x,y)<0 or w<=0 or h<=0 or not .5<=self.min_score<=1:
             raise ValueError('invalid marker ROI or threshold')
+        if self.source_client_size is not None:
+            if (len(self.source_client_size)!=2 or any(type(a) is not int or a<=0 for a in self.source_client_size)
+                or x+w>self.source_client_size[0] or y+h>self.source_client_size[1]):
+                raise ValueError('marker capture size inconsistent with ROI')
 
 
 @dataclass(frozen=True)
@@ -30,21 +35,29 @@ class ScreenProfile:
     markers:dict[str,Marker]
     minimum_ready_observations:int=2
     minimum_ready_span_ms:int=120
+    client_size: tuple[int,int] | None=None
 
     def __post_init__(self):
-        if not {'dialogue','text_ready'}.issubset(self.markers) or not set(self.markers).issubset(ROLES):
-            raise ValueError('dialogue and readiness markers are required')
+        if not self.markers or not set(self.markers).issubset(ROLES):
+            raise ValueError('calibrated screen evidence requires one or more known markers')
         if self.minimum_ready_observations<2 or self.minimum_ready_span_ms<=0:
             raise ValueError('invalid ready calibration')
+        if self.client_size is not None:
+            if (len(self.client_size)!=2 or any(type(v) is not int or v<=0 for v in self.client_size)):
+                raise ValueError('invalid calibrated client dimensions')
+            if any(marker.source_client_size != self.client_size for marker in self.markers.values()):
+                raise ValueError('markers were not all captured at this client size')
 
     @classmethod
     def load(cls,path:Path) -> 'ScreenProfile':
         data=json.loads(path.read_text(encoding='utf-8'))
-        if set(data)-{'markers','minimum_ready_observations','minimum_ready_span_ms'}:
+        if set(data)-{'markers','minimum_ready_observations','minimum_ready_span_ms','client_size'}:
             raise ValueError('unknown screen profile fields')
-        return cls({name:Marker((path.parent / d['image']).resolve(),tuple(d['rect']),d.get('min_score',.96))
+        return cls({name:Marker((path.parent / d['image']).resolve(),tuple(d['rect']),d.get('min_score',.96),
+                                 tuple(d['source_client_size']) if d.get('source_client_size') else None)
                     for name,d in data['markers'].items()},
-                   data.get('minimum_ready_observations',2),data.get('minimum_ready_span_ms',120))
+                   data.get('minimum_ready_observations',2),data.get('minimum_ready_span_ms',120),
+                   tuple(data['client_size']) if data.get('client_size') else None)
 
 
 @dataclass(frozen=True)
@@ -69,11 +82,17 @@ def recognize_markers(frame,templates:dict[str,tuple[Marker,object]]) -> tuple[S
     if 'manual_block' in matched:
         # Manual-required proof wins over any coincident dialogue indicator.
         return ScreenState.MANUAL_REQUIRED,False,'manual_block marker'
-    if 'transition' in matched and 'dialogue' not in matched:
-        return ScreenState.TRANSITION,False,'transition marker'
-    if 'dialogue' not in matched or 'transition' in matched:
-        return ScreenState.UNKNOWN,False,'no unambiguous dialogue marker'
-    return ScreenState.DIALOGUE,'text_ready' in matched,'dialogue + ready markers'
+    if 'transition' in matched:
+        if 'dialogue' not in matched and 'advance_allowed' not in matched:
+            return ScreenState.TRANSITION,False,'transition marker'
+        return ScreenState.UNKNOWN,False,'conflicting transition and dialogue markers'
+    if 'advance_allowed' in matched:
+        # Only a game-specific, separately calibrated affirmative advance indicator can grant permission.
+        return ScreenState.DIALOGUE,True,'advance_allowed-marker'
+    if 'dialogue' in matched:
+        # Legacy readiness markers may describe observed text, NEVER game input permission.
+        return ScreenState.DIALOGUE,'text_ready' in matched,'dialogue + text readiness (not input permission)'
+    return ScreenState.UNKNOWN,False,'no affirmative normal-dialogue evidence'
 
 
 class ScreenObserver:
@@ -90,7 +109,13 @@ class ScreenObserver:
         self._ready_count=0
 
     def observe(self,at_ms:int)->ScreenSample:
-        state,ready_marker,evidence=recognize_markers(self.capture(),self.templates)
+        frame=self.capture()
+        if (self.profile.client_size is not None and
+            (frame.shape[1],frame.shape[0])!=self.profile.client_size):
+            self._ready_first_at=None
+            self._ready_count=0
+            return ScreenSample(at_ms,ScreenState.UNKNOWN,False,False,'client size changed; recalibration required')
+        state,ready_marker,evidence=recognize_markers(frame,self.templates)
         if state is ScreenState.DIALOGUE and ready_marker:
             if self._ready_first_at is None:self._ready_first_at=at_ms
             self._ready_count+=1

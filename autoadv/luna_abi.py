@@ -39,6 +39,7 @@ def load_exports(dll):
     definitions={
         'Luna_Start':(START_CALLBACKS,None),
         'Luna_ConnectProcess':((C.c_uint32,),None),
+        'Luna_ConnectAndInjectProcess':((C.c_uint32,),None),
         'Luna_DetachProcess':((C.c_uint32,),None),
         'Luna_CheckIfNeedInject':((C.c_uint32,),C.c_bool),
         'Luna_InsertHookCode':((C.c_uint32,C.c_wchar_p),None),

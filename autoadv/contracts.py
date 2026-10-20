@@ -86,6 +86,9 @@ class EventKind(Enum):
     TRANSITION_ACK = auto()
     MANUAL_OVERRIDE = auto()
     FOCUS_CHANGED = auto()
+    ADVANCE_GATE = auto()
+    CHOICE_REQUIRED = auto()
+    CHOICE_RESOLVED = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +102,9 @@ class Envelope:
     source_seq: Optional[int] = None
     text: Optional[str] = None
     source_line_id: Optional[str] = None
+    source_kind: Optional[str] = None
+    source_origin: Optional[str] = None
+    source_generation: Optional[int] = None
     text_ready: bool = False
     screen: Optional[ScreenState] = None
     capture_ok: Optional[bool] = None
@@ -112,6 +118,9 @@ class Envelope:
     focused: Optional[bool] = None
     # An ACK must originate from a confirmed line/scene boundary, not text hash.
     transition_id: Optional[str] = None
+    gate_allowed: Optional[bool] = None
+    gate_proof_id: Optional[str] = None
+    gate_source: Optional[str] = None
 
 
 class EffectKind(Enum):

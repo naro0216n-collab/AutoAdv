@@ -1,22 +1,26 @@
 # AutoAdv
 
-Windows PySide6 GUI application for visual-novel voice-synchronized advancement.
-LunaTranslator supplies post-processed original text via its public `/api/ws/text/origin` WebSocket; AutoAdv owns per-game structure parsing, ruby/name readings, selective Irodori TTS, native audio attribution, and all input authorization. The shared Utterance is used for TTS, ASR and the GUI preview.
+Windows PySide6 GUI application for game-text acquisition, selective Irodori TTS, native game-audio synchronization and conservative, explicitly authorized advancement.
+
+**HOOK is the default text source**, using a managed LunaHook Host. It does not require a separate running LunaTranslator or its public WebSocket. An existing Tesseract installation is an **optional, explicitly selected OCR source** for games where HOOK cannot be used. HOOK and OCR do not run in parallel to create or merge dialogue. Game/profile-specific rules feed a single shared `Utterance` interpretation, voice routing and Controller.
 
 ## Starting
 
 ```powershell
 py -3.11 -m pip install -e ".[live]"
+dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
 py -3.11 -m autoadv
 ```
 
-In the GUI, select the existing Irodori-TTS-Server folder **once**. AutoAdv connects to an existing compatible Voice API or launches the installed virtual environment immediately, and again on subsequent app launches. It reads local `voices` files and aliases, then prioritizes IDs actually reported by `GET /v1/audio/voices`. It terminates only a server process that AutoAdv launched itself. Selecting a folder never authorizes game input.
+Select an installed Irodori-TTS-Server folder in the GUI once; AutoAdv reuses a running server or launches the existing environment on future starts and reads available Voice IDs. It does not install models, convert references or install Tesseract for you.
 
-Select a game, set its target window, Process Loopback and ASR file paths, positive screen markers and input key in the GUI, and save the per-game monitor profile. Existing JSON monitor profiles may be imported explicitly. Edit its named-group `speaker`/`body` structure regexes, replacements, readings and speaker-to-Voice assignments; save them, and preview Luna's unmodified original text. The active Controller Utterance is shown separately, including its saved config revision; an unsaved editor preview is not shown as an active line. The default is **auto-advance disabled** on every app launch. Positive target/HWID identity, game dialogue and readiness indicators, and explicit user authorization are mandatory; STOP/UNKNOWN keeps input disabled. Normal manual choice selection may return to automatic mode only after positively verified new normal text; explicit pause and runtime errors never do.
+Register a game and optional additional profiles. HOOK profiles select managed HOOK candidates and their order, then configure text parsing, readings, Voice and audio synchronization. OCR profiles must explicitly choose OCR, set an installed OCR executable, language and the client-area rectangle. Both use the same per-game/profile settings store and text interpreter. Audio capture, ASR files, target window and game-input configuration are supplied in the GUI. Existing standalone monitor JSON files may be imported explicitly; they are not a second settings authority.
 
-HOOK discovery, selection, sequence and merge occur in Luna. AutoAdv does not patch Luna, listen on UDP, read OCR game text or reconstruct invisible line IDs. Game original Auto and Luna `ttsautoforward` must both be disabled.
+Game-screen calibration is **not required to acquire text, prepare an `Utterance`, or listen to the game's audio**. Auto-input is a separate opt-in permission. Receipt of text, playback completion and UI focus do not prove that an ordinary advance is safe or that the previous input completed. Without **independently validated game-specific positive evidence**, auto-input remains blocked. Optional image templates only authorize when the game provides a uniquely verified affirmative `advance_allowed` indicator; `dialogue` or `text_ready` alone never authorizes input. Missing choice or transition evidence never means it is safe to send input. Repeated input is prohibited until a separate verified transition ACK.
 
-Calibration of game-specific positive visual evidence and native audio is required before automatic advancement. See [OPERATING.md](OPERATING.md) and `examples/`.
+**Current development limitation:** no general real-game provider for independent transition ACK or nonvisual positive advancement has been validated. The source, TTS and audio pathways can operate without images, but safe continuous automatic input is not yet confirmed on real games. The Windows x86/x64 Luna native binaries, injection, OCR engine integration and audio synchronization require Windows CI and real-game verification; passing fixture/unit tests is not sufficient.
+
+See [OPERATING.md](OPERATING.md) for operation and validation, and `docs/integration-spec.md` for the canonical product contract.
 
 ## Tests
 
@@ -25,4 +29,4 @@ python -m unittest discover -s tests -q
 python -m autoadv --help
 ```
 
-Real-game Windows Process Loopback/ASR/TTS playback, Luna HOOK results and input accuracy remain separate real-machine acceptance tests; Linux unit tests cannot validate them. Canonical requirements: `docs/README.md`, `docs/development-principles.md`, `docs/integration-spec.md`. Publish only to `develop` through the standard Gateway; `main` remains approval-gated.
+Normal development targets `develop` through the standard Publish Gateway. `main` and version changes require explicit approval.

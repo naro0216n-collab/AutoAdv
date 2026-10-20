@@ -56,6 +56,9 @@ class Line:
     source_line_id: Optional[str]
     first_seen_ms: int
     source_seq: int
+    source_kind: Optional[str] = None
+    source_origin: Optional[str] = None
+    source_generation: Optional[int] = None
     ready_ms: Optional[int] = None
     voice: VoicePresence = VoicePresence.UNRESOLVED
     evidence: Evidence = Evidence.NONE
@@ -89,7 +92,10 @@ class Controller:
         self.interpreter = interpreter or TextInterpreter(GameTextConfig(name_readings=dict(self.settings.name_readings)))
         self.session_id = session_id or str(uuid.uuid4())
         self.state = S.WAIT_LINE
-        self.screen = ScreenState.UNKNOWN
+        self.screen = ScreenState.UNKNOWN  # optional diagnostic, never input authorization
+        self.gate_allowed = False
+        self.gate_proof_id: str | None = None
+        self.gate_source: str | None = None
         self.focused = False
         self.capture_ok = False
         self.line: Optional[Line] = None
@@ -132,6 +138,8 @@ class Controller:
 
     def _pause(self, reason: str) -> list[Effect]:
         self.autoplay_authorized=False
+        self.gate_allowed=False
+        self.gate_proof_id=None
         if self.line is None:
             self.state = S.PAUSED
             self.pause_reason = reason
@@ -153,15 +161,20 @@ class Controller:
             effects.append(self._effect(FX.CANCEL_TTS,'manual_choice'))
         self._token+=1
         self.line=None
+        self.gate_allowed=False
+        self.gate_proof_id=None
         self.state=S.WAIT_MANUAL_CHOICE
         return effects
 
     def _new_line(self, e: Envelope) -> None:
         self._epoch += 1
         self._token += 1
+        self.gate_allowed=False
+        self.gate_proof_id=None
         utterance=self.interpreter.parse(e.text or "")
         self.line = Line(self._epoch, self._token, utterance,
-                         e.source_line_id, e.at_ms, e.source_seq or 0)
+                         e.source_line_id, e.at_ms, e.source_seq or 0,
+                         e.source_kind,e.source_origin,e.source_generation)
         self.tts_policy = utterance.tts_route
         self.voice_id = utterance.voice_id
         self.default_voice_id = self.interpreter.config.default_voice
@@ -179,14 +192,14 @@ class Controller:
         order_key = (e.kind, e.line_epoch if e.kind in (
             EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
             EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
-            EK.LINE_INVALIDATED) else None)
+            EK.LINE_INVALIDATED, EK.ADVANCE_GATE) else None)
         if (e.kind is not EK.MANUAL_OVERRIDE and e.kind is not EK.LINE_CANDIDATE and
             e.at_ms < self._last_kind_at_ms.get(order_key, -1)):
             return False
         # Callback events and their cancellation guards may never reach a new line.
         if e.kind in (EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
                       EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
-                      EK.LINE_INVALIDATED):
+                      EK.LINE_INVALIDATED, EK.ADVANCE_GATE):
             if self.line is None or e.line_epoch != self.line.epoch or e.cancel_token != self.line.token:
                 return False
         return True
@@ -202,7 +215,7 @@ class Controller:
         order_key = (e.kind, e.line_epoch if e.kind in (
             EK.VOICE_PRESENCE, EK.NATIVE_STARTED, EK.NATIVE_COMPLETED,
             EK.TTS_FINISHED, EK.TIMER, EK.LINE_READY, EK.LINE_UPDATED,
-            EK.LINE_INVALIDATED) else None)
+            EK.LINE_INVALIDATED, EK.ADVANCE_GATE) else None)
         self._last_kind_at_ms[order_key] = max(
             e.at_ms, self._last_kind_at_ms.get(order_key, -1))
         if e.kind is EK.MANUAL_OVERRIDE:
@@ -214,21 +227,25 @@ class Controller:
                 self.line.token = self._token
             return effects
         if e.kind is EK.SCREEN_CHANGED:
-            if e.screen is None:
-                return self._pause("invalid_screen_observation")
-            self.screen = e.screen
-            if self.screen is ScreenState.MANUAL_REQUIRED and self.state is not S.PAUSED:
-                return self._manual_choice()
-            if self.state is S.WAIT_MANUAL_CHOICE and self.screen is ScreenState.DIALOGUE:
-                self.state=S.WAIT_LINE
-                return []
-            if self.screen is not ScreenState.DIALOGUE and self.line is not None:
-                # After an input has been emitted, a verified scene TRANSITION
-                # is normal; never send again before an independently observed
-                # boundary ACK. Choices/menus/maps still require user action.
-                if not (self.state is S.WAIT_TRANSITION_ACK and
-                        self.screen is ScreenState.TRANSITION):
-                    return self._pause(f"screen_{self.screen.name.lower()}")
+            # Legacy visual classification is diagnostics only, never a grant.
+            self.screen = e.screen or ScreenState.UNKNOWN
+        elif e.kind is EK.CHOICE_REQUIRED:
+            return self._manual_choice()
+        elif e.kind is EK.CHOICE_RESOLVED:
+            if self.state is S.WAIT_MANUAL_CHOICE and e.gate_proof_id and e.gate_source:
+                self.state = S.WAIT_LINE
+                self.gate_allowed = False
+                self.gate_proof_id = None
+            return []
+        elif e.kind is EK.ADVANCE_GATE:
+            # Gate must belong to the active line generation. It may be revoked
+            # without creating or completing a line. Stale grants are rejected
+            # by _check_event; the executor will sample again before SendInput.
+            self.gate_allowed=bool(e.gate_allowed and e.gate_proof_id and e.gate_source)
+            self.gate_proof_id=e.gate_proof_id if self.gate_allowed else None
+            self.gate_source=e.gate_source if self.gate_allowed else None
+            if not self.gate_allowed and self.line and self.line.request_pending:
+                return self._pause('game_input_gate_revoked')
         elif e.kind is EK.FOCUS_CHANGED:
             self.focused = e.focused is True
             if not self.focused and (self.line is not None or self.state is S.WAIT_MANUAL_CHOICE):
@@ -275,6 +292,8 @@ class Controller:
                 return self._pause("ambiguous_transition_ack")
             self._last_ack_id = e.transition_id
             self.line = None
+            self.gate_allowed = False
+            self.gate_proof_id = None
             self.state = S.WAIT_LINE
             return []
         elif e.kind is EK.LINE_UPDATED:
@@ -392,7 +411,7 @@ class Controller:
     def _eligible_for_request(self) -> bool:
         l = self.line
         return bool(l and self.autoplay_authorized and self.focused and
-                    self.screen is ScreenState.DIALOGUE and self.capture_ok and
+                    self.gate_allowed and self.capture_ok and
                     l.ready_ms is not None and not l.sent and not l.request_pending and
                     l.presentation is not Presentation.UNRESOLVED and
                     l.playback is not Playback.ACTIVE and not (l.tts_job_started and not (l.tts_finished or l.tts_canceled)) and
@@ -402,7 +421,7 @@ class Controller:
         l = self.line
         if l is None or self.state in (S.PAUSED, S.WAIT_TRANSITION_ACK):
             return []
-        if self.screen is not ScreenState.DIALOGUE or not self.focused or not self.capture_ok:
+        if not self.focused or not self.capture_ok:
             if at_ms >= l.first_seen_ms + self.settings.unresolved_timeout_ms:
                 return self._pause("observation_unavailable")
             return []
@@ -464,8 +483,8 @@ class Controller:
         return [self._effect(FX.REQUEST_ADVANCE, "presentation_complete")]
 
     def confirm_advance(self, *, line_epoch: int, cancel_token: int,
-                        fresh_screen: ScreenState, fresh_focused: bool,
-                        fresh_text_ready: bool, fresh_capture_ok: bool,
+                        fresh_focused: bool, fresh_capture_ok: bool,
+                        fresh_gate_allowed: bool = False, fresh_gate_proof_id: str | None = None,
                         fresh_native_voice_active: bool = True,
                         fresh_tts_playing: bool = True,
                         fresh_line_matches: bool = False,
@@ -481,11 +500,12 @@ class Controller:
         l = self.line
         if (l is None or l.epoch != line_epoch or l.token != cancel_token or
             self.state is not S.READY_TO_ADVANCE or not l.request_pending or
-            self.screen is not ScreenState.DIALOGUE or not self.focused or not self.capture_ok or
-            not fresh_focused or fresh_screen is not ScreenState.DIALOGUE or
-            not fresh_text_ready or not fresh_capture_ok or
+            not self.gate_allowed or not self.gate_proof_id or
+            not fresh_gate_allowed or fresh_gate_proof_id != self.gate_proof_id or
+            not self.focused or not self.capture_ok or
+            not fresh_focused or not fresh_capture_ok or
             fresh_native_voice_active or fresh_tts_playing or
-            not fresh_line_matches or not fresh_target_window_matches or
+            not fresh_target_window_matches or
             not fresh_input_available or fresh_manual_override or
             fresh_transition_pending or at_ms < self._last_at_ms or
             l.sent or l.playback is Playback.ACTIVE):

@@ -1,6 +1,6 @@
 # AutoAdv 正準文書
 
-- `integration-spec.md`：2026年10月20日付、LunaHook広域移植・統合後の完成時契約（ゲーム識別、HOOK Host、複数プロファイル、GUI、Irodori、音声同期、進行安全）。
+- `integration-spec.md`：2026年10月20日付、LunaHook広域移植・統合後の完成時契約（HOOK標準・OCR明示選択、ゲーム識別、HOOK Host、複数プロファイル、GUI、Irodori、音声同期、進行証拠）。
 - `development-principles.md`：開発、責務、検証の原則。完成時動作を優先する。
 - `publish.md`：既存Publish Gateway、develop Fast CI source-snapshotからの復元・publish運用。
 

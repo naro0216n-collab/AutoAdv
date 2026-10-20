@@ -37,9 +37,9 @@ class HookProtocolTests(TestCase):
     def test_role_change_forces_reacquisition(self):
         s=SessionIdentity('game','profile','host')
         s.bind_process_roles(hook_pids={2},audio_pids={3},input_pid=4,input_hwnd=5)
-        prev=s.connection_generation
+        prev=s.session_epoch
         s.authorized=True
         s.bind_process_roles(hook_pids={2},audio_pids={6},input_pid=4,input_hwnd=5)
-        self.assertGreater(s.connection_generation,prev)
+        self.assertGreater(s.session_epoch,prev)
         self.assertFalse(s.authorized)
         self.assertEqual(s.audio_pids,{6})

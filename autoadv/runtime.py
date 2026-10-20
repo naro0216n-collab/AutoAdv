@@ -12,14 +12,13 @@ from .controller import Controller
 
 @dataclass(frozen=True)
 class FreshSnapshot:
-    screen: ScreenState
-    focused: bool
-    text_ready: bool
-    capture_ok: bool
-    # Conservative defaults: unknown blocker state forbids an advance.
+    focused: bool = False
+    capture_ok: bool = False
+    gate_allowed: bool = False
+    gate_proof_id: str | None = None
+    # Unknown blockers conservatively prohibit input.
     native_voice_active: bool = True
     tts_playing: bool = True
-    line_matches: bool = False
     target_window_matches: bool = False
     input_available: bool = False
     manual_override: bool = True
@@ -42,8 +41,8 @@ class Runtime:
     """All callbacks post to the same serial queue; never call InputDriver.
 
     The fresh guard is deliberately independent of controller's cached state.
-    The guard must derive screen classification and text-ready from real game
-    observations (not from receiving a Luna-origin packet).
+    The guard must re-read an independently verified game input gate and
+    window/audio/manual state; neither HOOK nor OCR output grants input.
     """
 
     def __init__(self, controller: Controller, guard: Guard, input_driver: InputDriver,
@@ -93,11 +92,12 @@ class Runtime:
                 snapshot = self.guard.observe()
                 if not self.controller.confirm_advance(
                     line_epoch=effect.line_epoch, cancel_token=effect.cancel_token,
-                    fresh_screen=snapshot.screen, fresh_focused=snapshot.focused,
-                    fresh_text_ready=snapshot.text_ready, fresh_capture_ok=snapshot.capture_ok,
+                    fresh_focused=snapshot.focused,
+                    fresh_capture_ok=snapshot.capture_ok,
+                    fresh_gate_allowed=snapshot.gate_allowed,
+                    fresh_gate_proof_id=snapshot.gate_proof_id,
                     fresh_native_voice_active=snapshot.native_voice_active,
                     fresh_tts_playing=snapshot.tts_playing,
-                    fresh_line_matches=snapshot.line_matches,
                     fresh_target_window_matches=snapshot.target_window_matches,
                     fresh_input_available=snapshot.input_available,
                     fresh_manual_override=snapshot.manual_override,
@@ -131,6 +131,9 @@ class Runtime:
         return {
             'session_id':c.session_id, 'line_epoch':line.epoch,
             'source_line_id':line.source_line_id,
+            'source_kind':line.source_kind,
+            'source_origin':line.source_origin,
+            'source_generation':line.source_generation,
             'raw_sha256':hashlib.sha256(line.text.observed_original.encode('utf-8')).hexdigest(),
             'content_kind':line.text.content_kind.name,
             'screen_state':c.screen.name,

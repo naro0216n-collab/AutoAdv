@@ -1,7 +1,6 @@
 """Default GUI entrypoint; diagnostics are safe and never authorize game input."""
 from __future__ import annotations
 import argparse
-import asyncio
 import csv
 import json
 from pathlib import Path
@@ -11,9 +10,6 @@ import sys
 def main() -> int:
     parser=argparse.ArgumentParser(description='AutoAdv GUI and input-free diagnostics')
     sub=parser.add_subparsers(dest='command')
-    origin=sub.add_parser('luna-origin',help='inspect Luna public original-text stream')
-    origin.add_argument('--url',default='ws://127.0.0.1:2333/api/ws/text/origin')
-    origin.add_argument('--count',type=int,default=0)
     tts=sub.add_parser('tts-smoke',help='test Irodori synthesis without game input')
     tts.add_argument('--url',default='http://127.0.0.1:8088/v1/audio/speech')
     tts.add_argument('--voice',required=True)
@@ -36,7 +32,9 @@ def main() -> int:
             return 2
     if args.command=='run-windows':
         from .live import LiveConfig,run_windows
-        try:return run_windows(LiveConfig.load(args.config),enable_input=False)
+        try:
+            from .preferences import Preferences
+            return run_windows(LiveConfig.load(args.config),preferences=Preferences.load(),enable_input=False)
         except (OSError,ValueError,FileNotFoundError) as exc:
             print(f'AutoAdv runtime error: {exc}',file=sys.stderr)
             return 2
@@ -50,17 +48,6 @@ def main() -> int:
             return 0
         except (OSError,ValueError,KeyError,json.JSONDecodeError) as exc:
             print(f'audit evaluation failed: {exc}',file=sys.stderr);return 2
-    if args.command=='luna-origin':
-        from .luna import observe_origin
-        async def run():
-            seen=0
-            async for packet in observe_origin(args.url):
-                print(json.dumps({'sequence':packet.sequence,'text':packet.text,'line_verified':False},ensure_ascii=False),flush=True)
-                seen+=1
-                if args.count and seen>=args.count:break
-        try:asyncio.run(run());return 0
-        except (OSError,ImportError) as exc:
-            print(f'Luna connection failed: {exc}',file=sys.stderr);return 2
     from .irodori import IrodoriClient,IrodoriConfig,play_wav
     from threading import Event
     try:

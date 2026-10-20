@@ -30,6 +30,8 @@ class Harness:
     def line(self, text="おはよう", *, ready=True, id="a", empty=False):
         effects = self.send(E.LINE_CANDIDATE, source_seq=self.c._last_source_seq+1,
                             source_line_id=id, text=text, text_ready=ready)
+        if self.c.line is not None:
+            self.send(E.ADVANCE_GATE,gate_allowed=True,gate_proof_id='verified-gate',gate_source='game-state')
         return effects
 
     def absent(self, evidence=Evidence.METADATA):
@@ -42,8 +44,8 @@ class Harness:
         assert [x.kind for x in effects] == [FX.REQUEST_ADVANCE], effects
         x = effects[0]
         return self.c.confirm_advance(line_epoch=x.line_epoch, cancel_token=x.cancel_token,
-                    fresh_screen=SS.DIALOGUE, fresh_focused=True,
-                    fresh_text_ready=True, fresh_capture_ok=True,
+                    fresh_focused=True, fresh_capture_ok=True,
+                    fresh_gate_allowed=True, fresh_gate_proof_id="verified-gate",
                     fresh_native_voice_active=False, fresh_tts_playing=False,
                     fresh_line_matches=True, fresh_target_window_matches=True,
                     fresh_input_available=True, fresh_manual_override=False,
@@ -160,10 +162,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(h.tick(),[])
 
     def test_choices_stop(self):
-        for state in (SS.TRANSITION, SS.UNKNOWN):
-            with self.subTest(state=state):
-                h=Harness();h.line();h.absent();h.send(E.SCREEN_CHANGED,screen=state)
-                self.assertEqual(h.c.state,S.PAUSED);self.assertEqual(h.tick(),[])
+        h=Harness();h.line();h.absent()
+        h.send(E.CHOICE_REQUIRED)
+        self.assertEqual(h.c.state,S.WAIT_MANUAL_CHOICE)
+        self.assertFalse(h.c.gate_allowed)
+        self.assertEqual(h.tick(),[])
+
 
     def test_focus_lost_pauses(self):
         h=Harness();h.line();h.send(E.FOCUS_CHANGED,focused=False)
@@ -228,16 +232,16 @@ class ContractTests(unittest.TestCase):
     def test_preflight_blocks(self):
         h=Harness();h.line();h.absent();effect=h.tick()[0]
         self.assertFalse(h.c.confirm_advance(line_epoch=effect.line_epoch,
-            cancel_token=effect.cancel_token,fresh_screen=SS.MANUAL_REQUIRED,
-            fresh_focused=True,fresh_text_ready=True,fresh_capture_ok=True,at_ms=h.now+1))
+            cancel_token=effect.cancel_token,fresh_gate_allowed=False,
+            fresh_focused=True,fresh_capture_ok=True,at_ms=h.now+1))
         self.assertFalse(h.c.line.sent)
 
     def test_manual_invalidation_before_advance(self):
         h=Harness();h.line();h.absent();effect=h.tick()[0]
         h.send(E.MANUAL_OVERRIDE)
         self.assertFalse(h.c.confirm_advance(line_epoch=effect.line_epoch,cancel_token=effect.cancel_token,
-                        fresh_screen=SS.DIALOGUE,fresh_focused=True,fresh_text_ready=True,
-                        fresh_capture_ok=True,at_ms=h.now+1))
+                        fresh_gate_allowed=True,fresh_gate_proof_id="verified-gate",
+                        fresh_focused=True,fresh_capture_ok=True,at_ms=h.now+1))
 
     def test_delayed_stale_notifications(self):
         h=Harness(TP.SELECTED,"s");h.line();h.absent();old=h.c.line

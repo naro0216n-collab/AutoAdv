@@ -19,9 +19,14 @@ from .contracts import Envelope,EventKind,TTSPolicy,ControllerState,ScreenState,
 from .irodori import TTSWorker,IrodoriClient,IrodoriConfig
 from .live_guard import LiveGuard,WindowsManualMonitor
 from .process_audio import CaptureHealth,ProcessCapture
-from .luna import OriginObservation,run_origin_listener
+from .observation import OriginObservation
+from .hook_host import HookHost
+from .hook_application import HookApplication
 from .runtime import Runtime
-from .screen import ScreenObserver,ScreenProfile,WindowsClientCapture,ScreenSample
+from .screen import ScreenObserver,ScreenProfile,WindowsClientCapture
+from .progression import ClosedGate,VisualGate,GateObservation,GateState
+from .acquisition import SourceKind,AcquisitionSession,TextCandidate
+from .ocr import TesseractOCR,OCRWorker
 from .windows_input import WindowsAdvancementInput
 from .text import TextInterpreter,GameTextConfig
 from .preferences import Preferences
@@ -70,7 +75,7 @@ def _clock() -> int:
 class LiveConfig:
     pid:int
     hwnd:int
-    screen_profile:Path
+    screen_profile:Path|None
     loopback_helper:Path
     asr_model:Path
     asr_tokens:Path
@@ -90,9 +95,9 @@ class LiveConfig:
     def load(cls,path:Path) -> 'LiveConfig':
         data=json.loads(path.read_text(encoding='utf-8'))
         base=path.resolve().parent
-        required={'pid','hwnd','screen_profile','loopback_helper','asr_model','asr_tokens','grace_ms',
+        required={'pid','hwnd','loopback_helper','asr_model','asr_tokens','grace_ms',
                   'allow_heuristic_absence','log_path','tts_speed','silent_dwell','tts_required','advance_input'}
-        if set(data)!=required:raise ValueError('live hardware configuration does not match the expected schema')
+        if set(data)-{'screen_profile'}!=required:raise ValueError('live hardware configuration does not match the expected schema')
         d=data['silent_dwell'];advance=data['advance_input']
         if (not isinstance(d,dict) or set(d)!={'base_ms','min_ms','reading_chars_per_sec'}
             or not isinstance(advance,dict) or set(advance)!={'mode','virtual_key'}
@@ -101,11 +106,12 @@ class LiveConfig:
             or type(advance['virtual_key']) is not int
             or type(data['allow_heuristic_absence']) is not bool
             or type(data['tts_required']) is not bool
+            or (data.get('screen_profile') is not None and (not isinstance(data['screen_profile'],str) or not data['screen_profile'].strip()))
             or any(not isinstance(data[name],str) or not data[name].strip()
-                   for name in ('screen_profile','loopback_helper','asr_model','asr_tokens','log_path'))):
+                   for name in ('loopback_helper','asr_model','asr_tokens','log_path'))):
             raise ValueError('invalid monitor field types / required paths')
         absolute=lambda x:(base/data[x]).resolve()
-        value=cls(int(data['pid']),int(data['hwnd']),absolute('screen_profile'),
+        value=cls(int(data['pid']),int(data['hwnd']),absolute('screen_profile') if data.get('screen_profile') else None,
                   absolute('loopback_helper'),absolute('asr_model'),absolute('asr_tokens'),
                   int(data['grace_ms']),data['allow_heuristic_absence'],absolute('log_path'),
                   float(data['tts_speed']),int(d['base_ms']),int(d['min_ms']),
@@ -138,7 +144,7 @@ class LiveControl:
     stop:Event=field(default_factory=Event)
     authorize:Event=field(default_factory=Event)
     pause:Event=field(default_factory=Event)
-    # App receives a positive user binding confirmation; never infer game identity from WS.
+    # Positive binding comes from exact managed native HOOK source, not a WS guess.
     bound:Event=field(default_factory=Event)
     config_lock:Lock=field(default_factory=Lock)
     next_config:GameTextConfig|None=None
@@ -230,8 +236,11 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
     if pid.value!=config.pid:raise ValueError('HWND does not belong to target game PID')
     if any(parent.pid==config.pid for parent in psutil.Process().parents()):
         raise ValueError('AutoAdv must not be a child of target game')
-    screen=ScreenObserver(ScreenProfile.load(config.screen_profile),
-                          WindowsClientCapture(config.hwnd,config.pid))
+    # No visual calibration is required for HOOK/OCR acquisition or audio.
+    # Calibrated visual proof is optional and cannot be synthesized from text.
+    gate=(VisualGate(ScreenObserver(ScreenProfile.load(config.screen_profile),
+                     WindowsClientCapture(config.hwnd,config.pid)))
+          if config.screen_profile is not None else ClosedGate())
     manual=WindowsManualMonitor()
     health=CaptureLiveness()
     history=AudioHistory()
@@ -248,26 +257,65 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
         'profile_schema':'live-profile-v2',
         'asr_model_id':config.asr_model.name,
         'asr_tokens_id':config.asr_tokens.name,
-        'screen_profile_id':config.screen_profile.name})
+        'screen_profile_id':config.screen_profile.name if config.screen_profile else None})
     tts=None;asr=None;runtime=None;capture=None
     packets=Queue()
-    listener_stop=Event()
-    listener_connected=Event()
+    source_connected=Event()
     last_state=None
-    def connected(ok:bool,message:str):
-        if ok:listener_connected.set()
-        else:listener_connected.clear()
-        packets.put(('connection',(ok,message)))
+    active=preferences.catalog.active()
+    if active is None:raise ValueError('registered game and profile required for native acquisition')
+    game,profile=active
+    acquisition=profile.source()
+    if acquisition.kind is SourceKind.HOOK and not profile.keys():
+        raise ValueError('select and save a HOOK before HOOK monitoring')
+    if acquisition.kind is SourceKind.HOOK and not preferences.luna_host_dll:
+        raise ValueError('select LunaHost DLL first')
+    if acquisition.kind is SourceKind.HOOK and len(profile.keys()) > 1:
+        # A collection of independent HOOK outputs does not prove a merged
+        # utterance until verified pairing/line boundaries are implemented.
+        raise ValueError('multiple HOOK combination is not verified for automation')
+    session=AcquisitionSession(game.game_id,profile.profile_id,acquisition)
     def received(observation:OriginObservation):
-        packets.put(('text',observation))
-    listener=Thread(target=run_origin_listener,
-                    args=(preferences.luna_url,listener_stop,received,connected),
-                    daemon=True,name='autoadv-luna-origin')
+        if acquisition.kind is SourceKind.HOOK:
+            candidate=TextCandidate(game.game_id,profile.profile_id,SourceKind.HOOK,
+                session.generation,observation.sequence,_clock(),observation.text,observation.origin or 'managed-lunahost')
+            packets.put(('source',candidate))
+    def received_ocr(candidate:TextCandidate):
+        packets.put(('source',candidate))
+    app = None
+    def invalidated(reason:str):
+        # Discard any queued event from the previous Host/HOOK/connection epoch.
+        # A still valid game/profile ID alone does not make a delayed packet current.
+        session.change(game.game_id,profile.profile_id,acquisition)
+        source_connected.clear()
+        control.bound.clear()
+        status({'hook':'not_verified','hook_reason':reason})
+        # During initial binding there is no authorized line to revoke.
+        # Once a line or authorization exists, cancel it synchronously, ahead
+        # of any later events already present in the Host input queue.
+        if app is not None and (ctrl.autoplay_authorized or ctrl.line is not None):
+            app.disconnected(_clock())
+    hook_app=None;host=None;ocr_worker=None
+    if acquisition.kind is SourceKind.HOOK:
+        hook_app=HookApplication(game.game_id,profile.profile_id,received,lambda _:None)
+        hook_app.update_roles(hook_pids={config.pid},audio_pids={config.pid},
+                              input_pid=config.pid,input_hwnd=config.hwnd)
+        hook_app.select(profile.keys())
+        hook_app.on_invalidate=invalidated
+        host=HookHost(Path(preferences.luna_host_dll),
+            lambda event:packets.put(('hook',event)),
+            lambda reason:packets.put(('host_closed',reason)))
+    else:
+        ocr_worker=OCRWorker(reader=TesseractOCR(acquisition,WindowsClientCapture(config.hwnd,config.pid)),
+            game_id=game.game_id,profile_id=profile.profile_id,generation=session.generation,
+            on_candidate=received_ocr,on_failure=lambda reason:packets.put(('source_error',reason)),
+            on_blank=lambda:packets.put(('source_blank',session.generation)))
     try:
-        guard=LiveGuard(ctrl,screen,config.hwnd,config.pid,manual,
+        guard=LiveGuard(ctrl,config.hwnd,config.pid,manual,
             lambda:tts.is_active() if tts else True,
             health.alive,lambda:asr.potentially_active() if asr else True,
-            binding_confirmed=lambda:control.bound.is_set() and listener_connected.is_set())
+            binding_confirmed=lambda:control.bound.is_set() and source_connected.is_set(),
+            gate=gate)
         runtime=Runtime(ctrl,guard if enable_input else GuardNoInput(guard),
                         WindowsAdvancementInput(config.hwnd,mode=config.input_mode,
                               virtual_key=config.input_virtual_key) if enable_input else InputDisabled(),
@@ -282,25 +330,48 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             on_line_updated=lambda epoch,token,text:asr.retarget(epoch,token,text),
             on_line_boundary=asr.mark_boundary,
             heuristic_absence_ready=asr.can_heuristically_exclude_voice,
-            binding_ok=lambda:control.bound.is_set() and listener_connected.is_set())
+            binding_ok=lambda:control.bound.is_set() and source_connected.is_set(),
+            stable_ms=acquisition.stable_ms)
         capture=ProcessCapture(config.pid,config.loopback_helper,history,asr.feed,health.report)
         capture.start()
-        listener.start()
-        status({'monitor':'running','advance':'disabled','reason':'Session requires explicit binding and authorization'})
+        if host is not None:
+            host.start()
+            host.command('connect',pid=config.pid)
+        else:
+            source_connected.set();control.bound.set()
+            ocr_worker.start()
+        status({'monitor':'running','acquisition':acquisition.kind.value,'advance':'disabled',
+                'gate':'not configured' if isinstance(gate,ClosedGate) else 'optional visual provider',
+                'reason':'Awaiting text; independent progression gate required for game input'})
         while not control.stop.is_set():
             while True:
                 try:kind,payload=packets.get_nowait()
                 except Empty:break
-                if kind=='connection':
-                    ok,message=payload
-                    audit('luna_connection',{'connected':ok,'reason':message})
-                    status({'luna':'connected' if ok else 'disconnected','luna_reason':message})
-                    if not ok:
-                        control.bound.clear()
-                        app.disconnected(_clock())
-                elif kind=='text':
-                    status({'original':payload.text})
-                    app.candidate(payload,_clock(),manual_intervened=manual.choice_action_seen())
+                if kind=='hook' and hook_app is not None:
+                    hook_app.handle(payload)
+                    state=hook_app.status()
+                    if state.state=='observing':
+                        source_connected.set()
+                        control.bound.set()
+                    status({'hook':state.state,'hook_reason':state.reason,
+                            'hook_candidates':state.candidate_count})
+                elif kind=='host_closed' and hook_app is not None:
+                    hook_app.host_closed(str(payload))
+                    audit('native_hook_invalidated',{'reason':str(payload)})
+                    status({'hook':'stopped','hook_reason':str(payload)})
+                    if ctrl.state is ControllerState.PAUSED:return 3
+                elif kind=='source':
+                    if session.accept(payload):
+                        status({'original':payload.text,'acquisition':payload.kind.value})
+                        app.candidate(OriginObservation(payload.sequence,payload.text,payload.text,
+                            kind=payload.kind.value,source_generation=payload.source_generation,
+                            game_id=payload.game_id,profile_id=payload.profile_id,origin=payload.origin),
+                            _clock(),manual_intervened=manual.choice_action_seen())
+                elif kind=='source_blank':
+                    if payload==session.generation:app.unstable(_clock())
+                elif kind=='source_error':
+                    invalidated(str(payload))
+                    status({'acquisition_error':str(payload)})
             if control.pause.is_set():
                 control.bound.clear()
                 for effect in ctrl.pause('explicit_pause'):
@@ -308,13 +379,15 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                 control.pause.clear()
             if control.authorize.is_set():
                 control.authorize.clear()
-                if (enable_input and listener_connected.is_set() and control.bound.is_set() and
+                if (enable_input and source_connected.is_set() and control.bound.is_set() and
                     ctrl.state is ControllerState.WAIT_LINE):
                     manual.reset_after_authorization()
                     ctrl.authorize()
-                    status({'advance':'authorized','reason':'Waiting for verified normal line'})
+                    status({'advance':'authorized',
+                            'reason':('Waiting for independent game-state permission'
+                                      if isinstance(gate,ClosedGate) else 'Waiting for verified normal line')})
                 else:
-                    status({'advance':'disabled','reason':'Target / Luna / controller not ready for authorization'})
+                    status({'advance':'disabled','reason':'Selected source / controller not ready for authorization'})
             while runtime.step():pass
             if ctrl.state is ControllerState.WAIT_LINE and ctrl.line is None:
                 config_update=control.consume_safe_config()
@@ -322,20 +395,19 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                     ctrl.interpreter=TextInterpreter(config_update)
                     audit('game_config_updated',{'revision':config_update.revision})
             now=_clock()
-            try:sample=screen.observe(now)
+            try:
+                proof=gate.observe(now)
             except Exception as exc:
-                audit('screen_failure',{'error_type':type(exc).__name__})
-                sample=ScreenSample(now,ScreenState.UNKNOWN,False,False,'capture_failure')
+                audit('game_gate_unavailable',{'error_type':type(exc).__name__})
+                proof=GateObservation(now,GateState.UNKNOWN)
             user32.GetForegroundWindow.restype=wintypes.HWND
             focused=user32.GetForegroundWindow()==config.hwnd
             was_manual=ctrl.state is ControllerState.WAIT_MANUAL_CHOICE
-            app.observe(sample,focused=focused,capture_ok=health.alive(),
-                manual_intervened=manual.intervened() and not was_manual)
+            app.tick(now,focused=focused,capture_ok=health.alive(),gate=proof)
             if not was_manual and ctrl.state is ControllerState.WAIT_MANUAL_CHOICE:
                 manual.reset_choice_actions()
-            if was_manual and ctrl.state is ControllerState.WAIT_LINE:
-                manual.reset_after_authorization()  # only after positively recognized manual-choice exit
-                audit('manual_choice_completed',{'at_ms':now})
+            # Manual selection alone is not a confirmed return to normal play.
+            # A provider must explicitly confirm the post-choice boundary.
             while runtime.step():pass
             line=ctrl.line
             view=(ctrl.state.name,ctrl.pause_reason,
@@ -356,13 +428,14 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             time.sleep(.08)
         return 0
     finally:
-        control.stop.set();listener_stop.set()
+        control.stop.set()
+        if host is not None:host.close()
+        if ocr_worker is not None:ocr_worker.close()
         if capture:capture.close()
         if asr:asr.close()
         if tts:tts.cancel_all()
         if runtime:runtime.finalize()
         manual.close()
-        if listener.is_alive():listener.join(timeout=3)
         audit.close()
 
 

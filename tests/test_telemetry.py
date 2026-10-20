@@ -12,7 +12,7 @@ class FakeInput:
     def __init__(self): self.count=0
     def advance(self): self.count+=1
 class FakeGuard:
-    def observe(self):return FreshSnapshot(SS.DIALOGUE,True,True,True,False,False,True,True,True,False,False)
+    def observe(self):return FreshSnapshot(focused=True,capture_ok=True,gate_allowed=True,gate_proof_id='gate-A',native_voice_active=False,tts_playing=False,target_window_matches=True,input_available=True,manual_override=False,transition_pending=False)
 class FakeTTS:
     def apply(self,x):raise AssertionError('no TTS expected')
 
@@ -33,7 +33,8 @@ class TelemetryContracts(unittest.TestCase):
             step(E.FOCUS_CHANGED,2,focused=True)
             step(E.CAPTURE_HEALTH,3,capture_ok=True)
             step(E.LINE_CANDIDATE,4,source_seq=1,source_line_id='a',text='おはよう',text_ready=True)
-            step(E.VOICE_PRESENCE,5,voice=VoicePresence.ABSENT,evidence=Evidence.METADATA)
+            step(E.ADVANCE_GATE,5,gate_allowed=True,gate_proof_id="gate-A",gate_source="game")
+            step(E.VOICE_PRESENCE,6,voice=VoicePresence.ABSENT,evidence=Evidence.METADATA)
             sink('asr_progress',{'session_id':'s','line_epoch':1,'asr_coverage':.8,'asr_tail_confidence':.2})
             clock[0]=3001
             step(E.TIMER,3000)

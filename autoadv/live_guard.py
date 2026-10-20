@@ -12,11 +12,11 @@ from threading import Event, Thread, Lock
 import ctypes
 import sys
 import time
-from .screen import ScreenObserver
 from .runtime import FreshSnapshot
 from .contracts import ScreenState, Playback, ControllerState
 from .controller import Controller
 from .windows_input import AUTOADV_INPUT_MARK
+from .progression import ClosedGate
 
 
 def is_manual_hook_event(*, keyboard: bool, flags: int, extra_info: int) -> bool:
@@ -200,16 +200,16 @@ class WindowsManualMonitor:
 
 
 class LiveGuard:
-    def __init__(self,controller:Controller, screen:ScreenObserver, hwnd:int, pid:int,
-                 manual:WindowsManualMonitor, tts_active:Callable[[],bool],
-                 capture_alive:Callable[[],bool],
-                 audio_activity:Callable[[],bool] = lambda: True,
-                 binding_confirmed:Callable[[],bool] = lambda: False,
-                 clock:Callable[[],int]=lambda:time.monotonic_ns()//1_000_000):
-        self.ctrl,self.screen,self.hwnd,self.pid=controller,screen,hwnd,pid
-        self.manual,self.tts_active,self.capture_alive,self.clock=manual,tts_active,capture_alive,clock
-        self.audio_activity=audio_activity
-        self.binding_confirmed=binding_confirmed
+    def __init__(self, controller:Controller, hwnd:int,pid:int,manual,
+                 tts_active:Callable[[],bool], capture_alive:Callable[[],bool],
+                 audio_activity:Callable[[],bool]=lambda:True,
+                 binding_confirmed:Callable[[],bool]=lambda:False,
+                 gate=None, clock:Callable[[],int]=lambda:time.monotonic_ns()//1_000_000):
+        self.ctrl,self.hwnd,self.pid=controller,hwnd,pid
+        self.manual,self.tts_active,self.capture_alive=manual,tts_active,capture_alive
+        self.audio_activity,self.binding_confirmed=audio_activity,binding_confirmed
+        self.gate=gate or ClosedGate()
+        self.clock=clock
 
     def observe(self)->FreshSnapshot:
         try:
@@ -220,18 +220,17 @@ class LiveGuard:
             foreground=user32.GetForegroundWindow()==self.hwnd
             pid=wintypes.DWORD()
             user32.GetWindowThreadProcessId(wintypes.HWND(self.hwnd),ctypes.byref(pid))
-            valid=pid.value==self.pid and bool(user32.IsWindowVisible(self.hwnd)) and bool(user32.IsWindowEnabled(self.hwnd))
+            valid=(pid.value==self.pid and bool(user32.IsWindowVisible(self.hwnd))
+                   and bool(user32.IsWindowEnabled(self.hwnd)))
             line=self.ctrl.line
-            if line is None:raise RuntimeError('no current line')
-            s=self.screen.observe(self.clock())
-            return FreshSnapshot(
-                screen=s.state,focused=foreground and valid,
-                text_ready=s.ready,capture_ok=self.capture_alive(),
+            if line is None:raise RuntimeError('no active line')
+            proof=self.gate.observe(self.clock()) if valid else None
+            allowed=bool(proof and proof.may_advance and self.binding_confirmed())
+            return FreshSnapshot(focused=foreground and valid,capture_ok=self.capture_alive(),
+                gate_allowed=allowed,gate_proof_id=proof.proof_id if allowed else None,
                 native_voice_active=(line.playback is Playback.ACTIVE or self.audio_activity()),
-                tts_playing=self.tts_active(),line_matches=s.positive and self.binding_confirmed(),
-                target_window_matches=valid,input_available=valid,
+                tts_playing=self.tts_active(),target_window_matches=valid,input_available=valid,
                 manual_override=self.manual.intervened(),
-                transition_pending=self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK,
-            )
+                transition_pending=self.ctrl.state is ControllerState.WAIT_TRANSITION_ACK)
         except Exception:
-            return FreshSnapshot(ScreenState.UNKNOWN,False,False,False)
+            return FreshSnapshot()

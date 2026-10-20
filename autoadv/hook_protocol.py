@@ -43,7 +43,7 @@ class ThreadSource:
 
 @dataclass(frozen=True, slots=True)
 class HookEvent:
-    kind: Literal['connected','disconnected','created','removed','output','diagnostic','inserted','emulator']
+    kind: Literal['connected','disconnected','created','removed','output','diagnostic','inserted','emulator','hook_found']
     host_generation: str
     connection_generation: int
     sequence: int
@@ -66,7 +66,8 @@ class SessionIdentity:
     game_id: str
     profile_id: str
     host_generation: str
-    connection_generation: int = 1
+    connection_generation: int = 0
+    session_epoch: int = 0
     hook_pids: set[int] = field(default_factory=set)
     audio_pids: set[int] = field(default_factory=set)
     input_pid: int | None = None
@@ -78,11 +79,18 @@ class SessionIdentity:
     invalid_reason: str = 'not_authorized'
 
     def invalidate(self, reason: str) -> None:
-        self.connection_generation += 1
+        self.session_epoch += 1
         self.pending.clear()
-        self.source_sequence = 0
         self.authorized = False
         self.invalid_reason = reason
+
+    def attach_host(self, host_generation: str, connection_generation: int, event_sequence: int) -> None:
+        if not host_generation or connection_generation <= 0 or event_sequence <= 0:
+            raise ValueError('invalid observed Host connection')
+        self.invalidate('host_connection_changed')
+        self.host_generation = host_generation
+        self.connection_generation = connection_generation
+        self.source_sequence = event_sequence
 
     def bind_process_roles(self, *, hook_pids: set[int], audio_pids: set[int], input_pid: int, input_hwnd: int) -> None:
         if not hook_pids or not audio_pids or input_pid <= 0 or input_hwnd <= 0 or min(hook_pids | audio_pids) <= 0:
@@ -109,20 +117,24 @@ class SessionIdentity:
         group.add(source)
         return 'unique' if len(group)==1 else 'ambiguous'
 
-    def accepts(self, event: HookEvent) -> bool:
-        if (event.host_generation != self.host_generation or event.connection_generation != self.connection_generation
+    def observes(self, event: HookEvent) -> bool:
+        if (event.host_generation != self.host_generation
+            or event.connection_generation != self.connection_generation
             or event.sequence <= self.source_sequence):
             return False
-        self.source_sequence=event.sequence
-        if event.kind!='output' or event.source is None:
+        self.source_sequence = event.sequence
+        return True
+
+    def accepts(self, event: HookEvent) -> bool:
+        if not self.observes(event):
             return False
-        if event.process_id not in self.hook_pids:
+        if event.kind != 'output' or event.source is None or event.process_id not in self.hook_pids:
             return False
         # A compatibility hit is only a hint. Unique candidates must have been
         # established from actual source events; no text-only fallback.
         return (any(event.source in sources for sources in self.pending.values())
-                and all(len(sources)==1 for sources in self.pending.values())
-                and len(self.pending)==len(self.selected))
+                and all(len(sources) == 1 for sources in self.pending.values())
+                and len(self.pending) == len(self.selected))
 
 
 def monotonic_ns() -> int:

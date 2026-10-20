@@ -13,10 +13,11 @@ class Continuity(unittest.TestCase):
         send(E.FOCUS_CHANGED,2,focused=True)
         send(E.CAPTURE_HEALTH,3,capture_ok=True)
         send(E.LINE_CANDIDATE,4,text='あ',source_seq=1,source_line_id='A',text_ready=True)
-        send(E.VOICE_PRESENCE,5,voice=P.ABSENT,evidence=V.METADATA)
+        send(E.ADVANCE_GATE,5,gate_allowed=True,gate_proof_id='gate-A',gate_source='game')
+        send(E.VOICE_PRESENCE,6,voice=P.ABSENT,evidence=V.METADATA)
         pending=send(E.TIMER,3000)[0]
         self.assertTrue(c.confirm_advance(line_epoch=pending.line_epoch,cancel_token=pending.cancel_token,
-                          fresh_screen=S.DIALOGUE,fresh_focused=True,fresh_text_ready=True,fresh_capture_ok=True,
+                          fresh_gate_allowed=True,fresh_gate_proof_id="gate-A",fresh_focused=True,fresh_capture_ok=True,
                           fresh_native_voice_active=False,fresh_tts_playing=False,fresh_line_matches=True,
                           fresh_target_window_matches=True,fresh_input_available=True,
                           fresh_manual_override=False,fresh_transition_pending=False,at_ms=3001))

@@ -17,6 +17,7 @@ class HostContractTests(TestCase):
         dll=luna_abi.load_exports(DLL())
         self.assertEqual(len(dll.Luna_Start.argtypes),10)
         self.assertEqual(len(dll.Luna_FindHooks.argtypes),4)
+        self.assertEqual(len(dll.Luna_ConnectAndInjectProcess.argtypes),1)
 
     def test_provenance_preserved_through_ipc(self):
         p={'kind':'output','host_generation':'abc','connection_generation':3,

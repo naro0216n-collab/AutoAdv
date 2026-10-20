@@ -15,14 +15,16 @@ class MockInput:
 
 
 class MockGuard:
-    def __init__(self, screen=SS.DIALOGUE): self.screen=screen
-    def observe(self): return FreshSnapshot(self.screen,True,True,True,False,False,True,True,True,False,False)
+    def __init__(self, allow=True): self.allow=allow
+    def observe(self): return FreshSnapshot(focused=True,capture_ok=True,gate_allowed=self.allow,
+        gate_proof_id='verified-gate' if self.allow else None,native_voice_active=False,tts_playing=False,
+        target_window_matches=True,input_available=True,manual_override=False,transition_pending=False)
 
 
 class RuntimeTests(unittest.TestCase):
     def test_guard_prevents_input(self):
         ctrl=Controller(Settings(autoplay=True),session_id="s")
-        guard=MockGuard(SS.UNKNOWN); inp=MockInput(); clock=iter(range(10000,20000))
+        guard=MockGuard(False); inp=MockInput(); clock=iter(range(10000,20000))
         runner=Runtime(ctrl,guard,inp,MockTTS(),clock=lambda:next(clock))
         def post(k,at,**kwargs):
             l=ctrl.line
@@ -32,7 +34,8 @@ class RuntimeTests(unittest.TestCase):
         post(E.FOCUS_CHANGED,101,focused=True)
         post(E.CAPTURE_HEALTH,102,capture_ok=True)
         post(E.LINE_CANDIDATE,103,source_seq=1,text="あ",text_ready=True,source_line_id="a")
-        post(E.VOICE_PRESENCE,104,voice=V.ABSENT,evidence=Evidence.METADATA)
+        post(E.ADVANCE_GATE,104,gate_allowed=True,gate_proof_id="verified-gate",gate_source="game-state")
+        post(E.VOICE_PRESENCE,105,voice=V.ABSENT,evidence=Evidence.METADATA)
         post(E.TIMER,5000)
         self.assertEqual(inp.calls,0)
         self.assertEqual(ctrl.pause_reason,"advance_preflight_rejected")
@@ -44,7 +47,8 @@ class RuntimeTests(unittest.TestCase):
              (E.FOCUS_CHANGED,101,{"focused":True}),
              (E.CAPTURE_HEALTH,102,{"capture_ok":True}),
              (E.LINE_CANDIDATE,103,{"source_seq":1,"text":"あ","text_ready":True,"source_line_id":"a"}),
-             (E.VOICE_PRESENCE,104,{"voice":V.ABSENT,"evidence":Evidence.METADATA}),
+             (E.ADVANCE_GATE,104,{"gate_allowed":True,"gate_proof_id":"verified-gate","gate_source":"game-state"}),
+             (E.VOICE_PRESENCE,105,{"voice":V.ABSENT,"evidence":Evidence.METADATA}),
              (E.TIMER,5000,{})]
         for k,at,details in seq:
             l=ctrl.line

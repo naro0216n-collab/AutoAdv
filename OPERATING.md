@@ -1,8 +1,8 @@
-# AutoAdv — Windows operation and game calibration
+# AutoAdv — Windows use and verification
 
-## Install and start
+## Prerequisites
 
-Windows 10 build 19041 or later, Python 3.11+, .NET SDK 9, LunaTranslator and an **already installed** Irodori-TTS-Server are required for the applicable features. Japanese ASR model files and the .NET process-loopback helper must be installed independently. AutoAdv does not install the server, download models, convert voice files or perform dependency synchronization.
+Windows 10 build 19041 or newer; Python 3.11; .NET SDK 9 for the Process Loopback helper; existing Irodori-TTS-Server installation, an installed native LunaHook Host/Hook build for the relevant target game, and local ASR model/tokens for native speech synchronization. Tesseract with Japanese trained data is needed **only** for an OCR profile. No separate running LunaTranslator is part of the normal HOOK workflow. AutoAdv does not download/update engines or models or modify other programs' installations on startup.
 
 ```powershell
 py -3.11 -m pip install -e ".[live]"
@@ -10,25 +10,25 @@ dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Rel
 py -3.11 -m autoadv
 ```
 
-1. In Luna, select/merge the HOOK(s) needed for this title. For a HOOK1 speaker + HOOK2 text title, select speaker then text and separate by a newline. Confirm the actual merged original in the AutoAdv preview. Do not assume Luna provides stable line IDs, speech timing, PID or voice metadata. Disable the game's own Auto and Luna `ttsautoforward`.
-2. In AutoAdv, select the installed Irodori-TTS-Server root. Its existing `.venv` or `venv` Python and installed package are used; the configured root is saved. On that selection and each next AutoAdv launch, the app connects to the API or starts the server from the chosen folder. It will not terminate external servers. Check the Voice IDs and any API/local difference. Select specific IDs or `SKIP`; no voice assignment silently changes when an ID vanishes.
-3. Set game-specific structure rules (`(?P<speaker>...)(?P<body>...)`), optional regex conditions and priority, name/ruby substitutions and voice routing. The right pane shows original → speaker/body → TTS/ASR → voice using the same interpreter as runtime. Save to a single settings file in `%APPDATA%\AutoAdv\settings.json` (atomic replacement).
-4. In the GUI's **game monitoring / audio / visual evidence** section, choose a visible game window (refresh the list and confirm its title, PID and HWND), select the existing loopback DLL, ASR model and token files, output log path, voice/silent timings and input key. For each required `dialogue` and `text_ready` marker, choose a cropped image of a positive game-screen indicator and enter its client-area rectangle `(x,y,width,height)` and threshold. Add a `manual_block` image for choices or other user-operated screens and optionally a `transition` image. Save the game monitoring profile. These are **per-game** validated runtime settings in `%APPDATA%\AutoAdv\profiles`, not example JSON files that must be edited by hand. Missing or ambiguous positive evidence never permits input. The old example JSON can be imported explicitly in the GUI, then saved once; there is no parallel legacy runtime route.
-5. The right pane distinguishes the **editable preview** from the **active controller Utterance** (source, speaker, body, TTS and ASR text, Voice ID and saved configuration revision). Changes to the live profile require a monitor restart, and changes to text rules apply only at the next safe line boundary. Start game monitoring, verify the game/HWND and current Luna original actually correspond, then separately press **auto-advance authorize**. Startup, monitoring, TTS playback test, and server connection alone must not issue game input. Manual choice detection only suspends input until a verified new ordinary utterance; a new Luna packet arriving before visual choice exit is treated as provisional and needs evidence of a physical selection action and a positive normal-dialogue boundary; explicit pause, disconnected WS, game switch or error requires a fresh session and explicit permission.
+## Normal GUI operation
 
-Do not enable `allow_heuristic_absence` without real-game latency/BGM/SE/no-voice calibration. Process-loopback failure is NOT voice absence. Late native onset cancels TTS, audio-device playback (not HTTP synthesis) determines TTS completion, and no second input is allowed until a verified transition. Logs include generation, presentation path, output/ACK, stop reason and text hash; not raw audio/video. Input-free diagnostics:
+1. Register the game and choose its profile. A new profile selects **HOOK** by default. For that path, configure a managed LunaHook Host, choose and preview one verified HOOK, save its selection and confirm the actual target PID. Multiple independent HOOKs cannot yet be accepted as one verified combined utterance; do not treat separate speaker and text outputs as synchronized. For an unsupported HOOK, manually select **OCR**, an already installed Tesseract executable, language (e.g. `jpn`) and the target client-area rectangle. OCR does not fall back to HOOK, or vice versa, without explicit intervention.
+2. Configure speaker/body extraction, ruby and name reading, voice routing and SKIP in the one game/profile record. The editable preview and active `Utterance` remain distinct. Configure the installed Irodori server root once; subsequent AutoAdv starts connect or start the installed server, then update available voice IDs. An absent voice ID is never silently replaced.
+3. Select the target window and audio helper/model/tokens, along with timings and input method. Saving the monitor settings **does not require visual markers**. Missing markers do not disable HOOK/OCR preview or audio presentation.
+4. If a particular game supplies reliable, positive, game-specific state indicators, optionally capture image templates from the GUI. `advance_allowed` must represent an independently validated ordinary-advance condition, **not** a generic textbox. `manual_block` or `transition` can deny permission; `dialogue` and `text_ready` support diagnosis only. Verify markers against real gameplay, choice screens and resolution changes. Screenshots are relative to the original client size and cannot be reused silently after resizing.
+5. Start monitoring independently from the explicit auto-input authorization. The controller must verify correct game/PID/HWND and focus, healthy audio, completed presentation, a current independent advance grant, no manual intervention and no pending transition ACK before sending any input. Text arrivals do not provide advance grants or ACKs. If the currently selected game has no reliable grant and transition proof, monitor text and listen to audio **without enabling auto-input**. A failed source, manual pause, game/profile switch or window change invalidates pending work.
+
+The input-safe path currently lacks a verified general game-transition ACK provider. Consequently, continuous automatic progression must not be represented as validated even when isolated text acquisition and TTS work. Game-specific integrations need real engine evidence; a timed assumption or mere changed text is not an ACK.
+
+## Diagnostic validation
 
 ```powershell
-py -3.11 -m autoadv luna-origin --count 4
-py -3.11 -m autoadv tts-smoke --voice YOUR_ID --play
-py -3.11 -m autoadv run-windows --config examples/live-profile.example.json
-py -3.11 -m autoadv audit-evaluate logs/autoadv.jsonl
+py -3.11 -m unittest discover -s tests -q
+py -3.11 -m autoadv --help
 ```
 
-## Undo a previously installed Luna patch
+Windows acceptance must separately check 32/64-bit Host/Hook build and attachment, actual HOOK events and sources, optional installed OCR recognition, native Process Loopback and VAD/ASR, Irodori playback completion, repeated/split/same text, late audio, choices, focus loss, profile and process switches, real positive advance permission and transition ACK. Passing synthetic tests or CI is not evidence that a particular game is safely operable.
 
-Older AutoAdv versions modified local Luna files via `scripts/luna_bridge_patch.py`. The patch is **not installed or used** by this release. Before using the Luna public WebSocket, restore the patched LunaTranslator files from the corresponding **unmodified Luna release or your own original backup** (or reinstall that Luna version), then use Luna's built-in original-text WS. Do not keep the old AutoAdv injected bridge module/startup hook or old UDP bridge configuration. AutoAdv does not attempt risky automated modifications of Luna installation files.
+## Imported legacy settings
 
-## Acceptance and limits
-
-Run unit/integration tests and Fast CI for reproducible contracts. Verify with a Windows machine and a real game: speaker + body HOOK merge, voiced/unvoiced lines, late native audio, SKIP, symbolic text, manual choice return, explicit pause, unknown/same repeated line stop, automatic Irodori relaunch and Voice UI, device-drain and no duplicate inputs. Linux tests, fixture calibrations and green CI cannot establish real-game correctness.
+Old Luna `savegamedata_5.3.1.json` can be read **without modifying Luna's original file**. Data are transferred explicitly to the AutoAdv catalog; there is no parallel Luna settings authority. Older AutoAdv screen templates may be imported, but generic `dialogue` and `text_ready` indicators do not authorize automated input under the new contract. An old third-party Luna patch or bridge must not run concurrently with the managed Host. No external process is killed, detached or overwritten automatically.

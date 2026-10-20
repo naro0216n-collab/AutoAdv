@@ -6,7 +6,7 @@ from pathlib import Path
 from autoadv.screen import Marker,ScreenProfile,ScreenObserver,recognize_markers
 from autoadv.contracts import ScreenState
 
-ROLES=('dialogue','text_ready','manual_block','transition')
+ROLES=('dialogue','text_ready','manual_block','transition','advance_allowed')
 
 class FakePatch:
     shape=(4,4,3)
@@ -38,7 +38,25 @@ class ScreenEvidenceTests(unittest.TestCase):
         self.assertEqual(self.see('dialogue','transition')[0],ScreenState.UNKNOWN)
     def test_schema_no_text_ocr_or_six_special_screens(self):
         self.assertEqual(set(ScreenProfile({k:v[0] for k,v in self.templates.items()}).markers),set(ROLES))
-        with self.assertRaises(ValueError):ScreenProfile({'dialogue':self.templates['dialogue'][0]})
+        self.assertEqual(set(ScreenProfile({'dialogue':self.templates['dialogue'][0]}).markers),{'dialogue'})
+        with self.assertRaises(ValueError):ScreenProfile({})
+    def test_advance_permission_requires_distinct_explicit_indicator(self):
+        from autoadv.progression import VisualGate
+        from autoadv.screen import ScreenSample
+        class Observer:
+            def __init__(self):self.sample=None
+            def observe(self,now_ms):return self.sample
+        obs=Observer();gate=VisualGate(obs)
+        obs.sample=ScreenSample(100,ScreenState.DIALOGUE,True,True,'dialogue + text readiness (not input permission)')
+        self.assertFalse(gate.observe(100).may_advance)
+        obs.sample=ScreenSample(150,ScreenState.DIALOGUE,True,True,'advance_allowed-marker')
+        self.assertTrue(gate.observe(150).may_advance)
+        obs.sample=ScreenSample(200,ScreenState.MANUAL_REQUIRED,False,False,'manual_block marker')
+        self.assertFalse(gate.observe(200).may_advance)
+        self.assertEqual(self.see('advance_allowed')[:2],(ScreenState.DIALOGUE,True))
+        self.assertEqual(self.see('advance_allowed','manual_block')[0],ScreenState.MANUAL_REQUIRED)
+        self.assertEqual(self.see('advance_allowed','transition')[0],ScreenState.UNKNOWN)
+
     def test_stable_readiness_requires_multiple_positive_observations(self):
         templates=self.templates
         profile=ScreenProfile({k:v[0] for k,v in templates.items()},2,100)

@@ -1,7 +1,7 @@
 """Subprocess owning LunaHost.dll; NDJSON IPC, never controller or input.
 
-This process does not inject automatically. A process reporting needs_injection
-is an incomplete connection until the adopted Luna injection helper is wired.
+Injection uses the pinned upstream Host implementation, enabled in the
+verifiable build copy. Collision with another Host stops before pipe creation.
 """
 from __future__ import annotations
 import argparse
@@ -24,6 +24,8 @@ class NativeHost:
         self.lock=threading.Lock()
         self.callbacks=[]
         self.connected=set()
+        self.managed=set()
+        self.find_callbacks=[]
         self.dll_path=dll_path
         if sys.platform!='win32':raise OSError('LunaHost requires Windows')
         validate_abi()
@@ -49,8 +51,8 @@ class NativeHost:
         def name(raw):
             return raw.decode('utf-8','replace') if raw else ''
         self.callbacks=[
-            PROCESS(lambda pid:(self.connected.add(pid),self.emit('connected',pid=pid))),
-            PROCESS(lambda pid:(self.connected.discard(pid),self.emit('disconnected',pid=pid))),
+            PROCESS(lambda pid:self._connected(pid)),
+            PROCESS(lambda pid:self._disconnected(pid)),
             CREATE(lambda code,n,tp,emb:self.emit('created',tp=tp,code=code,name=name(n),detail=str(bool(emb)))),
             THREAD(lambda code,n,tp:self.emit('removed',tp=tp,code=code,name=name(n))),
             OUTPUT(lambda code,n,tp,s:self.emit('output',tp=tp,code=code,name=name(n),text=s)),
@@ -64,36 +66,81 @@ class NativeHost:
         self.dll.Luna_Settings(500,932,3000,100000,False)
         self.emit('diagnostic',detail='native_host_ready')
 
+    def _connected(self,pid):
+        if pid in self.managed:
+            self.connected.add(pid)
+            self.emit('connected',pid=pid)
+        else:
+            self.emit('diagnostic',pid=pid,detail='unmanaged_connection_ignored')
+
+    def _disconnected(self,pid):
+        self.connected.discard(pid)
+        self.managed.discard(pid)
+        self.emit('disconnected',pid=pid)
+
     def command(self,message):
         action=message.get('action')
         pid=message.get('pid')
         if action=='connect':
             if type(pid) is not int or pid<=0:raise ValueError('positive pid required')
+            if pid in self.managed:
+                raise ValueError('PID already managed')
+            # Preflight BEFORE creating the upstream Named Pipes. If a Luna
+            # hook is already injected, never attach, detach or overwrite it.
+            if not self.dll.Luna_CheckIfNeedInject(pid):
+                self.emit('diagnostic',pid=pid,detail='injection_conflict_or_self')
+                return True
             self.connection_generation+=1
-            self.dll.Luna_ConnectProcess(pid)
-            if self.dll.Luna_CheckIfNeedInject(pid):
-                self.emit('diagnostic',pid=pid,detail='needs_injection')
-            else:
-                self.emit('diagnostic',pid=pid,detail='await_native_connect_event')
+            self.managed.add(pid)
+            self.dll.Luna_ConnectAndInjectProcess(pid)
+            self.emit('diagnostic',pid=pid,detail='native_injection_requested')
         elif action=='detach':
             if type(pid) is not int or pid<=0:raise ValueError('positive pid required')
             # Detach only a connection that this Host actually observed.
-            if pid in self.connected:self.dll.Luna_DetachProcess(pid)
+            if pid in self.managed and pid in self.connected:self.dll.Luna_DetachProcess(pid)
+            self.managed.discard(pid)
+            self.connected.discard(pid)
             self.connection_generation+=1
             self.emit('diagnostic',pid=pid,detail='detached')
         elif action=='insert_hook':
             if type(pid) is not int or pid not in self.connected or not isinstance(message.get('code'),str) or not message['code']:
                 raise ValueError('requires attached pid and nonempty code')
             self.dll.Luna_InsertHookCode(pid,message['code'])
+        elif action=='sync_thread':
+            src=message['source']
+            tp=ThreadParam(src['process_id'],src['address'],src['context'],src['context2'])
+            if tp.processId not in self.connected:raise ValueError('thread is not attached')
+            self.dll.Luna_SyncThread(tp,bool(message.get('enabled',True)))
+        elif action=='find_hooks':
+            if type(pid) is not int or pid not in self.connected:raise ValueError('search requires attached process')
+            parameters=message.get('parameters') or {}
+            valid={field for field,_ in SearchParam._fields_}
+            if set(parameters)-valid:raise ValueError('invalid hook search parameter')
+            sp=SearchParam()
+            sp.pattern=bytes([0xCC,0xCC,0x48,0x89]) if ctypes.sizeof(ctypes.c_void_p)==8 else bytes([0x55,0x8B,0xEC])
+            sp.length=4 if ctypes.sizeof(ctypes.c_void_p)==8 else 3
+            sp.offset=2 if ctypes.sizeof(ctypes.c_void_p)==8 else 0
+            sp.maxAddress=(1<<(8*ctypes.sizeof(ctypes.c_void_p)))-1
+            sp.searchTime=30000
+            sp.maxRecords=100000
+            sp.codepage=932
+            for field,value in parameters.items():
+                setattr(sp,field,value)
+            def found(code,sample):
+                self.emit('hook_found',pid=pid,code=code,text=sample)
+            cb=FIND(found)
+            self.find_callbacks.append(cb)  # Native search may finish asynchronously.
+            self.dll.Luna_FindHooks(pid,sp,cb,message.get('addresses',''))
         elif action=='history':
             source=message['source']
             tp=ThreadParam(source['process_id'],source['address'],source['context'],source['context2'])
             cb=HISTORY(lambda s:self.emit('diagnostic',pid=tp.processId,detail='history',text=s))
             self.dll.Luna_QueryThreadHistory(tp,bool(message.get('latest',True)),cb)
         elif action=='stop':
-            for connected_pid in tuple(self.connected):
+            for connected_pid in tuple(self.connected & self.managed):
                 self.dll.Luna_DetachProcess(connected_pid)
             self.connected.clear()
+            self.managed.clear()
             return False
         else:raise ValueError('unknown native Host command')
         return True
