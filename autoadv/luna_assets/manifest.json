@@ -1,0 +1,15 @@
+{
+  "release": "v12.1.2.12",
+  "commit": "51884b6c88cba8c42e98ce3e43c4f408017082a1",
+  "asset": "LunaTranslator_x64.zip",
+  "archive_sha256": "518eb9374f43487f04d0effa23b9c52384d73efad63acad43870f709d16fe0fa",
+  "source_url": "https://github.com/HIllya51/LunaTranslator/releases/download/v12.1.2.12/LunaTranslator_x64.zip",
+  "sha256": {
+    "LunaHost64.dll": "1cd93a0f95de11d72d6cf3a1d6bc3d13dc88058f7bb55763ef38b8529d36bd63",
+    "LunaHook64.dll": "925e50ea4b807df4865a6302b31ebeb73c2edbf717bd58ec8c3c1d817cdc6700",
+    "LunaSubProcess64.exe": "609a03722446a74b00caa53a064f59825adc719a6b5f58f003497746f77500e1",
+    "LunaHook32.dll": "6732f73d370d57d327b71613e32286b3985050f3cf5c083bbbc5ae19e962bd7f",
+    "LunaSubProcess32.exe": "a9a204ced180495355096302007dd239e02bce0e2e038edf1a3258b0f47770d3"
+  },
+  "license": "GPL-3.0, see vendor/luna/LICENSE"
+}

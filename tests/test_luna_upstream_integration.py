@@ -49,6 +49,10 @@ class LunaVendorContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 restored.validate()
 
+    def test_shipped_native_is_the_pinned_release(self):
+        luna_runtime.adopted_runtime().verify()
+        self.assertEqual(luna_runtime.adopted_runtime().host.name, 'LunaHost64.dll')
+
     def test_release_adoption_validates_integrity_before_any_install(self):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / 'luna_assets'
