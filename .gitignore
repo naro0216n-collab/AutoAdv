@@ -6,3 +6,8 @@ __pycache__/
 /dist/
 /build/
 *.zip
+# Opt-in CC0 vocalizations and machine-specific ASR model assets.
+/validation/real_game/renpy/game/audio/voice/stress_cry.wav
+/validation/real_game/renpy/game/audio/voice/stress_scream.wav
+# Legacy in-repo paths are ignored; current default is an external cache.
+/validation/real_game/asr-model/

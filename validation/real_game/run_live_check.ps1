@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('hook', 'reading', 'native', 'tts', 'mixed')]
+    [ValidateSet('hook', 'reading', 'native', 'tts', 'mixed', 'stress')]
     [string] $Phase,
     [int] $StartLine = 0,
     [string] $Trace = ''

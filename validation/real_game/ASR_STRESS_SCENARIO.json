@@ -1,0 +1,70 @@
+{
+  "description": "Independent expectations for the RenPy ASR stress branch ONLY (begin observation after selecting the manual menu entry). Never used by AutoAdv.",
+  "lines": [
+    {
+      "id": "stress-intro",
+      "text": "ASR特殊音声検証です。曖昧な区間ではAutoAdvを停止し、手動で次へ進めてください。",
+      "suggested_mode": "reading"
+    },
+    {
+      "id": "clean_control",
+      "text": "えっ嘘でしょ。",
+      "suggested_mode": "native"
+    },
+    {
+      "id": "background_over_foreground",
+      "text": "えっ嘘でしょ。",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "background_outlasts_foreground",
+      "text": "えっ嘘でしょ。",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "background_only_mismatch",
+      "text": "これは表示されただけの文章です。",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "background_only_same_text",
+      "text": "ヒューズが飛んだ。",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "nonlexical_cry",
+      "text": "うっ……うう……",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "nonlexical_scream",
+      "text": "あああっ！",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "cry_with_background_voice",
+      "text": "うっ……うう……",
+      "suggested_mode": "native",
+      "expected_hold": true,
+      "manual_handoff": true
+    },
+    {
+      "id": "stress-end",
+      "text": "特殊音声検証を終了します。",
+      "suggested_mode": "reading",
+      "ending": true
+    }
+  ]
+}

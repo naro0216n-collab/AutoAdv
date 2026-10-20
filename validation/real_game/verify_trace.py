@@ -15,7 +15,7 @@ from typing import Sequence
 from autoadv.validation_trace import text_digest
 
 HERE = Path(__file__).resolve().parent
-PHASES = ('hook', 'reading', 'native', 'tts', 'mixed')
+PHASES = ('hook', 'reading', 'native', 'tts', 'mixed', 'stress')
 
 
 def _summary(values: list[float]) -> dict | None:
@@ -45,6 +45,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
              start_line: int | None = None) -> dict:
     if phase not in PHASES:
         raise ValueError(f'unknown validation phase: {phase}')
+    if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
+        scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
     scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
     expected_hashes = [text_digest(x['text']) for x in scenario]
     errors: list[str] = []
@@ -251,7 +253,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if key not in sent:
                 continue
             if line.get('manual_handoff'):
-                errors.append(f'SendInput at manual-choice handoff instead of stopping: {key}')
+                errors.append(f'SendInput at manual handoff instead of stopping: {key}')
                 continue
             if pos == len(scenario) - 1 or line.get('ending'):
                 continue
@@ -276,6 +278,48 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if (phase != 'hook' and previous not in sent and
                     not scenario[start + offset - 1].get('manual_handoff')):
                 errors.append(f'next dialogue lacks preceding AutoAdv SendInput: {previous}')
+
+    if phase == 'stress':
+        # The separate challenge scenario prevents a truncated negative case from
+        # looking like successful rejection. Real UI pause and manual input
+        # are not simulated by the verifier.
+        if start != 0 or len(utterance_order) != len(scenario):
+            errors.append('incomplete ASR stress sequence; observe the entire challenge branch')
+        held = []
+        for index, key in enumerate(utterance_order):
+            if start is None or start + index >= len(scenario):
+                break
+            line = scenario[start + index]
+            if not line.get('expected_hold'):
+                continue
+            held.append(key)
+            if utterances[key].get('mode') != 'native':
+                errors.append(f'ASR stress must exercise native route rather than bypass: {key}')
+            if key in sent or key in attempts:
+                errors.append(f'automatic input attempted for ambiguous nonlexical/background voice: {key}')
+            # Negative cases must genuinely exercise capture and inference while
+            # AUTO is armed, before the user deliberately stops and intervenes.
+            next_at = timestamps[utterance_order[index + 1]] if index + 1 < len(utterance_order) else 2**63
+            window = [r for r in records if r.get('session') == key[0] and
+                      timestamps[key] < r.get('at_ns', -1) < next_at]
+            armed = [r for r in window if r.get('event') == 'permit_requested']
+            audio = [r for r in window if r.get('event') == 'native_pcm' and _key(r) == key]
+            inferred = [r for r in window if r.get('event') == 'asr_inference' and _key(r) == key]
+            paused = [r for r in window if r.get('event') == 'pause_requested']
+            if not armed or not audio or not inferred or not paused or not (
+                    armed[0]['at_ns'] < inferred[-1]['at_ns'] < paused[-1]['at_ns']):
+                errors.append(f'ASR stress lacks armed real PCM/inference followed by manual pause: {key}')
+            if key in native and line['id'] in (
+                    'background_only_mismatch', 'background_only_same_text',
+                    'nonlexical_cry', 'nonlexical_scream', 'cry_with_background_voice'):
+                errors.append(f'ASR falsely attributed unverified voice as completed foreground: {key}')
+        if len(held) != sum(bool(item.get('expected_hold')) for item in scenario):
+            errors.append('missing nonlexical or competing-voice challenge')
+        controls = [key for i, key in enumerate(utterance_order)
+                    if start is not None and start + i < len(scenario)
+                    and scenario[start + i]['id'] == 'clean_control']
+        if not controls or controls[0] not in links or controls[0] not in native:
+            errors.append('positive foreground ASR control did not advance before stress challenges')
 
     linked_modes = Counter(utterances[k].get('mode') for k in links)
     confirmed_native = [k for k in links if k in native and k in pcm]
@@ -336,7 +380,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='Verify a real AutoAdv GUI-to-game HOOK trace')
     parser.add_argument('--trace', type=Path, required=True, help='fresh AUTOADV_VALIDATION_TRACE JSONL')
     parser.add_argument('--phase', choices=PHASES, required=True,
-                        help='hook / reading / native / tts / full mixed conversation')
+                        help='hook / reading / native / tts / mixed / stress branch')
     parser.add_argument('--start-line', type=int,
                         help='1-based first SCENARIO.json line, to disambiguate repeated text')
     args = parser.parse_args()

@@ -6,9 +6,23 @@ import unittest
 from unittest.mock import patch
 
 from validation.real_game.benchmark_asr import _degrade, _edit_distance, run
+from validation.real_game import prepare_asr_model
 
 
 class OnDemandBenchmarkContracts(unittest.TestCase):
+    def test_pinned_model_uses_external_validation_cache_and_never_requires_irodori(self):
+        directory = prepare_asr_model.MODEL_DIR.resolve()
+        repo = Path(__file__).resolve().parents[2]
+        self.assertFalse(directory.is_relative_to(repo), f'ASR model cache must be outside source tree: {directory}')
+        self.assertTrue(str(directory).endswith(('validation/asr', 'validation\\asr')))
+        with self.assertRaisesRegex(ValueError, 'outside the repository'):
+            prepare_asr_model.prepare(Path(__file__).parent / 'asr-model', allow_download=False)
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            with self.assertRaises(FileNotFoundError):
+                prepare_asr_model.prepare(path, allow_download=False)
+            self.assertFalse(any(path.iterdir()))
+
     def test_levenshtein_and_deterministic_audio_degradation(self):
         import numpy as np
         self.assertEqual(_edit_distance('あいう', 'あう'), 1)

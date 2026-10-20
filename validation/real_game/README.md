@@ -102,19 +102,60 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 `python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL>` で同じ照合を行える。
 旧形式（version 1）のトレースは、入力後HOOK受信時刻とPCM証拠がないため検収対象外。
 
+## 原音ASRとIrodori TTSの独立性
+
+原音（`native`）のみProcess Loopbackで取り込んだPCMを実ASRへ送り、現在のUtteranceの照合・発話終了を判断する。
+明示的にTTSを選択した台詞はIrodoriの合成と**デバイスでの再生終了**が完了条件であり、TTS音声をASRへ再投入しない。
+`AUTO`は原音照合が成立した場合に原音、設定に従い代替TTSを選択した場合に再生終了を使う。いずれも一台詞につき一回の送り権限のみ。
+以下の特殊音声検証は**原音だけ**を扱い、Irodoriサーバー・Voice・TTS区間を事前条件にしない。
+
+## 隔離検証環境のASRモデル準備（明示実行のみ）
+
+モデルはGitワークツリーにも通常のアプリ設定にも書き込まず、Windowsでは既定で
+`%LOCALAPPDATA%\AutoAdv\validation\asr` に保存する。その他のOSではユーザーキャッシュ下に保存する。
+通常利用のASRモデルの選択は作品プロファイルが所有し、この検証用キャッシュは設定正本ではない。
+実HOOKからの原音検収では、GUIで該当作品のASRモデル／tokensに、この隔離キャッシュのパスを明示指定する。
+TTS専用の作品設定にはASRモデルの指定も準備も要求しない。
+版・SHA-256は `ASR_MODEL.json` に固定し、既存ファイルが不一致なら上書きせず失敗する。
+新規取得は検証者が下記を明示実行したときに限る。通常起動、Fast CI、Real Audio Validationでは取得しない。
+
+```powershell
+python -m validation.real_game.prepare_asr_model
+python -m validation.real_game.prepare_asr_model --verify-only
+```
+
+隔離ディレクトリを変更する場合は `--directory` を指定し、ベンチマークへも `--model`・`--tokens` を渡す。
+モデルの取得に失敗した場合、実モデルASR検証は**未検収**であり、FakeRecognizer / VAD-onlyの結果を代替しない。
+
+## ASR特殊音声・背景ボイスの挑戦シナリオ（Irodori不要）
+
+Ren'Pyゲームの手動メニュー「ASR非言語発声・背景音声テスト」から、通常原音対照例・同時背景発話・
+原音より後に続く背景声・背景声だけ・表示文と完全一致する背景声・泣き声・叫び声を検証できる。
+泣き声と叫び声の実録音は公開権利条件の確認後、明示実行でのみ準備する。未配置は検収成功としない。
+
+```powershell
+python -m validation.real_game.prepare_stress_audio
+python -m validation.real_game.stress_asr --selection all --rounds 2 --output asr-stress.json
+.\validation\real_game\run_live_check.ps1 -Phase stress
+```
+
+`stress_asr`は実モデルの推論時間・RTF・文字列誤認・背景声の誤帰属リスクを**観測するだけ**で、
+ゲームの進行結果は認定しない。`-Phase stress`は実HOOK・PCM・ASR・ユーザーの停止操作を使う。
+**背景声が表示台詞と完全に一致する場合、Process LoopbackとテキストASRだけでは発話者を識別できない。**
+したがって、このケースの誤完了はモデル品質の閾値調整で解決できたと解釈せず、製品の既知の識別限界を
+検出する負荷検証とする。現在の製品がこのケースで安全停止できることは未確認であり、必ずPASSする条件として扱わない。
+
 ## 音声認識品質と処理速度（任意実行、Fast CI対象外）
 
 **実モデルの認識精度をFast CIの合否条件にはしない。** 同一モデル・コーパス・前処理ではほぼ不変のため、モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に明示実行する。モデルの取得・インストールは行わず、既存のASR環境を利用する。通常の`Real Audio Validation`ワークフローも、この実モデルベンチマークは自動実行しない。
 
 ```powershell
 python -m validation.real_game.benchmark_asr `
-  --model 'C:\path\to\model.int8.onnx' `
-  --tokens 'C:\path\to\tokens.txt' `
   --conditions clean quiet noise clipped truncated bgm `
   --rounds 2 --output .\asr-performance.json
 ```
 
-実行時に`JapaneseASR`（製品使用の`sherpa-onnx`）で既存14音声を認識する。`clean`に加え、低音量・ノイズ・クリッピング・先頭欠落・シナリオ同梱のBGMを**メモリ内で加工**して同じ経路で評価する。モデル読込時間、各発話の実推論wall-clock時間、RTF（推論時間÷音声時間）、正規化CER、条件別のP50/P95と最大値を記録する。モデル／tokensのハッシュ、実行環境、条件・seedも保存する。テスト音声の改変ファイルは生成・再配布しない。速度と認識品質は**観測結果**であり、全音声を認識できるという固定アサーションにしない。言語の読み・表記揺れがあるためCERは単独で送り判断の品質を確定しない。
+モデルとtokensに指定がなければ隔離検証用キャッシュを使用する。実行時に`JapaneseASR`（製品使用の`sherpa-onnx`）で既存14音声を認識する。`clean`に加え、低音量・ノイズ・クリッピング・先頭欠落・シナリオ同梱のBGMを**メモリ内で加工**して同じ経路で評価する。モデル読込時間、各発話の実推論wall-clock時間、RTF（推論時間÷音声時間）、正規化CER、条件別のP50/P95と最大値を記録する。モデル／tokensのハッシュ、実行環境、条件・seedも保存する。テスト音声の改変ファイルは生成・再配布しない。速度と認識品質は**観測結果**であり、全音声を認識できるという固定アサーションにしない。言語の読み・表記揺れがあるためCERは単独で送り判断の品質を確定しない。
 
 通常の実ゲーム検収 (`run_live_check.ps1`) は、検証トレースに追加された**製品処理そのものの時間**を集計する。`verify_trace.py`のJSON結果に含まれる`performance`は、HOOK取得通知→Utterance、Utterance→提示完了、提示完了→入力試行、入力試行→次HOOK受信、実ASR推論・キュー待ち、Irodori合成・実再生の各時間とRTFのP50/P95／最大値／件数。`input_to_next_hook_ms`は次HOOKの受信元時刻を使う。トレースを有効にしていない一般利用時には追加診断を記録しない。
 

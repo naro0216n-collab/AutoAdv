@@ -46,6 +46,8 @@ label start:
 
     "次の選択肢は、ユーザー操作によって進めてください。"
     menu:
+        "ASR非言語発声・背景音声テスト":
+            jump asr_stress
         "検証を続ける":
             jump continuation
         "検証を終了する":
@@ -63,4 +65,47 @@ label continuation:
     voice "audio/voice/normal_035.wav"
     a "彼女は息子に家で行儀よくするように言った。"
     "検証用シナリオを終了します。"
+    return
+
+
+# Separate, optional real-engine challenge branch. No in-game AutoAdv control
+# channel is created; normal Ren'Py voice/sound/dialogue/input is used.
+label asr_stress:
+    if not renpy.loadable("audio/voice/stress_cry.wav") or not renpy.loadable("audio/voice/stress_scream.wav"):
+        "CC0実録音の泣き声・叫び声が未配置です。ASR特殊音声の検収は実行できません。"
+        return
+
+    "ASR特殊音声検証です。曖昧な区間ではAutoAdvを停止し、手動で次へ進めてください。"
+    voice "audio/voice/normal_001.wav"
+    a "えっ嘘でしょ。"
+
+    # Unrelated simultaneous speech from the same game PID. Loopback captures
+    # the mixture, not separately identified speakers.
+    play sound "audio/voice/normal_030.wav"
+    voice "audio/voice/normal_001.wav"
+    a "えっ嘘でしょ。"
+    stop sound
+    play sound "audio/voice/normal_030.wav"
+    voice "audio/voice/normal_001.wav"
+    a "えっ嘘でしょ。"
+    stop sound
+
+    # No foreground voice even though the game produces speech.
+    play sound "audio/voice/normal_020.wav"
+    p "これは表示されただけの文章です。"
+    stop sound
+    # More difficult: the *background* speaks the exact displayed sentence.
+    play sound "audio/voice/normal_020.wav"
+    p "ヒューズが飛んだ。"
+    stop sound
+
+    voice "audio/voice/stress_cry.wav"
+    a "うっ……うう……"
+    voice "audio/voice/stress_scream.wav"
+    s "あああっ！"
+    play sound "audio/voice/normal_020.wav"
+    voice "audio/voice/stress_cry.wav"
+    a "うっ……うう……"
+    stop sound
+    "特殊音声検証を終了します。"
     return

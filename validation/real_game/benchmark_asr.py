@@ -16,6 +16,7 @@ from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_match import phonetic_key
 from autoadv.native_audio import JapaneseASR
 from .verify_trace import _summary
+from .prepare_asr_model import MODEL_DIR
 
 HERE = Path(__file__).resolve().parent
 CONDITIONS = ('clean', 'quiet', 'noise', 'clipped', 'truncated', 'bgm')
@@ -127,8 +128,8 @@ def run(model: Path, tokens: Path, *, conditions: tuple[str, ...], rounds: int, 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='On-demand real-model ASR quality AND speed measurement (not Fast CI)')
-    parser.add_argument('--model', type=Path, required=True)
-    parser.add_argument('--tokens', type=Path, required=True)
+    parser.add_argument('--model', type=Path, default=MODEL_DIR / 'model.int8.onnx')
+    parser.add_argument('--tokens', type=Path, default=MODEL_DIR / 'tokens.txt')
     parser.add_argument('--conditions', nargs='+', choices=CONDITIONS, default=['clean', 'quiet', 'noise', 'bgm'])
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--seed', type=int, default=20261021)
