@@ -24,6 +24,13 @@ def is_manual_hook_event(*, keyboard: bool, flags: int, extra_info: int) -> bool
     return not (flags & injected_bit and extra_info == AUTOADV_INPUT_MARK)
 
 
+def is_choice_selection_event(*,keyboard:bool,message:int,flags:int,extra_info:int)->bool:
+    """Selection action, not mouse motion or AutoAdv's own tagged SendInput."""
+    if not is_manual_hook_event(keyboard=keyboard,flags=flags,extra_info=extra_info):return False
+    return message in ((0x0100,0x0104) if keyboard else
+                       (0x0201,0x0204,0x0207,0x020A,0x020B))
+
+
 class InputOriginTracker:
     """Independent last-input timestamp cross-check; never ignores a time span."""
     def __init__(self, initial_tick: int):
@@ -61,6 +68,7 @@ class WindowsManualMonitor:
         if sys.platform != 'win32':
             raise OSError('Windows required')
         self._manual = Event()
+        self._choice_input = Event()
         self._origin_lock = Lock()
         self._origin = InputOriginTracker(self._last_input())
         self._ready = Event()
@@ -109,7 +117,7 @@ class WindowsManualMonitor:
         user32.DispatchMessageW.argtypes = (ctypes.POINTER(MSG),)
         user32.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
         hooks = []
-        def check_event(*, keyboard, code, lparam):
+        def check_event(*, keyboard, code, message, lparam):
             if code >= 0:
                 try:
                     struct=KBD if keyboard else MOUSE
@@ -118,14 +126,17 @@ class WindowsManualMonitor:
                         self._origin.hook_event(keyboard=keyboard,flags=info.flags,
                                                 extra_info=info.dwExtraInfo,tick=info.time)
                         if self._origin.manual:self._manual.set()
+                        if is_choice_selection_event(keyboard=keyboard,message=int(message),
+                                                     flags=info.flags,extra_info=info.dwExtraInfo):
+                            self._choice_input.set()
                 except Exception:
                     # ctypes callbacks otherwise swallow Python exceptions.
                     self._manual.set()
         def keyboard(code, wparam, lparam):
-            check_event(keyboard=True,code=code,lparam=lparam)
+            check_event(keyboard=True,code=code,message=wparam,lparam=lparam)
             return user32.CallNextHookEx(None,code,wparam,lparam)
         def mouse(code, wparam, lparam):
-            check_event(keyboard=False,code=code,lparam=lparam)
+            check_event(keyboard=False,code=code,message=wparam,lparam=lparam)
             return user32.CallNextHookEx(None,code,wparam,lparam)
         # Keep callback references alive for the duration of the hook.
         keyboard_cb, mouse_cb = CALLBACK(keyboard), CALLBACK(mouse)
@@ -166,12 +177,19 @@ class WindowsManualMonitor:
             self._manual.set()
         return self._manual.is_set()
 
+    def choice_action_seen(self)->bool:
+        return self._choice_input.is_set() and self.intervened()
+
+    def reset_choice_actions(self):
+        self._choice_input.clear()
+
     def reset_after_authorization(self):
         # Only explicit new-session authorization or positively verified choice
         # completion can clear physical input observed during setup/selection.
         with self._origin_lock:
             self._origin = InputOriginTracker(self._last_input())
             self._manual.clear()
+            self._choice_input.clear()
 
     def close(self):
         self._stop.set()

@@ -1,5 +1,5 @@
 import unittest
-from autoadv.live_guard import is_manual_hook_event
+from autoadv.live_guard import is_manual_hook_event,is_choice_selection_event
 from autoadv.windows_input import AUTOADV_INPUT_MARK, input_types
 
 class InputOwnership(unittest.TestCase):
@@ -8,6 +8,13 @@ class InputOwnership(unittest.TestCase):
             self.assertFalse(is_manual_hook_event(keyboard=keyboard,flags=injected,extra_info=AUTOADV_INPUT_MARK))
             self.assertTrue(is_manual_hook_event(keyboard=keyboard,flags=injected,extra_info=11))
             self.assertTrue(is_manual_hook_event(keyboard=keyboard,flags=0,extra_info=AUTOADV_INPUT_MARK))
+
+    def test_selection_input_requires_key_or_button_not_motion(self):
+        self.assertFalse(is_choice_selection_event(keyboard=False,message=0x0200,flags=0,extra_info=0))
+        self.assertTrue(is_choice_selection_event(keyboard=False,message=0x0201,flags=0,extra_info=0))
+        self.assertTrue(is_choice_selection_event(keyboard=True,message=0x0100,flags=0,extra_info=0))
+        self.assertFalse(is_choice_selection_event(keyboard=True,message=0x0101,flags=0,extra_info=0))
+        self.assertFalse(is_choice_selection_event(keyboard=True,message=0x0100,flags=0x10,extra_info=AUTOADV_INPUT_MARK))
 
     def test_full_win32_input_layout_keeps_marker(self):
         INPUT, U, KI = input_types()

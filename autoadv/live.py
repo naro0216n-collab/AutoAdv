@@ -7,6 +7,7 @@ from queue import Queue,Empty
 from typing import Callable
 import hashlib
 import json
+import math
 import sys
 import time
 
@@ -24,6 +25,41 @@ from .screen import ScreenObserver,ScreenProfile,WindowsClientCapture,ScreenSamp
 from .windows_input import WindowsAdvancementInput
 from .text import TextInterpreter,GameTextConfig
 from .preferences import Preferences
+
+
+def list_target_windows() -> list[tuple[int,int,str]]:
+    """Enumerate visible selectable Windows; user explicitly binds one to Luna.
+
+    This is only a picker, not a claim that Luna's hook belongs to this PID.
+    """
+    if sys.platform!='win32':raise OSError('Target window selection requires Windows')
+    import ctypes
+    import os
+    from ctypes import wintypes
+    user32=ctypes.windll.user32
+    callback_type=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+    user32.EnumWindows.argtypes=(callback_type,wintypes.LPARAM)
+    user32.EnumWindows.restype=wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes=(wintypes.HWND,ctypes.POINTER(wintypes.DWORD))
+    user32.GetWindowTextLengthW.argtypes=(wintypes.HWND,)
+    user32.GetWindowTextLengthW.restype=ctypes.c_int
+    user32.GetWindowTextW.argtypes=(wintypes.HWND,wintypes.LPWSTR,ctypes.c_int)
+    user32.IsWindowVisible.argtypes=(wintypes.HWND,)
+    windows=[]
+    @callback_type
+    def collect(hwnd,_):
+        if not user32.IsWindowVisible(hwnd):return True
+        length=user32.GetWindowTextLengthW(hwnd)
+        if length<=0:return True
+        title=ctypes.create_unicode_buffer(length+1)
+        if not user32.GetWindowTextW(hwnd,title,length+1):return True
+        pid=wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+        if pid.value and pid.value!=os.getpid():
+            windows.append((int(pid.value),int(hwnd),title.value))
+        return True
+    if not user32.EnumWindows(collect,0):raise OSError('EnumWindows failed')
+    return windows
 
 
 def _clock() -> int:
@@ -57,8 +93,18 @@ class LiveConfig:
         required={'pid','hwnd','screen_profile','loopback_helper','asr_model','asr_tokens','grace_ms',
                   'allow_heuristic_absence','log_path','tts_speed','silent_dwell','tts_required','advance_input'}
         if set(data)!=required:raise ValueError('live hardware configuration does not match the expected schema')
-        absolute=lambda x:(base/str(data[x])).resolve()
         d=data['silent_dwell'];advance=data['advance_input']
+        if (not isinstance(d,dict) or set(d)!={'base_ms','min_ms','reading_chars_per_sec'}
+            or not isinstance(advance,dict) or set(advance)!={'mode','virtual_key'}
+            or any(type(data[name]) is not int for name in ('pid','hwnd','grace_ms'))
+            or any(type(d[name]) is not int for name in ('base_ms','min_ms'))
+            or type(advance['virtual_key']) is not int
+            or type(data['allow_heuristic_absence']) is not bool
+            or type(data['tts_required']) is not bool
+            or any(not isinstance(data[name],str) or not data[name].strip()
+                   for name in ('screen_profile','loopback_helper','asr_model','asr_tokens','log_path'))):
+            raise ValueError('invalid monitor field types / required paths')
+        absolute=lambda x:(base/data[x]).resolve()
         value=cls(int(data['pid']),int(data['hwnd']),absolute('screen_profile'),
                   absolute('loopback_helper'),absolute('asr_model'),absolute('asr_tokens'),
                   int(data['grace_ms']),data['allow_heuristic_absence'],absolute('log_path'),
@@ -67,9 +113,24 @@ class LiveConfig:
                   str(advance['mode']),int(advance['virtual_key']),hashlib.sha256(path.read_bytes()).hexdigest())
         if (value.pid<=0 or value.hwnd<=0 or value.grace_ms<0 or
             type(value.allow_heuristic_absence) is not bool or
-            value.input_mode not in ('keyboard','mouse_left') or not 1<=value.input_virtual_key<=254):
+            value.input_mode not in ('keyboard','mouse_left') or not 1<=value.input_virtual_key<=254
+            or not math.isfinite(value.tts_speed) or not .25<=value.tts_speed<=4.0
+            or not math.isfinite(value.reading_chars_per_sec) or value.reading_chars_per_sec<=0
+            or value.silent_base_ms<0 or value.silent_min_ms<0):
             raise ValueError('invalid game window or input settings')
         return value
+
+
+def utterance_view(line) -> dict | None:
+    """Publish the exact active Utterance without interpreting Luna text again."""
+    if line is None:return None
+    u=line.text
+    return {'observed_original':u.observed_original,'speaker':u.speaker,
+            'body':u.body,'structure_rule_id':u.structure_rule_id,
+            'content_kind':u.content_kind.name,'tts_text':u.tts_text,
+            'asr_target':u.asr_target,'effective_chars':u.effective_chars,
+            'tts_route':u.tts_route.name,'voice_id':u.voice_id,
+            'config_revision':u.config_revision,'conflicts':list(u.conflicts)}
 
 
 @dataclass
@@ -239,7 +300,7 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
                         app.disconnected(_clock())
                 elif kind=='text':
                     status({'original':payload.text})
-                    app.candidate(payload,_clock(),manual_intervened=manual.intervened())
+                    app.candidate(payload,_clock(),manual_intervened=manual.choice_action_seen())
             if control.pause.is_set():
                 control.bound.clear()
                 for effect in ctrl.pause('explicit_pause'):
@@ -270,6 +331,8 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             was_manual=ctrl.state is ControllerState.WAIT_MANUAL_CHOICE
             app.observe(sample,focused=focused,capture_ok=health.alive(),
                 manual_intervened=manual.intervened() and not was_manual)
+            if not was_manual and ctrl.state is ControllerState.WAIT_MANUAL_CHOICE:
+                manual.reset_choice_actions()
             if was_manual and ctrl.state is ControllerState.WAIT_LINE:
                 manual.reset_after_authorization()  # only after positively recognized manual-choice exit
                 audit('manual_choice_completed',{'at_ms':now})
@@ -278,12 +341,14 @@ def run_windows(config:LiveConfig, *, preferences:Preferences|None=None,
             view=(ctrl.state.name,ctrl.pause_reason,
                   line.epoch if line else None,line.presentation.name if line else 'NONE',
                   line.text.speaker if line else None,line.text.body if line else None,
-                  line.sent if line else False, focused)
+                  line.sent if line else False, focused,
+                  line.text if line else None)
             if view!=last_state:
                 status({'controller':view[0],'reason':view[1] or '',
                         'epoch':view[2],'presentation':view[3],'speaker':view[4],
                         'body':view[5],'sent':view[6],'focused':focused,
-                        'capture_ok':health.alive(),'awaiting_ack':ctrl.state is ControllerState.WAIT_TRANSITION_ACK})
+                        'capture_ok':health.alive(),'awaiting_ack':ctrl.state is ControllerState.WAIT_TRANSITION_ACK,
+                        'utterance':utterance_view(line)})
                 last_state=view
             if ctrl.state is ControllerState.PAUSED:
                 audit('paused',{'reason':ctrl.pause_reason})

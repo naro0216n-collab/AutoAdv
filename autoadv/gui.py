@@ -94,7 +94,7 @@ def run_gui() -> int:
             status_grid=QGridLayout(statuses)
             fields=['対象ゲーム','対象ウィンドウ/フォーカス','Luna 接続','最新Luna原文',
                     'Irodoriフォルダ','Irodori接続','Voice候補','提示経路','音声監視',
-                    '自動進行許可','停止理由','入力/ACK']
+                    '自動進行許可','停止理由','入力/ACK','現在Utterance']
             self.status_labels={}
             for i,name in enumerate(fields):
                 label=QLabel(name);value=QLabel('未設定 / 不明');value.setWordWrap(True)
@@ -118,19 +118,8 @@ def run_gui() -> int:
             self.allow.setEnabled(False)  # Enabled only while the guarded game session is active.
             self.pause.setEnabled(False)
             advance_controls.addWidget(self.allow);advance_controls.addWidget(self.pause)
-            runtime_box=QHBoxLayout();root.addLayout(runtime_box)
-            self.live_path=QLineEdit(self.service.preferences.live_config)
-            runtime_box.addWidget(QLabel('作品別ゲーム/画面/音声設定'))
-            runtime_box.addWidget(self.live_path,1)
-            choose_runtime=QPushButton('ファイル選択')
-            runtime_box.addWidget(choose_runtime)
-            def browse_runtime():
-                path,_=QFileDialog.getOpenFileName(self,'ゲーム監視プロファイル',self.live_path.text(),'JSON (*.json)')
-                if path:
-                    self.live_path.setText(path)
-                    self.service.preferences.live_config=path
-                    self.service.preferences.save(self.service.settings_file)
-            choose_runtime.clicked.connect(browse_runtime)
+            # The monitor profile is a per-game saved configuration, not a
+            # second input loop or a JSON file the user must hand-edit.
             splitter=QSplitter(Qt.Orientation.Horizontal);root.addWidget(splitter,1)
             left=QScrollArea();left.setWidgetResizable(True);splitter.addWidget(left)
             pane=QWidget();form=QVBoxLayout(pane);left.setWidget(pane)
@@ -164,6 +153,81 @@ def run_gui() -> int:
             defaults.addRow('未知話者のVoice ID',self.unknown_voice)
             defaults.addRow('既定Voice ID',self.default_voice);form.addLayout(defaults)
             self.save=QPushButton('作品ルール・Voice割当てを保存');form.addWidget(self.save)
+            monitor=QGroupBox('作品別ゲーム監視・音声・画面判定（保存後に反映）')
+            form.addWidget(monitor)
+            monitor_layout=QVBoxLayout(monitor)
+            self.monitor_location=QLabel('監視設定未保存');self.monitor_location.setWordWrap(True)
+            monitor_layout.addWidget(self.monitor_location)
+            self.window_choices=QComboBox();self.window_choices.setMinimumWidth(310)
+            find_windows=QPushButton('起動中ゲームの窓を一覧更新')
+            use_window=QPushButton('この窓のPID/HWNDを設定')
+            window_bar=QHBoxLayout();window_bar.addWidget(self.window_choices,1)
+            window_bar.addWidget(find_windows);window_bar.addWidget(use_window)
+            monitor_layout.addLayout(window_bar)
+            live_form=QFormLayout();monitor_layout.addLayout(live_form)
+            self.monitor_fields={}
+            self._loading_monitor=False
+            monitor_fields=(
+                ('pid','対象ゲームPID',False),('hwnd','対象HWND',False),
+                ('loopback_helper','Process Loopback helper (DLL)',True),
+                ('asr_model','日本語ASRモデル',True),('asr_tokens','ASR tokens',True),
+                ('log_path','ログ出力先',True),('grace_ms','native開始猶予 ms',False),
+                ('tts_speed','TTS速度',False),('silent_base_ms','無音基準閲覧 ms',False),
+                ('silent_min_ms','無音最低閲覧 ms',False),
+                ('reading_chars_per_sec','閲覧文字数/秒',False),
+                ('input_virtual_key','送りキー仮想キーコード',False))
+            for name,title,is_path in monitor_fields:
+                edit=QLineEdit();self.monitor_fields[name]=edit
+                if is_path:
+                    row=QWidget();horizontal=QHBoxLayout(row)
+                    horizontal.setContentsMargins(0,0,0,0)
+                    horizontal.addWidget(edit,1)
+                    choose=QPushButton('参照')
+                    def browse_file(_=False,key=name,entry=edit):
+                        path,_=QFileDialog.getOpenFileName(self,'ファイル選択',entry.text())
+                        if path:entry.setText(path)
+                    choose.clicked.connect(browse_file)
+                    horizontal.addWidget(choose)
+                    live_form.addRow(title,row)
+                else:live_form.addRow(title,edit)
+                edit.textEdited.connect(self.mark_monitor_dirty)
+            self.input_mode=QComboBox();self.input_mode.addItems(['keyboard','mouse_left'])
+            live_form.addRow('自動入力方式',self.input_mode)
+            self.heuristic_absence=QCheckBox('校正済み限定無音推定を使用')
+            self.tts_required=QCheckBox('TTS必須（失敗時は停止）')
+            live_form.addRow(self.heuristic_absence);live_form.addRow(self.tts_required)
+            self.min_ready_count=QLineEdit();self.min_ready_span=QLineEdit()
+            live_form.addRow('表示完了の連続確認数',self.min_ready_count)
+            live_form.addRow('表示完了の観測期間 ms',self.min_ready_span)
+            for widget in (self.min_ready_count,self.min_ready_span):
+                widget.textEdited.connect(self.mark_monitor_dirty)
+            for widget in (self.input_mode,self.heuristic_absence,self.tts_required):
+                (widget.currentIndexChanged if isinstance(widget,QComboBox) else widget.toggled).connect(self.mark_monitor_dirty)
+            monitor_layout.addWidget(QLabel('肯定的通常台詞・本文表示完了・手動操作・遷移の画面テンプレート'))
+            self.markers=table(['役割','画像ファイル','x','y','幅','高さ','一致しきい値'],180)
+            monitor_layout.addWidget(self.markers)
+            for role in ('dialogue','text_ready','manual_block','transition'):
+                append(self.markers,[role,'','0','0','40','20','0.96'])
+                self.markers.item(self.markers.rowCount()-1,0).setFlags(Qt.ItemFlag.ItemIsEnabled)
+            marker_browse=QPushButton('選択行の画像ファイルを指定')
+            monitor_layout.addWidget(marker_browse)
+            def browse_marker():
+                row=self.markers.currentRow()
+                if row<0:return
+                path,_=QFileDialog.getOpenFileName(self,'画面マーカーの画像',self.markers.item(row,1).text(),
+                                                    'Images (*.png *.bmp *.jpg *.jpeg)')
+                if path:self.markers.item(row,1).setText(path)
+            marker_browse.clicked.connect(browse_marker)
+            self.markers.itemChanged.connect(self.mark_monitor_dirty)
+            monitor_actions=QHBoxLayout();monitor_layout.addLayout(monitor_actions)
+            self.import_monitor=QPushButton('既存監視JSONを取り込む')
+            self.save_monitor=QPushButton('ゲーム監視設定を保存')
+            monitor_actions.addWidget(self.import_monitor);monitor_actions.addWidget(self.save_monitor)
+            self.import_monitor.clicked.connect(self.import_monitor_profile)
+            self.save_monitor.clicked.connect(self.save_monitor_profile)
+            find_windows.clicked.connect(self.refresh_windows)
+            use_window.clicked.connect(self.select_target_window)
+
             right=QWidget();right_layout=QVBoxLayout(right);splitter.addWidget(right)
             right_layout.addWidget(QLabel('Luna原文（受信内容は加工しない）'))
             self.original=QPlainTextEdit();self.original.setPlaceholderText('LunaのHOOK結合結果を確認してください')
@@ -172,6 +236,10 @@ def run_gui() -> int:
             self.preview=QPlainTextEdit();self.preview.setReadOnly(True)
             self.preview.setMinimumHeight(140);right_layout.addWidget(self.preview)
             self.test=QPushButton('本文分離・読み置換をテスト');right_layout.addWidget(self.test)
+            right_layout.addWidget(QLabel('実行中のUtterance（保存済み設定による解釈結果）'))
+            self.active_utterance=QPlainTextEdit();self.active_utterance.setReadOnly(True)
+            self.active_utterance.setPlaceholderText('監視停止中 / 台詞未確定')
+            self.active_utterance.setMinimumHeight(130);right_layout.addWidget(self.active_utterance)
             right_layout.addWidget(QLabel('接続済みVoice IDs（API一覧優先）'))
             self.voices=QPlainTextEdit();self.voices.setReadOnly(True);right_layout.addWidget(self.voices)
             self.sample_voice=QComboBox();self.sample_voice.setEditable(True)
@@ -214,6 +282,7 @@ def run_gui() -> int:
             self.default_voice.setCurrentText(c.default_voice or '')
             self.show_status('対象ゲーム',self.service.preferences.selected_game or '未選択')
             self.show_status('Irodoriフォルダ',self.service.preferences.irodori_root or '未設定')
+            self.load_monitor_profile()
             self.update_preview()
 
         def game_changed(self,text):
@@ -223,6 +292,140 @@ def run_gui() -> int:
                 return
             self.service.preferences.selected_game=text
             self.load_profile()
+
+        def mark_monitor_dirty(self,*_):
+            if not self._loading_monitor:
+                self.monitor_dirty=True
+                self.monitor_location.setText('監視設定に未保存の変更があります')
+
+        def refresh_windows(self):
+            self.window_choices.clear()
+            try:
+                from .live import list_target_windows
+                self._window_candidates=list_target_windows()
+                for pid,hwnd,title in self._window_candidates:
+                    self.window_choices.addItem(f'{title[:65]}  PID={pid} HWND={hwnd}')
+                if not self._window_candidates:
+                    self.issue.setText('対象候補のウィンドウがありません。PID/HWNDを手動入力できます')
+            except (OSError,RuntimeError) as exc:self.issue.setText(str(exc))
+
+        def select_target_window(self):
+            index=self.window_choices.currentIndex()
+            if not hasattr(self,'_window_candidates') or not 0<=index<len(self._window_candidates):return
+            pid,hwnd,_=self._window_candidates[index]
+            self.monitor_fields['pid'].setText(str(pid))
+            self.monitor_fields['hwnd'].setText(str(hwnd))
+            self.mark_monitor_dirty()
+
+        def load_monitor_document(self,document,screen,path_label):
+            self._loading_monitor=True
+            try:
+                defaults={'pid':'','hwnd':'','loopback_helper':'','asr_model':'','asr_tokens':'',
+                          'log_path':'','grace_ms':500,'tts_speed':1.0,'silent_base_ms':700,
+                          'silent_min_ms':1000,'reading_chars_per_sec':12.0,'input_virtual_key':13}
+                dwell=document.get('silent_dwell',{})
+                values={**defaults,**document,**{
+                    'silent_base_ms':dwell.get('base_ms',defaults['silent_base_ms']),
+                    'silent_min_ms':dwell.get('min_ms',defaults['silent_min_ms']),
+                    'reading_chars_per_sec':dwell.get('reading_chars_per_sec',defaults['reading_chars_per_sec']),
+                    'input_virtual_key':document.get('advance_input',{}).get('virtual_key',13)}}
+                for name,edit in self.monitor_fields.items():edit.setText(str(values[name]))
+                self.input_mode.setCurrentText(document.get('advance_input',{}).get('mode','keyboard'))
+                self.heuristic_absence.setChecked(document.get('allow_heuristic_absence',False))
+                self.tts_required.setChecked(document.get('tts_required',False))
+                self.min_ready_count.setText(str(screen.get('minimum_ready_observations',2)))
+                self.min_ready_span.setText(str(screen.get('minimum_ready_span_ms',120)))
+                for r,role in enumerate(('dialogue','text_ready','manual_block','transition')):
+                    marker=screen.get('markers',{}).get(role,{})
+                    rect=marker.get('rect',[0,0,40,20])
+                    for c,value in enumerate([role,marker.get('image',''),*rect,marker.get('min_score',.96)]):
+                        if c:self.markers.item(r,c).setText(str(value))
+                self.monitor_location.setText(path_label)
+                self.monitor_dirty=False
+            finally:self._loading_monitor=False
+
+        def load_monitor_profile(self):
+            try:
+                data,screen=self.service.monitor_document()
+                path=self.service.monitor_path()
+                if path:
+                    from .live import LiveConfig
+                    actual=LiveConfig.load(path)
+                    for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
+                        data[key]=str(getattr(actual,key))
+                    for marker in screen.get('markers',{}).values():
+                        marker['image']=str((actual.screen_profile.parent/marker['image']).resolve())
+                self.load_monitor_document(data,screen,str(path) if path else '監視設定未保存')
+            except (ValueError,OSError,KeyError) as exc:
+                self.monitor_location.setText('監視設定を読み取れません: '+str(exc))
+                self.monitor_dirty=True
+
+        def import_monitor_profile(self):
+            if self.game_worker is not None and self.game_worker.isRunning():
+                self.issue.setText('監視終了後に監視設定を変更してください');return
+            path,_=QFileDialog.getOpenFileName(self,'既存のゲーム監視JSONを指定',
+                    self.service.preferences.live_config or '', 'JSON (*.json)')
+            if not path:return
+            try:
+                from .live import LiveConfig
+                from .screen import ScreenProfile
+                config=LiveConfig.load(Path(path))
+                data=json.loads(Path(path).read_text(encoding='utf-8'))
+                screen=json.loads(config.screen_profile.read_text(encoding='utf-8'))
+                for key in ('loopback_helper','asr_model','asr_tokens','log_path'):
+                    data[key]=str(getattr(config,key))
+                for marker in screen['markers'].values():
+                    marker['image']=str((config.screen_profile.parent/marker['image']).resolve())
+                ScreenProfile.load(config.screen_profile)
+                self.load_monitor_document(data,screen,'取り込み済み・まだ保存されていません')
+                self.mark_monitor_dirty()
+            except (ValueError,OSError,KeyError) as exc:
+                self.issue.setText('監視設定を取り込めません: '+str(exc))
+
+        def current_monitor_document(self):
+            values={name:edit.text().strip() for name,edit in self.monitor_fields.items()}
+            abs_path=lambda value:str(Path(value).expanduser().resolve()) if value else ''
+            markers={}
+            for a in rows(self.markers):
+                role,path,x,y,w,h,score=a
+                if not path.strip():
+                    if role in ('dialogue','text_ready'):
+                        raise ValueError(f'{role}の画像ファイルを指定してください')
+                    continue
+                markers[role]={'image':abs_path(path),'rect':[int(x),int(y),int(w),int(h)],
+                               'min_score':float(score)}
+            screen={'markers':markers,
+                    'minimum_ready_observations':int(self.min_ready_count.text()),
+                    'minimum_ready_span_ms':int(self.min_ready_span.text())}
+            live={'pid':int(values['pid']),'hwnd':int(values['hwnd']),
+                  'loopback_helper':abs_path(values['loopback_helper']),
+                  'asr_model':abs_path(values['asr_model']),
+                  'asr_tokens':abs_path(values['asr_tokens']),
+                  'log_path':abs_path(values['log_path']),
+                  'grace_ms':int(values['grace_ms']),
+                  'allow_heuristic_absence':self.heuristic_absence.isChecked(),
+                  'tts_speed':float(values['tts_speed']),
+                  'silent_dwell':{'base_ms':int(values['silent_base_ms']),
+                                  'min_ms':int(values['silent_min_ms']),
+                                  'reading_chars_per_sec':float(values['reading_chars_per_sec'])},
+                  'tts_required':self.tts_required.isChecked(),
+                  'advance_input':{'mode':self.input_mode.currentText(),
+                                   'virtual_key':int(values['input_virtual_key'])}}
+            return live,screen
+
+        def save_monitor_profile(self):
+            if self.game_worker and self.game_worker.isRunning():
+                self.issue.setText('監視設定を変更するにはゲーム監視を終了してください');return
+            if not self.service.preferences.selected_game or self.service.preferences.selected_game!=self.game_name.currentText():
+                self.issue.setText('先に作品ルールを保存し、作品を選択してください');return
+            try:
+                live,screen=self.current_monitor_document()
+                path=self.service.save_monitor(self.service.preferences.selected_game,live,screen)
+                self.monitor_dirty=False
+                self.monitor_location.setText(str(path))
+                self.issue.setText('ゲーム監視・画面・音声設定を保存しました。次の監視開始から適用します')
+            except (OSError,ValueError,TypeError,KeyError) as exc:
+                self.issue.setText('監視設定を保存できません: '+str(exc))
 
         def current_editor_config(self):
             return GameTextConfig(
@@ -339,10 +542,11 @@ def run_gui() -> int:
             if self.game_worker and self.game_worker.isRunning():return
             try:
                 from .live import LiveConfig,LiveControl
-                profile=LiveConfig.load(Path(self.live_path.text()))
                 if not self.service.preferences.selected_game:raise ValueError('先に対象作品を保存してください')
-                self.service.preferences.live_config=self.live_path.text()
-                self.service.preferences.save(self.service.settings_file)
+                if self.monitor_dirty:raise ValueError('監視設定に未保存の変更があります。保存してください')
+                path=self.service.monitor_path()
+                if path is None:raise ValueError('作品別のゲーム監視設定が未保存です')
+                profile=LiveConfig.load(path)
             except (ValueError,OSError,KeyError) as exc:
                 self.issue.setText(f'監視開始不可: {exc}')
                 return
@@ -395,6 +599,21 @@ def run_gui() -> int:
             if 'sent' in state:self.show_status('入力/ACK',
                           '遷移ACK待ち' if state.get('awaiting_ack') else '送出済み' if state['sent'] else '未送出')
             if 'controller' in state:self.monitor_state.setText('Controller: '+state['controller'])
+            if 'utterance' in state:
+                u=state['utterance']
+                if u is None:
+                    self.active_utterance.setPlainText('新しい通常台詞の確定待ち')
+                    self.show_status('現在Utterance','未確定')
+                else:
+                    self.active_utterance.setPlainText('\n'.join((
+                        '原文: '+u['observed_original'],
+                        '話者: '+str(u['speaker'] or '不明'),
+                        '本文: '+u['body'], 'TTS文: '+u['tts_text'],
+                        'ASR文: '+u['asr_target'],
+                        'Voice: '+u['tts_route']+' / '+str(u['voice_id'] or '未割当て'),
+                        '構造規則: '+str(u['structure_rule_id'] or '不一致'),
+                        '設定版: '+u['config_revision'])))
+                    self.show_status('現在Utterance',str(u['speaker'] or '不明')+' / '+u['body'][:75])
             if state.get('speaker') or state.get('body'):
                 self.show_status('対象ゲーム',self.service.preferences.selected_game+' / '+str(state.get('speaker') or '話者不明'))
 

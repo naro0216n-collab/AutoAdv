@@ -21,7 +21,8 @@ class Preferences:
     luna_url: str = 'ws://127.0.0.1:2333/api/ws/text/origin'
     selected_game: str = ''
     games: dict[str,dict] = field(default_factory=dict)
-    live_config: str = ''
+    live_config: str = ''  # Read only for explicit one-time import; not a runtime source.
+    live_profiles: dict[str,str] = field(default_factory=dict)
 
     @classmethod
     def load(cls,path:Path | None=None) -> 'Preferences':
@@ -31,6 +32,9 @@ class Preferences:
         if not isinstance(data,dict) or set(data)-set(cls.__dataclass_fields__):
             raise ValueError('invalid AutoAdv preferences')
         prefs=cls(**data)
+        if not isinstance(prefs.live_profiles,dict) or any(
+            not isinstance(name,str) or not isinstance(path,str) for name,path in prefs.live_profiles.items()):
+            raise ValueError('invalid game monitor profiles')
         for name,value in prefs.games.items():
             if not isinstance(name,str) or not isinstance(value,dict):raise ValueError('invalid game entry')
             GameTextConfig.from_dict(value)

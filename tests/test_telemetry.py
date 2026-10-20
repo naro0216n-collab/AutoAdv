@@ -63,5 +63,14 @@ class TelemetryContracts(unittest.TestCase):
             profile.pop('advance_input')
             p.write_text(json.dumps(profile),encoding='utf-8')
             with self.assertRaises(ValueError):LiveConfig.load(p)
+            valid=json.loads(data)
+            for field,value in [('tts_required','false'),('pid',True),('tts_speed',-1)]:
+                altered={**valid,field:value}
+                p.write_text(json.dumps(altered),encoding='utf-8')
+                with self.subTest(field=field),self.assertRaises(ValueError):
+                    LiveConfig.load(p)
+            invalid={**valid,'silent_dwell':{'base_ms':-1,'min_ms':1000,'reading_chars_per_sec':12}}
+            p.write_text(json.dumps(invalid),encoding='utf-8')
+            with self.assertRaises(ValueError):LiveConfig.load(p)
 
 if __name__=='__main__':unittest.main()
