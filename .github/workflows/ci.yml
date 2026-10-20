@@ -72,6 +72,32 @@ jobs:
           cd "${RUNNER_TEMP}"
           python -c "import autoadv; assert autoadv.Controller"
 
+  native-change-detection:
+    name: Native checkpoint identification
+    if: ${{ github.ref_name == 'develop' }}
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.detect.outputs.required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --name-only HEAD^ HEAD | grep -Eq '^(vendor/luna/|scripts/sync_luna_upstream.py$|autoadv/hook_|autoadv/luna_abi.py$|\.github/workflows/(ci|luna-native)\.yml$)'; then
+            echo 'required=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'required=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  luna-native:
+    name: Luna x86/x64 build verification
+    needs: [native-change-detection]
+    if: ${{ needs.native-change-detection.outputs.required == 'true' }}
+    uses: ./.github/workflows/luna-native.yml
+
   status-rollup:
     name: Fast CI status
     if: ${{ always() }}
