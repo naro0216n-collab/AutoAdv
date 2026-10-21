@@ -15,7 +15,8 @@ param(
     [string] $Voice = '',
     [string] $IrodoriUrl = 'http://127.0.0.1:8088',
     [int] $TimeoutSeconds = 120,
-    [int] $MaxVoiceHoldMs = 2000
+    [int] $MaxVoiceHoldMs = 2000,
+    [switch] $UncertainFallback
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -122,7 +123,8 @@ try {
                     'hook' { 1 }; 'reading' { 3 }; 'native' { 3 };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
-                voice = $Voice; irodori_url = $IrodoriUrl
+                voice = $Voice; irodori_url = $IrodoriUrl;
+                fallback = [bool]$UncertainFallback
             }
             if ($Phase -in @('native', 'mixed', 'stress')) {
                 # Build only AutoAdv's process-audio bridge, not Luna or other suites.

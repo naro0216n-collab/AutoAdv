@@ -20,10 +20,12 @@ class LiveGuiSessionContract(unittest.TestCase):
     def test_console_window_is_not_the_renpy_game(self):
         console = SimpleNamespace(hwnd=1, title='Python console')
         game = SimpleNamespace(hwnd=2, title='RenPy validation game')
-        classes = {1: 'ConsoleWindowClass', 2: 'SDL_app', 3: 'SDL_app'}
+        classes = {1: 'ConsoleWindowClass', 2: 'SDL_app', 3: 'SDL_app', 4: 'PseudoConsoleWindow'}
         choose = lambda rows: select_game_window(rows, lambda hwnd: classes[hwnd])
         self.assertIs(choose([console, game]), game)
-        self.assertIsNone(choose([console]))
+        pseudo = SimpleNamespace(hwnd=4, title='')
+        self.assertIs(choose([console, pseudo, game]), game)
+        self.assertIsNone(choose([console, pseudo]))
         with self.assertRaises(ValueError):
             choose([game, SimpleNamespace(hwnd=3, title='another RenPy window')])
 

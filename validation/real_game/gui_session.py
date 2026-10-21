@@ -36,9 +36,13 @@ def load_session(environment=None):
 
 
 def select_game_window(windows, class_name):
-    """Exclude console hosts, never guess among multiple actual game windows."""
+    """Identify the existing Ren'Py SDL window, not Python console hosts.
+
+    Executable/PID are already constrained by the ordinary window discovery.
+    The Ren'Py test fixture uses SDL_app; no game's UI is driven or inspected.
+    """
     matches = [window for window in windows
-               if class_name(window.hwnd).casefold() != 'consolewindowclass']
+               if class_name(window.hwnd).casefold() == 'sdl_app']
     if len(matches) > 1:
         names = [(w.title, class_name(w.hwnd)) for w in matches]
         raise ValueError(f'ambiguous RenPy GUI windows: {names}')

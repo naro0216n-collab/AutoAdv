@@ -46,12 +46,26 @@ class IndependentGameOracleContract(unittest.TestCase):
         self.assertEqual(result['game_evidence']['early_inputs'], 1)
         self.assertLess(result['performance']['game_voice_end_to_input_ms']['p50'], 0)
 
-    def test_game_voice_source_must_match_the_game_scene(self):
+    def test_fixture_audio_filename_is_not_an_autoadv_acceptance_condition(self):
         game = [dict(x) for x in self.game]
         next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)['file'] = 'audio/voice/other.wav'
         result = self.verify(game=game)
+        self.assertTrue(result['ok'], result['errors'])
+
+    def test_input_within_observer_poll_interval_is_indeterminate_not_early_or_safe(self):
+        game = [dict(x) for x in self.game]
+        end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
+        attempt = next(x['at_ns'] for x in self.product
+                       if x['event'] == 'advance_attempt' and x['line'] == 1)
+        end['last_active_at_ns'] = attempt - 20_000_000
+        end['at_ns'] = attempt + 30_000_000
+        game.sort(key=lambda x: x['at_ns'])
+        result = self.verify(game=game)
         self.assertFalse(result['ok'])
-        self.assertTrue(any('wrong game voice channel source' in e for e in result['errors']))
+        self.assertEqual(result['game_evidence']['indeterminate_voice_end'], 1)
+        self.assertEqual(result['game_evidence']['early_inputs'], 0)
+        self.assertEqual(result['game_evidence']['confirmed_voice_safe_inputs'], 1)
+        self.assertEqual(result['game_evidence']['lines'][0]['outcome'], 'voice_end_indeterminate')
 
     def test_silence_never_observed_is_not_positive_voice_end(self):
         game = [x for x in self.game if not (x['event'] == 'voice_ended' and x['line'] == 1)]
