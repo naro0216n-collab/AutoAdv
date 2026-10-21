@@ -46,7 +46,7 @@ Windows上のRen'Py SDK（既存`renpy/game`を起動可能なもの）を用意
 
 校正に一致する実Hook候補がない場合など、データ収集自体が成立しなければ失敗する。Native音声捕捉・実ASR・フォーカス・次Hookの成否は、製品経路の観測結果として台詞ごとに記録する。同一校正台詞を出す複数の実Hookは通常どおり選択し、選んだHookが後続台詞を実際に取得できたかで成否を判定する。ASRの完全一致率を自動進行の合否に用いない。既存設定は一時`APPDATA`で隔離する。Lunaは再ビルドせず、必要時はProcess Loopback helperのみビルドする。
 
-`-Phase reading`は文字時間による通常送り、`-Phase native`はBGM下の原音判断を観測する。特定のASR成功件数や次Hook到達件数を検証器の収集成功条件とはしない。音声判断が不確実なときの文字数フォールバックは`-UncertainFallback`で明示的に有効化できる。`-Phase tts`は別途稼働中の実Irodoriサーバーと`-Voice`が必要。`mixed`/`stress`で原音判定が未確定となった場合、テストが入力して後続場面へ進めたり成功に数えたりしない。
+`-Phase reading`は文字時間による通常送り、`-Phase native`は通常原音3件から開始し、通常の自動送りが成立すればBGM下の原音へ進んで同じ処理を測る。特定のASR成功件数や次Hook到達件数を検証器の収集成功条件とはしない。音声判断が不確実なときの文字数フォールバックは`-UncertainFallback`で明示的に有効化できる。`-Phase tts`は別途稼働中の実Irodoriサーバーと`-Voice`が必要。`mixed`/`stress`で原音判定が未確定となった場合、テストが入力して後続場面へ進めたり成功に数えたりしない。
 
 ## 検査B：既存Ren'Pyゲームを用いたAutoAdv実経路検収（Windows）
 

@@ -48,7 +48,7 @@ $scene = switch ($Phase) {
 }
 if ($RenPySdk -and $StartLine -eq 0) {
     $StartLine = switch ($scene) {
-        'native' { if ($Automated) { 10 } else { 6 } }
+        'native' { 6 }
         'tts'    { 4 }
         default  { 1 }
     }

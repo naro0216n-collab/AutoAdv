@@ -25,7 +25,9 @@ label start:
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
         jump asr_stress
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
-        jump bgm_voice
+        # Start with existing plain foreground voice, then reach BGM by the
+        # same Controller input. This isolates audio capture from mixing.
+        jump standard_voice
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "tts":
         jump standard_tts
     "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。"
