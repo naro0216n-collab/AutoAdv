@@ -1,24 +1,19 @@
 name: Windows Adapter Validation
 
 on:
-  push:
-    branches: [develop]
-    paths:
-      - 'autoadv/**'
-      - 'integrations/windows-loopback/**'
-      - 'vendor/luna/**'
-      - 'scripts/sync_luna_upstream.py'
-      - 'docs/integration-spec.md'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - '.github/workflows/windows-adapters.yml'
-  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [reopened]
+
+# A nonmerging draft PR (develop -> main) is an explicit validation control.
+# No heavy validation on routine develop pushes or PR creation.
 
 permissions:
   contents: read
 
 jobs:
   windows-adapters:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

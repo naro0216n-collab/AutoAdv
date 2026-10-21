@@ -1,28 +1,18 @@
 name: Real Audio Validation
 
 on:
-  workflow_dispatch:
-    inputs:
-      run_real_asr:
-        description: 'Run pinned SenseVoice inference and stress cases (manual, expensive)'
-        type: boolean
-        required: false
-        default: false
-  push:
-    branches: [develop]
-    paths:
-      - 'validation/real_game/**'
-      - 'autoadv/audio_buffer.py'
-      - 'autoadv/audio_match.py'
-      - 'autoadv/native_audio.py'
-      - 'autoadv/validation_trace.py'
-      - '.github/workflows/real-audio-validation.yml'
+  pull_request:
+    branches: [main]
+    types: [reopened]
+
+# Explicit draft PR reopening exercises the real ASR, not just VAD contracts.
 
 permissions:
   contents: read
 
 jobs:
   recorded-audio:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' }}
     name: Real Japanese recordings and evidence verifier contracts
     runs-on: windows-latest
     timeout-minutes: 35
@@ -36,18 +26,15 @@ jobs:
       - name: Verify real PCM fixtures and native activity contracts
         run: python -m unittest discover -s validation/real_game -p 'test_*.py' -v
       - name: Obtain and independently verify pinned SenseVoice for explicit real ASR run
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml')) }}
         run: |
           python -m validation.real_game.prepare_asr_model
           python -m validation.real_game.prepare_asr_model --verify-only
       - name: Measure real production ASR accuracy and latency on recorded speech
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml')) }}
         run: python -m validation.real_game.benchmark_asr --conditions clean quiet noise clipped truncated bgm --rounds 1 --output asr-benchmark.json
       - name: Measure real production ASR on nonlexical and competing voices
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml')) }}
         run: python -m validation.real_game.stress_asr --selection all --rounds 1 --output asr-stress.json
       - name: Upload inference observations, not model or recorded audio
-        if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml'))) }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: real-asr-measurement

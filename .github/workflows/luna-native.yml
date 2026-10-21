@@ -1,24 +1,18 @@
 name: Luna Native Source and ABI Validation
 
 on:
-  push:
-    branches: [develop]
-    paths:
-      - 'autoadv/hook_*.py'
-      - 'autoadv/luna_abi.py'
-      - 'scripts/sync_luna_upstream.py'
-      - 'scripts/prepare_luna_native.py'
-      - 'vendor/luna/**'
-      - '.github/workflows/luna-native.yml'
-      - 'docs/integration-spec.md'
-  workflow_dispatch:
-  workflow_call:
+  pull_request:
+    branches: [main]
+    types: [reopened]
+
+# The upstream x86/x64 build is intentionally excluded from Fast CI.
 
 permissions:
   contents: read
 
 jobs:
   pinned-source:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' }}
     name: Pinned Luna source acquisition
     runs-on: ubuntu-latest
     timeout-minutes: 20
