@@ -109,6 +109,53 @@ try {
         } catch {
             $audioEnvironment['audio_endpoints_error'] = $_.Exception.Message
         }
+        # PnP and Win32_SoundDevice do not enumerate the same objects as the
+        # Core Audio API. Query the render endpoints through IMMDeviceEnumerator
+        # itself before attributing silent Process Loopback PCM to the runner.
+        try {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class AudioDeviceEnumeratorClass {}
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioDeviceEnumerator {
+    void EnumAudioEndpoints(int flow, uint mask, out IAudioDeviceCollection devices);
+    void GetDefaultAudioEndpoint(int flow, int role, out IAudioDevice device);
+}
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-C0A0A665E9AA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioDeviceCollection {
+    void GetCount(out uint count);
+    void Item(uint index, out IAudioDevice device);
+}
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioDevice {}
+public static class AudioRenderProbe {
+    public static string Inspect() {
+        var enumerator = (IAudioDeviceEnumerator)new AudioDeviceEnumeratorClass();
+        try {
+            // eRender=0, DEVICE_STATE_ACTIVE=1, eMultimedia=1.
+            enumerator.EnumAudioEndpoints(0, 1, out var collection);
+            uint count;
+            try { collection.GetCount(out count); }
+            finally { Marshal.ReleaseComObject(collection); }
+            string defaultResult;
+            try {
+                enumerator.GetDefaultAudioEndpoint(0, 1, out var device);
+                defaultResult = "present";
+                Marshal.ReleaseComObject(device);
+            } catch (COMException e) {
+                defaultResult = "missing_hresult_0x" + ((uint)e.HResult).ToString("X8");
+            }
+            return "active_render_count=" + count + " default_multimedia_render=" + defaultResult;
+        } finally { Marshal.ReleaseComObject(enumerator); }
+    }
+}
+'@ -ErrorAction Stop
+            $audioEnvironment['wasapi_render'] = [AudioRenderProbe]::Inspect()
+        } catch {
+            $audioEnvironment['wasapi_render_probe_error'] = $_.Exception.Message
+        }
         Write-Host ('Windows render environment (diagnostic only): ' +
             (ConvertTo-Json -InputObject $audioEnvironment -Compress -Depth 4))
     }
