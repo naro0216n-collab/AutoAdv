@@ -203,6 +203,14 @@ class SessionDriver:
                 elif self.clock() >= self.focus_deadline:
                     raise RuntimeError('Windows runner cannot focus the game for product SendInput')
             elif self.state == 'running':
+                # An AutoAdv handoff is a completed product outcome, not a
+                # reason to force the test game through later dialogues. Exit
+                # now and let the independent verifier classify this line.
+                c = self.w.controller
+                if c.token is not None and c.pause_reason:
+                    self.w.close()
+                    self.app.quit()
+                    return
                 # Stop once actual selected-Hook outputs demonstrate the
                 # required continuation. No test-owned input is generated.
                 target_count = int(self.options.get('dialogues', 0))

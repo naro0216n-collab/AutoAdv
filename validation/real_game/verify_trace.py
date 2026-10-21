@@ -283,6 +283,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     audio_targets: dict[object, int] = {}
     authorized: set[object] = set()
     timeouts: set[tuple] = set()
+    handoffs: dict[tuple, str] = {}
     methods: dict[tuple, str] = {}
     reasons: dict[tuple, str] = {}
     presentation_at: dict[tuple, int] = {}
@@ -460,6 +461,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     errors.append(f'unknown native completion reason: {key}')
         elif event == 'next_line_timeout':
             timeouts.add(key)
+        elif event == 'controller_handoff':
+            if key not in utterances or not isinstance(record.get('reason'), str) or not record['reason']:
+                errors.append(f'invalid Controller handoff: {key}')
+            else:
+                handoffs[key] = record['reason']
 
     for key in native:
         if key[0] not in readiness or key not in pcm or methods.get(key) != 'asr':
@@ -643,6 +649,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'advance_mode': utterance.get('advance_mode'),
             'use_tts': utterance.get('use_tts'),
             'completion_reason': reasons.get(key),
+            'stop_reason': handoffs.get(key),
+            'fallback_enabled': utterance.get('uncertain_text_fallback'),
             'outcome': outcome,
         }
         if game_evidence is not None and offset < len(game_evidence['lines']):

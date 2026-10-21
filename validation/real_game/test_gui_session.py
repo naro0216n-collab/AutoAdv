@@ -65,6 +65,19 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(driver.state, 'running')
         self.assertEqual(actions, ['.monitoring'])
 
+    def test_actual_product_handoff_ends_run_without_fake_game_input(self):
+        actions = []
+        control = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
+                                  pause_reason='native_inconclusive_manual_handoff',
+                                  line_no=1)
+        window = SimpleNamespace(controller=control, close=lambda: actions.append('close'))
+        app = SimpleNamespace(quit=lambda: actions.append('quit'))
+        driver = SessionDriver(window, app, {'timeout_seconds': 30, 'phase': 'native',
+                                             'dialogues': 3}, clock=lambda: 1)
+        driver.state = 'running'
+        driver.tick()
+        self.assertEqual(actions, ['close', 'quit'])
+
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(gate='session-gate', executable='renpy.exe',
                      phase='native', timeout_seconds=120)

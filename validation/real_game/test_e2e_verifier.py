@@ -112,6 +112,19 @@ class RealGameVerifierContract(unittest.TestCase):
                          ['next_hook_observed', 'next_hook_observed', 'no_autoadv_input'])
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
 
+    def test_nonadvancement_reports_controller_handoff_and_fallback_setting(self):
+        records = contract_records(9, 12)
+        target = next(r for r in records if r.get('event') == 'utterance' and r['line'] == 3)
+        target['uncertain_text_fallback'] = False
+        records.append({'event': 'controller_handoff', 'seq': len(records),
+                        'at_ns': records[-1]['at_ns'] + 1,
+                        'session': 1, 'line': 3,
+                        'reason': 'native_inconclusive_manual_handoff'})
+        result = _validate(records, phase='native', start_line=10)
+        self.assertEqual(result['line_results'][2]['stop_reason'], 'native_inconclusive_manual_handoff')
+        self.assertIs(result['line_results'][2]['fallback_enabled'], False)
+        self.assertEqual(result['line_results'][2]['outcome'], 'no_autoadv_input')
+
     def test_json_report_preserves_success_and_failures(self):
         import contextlib
         from io import StringIO

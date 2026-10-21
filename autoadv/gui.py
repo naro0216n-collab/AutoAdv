@@ -1650,6 +1650,16 @@ def run_gui(session_driver=None) -> int:
 
         def refresh_status(self):
             c = self.controller
+            # Observe a product handoff once per actual line/reason. This
+            # records why AutoAdv stopped without inspecting or driving the
+            # game's interface, and cannot confer input authority.
+            token = c.token
+            if self.validation_trace.path and token is not None and c.pause_reason:
+                marker = (token, c.pause_reason)
+                if marker != getattr(self, '_last_validation_handoff', None):
+                    self.validation_trace.emit('controller_handoff', session=token.session,
+                        line=token.line, reason=c.pause_reason)
+                    self._last_validation_handoff = marker
             targets = (f'HOOK {c.target.hook_pid or c.target.pid}; audio {c.target.audio_pid or c.target.pid}; '
                        f'input {c.target.pid}/{hex(c.target.hwnd)}') if c.target else 'no target'
             self.status.setText(f'Status: {c.reason} | permission={c.authorized} | '
