@@ -36,18 +36,18 @@ jobs:
       - name: Verify real PCM fixtures and native activity contracts
         run: python -m unittest discover -s validation/real_game -p 'test_*.py' -v
       - name: Obtain and independently verify pinned SenseVoice for explicit real ASR run
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_asr }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml')) }}
         run: |
           python -m validation.real_game.prepare_asr_model
           python -m validation.real_game.prepare_asr_model --verify-only
       - name: Measure real production ASR accuracy and latency on recorded speech
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_asr }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml')) }}
         run: python -m validation.real_game.benchmark_asr --conditions clean quiet noise clipped truncated bgm --rounds 1 --output asr-benchmark.json
       - name: Measure real production ASR on nonlexical and competing voices
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_asr }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml')) }}
         run: python -m validation.real_game.stress_asr --selection all --rounds 1 --output asr-stress.json
       - name: Upload inference observations, not model or recorded audio
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_real_asr }}
+        if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.run_real_asr) || (github.event_name == 'push' && contains(github.event.head_commit.modified, '.github/workflows/real-audio-validation.yml'))) }}
         uses: actions/upload-artifact@v4
         with:
           name: real-asr-measurement
