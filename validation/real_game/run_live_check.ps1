@@ -53,7 +53,11 @@ if ($RenPySdk -and $StartLine -eq 0) {
         default  { 1 }
     }
 }
-if ($RenPySdk -and $Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
+# Text-mode SendInput without a following Hook needs existing game-side
+# dismissal evidence to distinguish unhandled input from missed text capture.
+# This is diagnostics only, not a new game-state acceptance criterion.
+if ($RenPySdk -and ($Phase -in @('native', 'mixed', 'stress') -or
+        ($Automated -and $Phase -eq 'reading')) -and -not $Oracle) {
     $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {

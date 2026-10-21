@@ -184,6 +184,21 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
 
+    def test_audio_evidence_fields_report_unobserved_inference_without_fabrication(self):
+        records = contract_records(9, 12)
+        for record in records:
+            if record['event'] == 'native_event' and record['line'] == 1:
+                record['status'] = 'started'
+        report = validate(records, phase='native')
+        self.assertFalse(report['collection_valid'])  # genuine product order violation
+        first = report['line_results'][0]
+        self.assertTrue(first['native_setup_ready'])
+        self.assertTrue(first['pcm_observed'])
+        self.assertEqual(first['audio_judgement_method'], 'asr')
+        self.assertEqual(first['asr_inference_count'], 0)
+        self.assertTrue(first['native_judgement_started'])
+        self.assertFalse(first['native_judgement_completed'])
+
     def test_observation_without_asr_success_remains_a_valid_measurement(self):
         records = contract_records(9, 10, advance=False)
         result = validate(records, phase='native')
@@ -192,6 +207,21 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertFalse(result['advancement_observed'])
         self.assertEqual(result['confirmed_advance_to_next_hook'], 0)
         self.assertFalse(result['advancement_observed'])
+
+    def test_explicit_vad_only_product_configuration_does_not_require_asr(self):
+        records = contract_records(9, 12)
+        for record in records:
+            if record['event'] == 'native_ready':
+                record['vad_only'] = True
+            if record['event'] == 'native_event':
+                record['method'] = 'vad'
+            if record['event'] == 'native_voice_end_estimate':
+                record['evidence'] = 'vad_only'
+        result = validate(records, phase='native')
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertEqual(result['confirmed_native_asr'], 0)
+        self.assertEqual(result['confirmed_native_vad_only'], 2)
+        self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
 
     def test_native_requires_pcm_and_real_asr_not_only_adapter_ready_or_vad(self):
         records = contract_records(9, 12)

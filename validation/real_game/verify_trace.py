@@ -133,7 +133,8 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             result['unaligned_lines'] += 1
             result['lines'].append({
                 'scenario': None, 'game_line': None, 'sent': key in sent,
-                'voice_observed': None, 'outcome': 'game_playback_unaligned',
+                'voice_observed': None, 'dismissed_after_input': None,
+                'outcome': 'game_playback_unaligned',
             })
             diagnostics.append(f'no unique playback observation for HOOK line {key}; voice safety unverified')
             continue
@@ -161,7 +162,11 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         detail = {'scenario': contract.get('id'), 'game_line': game_number,
                   'completion_reason': reasons.get(key), 'sent': key in sent,
                   'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
+                  'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= attempt)
+                                            if attempt is not None else None),
                   'outcome': 'unadvanced'}
+        if attempt is not None and dismissal is None:
+            diagnostics.append(f'input not followed by observed game dialogue dismissal: {key}')
         if attempt is not None and key not in sent:
             diagnostics.append(f'input attempt has no confirmed SendInput: {key}')
         # The product's SendInput and following LunaHook already verify the
@@ -288,6 +293,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     sent: dict[tuple, int] = {}
     timestamps: dict[tuple, int] = {}
     readiness: set[object] = set()
+    audio_methods: dict[object, str] = {}
     audio_targets: dict[object, int] = {}
     authorized: set[object] = set()
     timeouts: set[tuple] = set()
@@ -299,6 +305,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     audio_completed_at: dict[tuple, int] = {}
     vad_end_estimates: dict[tuple, int] = {}
     vad_onset_estimates: dict[tuple, int] = {}
+    asr_counts: dict[tuple, int] = {}
     measured: dict[str, list[float]] = {
         name: [] for name in (
             'asr_decode_ms', 'asr_queue_ms', 'asr_rtf',
@@ -357,8 +364,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if source not in source_outputs:
                 errors.append(f'utterance without actual selected Luna output: {key}')
         elif event == 'native_ready':
-            if record.get('vad_only') is False and session in monitoring:
+            if type(record.get('vad_only')) is bool and session in monitoring:
                 readiness.add(session)
+                audio_methods[session] = 'vad' if record['vad_only'] else 'asr'
                 audio_targets[session] = record.get('audio_pid')
         elif event == 'native_pcm':
             if (key not in utterances or type(record.get('frames')) is not int or record['frames'] <= 0
@@ -367,6 +375,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 errors.append(f'PCM is not valid captured frames for {key}')
             pcm.add(key)
         elif event == 'asr_inference':
+            if key in utterances:
+                asr_counts[key] = asr_counts.get(key, 0) + 1
             if key in utterances and record.get('audio_ms', 0) > 0:
                 duration = record.get('decode_ms')
                 queue = record.get('queue_ms')
@@ -458,7 +468,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                         errors.append(f'audio-judgment TTS requires playback drain: {key}')
                 elif completion_reason == 'native':
                     if key not in native:
-                        errors.append(f'native completion lacks observed ASR end: {key}')
+                        errors.append(f'native completion lacks observed audio judgement end: {key}')
                 elif completion_reason == 'uncertain_text_fallback':
                     wait = u.get('text_wait_ms')
                     if (u.get('uncertain_text_fallback') is not True or
@@ -476,8 +486,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 handoffs[key] = record['reason']
 
     for key in native:
-        if key[0] not in readiness or key not in pcm or methods.get(key) != 'asr':
-            errors.append(f'native completion lacks real PCM and ASR evidence: {key}')
+        if (key[0] not in readiness or key not in pcm or
+                methods.get(key) != audio_methods.get(key[0])):
+            errors.append(f'native completion lacks matching real PCM and configured ASR/VAD evidence: {key}')
 
     hashes = [utterances[key].get('body_hash') for key in utterance_order]
     # A run may start from a known line in a larger game. It must not skip
@@ -521,7 +532,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             previous = utterance_order[offset - 1]
             if previous not in sent and phase != 'hook':
                 diagnostics.append(f'dialogue observed without preceding AutoAdv SendInput: {previous}')
-    confirmed_native = [k for k in links if k in native and k in pcm]
+    confirmed_native = [k for k in links if k in native and k in pcm
+                        and methods.get(k) == 'asr']
+    confirmed_vad_only = [k for k in links if k in native and k in pcm
+                          and methods.get(k) == 'vad']
     confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]
     if not utterance_order:
         errors.append('no live dialogue observed')
@@ -613,12 +627,23 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'body_hash': utterance.get('body_hash'),
             'text_wait_ms': utterance.get('text_wait_ms'),
             'characters': utterance.get('characters'),
+            'native_setup_ready': key[0] in readiness,
+            'audio_judgement_method': audio_methods.get(key[0]),
+            'pcm_observed': key in pcm,
+            'asr_inference_count': asr_counts.get(key, 0),
+            'native_judgement_started': key in audio_started_at,
+            'native_judgement_completed': key in native,
+            'vad_end_estimate_ns': vad_end_estimates.get(key),
+            'input_attempted': key in attempts,
             'input_sent': key in sent,
             'next_hook_observed': key in links,
+            'next_hook_timeout': key in timeouts,
             'outcome': outcome,
         }
         if game_evidence is not None and offset < len(game_evidence['lines']):
             line_result['game_outcome'] = game_evidence['lines'][offset]['outcome']
+            line_result['game_dismissed_after_input'] = (
+                game_evidence['lines'][offset].get('dismissed_after_input'))
             if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
                 line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
         line_results.append(line_result)
@@ -642,7 +667,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
-        'confirmed_native_asr': len(confirmed_native), 'confirmed_tts': len(confirmed_tts),
+        'confirmed_native_asr': len(confirmed_native),
+        'confirmed_native_vad_only': len(confirmed_vad_only), 'confirmed_tts': len(confirmed_tts),
         'errors': errors, 'diagnostics': diagnostics, 'game_evidence': game_evidence, 'line_results': line_results,
     }
 

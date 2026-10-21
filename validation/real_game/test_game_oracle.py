@@ -26,6 +26,18 @@ class IndependentGameOracleContract(unittest.TestCase):
                             for item in observation['diagnostics']))
         self.assertTrue(self.verify()['ok'])  # checker-only positive fixture
 
+    def test_game_dismissal_is_diagnostic_not_input_success(self):
+        real = self.verify()
+        first = real['line_results'][0]
+        self.assertTrue(first['game_dismissed_after_input'])
+        missing = [dict(x) for x in self.game if not (x['event'] == 'line_dismissed' and x['line'] == 1)]
+        observed = self.verify(game=missing)
+        self.assertTrue(observed['collection_valid'], observed['errors'])
+        self.assertFalse(observed['line_results'][0]['game_dismissed_after_input'])
+        self.assertTrue(any('not followed by observed game dialogue dismissal' in x
+                            for x in observed['diagnostics']))
+        self.assertEqual(observed['confirmed_advance_to_next_hook'], 2)
+
     def test_game_dismissal_without_autoadv_input_is_not_an_advance_success(self):
         result = self.verify()
         # Last acquired dialogue has no controller input in this checker-only
