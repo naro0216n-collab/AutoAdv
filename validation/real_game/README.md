@@ -130,7 +130,7 @@ python -m validation.real_game.prepare_asr_model --verify-only
 ## ASR特殊音声・背景ボイスの挑戦シナリオ（Irodori不要）
 
 Ren'Pyゲームの手動メニュー「ASR非言語発声・背景音声テスト」から、通常原音対照例・同時背景発話・
-原音より後に続く背景声・背景声だけ・表示文と完全一致する背景声・泣き声・叫び声を検証できる。
+原音より後に続く背景声・背景声だけ・表示文と完全一致する背景声・泣き声・叫び声を検証できる。背景声は短い実録音 `normal_020.wav` のループを複数台詞にまたがって流し、混合PCMが本体の原音と区別できない条件を確認する。録音混合のASR検証でも同じ短い音声を反復する。
 泣き声と叫び声の実録音はCC0音源を固定の48 kHz mono PCMに変換して同梱し、SHA-256で内容を検証する。取得元の403などを理由に検証を迂回しない。
 
 ```powershell
@@ -148,12 +148,14 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 
 `benchmark_asr`は録音全体を一度に推論し、`stress_asr`は混合音声の全体転写を観測する。
 これらとは別に、`timeline_asr`は同じ録音14音声と特殊音声8場面を
-40msずつ実時間に近い間隔で**製品の`NativeAudio.feed`・`VoiceActivity`・`JapaneseASR`・`TargetMatcher`**へ渡す。
+40msずつ実時間に近い間隔で、送信相当の観測境界から既定600ms後にHOOKが届く条件で**製品の`NativeAudio.feed`・`VoiceActivity`・`JapaneseASR`・`TargetMatcher`**へ渡す。
 原音の観測開始、PCM末尾の無音、部分認識のカバレッジ、発話終了通知、推論滞留を時刻付きで保存する。
 旧台詞の推論結果は新台詞へ適用しない。波形の加工・独立ASR判定器・第二の進行Controllerは使用しない。
 
 ```powershell
-python -m validation.real_game.timeline_asr --selection all --output asr-timeline.json
+python -m validation.real_game.timeline_asr --selection all --hook-delay-ms 600 --output asr-timeline.json
+# 原音が完全に終わってからHOOKを受ける条件の追加診断も可能:
+python -m validation.real_game.timeline_asr --selection corpus --hook-delay-ms 3000 --output asr-late-hook.json
 ```
 
 `Real Audio Validation`の検証専用PR再オープン時に、この測定を**実モデル**で実行する。
@@ -175,9 +177,9 @@ python -m validation.real_game.benchmark_asr `
 
 モデルとtokensに指定がなければ隔離検証用キャッシュを使用する。実行時に`JapaneseASR`（製品使用の`sherpa-onnx`）で既存14音声を認識する。`clean`に加え、低音量・ノイズ・クリッピング・先頭欠落・シナリオ同梱のBGMを**メモリ内で加工**して同じ経路で評価する。モデル読込時間、各発話の実推論wall-clock時間、RTF（推論時間÷音声時間）、正規化CER、条件別のP50/P95と最大値を記録する。モデル／tokensのハッシュ、実行環境、条件・seedも保存する。テスト音声の改変ファイルは生成・再配布しない。速度と認識品質は**観測結果**であり、全音声を認識できるという固定アサーションにしない。言語の読み・表記揺れがあるためCERは単独で送り判断の品質を確定しない。
 
-通常の実ゲーム検収 (`run_live_check.ps1`) は、検証トレースに追加された**製品処理そのものの時間**を集計する。`verify_trace.py`のJSON結果に含まれる`performance`は、HOOK取得通知→Utterance、Utterance→提示完了、提示完了→入力試行、入力試行→次HOOK受信、実ASR推論・キュー待ち、Irodori合成・実再生の各時間とRTFのP50/P95／最大値／件数。`input_to_next_hook_ms`は次HOOKの受信元時刻を使う。トレースを有効にしていない一般利用時には追加診断を記録しない。
+通常の実ゲーム検収 (`run_live_check.ps1`) は、検証トレースに追加された**製品処理そのものの時間**を集計する。`verify_trace.py`のJSON結果に含まれる`performance`は、HOOK取得通知→Utterance、Utterance→提示完了、提示完了→入力試行、入力試行→次HOOK受信、**VAD推定終了→判断／入力、HOOK→VAD推定発声開始（負値は音声先行）**、実ASR推論・キュー待ち、Irodori合成・実再生の各時間とRTFのP50/P95／最大値／件数。`input_to_next_hook_ms`は次HOOKの受信元時刻を使う。トレースを有効にしていない一般利用時には追加診断を記録しない。
 
-計測時は実際に使用するCPU/GPU・ASRモデル・音声機器・ゲーム負荷を記録して比較する。少数の台詞から得たP95は推定値であり、異なるPCやCIランナーとの絶対性能比較には使用しない。待ち時間には原音の実再生・閲覧時間が含まれるため、純粋な処理オーバーヘッドと分けて解釈する。音声が認識できない場合や入力権限が失効した場合、計測値の大小ではなく本体の既存状態遷移と安全停止を検証する。
+計測時は実際に使用するCPU/GPU・ASRモデル・音声機器・ゲーム負荷を記録して比較する。少数の台詞から得たP95は推定値であり、異なるPCやCIランナーとの絶対性能比較には使用しない。待ち時間には原音の実再生・閲覧時間が含まれるため、純粋な処理オーバーヘッドと分けて解釈する。VAD終了時刻は受信した混合PCMの推定値であり、原音単体の物理的な再生終了を保証しない。背景の断続的ループでは特に誤帰属・過剰保留の両方を観測する。音声が認識できない場合や入力権限が失効した場合、計測値の大小ではなく本体の既存状態遷移と安全停止を検証する。
 
 ## GitHubでの専用検証の実行操作
 

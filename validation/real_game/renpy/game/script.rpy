@@ -79,23 +79,20 @@ label asr_stress:
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
 
-    # Unrelated simultaneous speech from the same game PID. Loopback captures
-    # the mixture, not separately identified speakers.
-    play sound "audio/voice/normal_030.wav"
+    # One short utterance repeats as an independent background channel
+    # across multiple dialogue/advance boundaries. AutoAdv observes only
+    # the same-PID mix, never a privileged Ren'Py voice-source signal.
+    play sound "audio/voice/normal_020.wav" loop
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
-    stop sound
-    play sound "audio/voice/normal_030.wav"
+    # Leave the background loop running after the foreground has ended.
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
-    stop sound
 
-    # No foreground voice even though the game produces speech.
-    play sound "audio/voice/normal_020.wav"
+    # Background voice persists with no foreground voice at all.
     p "これは表示されただけの文章です。"
-    stop sound
-    # More difficult: the *background* speaks the exact displayed sentence.
-    play sound "audio/voice/normal_020.wav"
+    # Identical background speech is acoustically indistinguishable from
+    # a foreground occurrence of this very line using mixed PCM + ASR.
     p "ヒューズが飛んだ。"
     stop sound
 
@@ -103,7 +100,7 @@ label asr_stress:
     a "うっ……うう……"
     voice "audio/voice/stress_scream.wav"
     s "あああっ！"
-    play sound "audio/voice/normal_020.wav"
+    play sound "audio/voice/normal_020.wav" loop
     voice "audio/voice/stress_cry.wav"
     a "うっ……うう……"
     stop sound

@@ -44,11 +44,13 @@ class NativeAudio:
                  notify: Callable[[Token | None, str, str], None],
                  *, recognizer=None, activity=None, clock=None, vad_only: bool = False,
                  on_pcm: Callable[[Token, int], None] | None = None,
-                 on_inference: Callable[[Token, dict], None] | None = None):
+                 on_inference: Callable[[Token, dict], None] | None = None,
+                 on_voice_end: Callable[[Token, dict], None] | None = None):
         self.pid = pid
         self.notify = notify
         self.on_pcm = on_pcm
         self.on_inference = on_inference
+        self.on_voice_end = on_voice_end
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=10000)
         self.vad_only = vad_only
@@ -61,6 +63,11 @@ class NativeAudio:
         self.matcher: TargetMatcher | None = None
         self.start_ms = 0
         self.boundary_ms = 0
+        self.window_start_ms = 0
+        self._awaiting_hook = False
+        self._last_processed_ms = -1
+        self._last_processed_chunk: PCMChunk | None = None
+        self.voice_end_estimate_ms = -1
         self.rise_ms = -1
         self.active = False
         self.attributed = False
@@ -79,33 +86,83 @@ class NativeAudio:
         self._tail_decoded = False
 
     def start(self):
+        # Capture starts before the first HOOK: retain the first voice's PCM.
+        self.boundary()
         self._capture.start()
 
     def boundary(self):
-        with self._lock:
-            self.boundary_ms = self.clock()
+        """An advance opens the *next* observation interval, not a new recorder.
 
-    def begin(self, token: Token, match_text: str):
+        The old token and all pending ASR results lose ownership immediately.
+        PCM already retained in history is not destroyed, and may be matched
+        only after a subsequent HOOK establishes the new text.
+        """
         with self._lock:
             self._generation += 1
-            # ASR decoding from the prior utterance may still be running. It
-            # cannot own this utterance's inference slot or later clear it.
+            self._inflight = False
+            self._inflight_generation = None
+            self.token = None
+            self.matcher = None
+            self.boundary_ms = self.clock()
+            self.window_start_ms = self.boundary_ms
+            self._awaiting_hook = True
+            self._last_processed_ms = -1
+            self._last_processed_chunk = None
+            self._reset_observation()
+
+    def _reset_observation(self):
+        self.active = self.attributed = self.completed = False
+        self._inference_at = -1
+        self._vad_voicing_since = -1
+        self._pcm_reported = False
+        self._last_vad = False
+        self.rise_ms = -1
+        self.voice_end_estimate_ms = -1
+        self.tail_ms = 0
+        self._last_active_ms = -1
+        self._quiet_notified = False
+        self._tail_decoded = False
+        if hasattr(self.activity, 'reset'):
+            self.activity.reset()
+
+    def begin(self, token: Token, match_text: str):
+        """Bind captured post-input PCM to a HOOK text, including early voice.
+
+        Replay and live feeding are serialized with the VAD lock. An unbound
+        interval is never labelled as this dialogue until text is available.
+        If there was no preceding observed input, do not claim old PCM.
+        """
+        with self._lock:
+            self._generation += 1
             self._inflight = False
             self._inflight_generation = None
             self.token = token
             self.matcher = TargetMatcher(match_text)
             self.start_ms = self.clock()
-            self.active = self.attributed = self.completed = False
-            self._inference_at = -1
-            self._vad_voicing_since = -1
-            self._pcm_reported = False
-            self._last_vad = False
-            self.rise_ms = -1
-            self._last_active_ms = -1
-            self._quiet_notified = False
-            self._tail_decoded = False
-            if hasattr(self.activity, 'reset'):
-                self.activity.reset()
+            self.window_start_ms = (self.boundary_ms if self._awaiting_hook
+                                    else self.start_ms)
+            self._awaiting_hook = False
+            self._last_processed_ms = -1
+            self._last_processed_chunk = None
+            self._reset_observation()
+            # ProcessCapture pushes a packet before calling feed(). Replaying
+            # under this lock makes an in-flight packet idempotent.
+            buffered = self.history.since(self.window_start_ms)
+            pending = [self._consume_locked(c, replay=True) for c in buffered]
+            if buffered and self.rise_ms >= 0 and not self.vad_only and not self.completed:
+                # Decode the *whole* replayed window once, rather than running
+                # a misleading inference on its first short packet.
+                since = self._sample_start()
+                samples = self.history.since(since)
+                if samples:
+                    generation = self._generation
+                    self._inflight = True
+                    self._inflight_generation = generation
+                    self._inference_at = buffered[-1].at_ms
+                    self._tail_decoded = self.tail_ms >= 300
+                    pending.append((token, generation, [], '', None, samples, None, self.tail_ms >= 300))
+        for item in pending:
+            self._dispatch(item)
 
     def is_confirmed_playing(self, token: Token) -> bool:
         """Positive *recent* correlated VAD activity; never proof of voice absence.
@@ -132,100 +189,126 @@ class NativeAudio:
                 token = self.token
             self.notify(token, 'error', status.reason)
 
-    def feed(self, chunk: PCMChunk):
-        # Capture and the GUI's next-line callback are on different threads.
-        # Keep VAD's mutable frame buffer, token, generation and VAD results
-        # within the same lock; an old chunk must never run after begin() reset
-        # and become evidence for the next Utterance.
+    def _sample_start(self) -> int:
+        # The sender's interval is the earliest allowed observation. A voice
+        # starting late should not be decoded together with earlier chatter.
+        since = self.window_start_ms
+        if self.rise_ms >= self.start_ms + 500:
+            since = max(since, self.rise_ms - 200)
+        return since
+
+    def _consume_locked(self, chunk: PCMChunk, *, replay: bool = False):
+        # Caller owns the VAD/utterance lock. Only the active interval's PCM
+        # can change this token, including packets received before its HOOK.
+        if (self._closed or self.token is None or
+                chunk.at_ms < self.window_start_ms or
+                chunk.at_ms < self._last_processed_ms or
+                (chunk.at_ms == self._last_processed_ms and
+                 chunk is self._last_processed_chunk)):
+            return None
+        self._last_processed_ms = chunk.at_ms
+        self._last_processed_chunk = chunk
         events: list[str] = []
         samples = None
-        token = None
-        generation = None
         pcm_frames = None
-        with self._lock:
-            if (self._closed or self.token is None or
-                    chunk.at_ms < self.start_ms or chunk.at_ms < self.boundary_ms):
-                return
-            token, generation = self.token, self._generation
-            try:
-                activity = self.activity.observe_float32_stereo(chunk.frames)
-            except Exception as exc:
-                events.append('error')
-                error = 'VAD failure: ' + str(exc)
-            else:
-                error = ''
-                if activity.frames_analyzed and not self._pcm_reported:
-                    self._pcm_reported = True
-                    pcm_frames = len(chunk.frames) // 8
-                if activity.frames_analyzed:
-                    if (activity.active or activity.contains_speech) and not self._last_vad:
-                        self.rise_ms = chunk.at_ms
-                    self._last_vad = activity.active
-                    if activity.active or activity.contains_speech:
-                        self._tail_decoded = False
-                self.tail_ms = activity.tail_silence_ms
-                if activity.frames_analyzed and activity.active and self.attributed:
-                    self._last_active_ms = self.clock()
-                    self._quiet_notified = False
-                elif (activity.frames_analyzed and not activity.active and self.attributed
-                      and activity.tail_silence_ms >= 400 and not self._quiet_notified
-                      and (not self.vad_only or activity.tail_silence_ms < 450)):
-                    self._quiet_notified = True
-                    events.append('quiet')
+        end_estimate = None
+        token, generation = self.token, self._generation
+        try:
+            activity = self.activity.observe_float32_stereo(chunk.frames)
+        except Exception as exc:
+            events.append('error')
+            error = 'VAD failure: ' + str(exc)
+        else:
+            error = ''
+            if activity.frames_analyzed and not self._pcm_reported:
+                self._pcm_reported = True
+                pcm_frames = len(chunk.frames) // 8
+            if activity.frames_analyzed:
+                if (activity.active or activity.contains_speech) and not self._last_vad:
+                    self.rise_ms = chunk.at_ms
+                self._last_vad = activity.active
+                if activity.active or activity.contains_speech:
+                    self._tail_decoded = False
+                    self.voice_end_estimate_ms = -1
+                elif self.rise_ms >= 0 and activity.tail_silence_ms > 0:
+                    # The interval endpoint is estimated from VAD frames and
+                    # capture-receipt clock, *not* a device playback timestamp.
+                    self.voice_end_estimate_ms = chunk.at_ms - activity.tail_silence_ms
+            self.tail_ms = activity.tail_silence_ms
+            if activity.frames_analyzed and activity.active and self.attributed:
+                self._last_active_ms = self.clock()
+                self._quiet_notified = False
+            elif (activity.frames_analyzed and not activity.active and self.attributed
+                  and activity.tail_silence_ms >= 400 and not self._quiet_notified
+                  and (not self.vad_only or activity.tail_silence_ms < 450)):
+                self._quiet_notified = True
+                events.append('quiet')
 
-                if self.vad_only:
-                    # VAD-only remains an explicit per-game opt-in; no textual
-                    # attribution is possible for arbitrary competing voices.
-                    if activity.frames_analyzed and not self.completed:
-                        if activity.active:
-                            if self._vad_voicing_since < 0:
-                                self._vad_voicing_since = chunk.at_ms
-                            if not self.attributed and chunk.at_ms - self._vad_voicing_since >= 350:
-                                self.attributed = True
-                                self._last_active_ms = self.clock()
-                                events.append('started')
-                        elif not self.attributed:
-                            self._vad_voicing_since = -1
-                        if self.attributed and activity.tail_silence_ms >= 450:
-                            self.completed = True
-                            events.append('completed')
-                elif activity.frames_analyzed and not self.completed:
-                    # A final decode on the first significant quiet interval
-                    # avoids relying exclusively on the periodic 500ms cadence.
-                    tail_due = (activity.tail_silence_ms >= 300 and
-                                self.rise_ms >= 0 and not self._tail_decoded)
-                    if not self._inflight and (tail_due or self._inference_at < 0 or
-                                               chunk.at_ms - self._inference_at >= 500):
-                        self._inflight = True
-                        self._inflight_generation = generation
-                        self._inference_at = chunk.at_ms
-                        if tail_due:
-                            self._tail_decoded = True
-                        # For delayed onset, bound the hypothesis to the new
-                        # acoustic interval rather than 2 seconds of old voice.
-                        # Near-immediate onset retains pre-roll for engines in
-                        # which the voice precedes the HOOK notification.
-                        since = max(self.boundary_ms, self.start_ms - 2000)
-                        if self.rise_ms >= self.start_ms + 500:
-                            since = max(since, self.rise_ms - 200)
-                        samples = self.history.since(since)
+            if self.vad_only:
+                if activity.frames_analyzed and not self.completed:
+                    if activity.active:
+                        if self._vad_voicing_since < 0:
+                            self._vad_voicing_since = chunk.at_ms
+                        if not self.attributed and chunk.at_ms - self._vad_voicing_since >= 350:
+                            self.attributed = True
+                            self._last_active_ms = self.clock()
+                            events.append('started')
+                    elif not self.attributed:
+                        self._vad_voicing_since = -1
+                    if self.attributed and activity.tail_silence_ms >= 450:
+                        self.completed = True
+                        events.append('completed')
+                        end_estimate = self.voice_end_estimate_ms
+            elif activity.frames_analyzed and self.rise_ms >= 0 and not self.completed and not replay:
+                tail_due = (activity.tail_silence_ms >= 300 and
+                            self.rise_ms >= 0 and not self._tail_decoded)
+                if not self._inflight and (tail_due or self._inference_at < 0 or
+                                           chunk.at_ms - self._inference_at >= 500):
+                    self._inflight = True
+                    self._inflight_generation = generation
+                    self._inference_at = chunk.at_ms
+                    if tail_due:
+                        self._tail_decoded = True
+                    samples = self.history.since(self._sample_start())
+        return token, generation, events, error, pcm_frames, samples, end_estimate, False
+
+    def _dispatch(self, item):
+        if item is None:
+            return
+        token, generation, events, error, pcm_frames, samples, end_estimate, final_replay = item
+        # All callbacks are outside the lock; UI callbacks may synchronously
+        # accept an advance and invalidate this very generation.
+        with self._lock:
+            if generation != self._generation or token != self.token:
+                return
         if pcm_frames is not None and self.on_pcm is not None:
             self.on_pcm(token, pcm_frames)
+        if 'completed' in events and self.on_voice_end and end_estimate is not None and end_estimate >= 0:
+            try:
+                self.on_voice_end(token, {'estimated_end_ms': end_estimate, 'estimated_onset_ms': self.rise_ms, 'source': 'vad_only'})
+            except Exception:
+                pass  # Diagnostics must not gate real playback completion.
         for event in events:
             self.notify(token, event, error if event == 'error' else '')
-        if samples is not None:
+        if samples:
+            with self._lock:
+                if generation != self._generation or token != self.token:
+                    return
             submitted_ns = time.perf_counter_ns() if self.on_inference else 0
             try:
-                self._pool.submit(self._infer, token, generation, samples, submitted_ns)
+                self._pool.submit(self._infer, token, generation, samples, submitted_ns, final_replay)
             except RuntimeError:
-                # A concurrent close invalidates the queued work; never
-                # repurpose this utterance's completion/inference slot.
                 with self._lock:
                     if self._inflight_generation == generation:
                         self._inflight = False
                         self._inflight_generation = None
 
-    def _infer(self, token, generation, samples, submitted_ns=0):
+    def feed(self, chunk: PCMChunk):
+        with self._lock:
+            item = self._consume_locked(chunk)
+        self._dispatch(item)
+
+    def _infer(self, token, generation, samples, submitted_ns=0, final_replay=False):
         started_ns = time.perf_counter_ns() if self.on_inference else 0
         if not submitted_ns:
             submitted_ns = started_ns
@@ -238,7 +321,7 @@ class NativeAudio:
                         or not self.matcher or not self.history.healthy):
                     return
                 progress = self.matcher.observe(hypothesis)
-                recent = self.rise_ms >= max(self.boundary_ms, self.start_ms - 2000)
+                recent = self.rise_ms >= self.window_start_ms
                 if (not self.attributed and recent and
                         progress.matched_chars >= min(3, len(self.matcher.target)) and
                         progress.onset_score >= .80 and
@@ -247,9 +330,17 @@ class NativeAudio:
                     self._last_active_ms = self.clock()
                     events.append('started')
                 if (self.attributed and progress.terminal_candidate and
-                        progress.tail_confidence >= .90 and self.tail_ms >= 300):
+                        (progress.tail_confidence >= .90 or final_replay) and self.tail_ms >= 300):
                     self.completed = True
                     events.append('completed')
+                    voice_end_estimate = self.voice_end_estimate_ms
+                else:
+                    voice_end_estimate = -1
+            if self.on_voice_end and 'completed' in events and voice_end_estimate >= 0:
+                try:
+                    self.on_voice_end(token, {'estimated_end_ms': voice_end_estimate, 'estimated_onset_ms': self.rise_ms, 'source': 'asr_vad'})
+                except Exception:
+                    pass  # Optional metrics cannot change the product decision.
             if self.on_inference:
                 audio_ms = sum(chunk.duration_ms for chunk in samples)
                 measurements = {

@@ -244,3 +244,91 @@ class InferenceOwnershipTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class AdvanceOriginAudioWindowTests(unittest.TestCase):
+    """Real NativeAudio state ownership with controlled PCM/VAD/ASR timestamps."""
+
+    def test_voice_ending_before_hook_is_replayed_and_matched_to_next_token(self):
+        moments = [1000]
+        activity = iter((VADDecision(True, 0), VADDecision(False, 200),
+                         VADDecision(False, 400)))
+        recognition = []
+        end_observations = []
+        events = []
+        ready = threading.Event()
+
+        class Recognizer:
+            def recognize(self, chunks):
+                recognition.append(tuple(c.at_ms for c in chunks))
+                return '合図です'
+
+        def report(token, status, detail):
+            events.append((token, status))
+            if status == 'completed':
+                ready.set()
+
+        audio = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+                            report, recognizer=Recognizer(),
+                            activity=SimpleNamespace(observe_float32_stereo=lambda _: next(activity),
+                                                     reset=lambda: None),
+                            clock=lambda: moments[0],
+                            on_voice_end=lambda t, m: end_observations.append((t, m)))
+        try:
+            audio.history.start(11)
+            audio.boundary()  # prior SendInput, long before Luna's flush
+            for when in (1100, 1300, 1500):
+                packet = PCMChunk(when, bytes(960 * 8), 48000, 2, 4)
+                audio.history.push(packet, target_pid=11)
+                audio.feed(packet)  # unbound audio cannot issue a completion
+            self.assertEqual(events, [])
+            moments[0] = 1800
+            token = Token(5, 2)
+            audio.begin(token, '合図です')
+            self.assertTrue(ready.wait(2), events)
+            self.assertEqual(recognition, [(1100, 1300, 1500)])
+            self.assertEqual([v for v in events if v[1] == 'completed'], [(token, 'completed')])
+            self.assertEqual(end_observations[0][1]['estimated_end_ms'], 1100)
+            self.assertLess(audio.rise_ms, audio.start_ms)
+            self.assertEqual(end_observations[0][1]['source'], 'asr_vad')
+        finally:
+            audio.close()
+
+    def test_previous_interval_audio_is_not_replayed_after_next_send(self):
+        times = [1000]
+        viewed = []
+        audio = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+                            lambda *_: None, vad_only=True,
+                            activity=SimpleNamespace(observe_float32_stereo=lambda _: (
+                                viewed.append('frame') or VADDecision(True, 0)), reset=lambda: None),
+                            clock=lambda: times[0])
+        try:
+            audio.history.start(11)
+            old = PCMChunk(900, bytes(960 * 8), 48000, 2, 4)
+            audio.history.push(old, target_pid=11)
+            audio.boundary()
+            current = PCMChunk(1100, bytes(960 * 8), 48000, 2, 4)
+            audio.history.push(current, target_pid=11)
+            times[0] = 1600
+            audio.begin(Token(2, 1), 'テスト')
+            self.assertEqual(viewed, ['frame'])
+            audio.feed(current)  # previously captured packet, no double VAD
+            audio.feed(old)  # old packet, cannot change new token
+            self.assertEqual(viewed, ['frame'])
+            self.assertEqual(audio.rise_ms, 1100)
+        finally:
+            audio.close()
+
+    def test_no_send_does_not_claim_pre_hook_voice_from_prior_line(self):
+        times = [1600]
+        audio = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+                            lambda *_: None, vad_only=True,
+                            activity=SimpleNamespace(observe_float32_stereo=lambda _: VADDecision(True, 0),
+                                                     reset=lambda: None),
+                            clock=lambda: times[0])
+        try:
+            audio.history.start(11)
+            audio.history.push(PCMChunk(1200, bytes(960 * 8), 48000, 2, 4), target_pid=11)
+            audio.begin(Token(2, 1), '新しい本文')  # no observed advance
+            self.assertEqual(audio.rise_ms, -1)
+        finally:
+            audio.close()

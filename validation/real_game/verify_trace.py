@@ -87,6 +87,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     presentation_at: dict[tuple, int] = {}
     audio_started_at: dict[tuple, int] = {}
     audio_completed_at: dict[tuple, int] = {}
+    vad_end_estimates: dict[tuple, int] = {}
+    vad_onset_estimates: dict[tuple, int] = {}
     measured: dict[str, list[float]] = {
         name: [] for name in (
             'asr_decode_ms', 'asr_queue_ms', 'asr_rtf',
@@ -176,6 +178,21 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 audio_completed_at[key] = at
                 methods[key] = record.get('method', '')
                 native.add(key)
+        elif event == 'native_voice_end_estimate':
+            estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
+            # These are process-loopback/VAD estimates, not known game source
+            # playback endpoints. Bounds are checked, but not against HOOK:
+            # the voice may have started and ended before the HOOK arrived.
+            if (key not in utterances or type(estimate) is not int or
+                    type(onset) is not int or onset > estimate or
+                    estimate > at or estimate < 0 or onset < 0 or
+                    record.get('evidence') not in ('asr_vad', 'vad_only')):
+                errors.append(f'invalid native VAD endpoint evidence: {key}')
+            elif key in vad_end_estimates:
+                errors.append(f'duplicate native VAD endpoint: {key}')
+            else:
+                vad_end_estimates[key] = estimate
+                vad_onset_estimates[key] = onset
         elif event == 'tts_result':
             if record.get('success') is True:
                 tts.add(key)
@@ -349,6 +366,17 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         origin = (key[0], u.get('source'), u.get('hook_sequence'), u.get('raw_hash'))
         if (ms := _elapsed_ms(source_outputs.get(origin), timestamps.get(key))) is not None:
             durations.setdefault('hook_to_utterance_ms', []).append(ms)
+        if key in vad_end_estimates:
+            if (ms := _elapsed_ms(vad_end_estimates[key], presentation_at.get(key))) is not None:
+                durations.setdefault('vad_estimated_end_to_decision_ms', []).append(ms)
+            if (ms := _elapsed_ms(vad_end_estimates[key], attempts.get(key))) is not None:
+                durations.setdefault('vad_estimated_end_to_input_ms', []).append(ms)
+            if (onset := vad_onset_estimates.get(key)) is not None:
+                # Signed delta: negative means observed voice began before the HOOK.
+                source_time = source_outputs.get(origin)
+                if source_time is not None:
+                    durations.setdefault('hook_to_vad_onset_ms', []).append(
+                        round((onset - source_time) / 1_000_000, 3))
         if (ms := _elapsed_ms(timestamps.get(key), audio_started_at.get(key))) is not None:
             durations.setdefault('utterance_to_native_onset_ms', []).append(ms)
         if (ms := _elapsed_ms(timestamps.get(key), audio_completed_at.get(key))) is not None:

@@ -35,17 +35,18 @@ def recorded_cases(selection: str):
 
 
 def replay(native: NativeAudio, *, index: int, name: str, display: str,
-           mono, kind: str, chunk_ms: int, tail_ms: int) -> dict:
+           mono, kind: str, chunk_ms: int, tail_ms: int, hook_delay_ms: int = 600) -> dict:
     import numpy as np
-    if chunk_ms <= 0 or chunk_ms % 20 or tail_ms < 0 or tail_ms % 20:
-        raise ValueError('timing requires positive 20ms-aligned chunks and nonnegative tail')
+    if chunk_ms <= 0 or chunk_ms % 20 or tail_ms < 0 or tail_ms % 20 or hook_delay_ms < 0:
+        raise ValueError('timing requires positive 20ms-aligned chunks and nonnegative tail/hook delay')
     token = Token(1, index)
     observations: list[dict] = []
     inference: list[dict] = []
     t0 = time.monotonic()
-    # Never associate a previous recording's PCM with the new Utterance.
+    # Simulate a real send followed by a delayed Luna flush. Audio packets
+    # can arrive and even finish before the Utterance exists.
     native.boundary()
-    native.begin(token, display)
+    hook_begun = False
 
     def record_event(t, event, detail):
         if t == token:
@@ -60,6 +61,10 @@ def replay(native: NativeAudio, *, index: int, name: str, display: str,
     # through the same NativeAudio.feed/VoiceActivity/TargetMatcher callbacks.
     native.notify = record_event
     native.on_inference = record_inference
+    native.on_voice_end = lambda t, m: observations.append({
+        'event': 'voice_end_estimate', 'at_ms': round((time.monotonic() - t0) * 1000, 2),
+        'estimated_ms': round(m['estimated_end_ms'] - t0 * 1000, 2),
+        'source': m['source']}) if t == token else None
     frame_count = int(48000 * chunk_ms / 1000)
     total_frames = len(mono) + int(48000 * tail_ms / 1000)
     all_frames = np.concatenate((mono, np.zeros(int(48000 * tail_ms / 1000), dtype='float32')))
@@ -70,9 +75,18 @@ def replay(native: NativeAudio, *, index: int, name: str, display: str,
             time.sleep(remaining)
         portion = all_frames[frame:frame + frame_count]
         stereo = np.column_stack((portion, portion)).astype('<f4').tobytes()
+        if not hook_begun and target_s * 1000 >= hook_delay_ms:
+            native.begin(token, display)
+            hook_begun = True
         pcm = PCMChunk(native.clock(), stereo, 48000, 2, 4)
         native.history.push(pcm, target_pid=native.pid)
         native.feed(pcm)
+    if not hook_begun:
+        # Test Hook arrival even after the audio file and its tail.
+        remaining = t0 + hook_delay_ms / 1000 - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        native.begin(token, display)
     # Allow already-submitted inference to finish, but a late result never
     # becomes a synthetic successful completion. Report outstanding decode.
     drain_start = time.monotonic()
@@ -89,6 +103,7 @@ def replay(native: NativeAudio, *, index: int, name: str, display: str,
         'id': name, 'kind': kind, 'display_hash': hashlib.sha256(display.encode('utf-8')).hexdigest(),
         'recorded_audio_ms': round(len(mono) / 48, 2),
         'tail_pcm_ms': tail_ms, 'chunk_ms': chunk_ms,
+        'hook_delay_ms': hook_delay_ms,
         'events': observations, 'inferences': inference,
         'decode_pending_after_drain': pending,
         'native_completions': sum(e['event'] == 'completed' for e in observations),
@@ -98,9 +113,9 @@ def replay(native: NativeAudio, *, index: int, name: str, display: str,
 
 
 def run(model: Path, tokens: Path, *, selection: str, chunk_ms: int = 40,
-        tail_ms: int = 600) -> dict:
-    if chunk_ms <= 0 or chunk_ms % 20 or tail_ms < 0 or tail_ms % 20:
-        raise ValueError('invalid timeline chunk/tail length')
+        tail_ms: int = 600, hook_delay_ms: int = 600) -> dict:
+    if chunk_ms <= 0 or chunk_ms % 20 or tail_ms < 0 or tail_ms % 20 or hook_delay_ms < 0:
+        raise ValueError('invalid timeline chunk/tail/hook delay length')
     started = time.monotonic()
     recognizer = JapaneseASR(model, tokens)
     load_ms = (time.monotonic() - started) * 1000
@@ -111,7 +126,8 @@ def run(model: Path, tokens: Path, *, selection: str, chunk_ms: int = 40,
         native.history.start(native.pid)
         for i, (name, display, pcm, kind) in enumerate(recorded_cases(selection), 1):
             records.append(replay(native, index=i, name=name, display=display, mono=pcm,
-                                  kind=kind, chunk_ms=chunk_ms, tail_ms=tail_ms))
+                                  kind=kind, chunk_ms=chunk_ms, tail_ms=tail_ms,
+                                  hook_delay_ms=hook_delay_ms))
     finally:
         native.close()
     return {
@@ -130,11 +146,14 @@ def main() -> int:
     parser.add_argument('--tokens', type=Path, default=MODEL_DIR / 'tokens.txt')
     parser.add_argument('--selection', choices=['corpus', 'stress', 'all'], default='all')
     parser.add_argument('--chunk-ms', type=int, default=40)
+    parser.add_argument('--hook-delay-ms', type=int, default=600,
+                        help='Delay HOOK binding relative to the initial PCM, in milliseconds')
     parser.add_argument('--tail-ms', type=int, default=600)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     result = run(args.model, args.tokens, selection=args.selection,
-                 chunk_ms=args.chunk_ms, tail_ms=args.tail_ms)
+                 chunk_ms=args.chunk_ms, tail_ms=args.tail_ms,
+                 hook_delay_ms=args.hook_delay_ms)
     brief = [{key: row[key] for key in ('id', 'native_completions',
               'possible_early_completion_before_recording_end', 'decode_pending_after_drain')}
              for row in result['cases']]

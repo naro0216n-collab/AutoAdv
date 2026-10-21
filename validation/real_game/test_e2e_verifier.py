@@ -35,6 +35,9 @@ def contract_records(first: int, last: int, *, mode=None, advance=True):
         if chosen == 'native':
             add('native_pcm', **key, frames=960, audio_pid=50)
             add('native_event', **key, status='started', method='asr')
+            observed_time = len(records) * 1_000_000_000
+            add('native_voice_end_estimate', **key, estimated_at_ns=observed_time - 300_000_000,
+                onset_estimated_at_ns=observed_time - 1_000_000_000, evidence='asr_vad')
             add('native_event', **key, status='completed', method='asr')
         elif chosen == 'tts':
             add('tts_result', **key, success=True)
@@ -125,6 +128,8 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(metrics['hook_to_utterance_ms']['count'], 3)
         self.assertEqual(metrics['input_to_next_hook_ms']['count'], 2)
         self.assertEqual(metrics['utterance_to_presentation_ms']['count'], 3)
+        self.assertEqual(metrics['vad_estimated_end_to_decision_ms']['count'], 2)
+        self.assertEqual(metrics['vad_estimated_end_to_input_ms']['count'], 2)
         self.assertNotIn('asr_decode_ms', metrics)  # Older traces cannot invent inference speed.
         # Optional real measurements must not convert a valid input sequence into FAIL.
         at = records[-1]['at_ns'] + 100
@@ -135,6 +140,24 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(result['ok'], result['errors'])
         self.assertEqual(result['performance']['asr_rtf']['p95'], 2.0)
         self.assertEqual(result['performance']['asr_decode_ms']['count'], 1)
+
+    def test_voice_timing_cannot_be_fabricated_or_misclassified(self):
+        records = contract_records(9, 12)
+        self.assertTrue(validate(records, phase='native')['ok'])
+        wrong = [dict(r, estimated_at_ns=r['at_ns'] + 1) if
+                 r['event'] == 'native_voice_end_estimate' and r['line'] == 1 else r
+                 for r in records]
+        result = validate(wrong, phase='native')
+        self.assertFalse(result['ok'])
+        # A pre-HOOK onset must appear as a negative signed interval, not be
+        # silently discarded by an unsigned-duration helper.
+        early = [dict(r) for r in records]
+        event = next(r for r in early if r['event'] == 'native_voice_end_estimate' and r['line'] == 2)
+        hook = next(r for r in early if r['event'] == 'hook_output' and r['hook_sequence'] == 11)
+        event['onset_estimated_at_ns'] = hook['received_ns'] - 50_000_000
+        metric = validate(early, phase='native')
+        self.assertTrue(metric['ok'], metric['errors'])
+        self.assertLess(metric['performance']['hook_to_vad_onset_ms']['p50'], 0)
 
     def test_wrong_origin_and_wrong_dialogue_cannot_claim_success(self):
         records = contract_records(0, 3, mode='reading')

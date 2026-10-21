@@ -61,13 +61,23 @@ def _mix(case: dict, audio: dict):
     if foreground is None and background is None:
         raise ValueError('Case has no actual audio source')
     offset = round(case['background_offset_ms'] * 48)
-    end = max(len(foreground) if foreground is not None else 0,
-              offset + len(background) if background is not None else 0)
+    loop_frames = round(case.get('background_loop_ms', 0) * 48)
+    if loop_frames and background is None:
+        raise ValueError('background loop requires a recording')
+    length = loop_frames if loop_frames else (len(background) if background is not None else 0)
+    end = max(len(foreground) if foreground is not None else 0, offset + length)
     out = np.zeros(end, dtype='float32')
     if foreground is not None:
         out[:len(foreground)] += foreground
     if background is not None:
-        out[offset:offset + len(background)] += background * case['background_gain']
+        if loop_frames:
+            # Repeated *human voice* with its recorded silence. Avoid a
+            # synthesized noise stand-in and avoid extending a huge WAV.
+            for pos in range(offset, offset + loop_frames, len(background)):
+                end_frame = min(pos + len(background), offset + loop_frames)
+                out[pos:end_frame] += background[:end_frame - pos] * case['background_gain']
+        else:
+            out[offset:offset + len(background)] += background * case['background_gain']
     return np.clip(out, -1, 1)
 
 

@@ -16,20 +16,22 @@
       "kind": "overlap",
       "display": "えっ嘘でしょ。",
       "foreground": "normal-001",
-      "background": "normal-030",
+      "background": "normal-020",
       "background_offset_ms": 0,
       "background_gain": 0.4,
-      "attribution": "ambiguous_mix"
+      "attribution": "ambiguous_mix",
+      "background_loop_ms": 5600
     },
     {
       "id": "background_outlasts_foreground",
       "kind": "overlap",
       "display": "えっ嘘でしょ。",
       "foreground": "normal-001",
-      "background": "normal-030",
+      "background": "normal-020",
       "background_offset_ms": 900,
       "background_gain": 0.4,
-      "attribution": "ambiguous_mix"
+      "attribution": "ambiguous_mix",
+      "background_loop_ms": 5600
     },
     {
       "id": "background_only_mismatch",
@@ -39,7 +41,8 @@
       "background": "normal-020",
       "background_offset_ms": 0,
       "background_gain": 1,
-      "attribution": "not_foreground"
+      "attribution": "not_foreground",
+      "background_loop_ms": 5600
     },
     {
       "id": "background_only_same_text",
@@ -49,7 +52,8 @@
       "background": "normal-020",
       "background_offset_ms": 0,
       "background_gain": 1,
-      "attribution": "unverified"
+      "attribution": "unverified",
+      "background_loop_ms": 5600
     },
     {
       "id": "nonlexical_cry",
@@ -79,7 +83,8 @@
       "background": "normal-020",
       "background_offset_ms": 600,
       "background_gain": 0.35,
-      "attribution": "ambiguous_mix"
+      "attribution": "ambiguous_mix",
+      "background_loop_ms": 5600
     }
   ],
   "external_assets": [

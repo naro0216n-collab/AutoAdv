@@ -1450,6 +1450,13 @@ def run_gui() -> int:
                         on_inference=(lambda token, metrics:
                             self.validation_trace.emit('asr_inference', session=token.session,
                                 line=token.line, **metrics))
+                        if self.validation_trace.path else None,
+                        on_voice_end=(lambda token, metrics:
+                            self.validation_trace.emit('native_voice_end_estimate',
+                                session=token.session, line=token.line,
+                                estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
+                                onset_estimated_at_ns=metrics['estimated_onset_ms'] * 1_000_000,
+                                evidence=metrics['source']))
                         if self.validation_trace.path else None)
                     native.start()
                     self.bridge.native_ready.emit(session, native, '')
@@ -1603,12 +1610,17 @@ def run_gui() -> int:
             if token:
                 self.validation_trace.emit('advance_attempt', session=token.session,
                     line=token.line)
+            # Start next-line observation at the input operation, before the
+            # game can render/play ahead of Luna's delayed HOOK flush.
+            if self.native_audio:
+                self.native_audio.boundary()
+                if token:
+                    self.validation_trace.emit('audio_observation_boundary',
+                        session=token.session, after_line=token.line)
             WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
             if token:
                 self.validation_trace.emit('advance_input', session=token.session,
                     line=token.line)
-            if self.native_audio:
-                self.native_audio.boundary()
 
         def advance_if_ready(self):
             if not self.controller.try_advance():

@@ -28,6 +28,25 @@ class StressScenarios(unittest.TestCase):
         self.assertGreater(len(stress_asr._mix(outlasts, recordings)),
                            len(recordings[outlasts['foreground']]))
 
+    def test_background_is_a_repeating_short_human_utterance(self):
+        import numpy as np
+        cases, recordings = stress_asr._load_cases(selection='background')
+        repeated = [c for c in cases if c['background']]
+        self.assertTrue(repeated)
+        self.assertEqual({c['background'] for c in repeated}, {'normal-020'})
+        for case in repeated:
+            with self.subTest(case=case['id']):
+                voice = recordings[case['background']]
+                self.assertGreater(case['background_loop_ms'], 2 * len(voice) / 48)
+                if case['foreground'] is None:
+                    mix = stress_asr._mix(case, recordings)
+                    start = round(case['background_offset_ms'] * 48)
+                    one = mix[start:start + len(voice)]
+                    two = mix[start + len(voice):start + 2 * len(voice)]
+                    self.assertTrue(np.allclose(one, two, atol=1e-7))
+        game = (STRESS.parent / 'renpy/game/script.rpy').read_text(encoding='utf-8')
+        self.assertIn('play sound "audio/voice/normal_020.wav" loop', game)
+
     def test_pinned_real_nonlexical_recordings_are_committed_and_integral(self):
         import wave
         from validation.real_game.benchmark_asr import _load_pcm
