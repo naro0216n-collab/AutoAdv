@@ -1,7 +1,11 @@
-"""ASR lexical cues are imperfect evidence, never game-input authority."""
+"""Bounded lexical cues for associating ASR with the current utterance.
+
+Recognition text is *not* an end-of-speech signal. Timing/voice activity and
+session ownership remain with NativeAudio; game-input authority remains with
+Controller.
+"""
 from __future__ import annotations
 from dataclasses import dataclass
-import re
 import unicodedata
 
 
@@ -12,44 +16,83 @@ def phonetic_key(text: str) -> str:
 
 @dataclass(frozen=True)
 class ASRProgress:
-    coverage: float
-    onset_score: float
-    tail_confidence: float
+    coverage: float  # aligned characters / longer text (penalizes foreign ASR speech)
+    onset_score: float  # estimated agreement with observed fragment
+    tail_confidence: float  # repeated terminal *lexical* hypothesis, not voice end
     monotonic: bool
     matched_chars: int
     observed: str
+    edit_count: int = 0
+    length_ratio: float = 0.0
+    terminal_candidate: bool = False
 
 
 class TargetMatcher:
-    """Track recoverable partial corrections and stable high-coverage hypotheses."""
+    """Align a whole ASR hypothesis to a *prefix* of displayed speech text.
+
+    Unlike prefix-exact comparison, one substitution/deletion near the start
+    does not erase all subsequent evidence. Unlike unrestricted substring/LCS
+    scoring, words buried in unrelated preceding voice do not count as a match.
+    This is a bounded cue, not a phonetic reading model or a speaker identifier.
+    """
+    MAX_CHARS = 512  # reject pathologically long input instead of quadratic work
+
     def __init__(self, target: str):
         self.target = phonetic_key(target)
-        self._last = ''
         self._previous = ''
-        self._observations = 0
+        self._previous_coverage = 0.0
 
     def observe(self, hypothesis: str) -> ASRProgress:
         key = phonetic_key(hypothesis)
-        self._observations += 1
-        # Count exact prefix: arbitrary LCS over a long repeated line gives
-        # deceptively high coverage even when the source utterance is unrelated.
-        shared = 0
-        for a, b in zip(self.target, key):
-            if a != b:
-                break
-            shared += 1
-        monotonic = not self._last or key.startswith(self._last[:max(1, len(self._last) - 1)])
-        # A correction is not a permanent veto; require the new hypothesis to
-        # stabilize before confirming a target and avoid relying on one output.
-        stable_tail = bool(self._previous and key == self._previous and
-                           shared >= max(2, int(len(self.target) * .90)))
-        # An extremely short hypothesis never confirms onset by acoustic matching.
-        onset = (shared / max(1, min(len(self.target), len(key)))) if shared >= 2 else 0.0
-        result = ASRProgress(shared / max(1, len(self.target)), onset,
-                             1.0 if stable_tail else 0.0,
-                             monotonic, shared, key)
-        self._previous, self._last = key, key
-        return result
+        n, m = len(self.target), len(key)
+        if not n or not m or n > self.MAX_CHARS or m > self.MAX_CHARS:
+            self._previous, self._previous_coverage = key, 0.0
+            return ASRProgress(0, 0, 0, False, 0, key)
+
+        # Levenshtein target-prefix versus the complete ASR hypothesis. Target
+        # prefixes accommodate streaming recognition; an ASR prefix/suffix from
+        # other voice must still incur edit cost and cannot match for free.
+        # Carry the number of exact aligned characters as well as edit cost.
+        # Substitutions, insertions and deletions each cost one; on equal edit
+        # cost the alignment with the most unchanged characters wins.
+        row = [(j, 0) for j in range(m + 1)]
+        best = (0, 0, 0)  # matched characters, target prefix length, edit count
+        for i, ch in enumerate(self.target, 1):
+            next_row = [(i, 0)]
+            for j, found in enumerate(key, 1):
+                matched_char = int(ch == found)
+                candidates = (
+                    (row[j][0] + 1, row[j][1]),
+                    (next_row[-1][0] + 1, next_row[-1][1]),
+                    (row[j - 1][0] + (not matched_char), row[j - 1][1] + matched_char),
+                )
+                next_row.append(min(candidates, key=lambda state: (state[0], -state[1])))
+            row = next_row
+            distance, correct = row[m]
+            # Favor the best-supported target prefix without allowing free
+            # skipping at either end of the ASR hypothesis.
+            if (correct, -distance, i) > (best[0], -best[2], best[1]):
+                best = (correct, i, distance)
+        matched, prefix_len, errors = best
+        coverage = matched / max(n, m)
+        onset = matched / max(1, prefix_len, m)
+        length_ratio = m / n
+
+        # Repeated identical hypotheses are a lexical stability cue only. A
+        # short stable prefix must never masquerade as the tail of a long line.
+        # One missing character in a short line is permissible, while longer
+        # lines require nearly all their text to have been observed.
+        trailing_allowance = max(1, n // 10)
+        terminal = (matched >= max(3, n - trailing_allowance - max(1, n // 8))
+                    and prefix_len >= n - trailing_allowance
+                    and m >= n - trailing_allowance
+                    and errors <= max(1, n // 8)
+                    and coverage >= .80)
+        stable = terminal and self._previous == key
+        monotonic = (coverage >= self._previous_coverage - .15)
+        self._previous, self._previous_coverage = key, coverage
+        return ASRProgress(coverage, onset, float(stable), monotonic,
+                           matched, key, errors, length_ratio, terminal)
 
 
 @dataclass(frozen=True)

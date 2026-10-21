@@ -76,6 +76,7 @@ class NativeAudio:
         self._pcm_reported = False
         self._last_active_ms = -1
         self._quiet_notified = False
+        self._tail_decoded = False
 
     def start(self):
         self._capture.start()
@@ -102,6 +103,7 @@ class NativeAudio:
             self.rise_ms = -1
             self._last_active_ms = -1
             self._quiet_notified = False
+            self._tail_decoded = False
             if hasattr(self.activity, 'reset'):
                 self.activity.reset()
 
@@ -131,75 +133,97 @@ class NativeAudio:
             self.notify(token, 'error', status.reason)
 
     def feed(self, chunk: PCMChunk):
-        with self._lock:
-            if self._closed or self.token is None:
-                return  # no ASR/VAD inference for TTS and text-only lines
-        try:
-            activity = self.activity.observe_float32_stereo(chunk.frames)
-        except Exception as exc:
-            self.notify(self.token, 'error', 'VAD failure: ' + str(exc))
-            return
+        # Capture and the GUI's next-line callback are on different threads.
+        # Keep VAD's mutable frame buffer, token, generation and VAD results
+        # within the same lock; an old chunk must never run after begin() reset
+        # and become evidence for the next Utterance.
         events: list[str] = []
+        samples = None
+        token = None
+        generation = None
+        pcm_frames = None
         with self._lock:
-            if self._closed:
+            if (self._closed or self.token is None or
+                    chunk.at_ms < self.start_ms or chunk.at_ms < self.boundary_ms):
                 return
-            if activity.frames_analyzed and self.token is not None and not self._pcm_reported:
-                self._pcm_reported = True
-                # A real process-loopback PCM packet reached production analysis.
-                # This is evidence of capture, not evidence of matching speech.
-                if self.on_pcm is not None:
-                    self.on_pcm(self.token, len(chunk.frames) // 8)
-            if activity.frames_analyzed:
-                if (activity.active or activity.contains_speech) and not self._last_vad:
-                    self.rise_ms = chunk.at_ms
-                self._last_vad = activity.active
-            self.tail_ms = activity.tail_silence_ms
-            if activity.frames_analyzed and activity.active and self.attributed:
-                self._last_active_ms = self.clock()
-                self._quiet_notified = False
-            elif (activity.frames_analyzed and not activity.active and self.attributed
-                  and activity.tail_silence_ms >= 400 and not self._quiet_notified
-                  and (not self.vad_only or activity.tail_silence_ms < 450)):
-                self._quiet_notified = True
-                events.append('quiet')
-            if self.vad_only:
-                # Only explicitly configured voice-only games may treat VAD as
-                # correlated evidence; background sounds remain ambiguous.
-                token = self.token
-                if token is None or not activity.frames_analyzed or self.completed:
-                    return
-                if activity.active:
-                    if self._vad_voicing_since < 0:
-                        self._vad_voicing_since = chunk.at_ms
-                    if not self.attributed and chunk.at_ms - self._vad_voicing_since >= 350:
-                        self.attributed = True
-                        self._last_active_ms = self.clock()
-                        events.append('started')
-                elif not self.attributed:
-                    self._vad_voicing_since = -1
-                if self.attributed and activity.tail_silence_ms >= 450:
-                    self.completed = True
-                    events.append('completed')
+            token, generation = self.token, self._generation
+            try:
+                activity = self.activity.observe_float32_stereo(chunk.frames)
+            except Exception as exc:
+                events.append('error')
+                error = 'VAD failure: ' + str(exc)
             else:
-                if (self.token is None or self.completed or not activity.frames_analyzed):
-                    return
-                if self._inflight or (self._inference_at >= 0 and chunk.at_ms - self._inference_at < 500):
-                    for event in events:
-                        self.notify(self.token, event, '')
-                    return
-                token, generation = self.token, self._generation
-                self._inflight = True
-                self._inflight_generation = generation
-                self._inference_at = chunk.at_ms
-                samples = self.history.since(max(self.boundary_ms, self.start_ms - 2000))
-        if self.vad_only:
-            for event in events:
-                self.notify(token, event, '')
-        else:
+                error = ''
+                if activity.frames_analyzed and not self._pcm_reported:
+                    self._pcm_reported = True
+                    pcm_frames = len(chunk.frames) // 8
+                if activity.frames_analyzed:
+                    if (activity.active or activity.contains_speech) and not self._last_vad:
+                        self.rise_ms = chunk.at_ms
+                    self._last_vad = activity.active
+                    if activity.active or activity.contains_speech:
+                        self._tail_decoded = False
+                self.tail_ms = activity.tail_silence_ms
+                if activity.frames_analyzed and activity.active and self.attributed:
+                    self._last_active_ms = self.clock()
+                    self._quiet_notified = False
+                elif (activity.frames_analyzed and not activity.active and self.attributed
+                      and activity.tail_silence_ms >= 400 and not self._quiet_notified
+                      and (not self.vad_only or activity.tail_silence_ms < 450)):
+                    self._quiet_notified = True
+                    events.append('quiet')
+
+                if self.vad_only:
+                    # VAD-only remains an explicit per-game opt-in; no textual
+                    # attribution is possible for arbitrary competing voices.
+                    if activity.frames_analyzed and not self.completed:
+                        if activity.active:
+                            if self._vad_voicing_since < 0:
+                                self._vad_voicing_since = chunk.at_ms
+                            if not self.attributed and chunk.at_ms - self._vad_voicing_since >= 350:
+                                self.attributed = True
+                                self._last_active_ms = self.clock()
+                                events.append('started')
+                        elif not self.attributed:
+                            self._vad_voicing_since = -1
+                        if self.attributed and activity.tail_silence_ms >= 450:
+                            self.completed = True
+                            events.append('completed')
+                elif activity.frames_analyzed and not self.completed:
+                    # A final decode on the first significant quiet interval
+                    # avoids relying exclusively on the periodic 500ms cadence.
+                    tail_due = (activity.tail_silence_ms >= 300 and
+                                self.rise_ms >= 0 and not self._tail_decoded)
+                    if not self._inflight and (tail_due or self._inference_at < 0 or
+                                               chunk.at_ms - self._inference_at >= 500):
+                        self._inflight = True
+                        self._inflight_generation = generation
+                        self._inference_at = chunk.at_ms
+                        if tail_due:
+                            self._tail_decoded = True
+                        # For delayed onset, bound the hypothesis to the new
+                        # acoustic interval rather than 2 seconds of old voice.
+                        # Near-immediate onset retains pre-roll for engines in
+                        # which the voice precedes the HOOK notification.
+                        since = max(self.boundary_ms, self.start_ms - 2000)
+                        if self.rise_ms >= self.start_ms + 500:
+                            since = max(since, self.rise_ms - 200)
+                        samples = self.history.since(since)
+        if pcm_frames is not None and self.on_pcm is not None:
+            self.on_pcm(token, pcm_frames)
+        for event in events:
+            self.notify(token, event, error if event == 'error' else '')
+        if samples is not None:
             submitted_ns = time.perf_counter_ns() if self.on_inference else 0
-            for event in events:
-                self.notify(token, event, '')
-            self._pool.submit(self._infer, token, generation, samples, submitted_ns)
+            try:
+                self._pool.submit(self._infer, token, generation, samples, submitted_ns)
+            except RuntimeError:
+                # A concurrent close invalidates the queued work; never
+                # repurpose this utterance's completion/inference slot.
+                with self._lock:
+                    if self._inflight_generation == generation:
+                        self._inflight = False
+                        self._inflight_generation = None
 
     def _infer(self, token, generation, samples, submitted_ns=0):
         started_ns = time.perf_counter_ns() if self.on_inference else 0
@@ -215,12 +239,15 @@ class NativeAudio:
                     return
                 progress = self.matcher.observe(hypothesis)
                 recent = self.rise_ms >= max(self.boundary_ms, self.start_ms - 2000)
-                if not self.attributed and recent and progress.matched_chars >= 2 and progress.onset_score >= .85:
+                if (not self.attributed and recent and
+                        progress.matched_chars >= min(3, len(self.matcher.target)) and
+                        progress.onset_score >= .80 and
+                        progress.edit_count <= max(1, progress.matched_chars // 6)):
                     self.attributed = True
                     self._last_active_ms = self.clock()
                     events.append('started')
-                if (self.attributed and progress.monotonic and progress.coverage >= .90
-                        and progress.tail_confidence >= .90 and self.tail_ms >= 300):
+                if (self.attributed and progress.terminal_candidate and
+                        progress.tail_confidence >= .90 and self.tail_ms >= 300):
                     self.completed = True
                     events.append('completed')
             if self.on_inference:
@@ -232,6 +259,10 @@ class NativeAudio:
                     'coverage': round(progress.coverage, 4),
                     'monotonic': progress.monotonic,
                     'tail_confidence': progress.tail_confidence,
+                    'matched_chars': progress.matched_chars,
+                    'edit_count': progress.edit_count,
+                    'length_ratio': round(progress.length_ratio, 4),
+                    'terminal_candidate': progress.terminal_candidate,
                 }
                 try:
                     self.on_inference(token, measurements)
