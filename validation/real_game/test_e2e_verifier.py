@@ -208,6 +208,23 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 0)
         self.assertFalse(result['advancement_observed'])
 
+    def test_capture_transport_diagnosis_does_not_fake_audio_recognition(self):
+        # A real helper may be alive without providing process PCM. Its
+        # counters explain the product handoff; they must not certify audio.
+        records = contract_records(9, 10, advance=False)
+        for record in records:
+            if record['event'] == 'native_event':
+                record['status'] = 'started'
+        records.append({'event': 'native_capture_summary', 'seq': len(records),
+                        'at_ns': records[-1]['at_ns'] + 1_000_000,
+                        'session': 1, 'line': 1, 'scope': 'capture_since_start',
+                        'pcm_packets': 0, 'pcm_frames': 0, 'heartbeats': 11,
+                        'failure': None})
+        result = validate(records, phase='native')
+        self.assertEqual(result['line_results'][0]['capture_transport']['heartbeats'], 11)
+        self.assertEqual(result['line_results'][0]['capture_transport']['pcm_packets'], 0)
+        self.assertEqual(result['confirmed_native_asr'], 0)
+
     def test_vad_alone_never_confirms_a_matching_native_utterance(self):
         records = contract_records(9, 12)
         for record in records:

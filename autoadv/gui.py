@@ -1477,7 +1477,7 @@ def run_gui(session_driver=None) -> int:
                 return
             self.native_audio = native
             self.validation_trace.emit('native_ready', session=session, audio_pid=native.pid)
-            self.note('Native process audio and ASR ready')
+            self.note('Process audio helper started; waiting for actual captured PCM')
             token, u = self.controller.token, self.controller.utterance
             if token and u and not self.controller.sent and not self.controller.completed and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts:
                 native.begin(token, u.match_text)
@@ -1654,6 +1654,13 @@ def run_gui(session_driver=None) -> int:
                 if marker != getattr(self, '_last_validation_handoff', None):
                     self.validation_trace.emit('controller_handoff', session=token.session,
                         line=token.line, reason=c.pause_reason)
+                    u = c.utterance
+                    if (self.native_audio and u and
+                            u.advance_mode == AdvanceMode.AUDIO and not u.use_tts):
+                        self.validation_trace.emit('native_capture_summary',
+                            session=token.session, line=token.line,
+                            audio_pid=self.native_audio.pid,
+                            **self.native_audio.capture_status())
                     self._last_validation_handoff = marker
             targets = (f'HOOK {c.target.hook_pid or c.target.pid}; audio {c.target.audio_pid or c.target.pid}; '
                        f'input {c.target.pid}/{hex(c.target.hwnd)}') if c.target else 'no target'

@@ -77,6 +77,10 @@ class NativeAudio:
         self._inflight_generation: int | None = None
         self._generation = 0
         self._closed = False
+        self._capture_pcm_packets = 0
+        self._capture_pcm_frames = 0
+        self._capture_heartbeats = 0
+        self._capture_error: str | None = None
         self._last_vad = False
         self._pcm_reported = False
         self._last_active_ms = -1
@@ -170,6 +174,12 @@ class NativeAudio:
                                     self.tail_ms, self.voice_end_estimate_ms))
         for item in pending:
             self._dispatch(item)
+        # A capture failure before HOOK reception must not disappear merely
+        # because the earlier health event had no active utterance token.
+        with self._lock:
+            failure = self._capture_error if self.token == token else None
+        if failure:
+            self.notify(token, 'error', failure)
 
     def is_confirmed_playing(self, token: Token) -> bool:
         """Positive *recent* correlated VAD activity; never proof of voice absence.
@@ -218,10 +228,33 @@ class NativeAudio:
             self.matcher = None
 
     def health(self, status: CaptureHealth):
-        if not status.healthy:
-            with self._lock:
-                token = self.token
+        with self._lock:
+            if status.healthy:
+                if status.pcm_frames:
+                    self._capture_pcm_packets += 1
+                    self._capture_pcm_frames += status.pcm_frames
+                else:
+                    self._capture_heartbeats += 1
+                return
+            self._capture_error = status.reason
+            token = self.token
+        # Before the first line there is no token to notify. begin() replays
+        # the failure to the actual line; no silence/voice conclusion is made.
+        if token is not None:
             self.notify(token, 'error', status.reason)
+
+    def capture_status(self) -> dict:
+        """Minimal product-boundary diagnosis when a line must hand off.
+
+        Helper heartbeats confirm only transport responsiveness; PCM frame
+        counts do not assert foreground speech or a matching ASR segment.
+        """
+        with self._lock:
+            return dict(scope='capture_since_start',
+                        pcm_packets=self._capture_pcm_packets,
+                        pcm_frames=self._capture_pcm_frames,
+                        heartbeats=self._capture_heartbeats,
+                        failure=self._capture_error)
 
     def _sample_start(self) -> int:
         # The sender's interval is the earliest allowed observation. A voice

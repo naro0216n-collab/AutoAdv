@@ -299,6 +299,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     authorized: set[object] = set()
     timeouts: set[tuple] = set()
     handoffs: dict[tuple, str] = {}
+    capture_summaries: dict[tuple, dict] = {}
     methods: dict[tuple, str] = {}
     reasons: dict[tuple, str] = {}
     presentation_at: dict[tuple, int] = {}
@@ -489,6 +490,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 errors.append(f'invalid Controller handoff: {key}')
             else:
                 handoffs[key] = record['reason']
+        elif event == 'native_capture_summary':
+            # Capture transport health and ASR/VAD judgement are independent.
+            # No count or PCM threshold is a test pass condition.
+            if key in utterances:
+                capture_summaries[key] = {
+                    name: record.get(name) for name in
+                    ('scope', 'pcm_packets', 'pcm_frames', 'heartbeats', 'failure')
+                }
 
     for key in native:
         if (key[0] not in readiness or key not in pcm or
@@ -634,6 +643,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'audio_judgement_method': audio_methods.get(key[0]),
             'pcm_observed': key in pcm,
             'asr_inference_count': asr_counts.get(key, 0),
+            'capture_transport': capture_summaries.get(key),
             'native_judgement_started': key in audio_started_at,
             'native_judgement_completed': key in native,
             'vad_end_estimate_ns': vad_end_estimates.get(key),

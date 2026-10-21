@@ -15,6 +15,47 @@ from autoadv.audio_match import VoiceActivity, VADDecision
 from autoadv.conversation import Controller, Target, Token
 from autoadv.model import AdvanceMode, HookSelection, Profile
 from autoadv.native_audio import NativeAudio
+from autoadv.process_audio import CaptureHealth
+
+
+class ProcessCaptureOwnershipTests(unittest.TestCase):
+    def test_early_helper_failure_is_delivered_to_first_real_utterance(self):
+        reported = []
+        audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+                            lambda *fields: reported.append(fields),
+                            recognizer=SimpleNamespace(recognize=lambda _: ''),
+                            activity=SimpleNamespace(reset=lambda: None), clock=lambda: 1000)
+        try:
+            audio.health(CaptureHealth(950, False, 'WASAPI stream closed'))
+            self.assertEqual(reported, [])  # no dialogue token existed yet
+            token = Token(1, 1)
+            audio.begin(token, '台詞')
+            self.assertEqual(reported, [(token, 'error', 'WASAPI stream closed')])
+            self.assertEqual(audio.capture_status()['failure'], 'WASAPI stream closed')
+        finally:
+            audio.close()
+
+    def test_transport_heartbeat_is_not_pcm_or_utterance_evidence(self):
+        events = []
+        audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+                            lambda *args: events.append(args),
+                            recognizer=SimpleNamespace(recognize=lambda _: ''),
+                            activity=SimpleNamespace(reset=lambda: None), clock=lambda: 1000)
+        try:
+            token = Token(1, 1)
+            audio.begin(token, '台詞')
+            audio.health(CaptureHealth(1000, True, 'helper_alive'))
+            self.assertEqual(audio.capture_status()['heartbeats'], 1)
+            self.assertEqual(audio.capture_status()['pcm_packets'], 0)
+            self.assertFalse(audio.attributed)
+            self.assertFalse(audio.completed)
+            self.assertEqual(events, [])
+            audio.health(CaptureHealth(1010, True, 'helper_alive', pcm_frames=960))
+            self.assertEqual(audio.capture_status()['pcm_packets'], 1)
+            self.assertEqual(audio.capture_status()['pcm_frames'], 960)
+            self.assertEqual(events, [])  # decoded voice never inferred from packet count
+        finally:
+            audio.close()
 
 
 class PacketVadBoundaryTests(unittest.TestCase):

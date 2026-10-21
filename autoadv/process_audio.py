@@ -25,6 +25,7 @@ class CaptureHealth:
     at_ms: int
     healthy: bool
     reason: str
+    pcm_frames: int = 0  # capture transport evidence, not foreground speech
 
 
 def read_packet(stream: BinaryIO) -> tuple[int, PCMChunk | None]:
@@ -83,7 +84,8 @@ class ProcessCapture:
                                            chunk.channels, chunk.sample_width_bytes)
                     self.history.push(local_chunk, target_pid=self.pid)
                     self.on_chunk(local_chunk)
-                self.on_health(CaptureHealth(now, True, 'helper_alive'))
+                self.on_health(CaptureHealth(now, True, 'helper_alive',
+                                             len(chunk.frames) // 8 if chunk is not None else 0))
         except (EOFError, OSError, ValueError) as exc:
             self.history.reset(str(exc))
             if not self.stop_requested.is_set():
