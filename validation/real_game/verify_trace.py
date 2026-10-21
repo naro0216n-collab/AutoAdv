@@ -214,15 +214,35 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 advanced_after_resumption.add(session)
             u = utterances.get(key)
             if u:
-                mode = u.get('mode')
-                if mode == 'native' and key not in native:
-                    errors.append(f'native SendInput before ASR speech completion: {key}')
-                if mode == 'tts' and key not in tts:
-                    errors.append(f'TTS SendInput before actual playback completion: {key}')
-                if mode == 'auto' and key not in native | tts:
-                    errors.append(f'AUTO SendInput before matched audio or TTS completion: {key}')
-                if mode not in ('reading', 'native', 'tts', 'auto'):
-                    errors.append(f'unknown dialogue presentation mode: {key}')
+                mode, uses_tts = u.get('advance_mode'), u.get('use_tts')
+                completed = next((r for r in records[1:] if r.get('event') == 'presentation_complete' and _key(r) == key), None)
+                completion_reason = completed.get('reason') if completed else None
+                if mode not in ('text', 'audio') or type(uses_tts) is not bool:
+                    errors.append(f'invalid two-mode Utterance policy: {key}')
+                elif mode == 'text':
+                    expected_reason = 'tts_and_text' if uses_tts else 'text'
+                    if completion_reason != expected_reason:
+                        errors.append(f'text-mode completion contract not observed: {key}')
+                    if uses_tts and key not in tts:
+                        errors.append(f'TTS SendInput before actual playback completion: {key}')
+                    wait = u.get('text_wait_ms')
+                    if (type(wait) is not int or wait <= 0 or not completed or
+                            completed['at_ns'] - timestamps[key] < wait * 1_000_000):
+                        errors.append(f'text SendInput before computed reading time: {key}')
+                elif uses_tts:
+                    if key not in tts or completion_reason != 'tts':
+                        errors.append(f'audio-judgment TTS requires playback drain: {key}')
+                elif completion_reason == 'native':
+                    if key not in native:
+                        errors.append(f'native completion lacks observed ASR end: {key}')
+                elif completion_reason == 'uncertain_text_fallback':
+                    wait = u.get('text_wait_ms')
+                    if (u.get('uncertain_text_fallback') is not True or
+                            type(wait) is not int or wait <= 0 or not completed or
+                            completed['at_ns'] - timestamps[key] < wait * 1_000_000):
+                        errors.append(f'unpermitted or early uncertain fallback: {key}')
+                else:
+                    errors.append(f'unknown native completion reason: {key}')
         elif event == 'next_line_timeout':
             timeouts.add(key)
 
@@ -275,62 +295,41 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         # credited as an automatic advance (except after the menu handoff).
         for offset in range(1, len(utterance_order)):
             previous = utterance_order[offset - 1]
-            if (phase != 'hook' and previous not in sent and
+            if (phase not in ('hook', 'stress') and previous not in sent and
                     not scenario[start + offset - 1].get('manual_handoff')):
                 errors.append(f'next dialogue lacks preceding AutoAdv SendInput: {previous}')
 
     if phase == 'stress':
-        # The separate challenge scenario prevents a truncated negative case from
-        # looking like successful rejection. Real UI pause and manual input
-        # are not simulated by the verifier.
+        # The real challenge run is observational: a fixed 'hold' expected for
+        # nonlexical speech/background is not a valid universal oracle.
         if start != 0 or len(utterance_order) != len(scenario):
-            errors.append('incomplete ASR stress sequence; observe the entire challenge branch')
-        held = []
+            errors.append('incomplete ASR stress sequence; observe entire challenge branch')
         for index, key in enumerate(utterance_order):
             if start is None or start + index >= len(scenario):
                 break
-            line = scenario[start + index]
-            if not line.get('expected_hold'):
+            case = scenario[start + index]
+            if case.get('assessment') is None:
                 continue
-            held.append(key)
-            if utterances[key].get('mode') != 'native':
-                errors.append(f'ASR stress must exercise native route rather than bypass: {key}')
-            if key in sent or key in attempts:
-                errors.append(f'automatic input attempted for ambiguous nonlexical/background voice: {key}')
-            # Negative cases must genuinely exercise capture and inference while
-            # AUTO is armed, before the user deliberately stops and intervenes.
-            next_at = timestamps[utterance_order[index + 1]] if index + 1 < len(utterance_order) else 2**63
-            window = [r for r in records if r.get('session') == key[0] and
-                      timestamps[key] < r.get('at_ns', -1) < next_at]
-            armed = [r for r in window if r.get('event') == 'permit_requested']
-            audio = [r for r in window if r.get('event') == 'native_pcm' and _key(r) == key]
-            inferred = [r for r in window if r.get('event') == 'asr_inference' and _key(r) == key]
-            paused = [r for r in window if r.get('event') == 'pause_requested']
-            if not armed or not audio or not inferred or not paused or not (
-                    armed[0]['at_ns'] < inferred[-1]['at_ns'] < paused[-1]['at_ns']):
-                errors.append(f'ASR stress lacks armed real PCM/inference followed by manual pause: {key}')
-            if key in native and line['id'] in (
-                    'background_only_mismatch', 'background_only_same_text',
-                    'nonlexical_cry', 'nonlexical_scream', 'cry_with_background_voice'):
-                errors.append(f'ASR falsely attributed unverified voice as completed foreground: {key}')
-        if len(held) != sum(bool(item.get('expected_hold')) for item in scenario):
-            errors.append('missing nonlexical or competing-voice challenge')
+            if (utterances[key].get('advance_mode') != 'audio' or utterances[key].get('use_tts')):
+                errors.append(f'stress must exercise non-TTS audio judgement: {key}')
+            # Expect source observations, not a manufactured yes/no 'should hold'.
+            # Missing PCM/inference is a coverage gap, not evidence of no voice.
         controls = [key for i, key in enumerate(utterance_order)
                     if start is not None and start + i < len(scenario)
                     and scenario[start + i]['id'] == 'clean_control']
         if not controls or controls[0] not in links or controls[0] not in native:
-            errors.append('positive foreground ASR control did not advance before stress challenges')
+            errors.append('positive foreground ASR control did not advance')
 
-    linked_modes = Counter(utterances[k].get('mode') for k in links)
+    linked_modes = Counter((utterances[k].get('advance_mode'), utterances[k].get('use_tts')) for k in links)
     confirmed_native = [k for k in links if k in native and k in pcm]
-    confirmed_tts = [k for k in links if k in tts and utterances[k].get('mode') in ('tts', 'auto')]
+    confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]
     bgm_native = bool(start is not None and any(
         scenario[start + i].get('bgm') and k in confirmed_native
         for i, k in enumerate(utterance_order)))
     repeats = [k for k in links if utterances[k].get('body_hash') == text_digest('ヒューズが飛んだ。')]
     if not utterance_order:
         errors.append('no live dialogue observed')
-    if phase in ('reading', 'mixed') and linked_modes['reading'] < (1 if phase == 'mixed' else 2):
+    if phase in ('reading', 'mixed') and linked_modes[('text', False)] < (1 if phase == 'mixed' else 2):
         errors.append('insufficient reading-time advances confirmed by next HOOK')
     if phase in ('native', 'mixed') and (len(confirmed_native) < (3 if phase == 'mixed' else 2) or not bgm_native):
         errors.append('insufficient ASR-confirmed native advances including BGM case')

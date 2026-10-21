@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from autoadv.conversation import Controller, Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import Profile, HookSelection, AudioMode
+from autoadv.model import Profile, HookSelection, AdvanceMode
 from autoadv.storage import Catalog, save, load
 from autoadv.native_audio import NativeAudio
 from autoadv.audio_buffer import PCMChunk
@@ -24,8 +24,8 @@ class MultiHookProductContract(unittest.TestCase):
         self.p = Profile('p', 'test', hooks=[HookSelection('HT', 1, 2, 'text'),
                                               HookSelection('HS', 3, 4, 'speaker')],
                          speaker_links={'HT|1|2': 'HS|3|4'},
-                         default_mode=AudioMode.TTS, default_voice='default',
-                         speaker_modes={'京': AudioMode.READING})
+                         default_tts=True, default_voice='default',
+                         speaker_tts={'京': False})
         self.c = Controller(lambda *_: self.sent.append(1), lambda _: True)
         self.c.begin(self.p, Target(31, 90), 'host', 2)
 
@@ -33,7 +33,7 @@ class MultiHookProductContract(unittest.TestCase):
         token = self.c.observe_group([msg(TEXT, 1, '「はい」'), msg(SPEAKER, 2, '京')])
         self.assertEqual(token, Token(self.c.session, 1))
         self.assertEqual(self.c.utterance.speaker, '京')
-        self.assertEqual(self.c.utterance.mode, AudioMode.READING)
+        self.assertEqual(self.c.utterance.use_tts, False)
         self.assertEqual(self.c.utterance.raw, '「はい」')
         self.assertEqual(self.c.highest_sequence, 2)
 
@@ -60,7 +60,8 @@ class MultiHookProductContract(unittest.TestCase):
     def test_no_next_output_after_input_returns_control_without_retry(self):
         self.c.permit(True)
         ticket = self.c.observe_group([msg(TEXT, 1, '台詞')])
-        self.c.mark_complete(ticket)
+        self.c.presentation_event(ticket, 'text_elapsed')
+        self.c.presentation_event(ticket, 'tts_finished')
         self.assertTrue(self.c.try_advance())
         self.assertFalse(self.c.expire_next_line(Token(self.c.session, 2)))
         self.assertTrue(self.c.expire_next_line(ticket))
@@ -76,7 +77,7 @@ class MultiHookProductContract(unittest.TestCase):
     def test_timeout_of_old_ticket_cannot_pause_new_line(self):
         self.c.permit(True)
         first = self.c.observe_group([msg(TEXT, 1, '一')])
-        self.c.mark_complete(first)
+        self.c.presentation_event(first, 'text_elapsed')
         self.c.try_advance()
         next_token = self.c.observe_group([msg(TEXT, 2, '二')])
         self.assertNotEqual(first, next_token)

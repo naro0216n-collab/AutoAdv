@@ -8,7 +8,7 @@ import json
 import copy
 import unittest
 
-from autoadv.model import (Profile, AudioMode, StructureRule, ReplacementRule,
+from autoadv.model import (Profile, AdvanceMode, StructureRule, ReplacementRule,
                            OCRSettings, interpret)
 from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
@@ -37,14 +37,14 @@ class SalvagedTextTests(unittest.TestCase):
                           ReplacementRule('C+', 'しー', regex=True, target='both')]
         u = interpret('京「京(みやこ)と東京とABCCC」', p, session=1, line=1, source='s', sequence=1)
         self.assertEqual(u.reading, 'みやこと東京とえーBしー')
-        self.assertEqual(u.match_text, '京(みやこ)と東京とAびーしー')
+        self.assertEqual(u.match_text, '京と東京とAびーしー')
 
     def test_explicit_speaker_tts_wins_over_default_native(self):
-        p = Profile('p', 'P', default_mode=AudioMode.NATIVE)
-        p.speaker_modes['大和'] = AudioMode.TTS
+        p = Profile('p', 'P', default_tts=False)
+        p.speaker_tts['大和'] = True
         p.speaker_voices['大和'] = 'voice-01'
         u = interpret('大和「こんにちは」', p, session=2, line=5, source='X', sequence=6)
-        self.assertEqual((u.mode, u.voice), (AudioMode.TTS, 'voice-01'))
+        self.assertEqual((u.use_tts, u.voice), (True, 'voice-01'))
 
     def test_invalid_regexes_fail_before_persisting(self):
         for constructor in (lambda: StructureRule(r'(?P<speaker>.*)'),
@@ -123,7 +123,7 @@ class AcquisitionAndInputTests(unittest.TestCase):
         a = c.observe_ocr(sequence=1, text='同じ台詞', pid=11, session=session)
         self.assertIsNotNone(a)
         c.permit(True)
-        c.mark_complete(a)
+        c.presentation_event(a, 'text_elapsed')
         self.assertTrue(c.try_advance())
         self.assertIsNone(c.observe_ocr(sequence=2, text='同じ台詞', pid=11, session=session))
         self.assertIsNone(c.observe_ocr(sequence=3, text='', pid=11, session=session))

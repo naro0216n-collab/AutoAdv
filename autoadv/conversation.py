@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
-from .model import Profile, Utterance, interpret
+from .model import AdvanceMode, Profile, Utterance, interpret
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,11 @@ class Controller:
         self.utterance: Utterance | None = None
         self.authorized = False
         self.completed = False
+        self.presentation_reason: str | None = None
+        self.text_elapsed = False
+        self.tts_finished = False
+        self.native_playing = False
+        self.fallback_elapsed = False
         self.sent = False
         self.reason = 'not_monitoring'
         self.pause_reason: str | None = None
@@ -79,6 +84,8 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source = None
+        self.presentation_reason = None
+        self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.pause_reason = None
         self.reason = reason
 
@@ -228,17 +235,71 @@ class Controller:
                                    line=self.line_no, source=origin,
                                    sequence=sequence, side_speaker=side_speaker)
         self.completed = False
+        self.presentation_reason = None
+        self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.sent = False
         self.awaiting_next = False
         self.reason = self.pause_reason or 'presenting'
         return Token(self.session, self.line_no)
 
-    def mark_complete(self, token: Token, *, success: bool = True) -> bool:
-        if token != self.token or not success:
-            if token == self.token:
-                self.pause('presentation_failed')
+    def presentation_event(self, token: Token, event: str, *,
+                           success: bool = True) -> bool:
+        """All presentation evidence is owned by this Controller, never by GUI callbacks.
+
+        A completion event returns True only on the first transition to ready.
+        Events from another line/session or after input are inert.
+        """
+        if token != self.token or self.sent or self.completed or not self.utterance:
             return False
+        u = self.utterance
+        if event == 'tts_finished':
+            if not u.use_tts:
+                return False
+            if not success:
+                self.pause('tts_playback_failed')
+                return False
+            self.tts_finished = True
+            if u.advance_mode == AdvanceMode.AUDIO or self.text_elapsed:
+                return self._presentation_done('tts' if u.advance_mode == AdvanceMode.AUDIO else 'tts_and_text')
+            return False
+        if event == 'text_elapsed':
+            if u.advance_mode != AdvanceMode.TEXT:
+                return False
+            self.text_elapsed = True
+            if not u.use_tts:
+                return self._presentation_done('text')
+            if self.tts_finished:
+                return self._presentation_done('tts_and_text')
+            return False
+        if event == 'native_started':
+            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+                return False
+            self.native_playing = True
+            return False
+        if event == 'native_quiet':
+            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+                return False
+            self.native_playing = False
+            if self.fallback_elapsed and u.uncertain_text_fallback:
+                return self._presentation_done('uncertain_text_fallback')
+            return False
+        if event == 'native_finished':
+            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+                return False
+            return self._presentation_done('native')
+        if event == 'fallback_elapsed':
+            if (u.advance_mode != AdvanceMode.AUDIO or u.use_tts
+                    or not u.uncertain_text_fallback):
+                return False
+            self.fallback_elapsed = True
+            if not self.native_playing:
+                return self._presentation_done('uncertain_text_fallback')
+            return False
+        raise ValueError(f'unknown presentation event: {event}')
+
+    def _presentation_done(self, reason: str) -> bool:
         self.completed = True
+        self.presentation_reason = reason
         self.reason = 'ready' if self.authorized else (self.pause_reason or 'awaiting_permission')
         return True
 

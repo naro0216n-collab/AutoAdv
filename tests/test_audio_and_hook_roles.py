@@ -5,7 +5,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import AudioMode, HookSelection, Profile
+from autoadv.model import HookSelection, Profile
 from autoadv.voice import synthesize
 
 

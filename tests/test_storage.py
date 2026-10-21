@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from autoadv.model import AudioMode, HookSelection, ReplacementRule
+from autoadv.model import AdvanceMode, HookSelection, ReplacementRule
 from autoadv.storage import Catalog, load, save
 
 
@@ -15,7 +15,7 @@ class SettingsContract(unittest.TestCase):
             b = c.create_game('ゲーム2', 'C:/games/b.exe')
             p = c.add_profile(a.id, 'Route B')
             p.hooks = [HookSelection('HX', 1, 2, 'text'), HookSelection('HY', 5, 6, 'speaker')]
-            p.speaker_modes = {'大和': AudioMode.TTS}
+            p.speaker_tts = {'大和': True}
             p.speaker_voices = {'大和': 'voice-m'}
             p.replacements = [ReplacementRule('東京', 'とうきょう')]
             a.default_profile = p.id
@@ -24,7 +24,7 @@ class SettingsContract(unittest.TestCase):
             self.assertEqual(set(restored.games), {a.id, b.id})
             q = restored.games[a.id].profiles[p.id]
             self.assertEqual(q.hooks, p.hooks)
-            self.assertEqual(q.speaker_modes['大和'], AudioMode.TTS)
+            self.assertEqual(q.speaker_tts['大和'], True)
             self.assertEqual(q.speaker_voices['大和'], 'voice-m')
             self.assertEqual(q.replacements, p.replacements)
             self.assertNotIn('pid', path.read_text(encoding='utf-8'))

@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from autoadv.conversation import Controller, Target, Token
-from autoadv.model import Profile, HookSelection, AudioMode, interpret, ReplacementRule
+from autoadv.model import Profile, HookSelection, AdvanceMode, interpret, ReplacementRule
 
 
 SOURCE = SimpleNamespace(hook_code='H/A', context=3, context2=4, identity='H/A|3|4')
@@ -9,7 +9,7 @@ SOURCE = SimpleNamespace(hook_code='H/A', context=3, context2=4, identity='H/A|3
 
 def profile():
     return Profile('profile-1', 'Default', hooks=[HookSelection('H/A', 3, 4)],
-                   default_mode=AudioMode.READING, reading_ms=10)
+                   advance_mode=AdvanceMode.TEXT, reading_ms=10)
 
 
 class DialogueContractTests(unittest.TestCase):
@@ -30,28 +30,28 @@ class DialogueContractTests(unittest.TestCase):
         self.assertFalse(self.controller.try_advance())
         self.controller.permit(True)
         self.assertFalse(self.controller.try_advance())
-        self.assertTrue(self.controller.mark_complete(ticket))
+        self.assertTrue(self.controller.presentation_event(ticket, 'text_elapsed'))
         self.assertTrue(self.controller.try_advance())
         self.assertFalse(self.controller.try_advance())
         self.assertEqual(len(self.sent), 1)
 
     def test_can_enable_after_completion(self):
         token = self.output('同じ台詞', 1)
-        self.controller.mark_complete(token)
+        self.controller.presentation_event(token, 'text_elapsed')
         self.controller.permit(True)
         self.assertTrue(self.controller.try_advance())
 
     def test_same_raw_line_requires_explicit_profile_rule(self):
         self.controller.permit(True)
         first = self.output('同じ台詞', 1)
-        self.controller.mark_complete(first)
+        self.controller.presentation_event(first, 'text_elapsed')
         self.controller.try_advance()
         self.assertIsNone(self.output('同じ台詞', 2))
         self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
         self.assertFalse(self.controller.authorized)
         second = self.output('違う台詞', 3)
         self.assertNotEqual(second, first)
-        self.controller.mark_complete(second)
+        self.controller.presentation_event(second, 'text_elapsed')
         self.controller.permit(True)
         self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
@@ -64,7 +64,7 @@ class DialogueContractTests(unittest.TestCase):
         for seq in (1, 2):
             token = self.output('同じ台詞', seq)
             self.assertIsNotNone(token)
-            self.controller.mark_complete(token)
+            self.controller.presentation_event(token, 'text_elapsed')
             self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
 
@@ -72,17 +72,17 @@ class DialogueContractTests(unittest.TestCase):
         a = self.output('これ', 1)
         b = self.output('これは全文', 2)
         self.assertNotEqual(a, b)
-        self.assertFalse(self.controller.mark_complete(a))
+        self.assertFalse(self.controller.presentation_event(a, 'text_elapsed'))
         self.controller.permit(True)
         self.assertFalse(self.controller.try_advance())
-        self.controller.mark_complete(b)
+        self.controller.presentation_event(b, 'text_elapsed')
         self.assertTrue(self.controller.try_advance())
 
     def test_session_switch_invalidates_old_audio_and_permission(self):
         self.controller.permit(True)
         old = self.output('古い', 1)
         self.controller.begin(profile(), Target(102, 203), 'host-b', 1)
-        self.assertFalse(self.controller.mark_complete(old))
+        self.assertFalse(self.controller.presentation_event(old, 'text_elapsed'))
         self.assertFalse(self.controller.authorized)
         self.assertFalse(self.controller.try_advance())
 
@@ -90,7 +90,7 @@ class DialogueContractTests(unittest.TestCase):
         token = self.output('まだ読む', 1)
         self.controller.permit(True)
         self.controller.pause('manual_intervention')
-        self.controller.mark_complete(token)
+        self.controller.presentation_event(token, 'text_elapsed')
         self.assertFalse(self.controller.try_advance())
         self.assertIsNotNone(self.output('次', 2))
         self.assertIsNotNone(self.controller.profile)
@@ -111,7 +111,7 @@ class DialogueContractTests(unittest.TestCase):
     def test_foreground_check_and_failure_do_not_retry(self):
         self.controller.permit(True)
         token = self.output('台詞', 1)
-        self.controller.mark_complete(token)
+        self.controller.presentation_event(token, 'text_elapsed')
         self.foreground = False
         self.assertFalse(self.controller.try_advance())
         self.foreground = True
@@ -122,7 +122,7 @@ class DialogueContractTests(unittest.TestCase):
     def test_failed_input_is_not_retried(self):
         self.controller.input_send = lambda *_: (_ for _ in ()).throw(OSError('input error'))
         self.controller.permit(True)
-        self.controller.mark_complete(self.output('台詞', 1))
+        self.controller.presentation_event(self.output('台詞', 1), 'text_elapsed')
         self.assertFalse(self.controller.try_advance())
         self.controller.permit(True)
         self.assertFalse(self.controller.try_advance())
@@ -130,13 +130,13 @@ class DialogueContractTests(unittest.TestCase):
 
     def test_text_transform_is_single_utterance(self):
         p = profile()
-        p.default_mode = AudioMode.TTS
+        p.default_tts = True
         p.default_voice = 'narrator'
         p.replacements = [ReplacementRule('東京', 'とうきょう')]
-        p.speaker_modes = {'京': AudioMode.READING}
+        p.speaker_tts = {'京': False}
         result = interpret('京「東京へ行く(いく)」', p, session=2, line=3, source='x', sequence=6)
         self.assertEqual(result.reading, 'とうきょうへ行く(いく)')
-        self.assertEqual(result.mode, AudioMode.READING)
+        self.assertEqual(result.use_tts, False)
         self.assertEqual(result.speaker, '京')
 
     def test_unique_hook_role(self):
@@ -164,7 +164,7 @@ class HookBoundaryContractTests(unittest.TestCase):
 
     def sent_line(self, text):
         token = self.out(text, 1)
-        self.assertTrue(self.controller.mark_complete(token))
+        self.assertTrue(self.controller.presentation_event(token, 'text_elapsed'))
         self.assertTrue(self.controller.try_advance())
         return token
 
@@ -176,7 +176,7 @@ class HookBoundaryContractTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertFalse(self.controller.completed)
         self.assertTrue(self.controller.authorized)
-        self.assertTrue(self.controller.mark_complete(after))
+        self.assertTrue(self.controller.presentation_event(after, 'text_elapsed'))
         self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
 
@@ -195,12 +195,12 @@ class HookBoundaryContractTests(unittest.TestCase):
         self.controller.permit(True)
         first = self.controller.observe(generation='host-b', connection=2, sequence=1,
                                         source=SOURCE, text='同じ', pid=101)
-        self.assertTrue(self.controller.mark_complete(first))
+        self.assertTrue(self.controller.presentation_event(first, 'text_elapsed'))
         self.assertTrue(self.controller.try_advance())
         second = self.controller.observe(generation='host-b', connection=2, sequence=2,
                                          source=SOURCE, text='同じ', pid=101)
         self.assertNotEqual(first, second)
-        self.assertTrue(self.controller.mark_complete(second))
+        self.assertTrue(self.controller.presentation_event(second, 'text_elapsed'))
         self.assertTrue(self.controller.try_advance())
 
     def test_source_gap_does_not_come_from_unselected_hook(self):
@@ -216,6 +216,6 @@ class HookBoundaryContractTests(unittest.TestCase):
         first = self.sent_line('同じ')
         self.out('', 2)
         self.controller.begin(profile(), Target(102, 203), 'host-b', 2)
-        self.assertFalse(self.controller.mark_complete(first))
+        self.assertFalse(self.controller.presentation_event(first, 'text_elapsed'))
         self.assertFalse(self.controller.authorized)
         self.assertIsNone(self.out('同じ', 3))

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from copy import deepcopy
 import json
-from .model import (AudioMode, Game, HookSelection, OCRSettings, Profile,
+from .model import (Game, HookSelection, OCRSettings, Profile,
                     ReplacementRule, StructureRule, DEFAULT_STRUCTURE_RULES)
 from .storage import Catalog
 
@@ -59,27 +59,21 @@ def inspect_legacy(path: Path) -> tuple[LegacyGame, ...]:
                 profile.default_voice = text['default_voice']
             for speaker, route in text.get('speaker_routes', {}).items():
                 policy = route.get('policy')
-                audio = {'SELECTED': AudioMode.TTS, 'DEFAULT': AudioMode.TTS,
-                         'NATIVE': AudioMode.NATIVE, 'AUTO': AudioMode.AUTO,
-                         'SILENT': AudioMode.READING}.get(policy)
-                if audio is None:
-                    unmapped.append(f'{pid}: speaker {speaker} route {policy}')
-                    continue
-                profile.speaker_modes[speaker] = audio
+                if policy in ('SELECTED', 'DEFAULT'):
+                    profile.speaker_tts[speaker] = True
+                elif policy in ('NATIVE', 'SILENT'):
+                    profile.speaker_tts[speaker] = False
+                else:
+                    unmapped.append(f'{pid}: speaker {speaker} route {policy} requires review')
                 if route.get('voice_id'):
                     profile.speaker_voices[speaker] = route['voice_id']
             default_policy = text.get('unknown_route')
-            if default_policy in ('NATIVE', 'AUTO', 'SILENT'):
-                profile.default_mode = {'NATIVE': AudioMode.NATIVE,
-                                        'AUTO': AudioMode.AUTO,
-                                        'SILENT': AudioMode.READING}[default_policy]
-            elif default_policy in ('SELECTED', 'DEFAULT'):
-                profile.default_mode = AudioMode.TTS
+            if default_policy in ('SELECTED', 'DEFAULT'):
+                profile.default_tts = True
                 profile.default_voice = text.get('unknown_voice') or profile.default_voice
-            elif default_policy == 'UNASSIGNED':
-                profile.default_mode = AudioMode.AUTO
-            elif default_policy is not None:
-                unmapped.append(f'{pid}: unknown_route {default_policy}')
+            elif default_policy not in (None, 'NATIVE', 'SILENT'):
+                unmapped.append(f'{pid}: unknown_route {default_policy} requires review')
+            unmapped.append(f'{pid}: old audio policy cannot determine the new 2-mode advance setting')
             acquisition = row.get('acquisition') or {}
             if not isinstance(acquisition, dict):
                 raise ValueError('Invalid previous acquisition configuration')

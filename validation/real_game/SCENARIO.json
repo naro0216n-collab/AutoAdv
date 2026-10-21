@@ -4,136 +4,162 @@
     {
       "id": "notice",
       "text": "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "intro",
       "text": "通常のゲームと同じように、台詞表示・音声再生・選択肢・送り入力が動作します。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "instruction",
       "text": "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "protagonist-1",
       "text": "これは無音声の台詞です。",
-      "suggested_mode": "tts"
+      "advance_mode": "audio",
+      "use_tts": true
     },
     {
       "id": "protagonist-2",
       "text": "この文章はIrodori TTSの確認に使用します。",
-      "suggested_mode": "tts"
+      "advance_mode": "audio",
+      "use_tts": true
     },
     {
       "id": "normal-001",
       "text": "えっ嘘でしょ。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-017",
       "text": "あっベルが鳴ってる。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-022",
       "text": "猫はにゃーにゃーと鳴く。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "bgm-notice",
       "text": "ここからはBGMが流れる状態で、ゲーム内の原音を再生します。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "normal-026-bgm",
       "text": "私はいつもミネラルウォーターを持ち歩いています。",
-      "suggested_mode": "native",
-      "bgm": true
+      "bgm": true,
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-028-bgm",
       "text": "彼女はスタッフをまとめていけると思いますか？",
-      "suggested_mode": "native",
-      "bgm": true
+      "bgm": true,
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "repeat-notice",
       "text": "同一の表示台詞を、異なる音声収録条件で連続して再生します。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "normal-001-repeat",
       "text": "えっ嘘でしょ。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "whisper-001",
       "text": "えっ嘘でしょ。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "whisper-017",
       "text": "あっベルが鳴ってる。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "whisper-022",
       "text": "猫はにゃーにゃーと鳴く。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "same-notice",
       "text": "同じ取得本文が連続する区間です。二重送りと台詞取りこぼしに注意してください。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "normal-020-first",
       "text": "ヒューズが飛んだ。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-020-second",
       "text": "ヒューズが飛んだ。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "choice-notice",
       "text": "次の選択肢は、ユーザー操作によって進めてください。",
-      "suggested_mode": "reading",
-      "manual_handoff": true
+      "manual_handoff": true,
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "normal-010",
       "text": "彼のあだ名は言い得て妙だよね。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-012",
       "text": "ゼロという概念は、ヒンドゥー文化に由来している。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-021",
       "text": "私はポピュラー音楽を聞きたい。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-030",
       "text": "あなたは流感になりかけているか、もっと重い病気かもしれません。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "normal-035",
       "text": "彼女は息子に家で行儀よくするように言った。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "ending",
       "text": "検証用シナリオを終了します。",
-      "suggested_mode": "reading",
-      "ending": true
+      "ending": true,
+      "advance_mode": "text",
+      "use_tts": false
     }
   ]
 }

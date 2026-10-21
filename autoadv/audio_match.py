@@ -1,8 +1,4 @@
-"""Incremental target-text/ASR matching; audio *evidence*, never input rights.
-
-Repetitions, backward progress and unstable recognizer tails are explicit
-blockers. Hypotheses for BGM/SE must not be converted into verified speech.
-"""
+"""ASR lexical cues are imperfect evidence, never game-input authority."""
 from __future__ import annotations
 from dataclasses import dataclass
 import re
@@ -25,16 +21,11 @@ class ASRProgress:
 
 
 class TargetMatcher:
-    """Require monotonic prefix coverage, not arbitrary subsequence matching.
-
-    A recognizer is allowed to emit partial text, but reversing the recognized
-    prefix invalidates the current utterance rather than triggering a fast end.
-    """
+    """Track recoverable partial corrections and stable high-coverage hypotheses."""
     def __init__(self, target: str):
         self.target = phonetic_key(target)
         self._last = ''
         self._previous = ''
-        self._monotonic = True
         self._observations = 0
 
     def observe(self, hypothesis: str) -> ASRProgress:
@@ -47,14 +38,16 @@ class TargetMatcher:
             if a != b:
                 break
             shared += 1
-        if self._last and (len(key) < len(self._last) or not key.startswith(self._last[:max(1, len(self._last) - 1)])):
-            self._monotonic = False
-        stable_tail = bool(self._previous and key == self._previous and key == self.target)
+        monotonic = not self._last or key.startswith(self._last[:max(1, len(self._last) - 1)])
+        # A correction is not a permanent veto; require the new hypothesis to
+        # stabilize before confirming a target and avoid relying on one output.
+        stable_tail = bool(self._previous and key == self._previous and
+                           shared >= max(2, int(len(self.target) * .90)))
         # An extremely short hypothesis never confirms onset by acoustic matching.
         onset = (shared / max(1, min(len(self.target), len(key)))) if shared >= 2 else 0.0
         result = ASRProgress(shared / max(1, len(self.target)), onset,
-                             1.0 if stable_tail and self._monotonic else 0.0,
-                             self._monotonic, shared, key)
+                             1.0 if stable_tail else 0.0,
+                             monotonic, shared, key)
         self._previous, self._last = key, key
         return result
 
@@ -77,6 +70,10 @@ class VoiceActivity:
         self.vad = webrtcvad.Vad(mode)
         self.tail_ms = 0
         self._pending = bytearray()
+
+    def reset(self) -> None:
+        self.tail_ms = 0
+        self._pending.clear()
 
     def observe_float32_stereo(self, frames: bytes) -> VADDecision:
         import numpy as np  # optional module

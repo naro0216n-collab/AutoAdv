@@ -6,11 +6,9 @@ import re
 import unicodedata
 
 
-class AudioMode(str, Enum):
-    NATIVE = 'native'
-    TTS = 'tts'
-    AUTO = 'auto'
-    READING = 'reading'
+class AdvanceMode(str, Enum):
+    TEXT = 'text'
+    AUDIO = 'audio'
 
 
 @dataclass(frozen=True)
@@ -96,8 +94,9 @@ class OCRSettings:
 
 # Only these values can be inherited. The persisted profile owns the choice;
 # the effective session profile is resolved from the catalog when monitoring begins.
-COMMON_FIELDS = ('default_mode', 'default_voice', 'reading_ms', 'native_helper',
-                 'asr_model', 'asr_tokens', 'native_wait_ms', 'input_key',
+COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
+                 'default_voice', 'reading_ms', 'per_character_wait_ms',
+                 'native_helper', 'asr_model', 'asr_tokens', 'input_key',
                  'next_line_timeout_ms')
 
 
@@ -108,14 +107,17 @@ class Profile:
     hooks: list[HookSelection] = field(default_factory=list)
     inserted_hooks: list[str] = field(default_factory=list)
     speaker_links: dict[str, str] = field(default_factory=dict)
-    default_mode: AudioMode = AudioMode.READING
+    advance_mode: AdvanceMode = AdvanceMode.TEXT
+    uncertain_text_fallback: bool = False
+    default_tts: bool = False
     default_voice: str = ''
-    speaker_modes: dict[str, AudioMode] = field(default_factory=dict)
+    speaker_tts: dict[str, bool] = field(default_factory=dict)
     speaker_voices: dict[str, str] = field(default_factory=dict)
     structure_rules: list[StructureRule] = field(default_factory=lambda: list(DEFAULT_STRUCTURE_RULES))
     replacements: list[ReplacementRule] = field(default_factory=list)
     name_readings: dict[str, str] = field(default_factory=dict)
-    reading_ms: int = 1200
+    reading_ms: int = 700
+    per_character_wait_ms: int = 160
     hook_flush_ms: int = 500
     hook_codepage: int = 932
     hook_max_buffer: int = 3000
@@ -129,11 +131,10 @@ class Profile:
     asr_model: str = ''
     asr_tokens: str = ''
     native_vad_only: bool = False
-    native_wait_ms: int = 1200
     inherit_common: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
-        if not self.id or not self.name or self.reading_ms < 0:
+        if not self.id or not self.name or type(self.reading_ms) is not int or self.reading_ms <= 0 or type(self.per_character_wait_ms) is not int or self.per_character_wait_ms <= 0:
             raise ValueError('invalid profile')
         if (not 0 <= self.hook_flush_ms <= 10000 or not 1 <= self.hook_codepage <= 65535
                 or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
@@ -155,8 +156,10 @@ class Profile:
             raise ValueError('invalid name reading')
         if type(self.native_vad_only) is not bool:
             raise ValueError('invalid native voice evidence setting')
-        if self.native_wait_ms < 0:
-            raise ValueError('invalid native wait')
+        if (type(self.uncertain_text_fallback) is not bool or type(self.default_tts) is not bool
+                or any(type(v) is not bool or not k for k, v in self.speaker_tts.items())):
+            raise ValueError('invalid TTS and fallback settings')
+        AdvanceMode(self.advance_mode)
         if len(self.inherit_common) != len(set(self.inherit_common)) or any(
                 name not in COMMON_FIELDS for name in self.inherit_common):
             raise ValueError('invalid common setting inheritance')
@@ -189,12 +192,30 @@ class Utterance:
     text: str
     reading: str
     match_text: str
-    mode: AudioMode
+    use_tts: bool
     voice: str
+    advance_mode: AdvanceMode
+    uncertain_text_fallback: bool
+    character_count: int
+    text_wait_ms: int
 
 
 _RUBY = re.compile(r'([\u3400-\u9fff]+)\(([\u3040-\u30ffー]{1,30})\)')
 _KANJI = r'[\u3400-\u9fff]'
+
+
+def count_reading_characters(body: str) -> int:
+    """Count display glyphs only, never expanded reading or duplicate ruby."""
+    without_ruby = _RUBY.sub(lambda m: m.group(1), body)
+    def countable(index: int, character: str) -> bool:
+        if character == 'ー':
+            # A long vowel mark by itself is punctuation-like. Within kana it
+            # is a pronounced character even though Unicode categorizes it Lm.
+            return index > 0 and ('\u3040' <= without_ruby[index-1] <= '\u30ff'
+                                  or without_ruby[index-1] == 'ー')
+        return unicodedata.category(character)[0] in 'LN'
+
+    return sum(countable(i, c) for i, c in enumerate(without_ruby))
 
 
 def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,
@@ -214,7 +235,7 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
     for word, replacement in sorted(profile.name_readings.items(), key=lambda item: -len(item[0])):
         reading = re.sub(r'(?<!' + _KANJI + ')' + re.escape(word) + r'(?!' + _KANJI + ')',
                          lambda _: replacement, reading)
-    match_text = body
+    match_text = _RUBY.sub(lambda m: m.group(1), body)
     for rule in profile.replacements:
         if not rule.enabled:
             continue
@@ -225,7 +246,10 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
             reading = replace(reading)
         if rule.target in ('asr', 'both'):
             match_text = replace(match_text)
-    mode = AudioMode(profile.speaker_modes.get(speaker, profile.default_mode))
+    use_tts = profile.speaker_tts.get(speaker, profile.default_tts)
     voice = profile.speaker_voices.get(speaker, profile.default_voice)
+    count = count_reading_characters(body)
     return Utterance(session, line, source, sequence, raw, speaker, body,
-                     reading, match_text, mode, voice)
+                     reading, match_text, use_tts, voice,
+                     AdvanceMode(profile.advance_mode), profile.uncertain_text_fallback,
+                     count, max(profile.reading_ms, count * profile.per_character_wait_ms))

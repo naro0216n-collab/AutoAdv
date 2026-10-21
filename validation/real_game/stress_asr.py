@@ -89,8 +89,8 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
             hypothesis = recognizer.recognize((chunk,))
             duration = (time.perf_counter_ns() - started) / 1e6
             transcript, target = phonetic_key(hypothesis), phonetic_key(case['display'])
-            # Match against the *displayed* utterance. When foreground=null even
-            # an exact match is a false attribution: the voice belongs to background.
+            # A lexical match is only a lexical observation. A manually labelled
+            # 'background' cannot independently prove origin for same text.
             matching = bool(target) and transcript == target
             no_foreground = case['attribution'] == 'not_foreground'
             lexical = case['kind'] == 'lexical'
@@ -99,6 +99,7 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
                 'round': repetition + 1, 'audio_ms': round(chunk.duration_ms, 3),
                 'decode_ms': round(duration, 3), 'rtf': round(duration / chunk.duration_ms, 4),
                 'transcript_hash': hashlib.sha256(transcript.encode('utf-8')).hexdigest(),
+                'transcript': hypothesis,  # real recognizer output, not inferred from its hash
                 'recognized_characters': len(transcript), 'matches_display_text': matching,
                 'cer': round(_edit_distance(target, transcript) / max(1, len(target)), 4)
                         if lexical else None,

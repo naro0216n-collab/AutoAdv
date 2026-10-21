@@ -14,7 +14,7 @@ from .hook_host import HookHost
 from .luna_runtime import runtime_dir, adopted_runtime, RELEASE
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import AudioMode, HookSelection, Profile, StructureRule, ReplacementRule, COMMON_FIELDS
+from .model import AdvanceMode, HookSelection, Profile, StructureRule, ReplacementRule, COMMON_FIELDS
 from .storage import Catalog, load, save
 from .voice import VoiceJobs
 from .native_audio import NativeAudio
@@ -89,7 +89,6 @@ def run_gui() -> int:
             self.manual_monitor: WindowsManualMonitor | None = None
             self.native_token: Token | None = None
             self.native_started = False
-            self.auto_tts_started = False
             self._known_game_pid = None
             self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
             self._output_group: list[HookEvent] = []
@@ -120,17 +119,22 @@ def run_gui() -> int:
             self.btn_server.clicked.connect(self.start_server)
             self.common_controls = {}
             common_titles = {
-                'default_mode': 'Default audio policy', 'default_voice': 'Default Voice ID',
-                'reading_ms': 'Reading time (ms)', 'native_helper': 'Process Loopback helper',
-                'asr_model': 'Japanese ASR model', 'asr_tokens': 'ASR tokens',
-                'native_wait_ms': 'Native fallback wait (ms)', 'input_key': 'Advance key code',
+                'advance_mode': '自動進行方式', 'uncertain_text_fallback': '音声判定が不確かなとき文字数時間で進む',
+                'default_tts': '未知話者にもIrodori TTSを使用', 'default_voice': 'Default Voice ID',
+                'reading_ms': '最低表示時間 (ms)', 'per_character_wait_ms': '1文字あたり待機時間 (ms)',
+                'native_helper': 'Process Loopback helper',
+                'asr_model': 'Japanese ASR model', 'asr_tokens': 'ASR tokens', 'input_key': 'Advance key code',
                 'next_line_timeout_ms': 'Next line wait (ms)'}
             for key in COMMON_FIELDS:
                 value = getattr(self.catalog.common, key)
-                if key == 'default_mode':
+                if key == 'advance_mode':
                     control = QComboBox()
-                    control.addItems([mode.value for mode in AudioMode])
-                    control.setCurrentText(value.value)
+                    control.addItem('文字のみ判断', AdvanceMode.TEXT.value)
+                    control.addItem('音声判断', AdvanceMode.AUDIO.value)
+                    control.setCurrentIndex(control.findData(value.value))
+                elif isinstance(value, bool):
+                    control = QCheckBox('有効')
+                    control.setChecked(value)
                 elif isinstance(value, int):
                     control = QSpinBox()
                     if key in ('input_key',):
@@ -138,7 +142,7 @@ def run_gui() -> int:
                     elif key == 'next_line_timeout_ms':
                         control.setRange(1000, 120000)
                     else:
-                        control.setRange(0, 600000)
+                        control.setRange(1, 600000)
                     control.setValue(value)
                 else:
                     control = QLineEdit(value)
@@ -321,18 +325,16 @@ def run_gui() -> int:
             capture.addRow(self.btn_monitor)
 
             speech = group('Dialogue and voice routing')
-            self.default_mode = QComboBox()
-            self.default_mode.addItems([mode.value for mode in AudioMode])
-            speech.addRow('Unknown speaker routing', self.default_mode)
+            self.default_tts = QCheckBox('未知話者にTTSを使用（進行モードと独立）')
+            speech.addRow('Unknown speaker TTS', self.default_tts)
             self.default_voice = QComboBox()
             self.default_voice.setEditable(True)
             speech.addRow('Default Irodori Voice ID', self.default_voice)
             self.speaker_name = QLineEdit()
             self.speaker_name.setPlaceholderText('Character name, empty = default')
             speech.addRow('Speaker override', self.speaker_name)
-            self.speaker_mode = QComboBox()
-            self.speaker_mode.addItems([m.value for m in AudioMode])
-            speech.addRow('Speaker routing', self.speaker_mode)
+            self.speaker_tts = QCheckBox('この話者にIrodori TTSを使用')
+            speech.addRow('Speaker TTS', self.speaker_tts)
             self.speaker_voice = QComboBox()
             self.speaker_voice.setEditable(True)
             speech.addRow('Speaker Voice', self.speaker_voice)
@@ -403,9 +405,9 @@ def run_gui() -> int:
             self.btn_assign.clicked.connect(self.assign_speaker)
             speech.addRow(self.btn_assign)
             self.reading_ms = QSpinBox()
-            self.reading_ms.setRange(0, 600000)
-            self.reading_ms.setValue(1200)
-            speech.addRow('Reading time (ms)', self.reading_ms)
+            self.reading_ms.setRange(1, 600000)
+            self.reading_ms.setValue(700)
+            # Timing controls are in the separate advance settings section below.
             self.hook_flush = QSpinBox()
             self.hook_flush.setRange(0, 10000)
             speech.addRow('Luna HOOK flush delay (ms)', self.hook_flush)
@@ -421,14 +423,11 @@ def run_gui() -> int:
             self.native_helper = QLineEdit()
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
-            self.native_wait = QSpinBox()
-            self.native_wait.setRange(0, 600000)
-            speech.addRow('Process audio helper DLL (native/auto only)', self.native_helper)
+            speech.addRow('Process audio helper DLL (音声判断用)', self.native_helper)
             self.native_vad_only = QCheckBox('Native voice-only game audio: allow VAD without ASR (cannot identify BGM)')
             speech.addRow(self.native_vad_only)
-            speech.addRow('Japanese ASR model (native/auto only)', self.asr_model)
+            speech.addRow('Japanese ASR model (音声判断用)', self.asr_model)
             speech.addRow('ASR tokens', self.asr_tokens)
-            speech.addRow('Auto fallback wait (ms)', self.native_wait)
             self.next_line_timeout = QSpinBox()
             self.next_line_timeout.setRange(1000, 120000)
             speech.addRow('Next line wait limit (ms)', self.next_line_timeout)
@@ -448,7 +447,20 @@ def run_gui() -> int:
             self.preview.setMaximumHeight(125)
             speech.addRow('Raw / speaker / reading / voice', self.preview)
 
-            advance = group('Advance authority')
+            advance = group('自動進行（TTS使用設定とは独立）')
+            self.advance_mode = QComboBox()
+            self.advance_mode.addItem('文字のみ判断', AdvanceMode.TEXT.value)
+            self.advance_mode.addItem('音声判断', AdvanceMode.AUDIO.value)
+            advance.addRow('進行方式', self.advance_mode)
+            self.uncertain_text_fallback = QCheckBox('音声判定が不確かなとき、文字数待機時間で進む（早送りの可能性あり）')
+            advance.addRow(self.uncertain_text_fallback)
+            self.per_character_wait_ms = QSpinBox()
+            self.per_character_wait_ms.setRange(1, 600000)
+            advance.addRow('記号除外の1文字あたり待機時間（ms）', self.per_character_wait_ms)
+            advance.addRow('最低表示時間（ms）', self.reading_ms)
+            self.wait_preview = QLabel('計数: - / 待機時間: -')
+            advance.addRow('現在台詞の計数と確定時間', self.wait_preview)
+            advance.addRow(QLabel('文字のみ判断は原音を途中で送る場合があります。音声判断で確証がなければ停止します。'))
             row = QHBoxLayout()
             self.btn_permit = QPushButton('Authorize automatic advance')
             self.btn_pause = QPushButton('Pause automatic advance')
@@ -467,6 +479,7 @@ def run_gui() -> int:
             self.intervention_timer.setInterval(150)
             self.intervention_timer.timeout.connect(self.check_intervention)
             self.intervention_timer.start()
+            self.confirm_migration_if_needed()
             self.fill_games()
             if self.irodori_path.text().strip():
                 QTimer.singleShot(0, self.start_server)
@@ -474,12 +487,37 @@ def run_gui() -> int:
         def note(self, message):
             self.log.appendPlainText(message)
 
+        def confirm_migration_if_needed(self):
+            review = getattr(self.catalog, 'migration_review', ())
+            if not review:
+                return
+            from .storage import user_settings_path
+            message = ('保存形式v3には旧4区分の音声方針があります。新2モードは自動推定しません。\n'
+                       + '\n'.join(review) + '\n旧設定は別ファイルへ保全します。\n'
+                       'この内容を確認して新設定へ移行しますか？')
+            decision = QMessageBox.question(self, '設定移行の確認', message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if decision != QMessageBox.StandardButton.Yes:
+                self.note('設定移行を取り消しました。原本を保持してGUIを終了します。')
+                QTimer.singleShot(0, self.close)
+                return
+            source = Path(self.catalog.migration_source)
+            destination = user_settings_path()
+            if destination.exists():
+                raise RuntimeError('移行先の設定ファイルが既に存在します')
+            save(self.catalog, destination)
+            self.catalog.migration_review = []
+            self.note('旧設定原本を変更せず新設定へ移行しました: ' + str(source))
+
         def save_common(self):
             from .storage import CommonSettings
             values = {}
             for key, widget in self.common_controls.items():
                 if isinstance(widget, QComboBox):
-                    values[key] = AudioMode(widget.currentText())
+                    values[key] = AdvanceMode(widget.currentData())
+                elif isinstance(widget, QCheckBox):
+                    values[key] = widget.isChecked()
                 elif isinstance(widget, QSpinBox):
                     values[key] = widget.value()
                 else:
@@ -547,7 +585,10 @@ def run_gui() -> int:
             effective = self.catalog.effective_profile(profile)
             for key, widget in self.inherit_controls.items():
                 widget.setChecked(key in profile.inherit_common)
-            self.default_mode.setCurrentText(effective.default_mode.value)
+            self.default_tts.setChecked(effective.default_tts)
+            self.advance_mode.setCurrentIndex(self.advance_mode.findData(effective.advance_mode.value))
+            self.uncertain_text_fallback.setChecked(effective.uncertain_text_fallback)
+            self.per_character_wait_ms.setValue(effective.per_character_wait_ms)
             self.default_voice.setEditText(effective.default_voice)
             self.reading_ms.setValue(effective.reading_ms)
             self.hook_flush.setValue(profile.hook_flush_ms)
@@ -564,7 +605,6 @@ def run_gui() -> int:
             self.asr_model.setText(effective.asr_model)
             self.asr_tokens.setText(effective.asr_tokens)
             self.native_vad_only.setChecked(profile.native_vad_only)
-            self.native_wait.setValue(effective.native_wait_ms)
             self.next_line_timeout.setValue(effective.next_line_timeout_ms)
             self.refresh_rules()
             self.refresh_selected_hooks()
@@ -607,9 +647,11 @@ def run_gui() -> int:
                 updated.asr_model = self.asr_model.text().strip()
                 updated.asr_tokens = self.asr_tokens.text().strip()
                 updated.native_vad_only = self.native_vad_only.isChecked()
-                updated.native_wait_ms = self.native_wait.value()
                 updated.next_line_timeout_ms = self.next_line_timeout.value()
-                updated.default_mode = AudioMode(self.default_mode.currentText())
+                updated.default_tts = self.default_tts.isChecked()
+                updated.advance_mode = AdvanceMode(self.advance_mode.currentData())
+                updated.uncertain_text_fallback = self.uncertain_text_fallback.isChecked()
+                updated.per_character_wait_ms = self.per_character_wait_ms.value()
                 updated.default_voice = self.default_voice.currentText().strip()
                 updated.reading_ms = self.reading_ms.value()
                 updated.hook_flush_ms = self.hook_flush.value()
@@ -639,7 +681,7 @@ def run_gui() -> int:
             if not name:
                 self.note('A speaker name is required for an override')
                 return
-            p.speaker_modes[name] = AudioMode(self.speaker_mode.currentText())
+            p.speaker_tts[name] = self.speaker_tts.isChecked()
             p.speaker_voices[name] = self.speaker_voice.currentText().strip()
             self.persist()
             self.refresh_speaker_choices()
@@ -706,7 +748,7 @@ def run_gui() -> int:
             p = self.current_profile()
             self.speaker_overrides.clear()
             if p:
-                for name in p.speaker_modes:
+                for name in sorted(set(p.speaker_tts) | set(p.speaker_voices)):
                     self.speaker_overrides.addItem(name, name)
             self.refresh_rules()
 
@@ -715,14 +757,14 @@ def run_gui() -> int:
             name = self.speaker_overrides.currentData()
             if p and name:
                 self.speaker_name.setText(name)
-                self.speaker_mode.setCurrentText(p.speaker_modes[name].value)
+                self.speaker_tts.setChecked(p.speaker_tts.get(name, p.default_tts))
                 self.speaker_voice.setEditText(p.speaker_voices.get(name, ''))
 
         def remove_speaker(self):
             p = self.current_profile()
             name = self.speaker_overrides.currentData()
             if p and name:
-                p.speaker_modes.pop(name, None)
+                p.speaker_tts.pop(name, None)
                 p.speaker_voices.pop(name, None)
                 self.persist()
                 self.refresh_speaker_choices()
@@ -1383,13 +1425,14 @@ def run_gui() -> int:
                 self.refresh_status()
 
         def start_native_audio_if_needed(self, profile: Profile):
-            modes = {profile.default_mode, *profile.speaker_modes.values()}
-            if not modes.intersection({AudioMode.NATIVE, AudioMode.AUTO}):
+            if profile.advance_mode != AdvanceMode.AUDIO:
                 return
             has_asr = bool(profile.asr_model and profile.asr_tokens)
-            vad_only = not has_asr and profile.native_vad_only and AudioMode.NATIVE in modes
+            vad_only = not has_asr and profile.native_vad_only
             if not profile.native_helper or not (has_asr or vad_only):
-                self.note('Native matching needs Process Loopback and ASR, or explicit VAD-only native mode; TTS/reading remain available')
+                self.note('音声判断にはProcess LoopbackとASR、または明示VAD専用設定が必要です。根拠不足では設定に従います。')
+                if not profile.uncertain_text_fallback:
+                    self.controller.pause('native_audio_unavailable_manual_handoff')
                 return
             target = self.controller.target
             if not target:
@@ -1424,22 +1467,18 @@ def run_gui() -> int:
                 return
             if reason:
                 self.note('Native audio unavailable: ' + reason)
+                u = self.controller.utterance
+                if u and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts and not u.uncertain_text_fallback:
+                    self.controller.pause('native_audio_unavailable_manual_handoff')
+                self.refresh_status()
                 return
             self.native_audio = native
-            self.validation_trace.emit('native_ready', session=self.controller.session,
+            self.validation_trace.emit('native_ready', session=session,
                 vad_only=bool(native.vad_only), audio_pid=native.pid)
-            self.note('Native process audio ready (VAD-only)'  if native.vad_only else 'Native process audio and ASR ready')
-            token = self.controller.token
-            if (token and self.controller.utterance and not self.controller.sent and
-                    not self.controller.completed and
-                    self.controller.utterance.mode in (AudioMode.NATIVE, AudioMode.AUTO)):
-                if self.native_token == token and self.controller.utterance.mode == AudioMode.AUTO:
-                    # The capture worker may become ready during AUTO's fallback window.
-                    # Start attribution without restarting or duplicating TTS presentation.
-                    if not native.vad_only:
-                        native.begin(token, self.controller.utterance.match_text)
-                elif self.native_token != token or self.controller.reason == 'native_audio_unavailable':
-                    self.present(token)
+            self.note('Native process audio ready (VAD-only)' if native.vad_only else 'Native process audio and ASR ready')
+            token, u = self.controller.token, self.controller.utterance
+            if token and u and not self.controller.sent and not self.controller.completed and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts:
+                native.begin(token, u.match_text)
 
         def on_native_pcm(self, token, frames):
             if token is not None and token == self.controller.token:
@@ -1447,55 +1486,36 @@ def run_gui() -> int:
                     frames=frames, audio_pid=getattr(self.native_audio, 'pid', 0))
 
         def on_native(self, token, event, detail):
-            if token == self.controller.token and token is not None:
-                self.validation_trace.emit('native_event', session=token.session, line=token.line,
-                    status=event, method='vad' if getattr(self.native_audio, 'vad_only', False) else 'asr')
-            if not token or token != self.controller.token:
+            if token != self.controller.token or token is None:
                 return
-            current = self.controller.utterance
-            if not current or current.mode not in (AudioMode.NATIVE, AudioMode.AUTO):
+            self.validation_trace.emit('native_event', session=token.session, line=token.line,
+                status=event, method='vad' if getattr(self.native_audio, 'vad_only', False) else 'asr')
+            u = self.controller.utterance
+            if not u or u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return
             if event == 'error':
                 self.note('Native audio: ' + detail)
-                if current.mode == AudioMode.NATIVE or self.native_started:
+                if not u.uncertain_text_fallback:
                     self.controller.pause('native_audio_failure')
-                    self.jobs.cancel()
-                elif current.mode == AudioMode.AUTO and not self.auto_tts_started:
-                    # Capture or recognition failure is not proof that game speech is absent.
-                    # AUTO's explicitly configured TTS policy can still present this line.
-                    self.auto_fallback(token)
             elif event == 'started':
-                self.native_started = True
-                if current.mode == AudioMode.AUTO:
-                    self.jobs.cancel()
-                self.note('Matching game speech detected')
+                self.presentation_event(token, 'native_started')
+            elif event == 'quiet':
+                self.presentation_event(token, 'native_quiet')
             elif event == 'completed':
-                self.complete(token, True)
-            self.refresh_status()
-
-        def auto_fallback(self, token):
-            if (token != self.controller.token or not self.controller.utterance or
-                    self.controller.utterance.mode != AudioMode.AUTO or self.native_started or
-                    self.auto_tts_started or self.controller.completed or self.controller.sent):
-                return
-            current = self.controller.utterance
-            if not current.voice:
-                self.note('AUTO requires a fallback Irodori Voice; advance held')
-                self.controller.pause('auto_voice_unavailable')
-            else:
-                self.auto_tts_started = True
-                self.note('No matching native voice yet: starting configured TTS fallback')
-                self.jobs.start(token, self.catalog.irodori_url, current.reading, current.voice)
+                self.presentation_event(token, 'native_finished')
             self.refresh_status()
 
         def display_utterance(self, token: Token):
             u = self.controller.utterance
             if not u:
                 return
-            self.preview.setPlainText(f'Original: {u.raw}\\nSpeaker: {u.speaker}\\nText: {u.text}\\nReading: {u.reading}\\nMatch: {u.match_text}\\nRoute: {u.mode.value}; Voice: {u.voice}')
+            self.preview.setPlainText(f'Original: {u.raw}\\nSpeaker: {u.speaker}\\nText: {u.text}\\nReading: {u.reading}\\nMatch: {u.match_text}\\nTTS: {u.use_tts}; Voice: {u.voice}; Advance: {u.advance_mode.value}')
+            self.wait_preview.setText(f'{u.character_count}文字 × {self.controller.profile.per_character_wait_ms}ms / 最低{self.controller.profile.reading_ms}ms → {u.text_wait_ms}ms')
             self.validation_trace.emit('utterance', session=token.session, line=token.line,
                 source=u.source, hook_sequence=u.sequence, raw_hash=text_digest(u.raw),
-                body_hash=text_digest(u.text), speaker=u.speaker, mode=u.mode.value)
+                body_hash=text_digest(u.text), speaker=u.speaker, advance_mode=u.advance_mode.value, use_tts=u.use_tts,
+                characters=u.character_count, text_wait_ms=u.text_wait_ms,
+                uncertain_text_fallback=u.uncertain_text_fallback)
             # Luna emits an already-flushed sentence; do not reimplement a second flush timer.
             self.present(token)
             self.refresh_status()
@@ -1505,50 +1525,53 @@ def run_gui() -> int:
             if not u or token != self.controller.token:
                 return
             self.jobs.cancel()
-            self.native_token = token
-            self.native_started = False
-            self.auto_tts_started = False
-            native_ready_for_mode = bool(self.native_audio and
-                (u.mode == AudioMode.NATIVE or
-                 (u.mode == AudioMode.AUTO and not getattr(self.native_audio, 'vad_only', False))))
             if self.native_audio:
                 self.native_audio.cancel()
-                if native_ready_for_mode:
+            if u.advance_mode == AdvanceMode.TEXT:
+                QTimer.singleShot(u.text_wait_ms, lambda t=token: self.presentation_event(t, 'text_elapsed'))
+            elif not u.use_tts:
+                if self.native_audio:
                     self.native_audio.begin(token, u.match_text)
-            if u.mode == AudioMode.READING:
-                QTimer.singleShot(self.controller.profile.reading_ms, lambda: self.complete(token, True))
-            elif u.mode == AudioMode.TTS:
+                else:
+                    self.note('Native observation unavailable; uncertain audio cannot be certified')
+                if u.uncertain_text_fallback:
+                    QTimer.singleShot(u.text_wait_ms, lambda t=token: self.fallback_due(t))
+                else:
+                    self.note('No native end evidence will hold advance for manual action')
+            if u.use_tts:
                 if not u.voice:
-                    self.complete(token, False, 'TTS requires a Voice')
+                    self.presentation_event(token, 'tts_finished', success=False)
+                    self.note('TTS requires a configured Voice')
                 else:
                     self.jobs.start(token, self.catalog.irodori_url, u.reading, u.voice)
-            elif not native_ready_for_mode and u.mode == AudioMode.AUTO:
-                self.note('AUTO audio capture unavailable; using configured TTS fallback')
-                QTimer.singleShot(self.controller.profile.native_wait_ms, lambda t=token: self.auto_fallback(t))
-            elif not native_ready_for_mode:
-                self.note('Native voice requires configured audio capture and evidence; advance held')
-                self.controller.pause('native_audio_unavailable')
-            elif u.mode == AudioMode.AUTO:
-                QTimer.singleShot(self.controller.profile.native_wait_ms, lambda t=token: self.auto_fallback(t))
-            else:
-                self.note('Waiting for matching native speech to finish')
+
+        def fallback_due(self, token):
+            u = self.controller.utterance
+            if (token != self.controller.token or not u or u.use_tts or
+                    u.advance_mode != AdvanceMode.AUDIO or self.controller.completed or self.controller.sent):
+                return
+            if self.native_audio and self.native_audio.is_confirmed_playing(token):
+                # A positive correlated voice segment is still active. Re-evaluate
+                # while that evidence persists, without resetting the deadline.
+                QTimer.singleShot(200, lambda t=token: self.fallback_due(t))
+                return
+            if self.controller.native_playing:
+                self.presentation_event(token, 'native_quiet')
+            self.presentation_event(token, 'fallback_elapsed')
 
         def on_voice(self, token, success, reason):
             if token == self.controller.token and token is not None:
                 self.validation_trace.emit('tts_result', session=token.session,
                     line=token.line, success=bool(success))
-            if (token == self.controller.token and self.controller.utterance and
-                    self.controller.utterance.mode == AudioMode.AUTO and self.native_started):
-                return  # Once native speech is attributed, cancelled TTS may not advance.
-            self.complete(token, success, reason)
-
-        def complete(self, token, success, reason=''):
-            if self.controller.mark_complete(token, success=success):
-                self.validation_trace.emit('presentation_complete', session=token.session,
-                    line=token.line, success=True)
-                self.advance_if_ready()
-            elif reason:
+            self.presentation_event(token, 'tts_finished', success=success)
+            if reason and not success and token == self.controller.token:
                 self.note(reason)
+
+        def presentation_event(self, token, event, *, success=True):
+            if self.controller.presentation_event(token, event, success=success):
+                self.validation_trace.emit('presentation_complete', session=token.session,
+                    line=token.line, success=True, reason=self.controller.presentation_reason)
+                self.advance_if_ready()
             self.refresh_status()
 
         def on_ocr(self, session, pid, sequence, text):
@@ -1619,7 +1642,7 @@ def run_gui() -> int:
             targets = (f'HOOK {c.target.hook_pid or c.target.pid}; audio {c.target.audio_pid or c.target.pid}; '
                        f'input {c.target.pid}/{hex(c.target.hwnd)}') if c.target else 'no target'
             self.status.setText(f'Status: {c.reason} | permission={c.authorized} | '
-                                f'line={c.line_no} | sent={c.sent} | {targets}')
+                                f'line={c.line_no} | sent={c.sent} | completion={c.presentation_reason or "pending"} | {targets}')
             if c.profile and c.profile.source == 'hook':
                 self.active_hook_status.setText('Active dialogue HOOK: ' +
                     (c.active_text_source or 'waiting for selected source output'))

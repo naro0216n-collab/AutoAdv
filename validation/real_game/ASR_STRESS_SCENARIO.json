@@ -4,67 +4,70 @@
     {
       "id": "stress-intro",
       "text": "ASR特殊音声検証です。曖昧な区間ではAutoAdvを停止し、手動で次へ進めてください。",
-      "suggested_mode": "reading"
+      "advance_mode": "text",
+      "use_tts": false
     },
     {
       "id": "clean_control",
       "text": "えっ嘘でしょ。",
-      "suggested_mode": "native"
+      "advance_mode": "audio",
+      "use_tts": false
     },
     {
       "id": "background_over_foreground",
       "text": "えっ嘘でしょ。",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "background_outlasts_foreground",
       "text": "えっ嘘でしょ。",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "background_only_mismatch",
       "text": "これは表示されただけの文章です。",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "background_only_same_text",
       "text": "ヒューズが飛んだ。",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "nonlexical_cry",
       "text": "うっ……うう……",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "nonlexical_scream",
       "text": "あああっ！",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "cry_with_background_voice",
       "text": "うっ……うう……",
-      "suggested_mode": "native",
-      "expected_hold": true,
-      "manual_handoff": true
+      "advance_mode": "audio",
+      "use_tts": false,
+      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off"
     },
     {
       "id": "stress-end",
       "text": "特殊音声検証を終了します。",
-      "suggested_mode": "reading",
-      "ending": true
+      "ending": true,
+      "advance_mode": "text",
+      "use_tts": false
     }
   ]
 }

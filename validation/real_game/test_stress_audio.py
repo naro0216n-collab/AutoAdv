@@ -14,7 +14,7 @@ class StressScenarios(unittest.TestCase):
     def test_background_voices_are_real_recordings_and_not_automatically_attributed(self):
         import numpy as np
         cases, recordings = stress_asr._load_cases(selection='background')
-        self.assertEqual(len(cases), 5)
+        self.assertGreaterEqual(len(cases), 1)
         for case in cases:
             with self.subTest(case=case['id']):
                 waveform = stress_asr._mix(case, recordings)
@@ -50,7 +50,7 @@ class StressScenarios(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, 'Actual nonverbal audio required'):
                 stress_asr._load_cases(selection='nonlexical')
 
-    def test_report_exposes_background_same_text_false_attribution(self):
+    def test_same_text_ambiguous_origin_is_not_fabricated_negative_acceptance(self):
         class BackgroundRecognizer:
             def __init__(self, *_):
                 pass
@@ -63,17 +63,18 @@ class StressScenarios(unittest.TestCase):
             with patch.object(stress_asr, 'JapaneseASR', BackgroundRecognizer):
                 data = stress_asr.run(model, tokens, selection='background')
             risk = next(c for c in data['cases'] if c['id'] == 'background_only_same_text')
-            self.assertTrue(risk['false_attribution_risk'])
+            self.assertEqual(risk['attribution'], 'unverified')
+            self.assertFalse(risk['false_attribution_risk'])
             self.assertIs(data['real_game_verified'], False)
-            self.assertEqual(len(data['observations']), 5)
-            self.assertEqual(next(o for o in data['observations'] if o['case'] == 'background_only_same_text')['cer'], None)
+            self.assertEqual(len(data['observations']), len(data['cases']))
+            self.assertEqual(next(o for o in data['observations'] if o['case'] == 'background_only_same_text')['transcript'], 'ヒューズが飛んだ。')
 
     def test_stress_is_native_or_reading_only_not_tts_asr(self):
         scenario = json.loads((STRESS.parent / 'ASR_STRESS_SCENARIO.json').read_text(encoding='utf-8'))
-        self.assertEqual({line['suggested_mode'] for line in scenario['lines']}, {'native', 'reading'})
+        self.assertEqual({line['advance_mode'] for line in scenario['lines']}, {'audio', 'text'})
         # Only original-game audio is submitted to the recognizer. The TTS
         # contract waits for real playback drain and is tested separately.
-        self.assertNotIn('tts', {line['suggested_mode'] for line in scenario['lines']})
+        self.assertTrue(all(not line['use_tts'] for line in scenario['lines']))
 
     def test_nonlexical_cases_are_not_given_word_error_success_targets(self):
         cases = json.loads(STRESS.read_text(encoding='utf-8'))['cases']

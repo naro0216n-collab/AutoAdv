@@ -7,7 +7,7 @@ from autoadv.conversation import Controller, Target, Token
 from autoadv.hook_protocol import ThreadSource, HookEvent
 from autoadv.import_legacy import inspect_legacy, add_legacy_games
 from autoadv.import_luna import inspect_luna, add_luna_games
-from autoadv.model import Profile, HookSelection, AudioMode, interpret, OCRSettings
+from autoadv.model import Profile, HookSelection, AdvanceMode, interpret, OCRSettings
 from autoadv.storage import Catalog, CommonSettings, load, save
 from autoadv.ocr import OCRWorker
 
@@ -27,7 +27,7 @@ class SessionOwnership(unittest.TestCase):
                     sequence=2, source=hook, text='real hook output', pid=11)
         self.assertIsNotNone(token)
         controller.permit(True)
-        controller.mark_complete(token)
+        controller.presentation_event(token, 'text_elapsed')
         self.assertTrue(controller.try_advance())
         self.assertEqual(sent, [(22, 33, 13)])
         self.assertFalse(controller.try_advance())
@@ -41,7 +41,7 @@ class SessionOwnership(unittest.TestCase):
                           source=source, text='line', pid=10)
         c.permit(True)
         c.pause('manual_intervention')
-        c.mark_complete(token)
+        c.presentation_event(token, 'text_elapsed')
         self.assertEqual(c.reason, 'manual_intervention')
         self.assertFalse(c.authorized)
         second = c.observe(generation='host', connection=1, sequence=2,
@@ -70,7 +70,7 @@ class SessionOwnership(unittest.TestCase):
 
 class CommonPreferencesContract(unittest.TestCase):
     def test_resolve_at_session_start_preserves_explicit_overrides_and_legacy_values(self):
-        c = Catalog(common=CommonSettings(default_mode=AudioMode.TTS,
+        c = Catalog(common=CommonSettings(default_tts=True,
                                           default_voice='narrator', asr_model='C:/asr', input_key=32))
         g = c.create_game('first')
         p = g.profiles[g.default_profile]
@@ -140,7 +140,7 @@ class UserConfirmedImport(unittest.TestCase):
             p = restored.games['gid'].profiles['pid']
             self.assertEqual(p.name_readings['京'], 'みやこ')
             self.assertEqual(p.speaker_voices['京'], 'V1')
-            self.assertEqual(p.speaker_modes['京'], AudioMode.TTS)
+            self.assertEqual(p.speaker_tts['京'], True)
             with self.assertRaisesRegex(ValueError, 'already imported'):
                 add_legacy_games(restored, rows)
             self.assertEqual(snapshot, src.read_bytes())

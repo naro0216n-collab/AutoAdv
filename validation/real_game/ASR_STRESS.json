@@ -1,5 +1,5 @@
 {
-  "description": "Independent difficult-audio reference. Never loaded by AutoAdv. Sources marked foreground=null do not speak the displayed line.",
+  "description": "ASR and difficult audio observations. Labels do not prove dialogue ownership. No blanket expected hold; same-text background-only is a diagnostic, not a negative acceptance case.",
   "cases": [
     {
       "id": "clean_control",
@@ -43,13 +43,13 @@
     },
     {
       "id": "background_only_same_text",
-      "kind": "distractor",
+      "kind": "unverified_same_text",
       "display": "ヒューズが飛んだ。",
       "foreground": null,
       "background": "normal-020",
       "background_offset_ms": 0,
       "background_gain": 1,
-      "attribution": "not_foreground"
+      "attribution": "unverified"
     },
     {
       "id": "nonlexical_cry",

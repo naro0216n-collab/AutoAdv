@@ -45,7 +45,7 @@ Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
 3. AutoAdvのGUIから実HOOKを探索・選択し、原音＝明日香／栞、
    Irodori TTS＝主人公（Voice IDは個人のIrodori環境に応じて設定）。
    同文連続ルール `each_after_input` を必要に応じて設定。
-   `native` はProcess Loopback＋ASR照合を推奨。VAD-onlyの利用条件を満たさない環境で使わない。
+   進行は「文字のみ判断」「音声判断」の2択。TTSの利用は話者設定で独立に指定する。音声判断かつTTS非使用の場合にProcess Loopback＋ASR照合を使用する。VAD-onlyは発声帰属の制限を理解して使う。
 4. 自動送りを明示的に許可し、ゲームの通常会話を実行する。
    選択肢では一時停止・手動選択・再許可する。
 5. GUIを閉じて `python -m validation.real_game.verify_trace --phase mixed --trace "$env:AUTOADV_VALIDATION_TRACE"`。
@@ -70,13 +70,13 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 # P0-1: HookHostの実接続、取得元を伴うflush出力とUtterance
 .\validation\real_game\run_live_check.ps1 -Phase hook
 
-# P0-2: 閲覧時間→SendInput→次のHOOK取得（冒頭などを閲覧モードに設定）
+# P0-2: 文字のみ判断で文字数時間→SendInput→次HOOK（TTS使用は別設定）
 .\validation\real_game\run_live_check.ps1 -Phase reading
 
-# P0-3: Process LoopbackのPCM、実ASR一致、原音終了と次HOOK
+# P0-3: 音声判断・TTS非使用のPCM、ASR、原音終了と次HOOK
 .\validation\real_game\run_live_check.ps1 -Phase native
 
-# P0-4: Irodoriの合成・実再生完了と次HOOK
+# P0-4: 音声判断・TTS使用の合成・実再生完了と次HOOK
 .\validation\real_game\run_live_check.ps1 -Phase tts
 
 # P0-5: 原音/TTS/閲覧、同一文連続、手動停止と再許可の連続検査
@@ -104,9 +104,9 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 
 ## 原音ASRとIrodori TTSの独立性
 
-原音（`native`）のみProcess Loopbackで取り込んだPCMを実ASRへ送り、現在のUtteranceの照合・発話終了を判断する。
-明示的にTTSを選択した台詞はIrodoriの合成と**デバイスでの再生終了**が完了条件であり、TTS音声をASRへ再投入しない。
-`AUTO`は原音照合が成立した場合に原音、設定に従い代替TTSを選択した場合に再生終了を使う。いずれも一台詞につき一回の送り権限のみ。
+「音声判断」かつ**TTS非使用**の台詞だけProcess LoopbackのPCMを実ASRへ送り、現在のUtteranceとの照合・発話終了を判断する。
+TTS使用台詞はIrodoriの合成と**デバイスでの再生終了**を待ち、TTS音声をASRへ再投入しない。「文字のみ判断」＋TTS使用ではさらに文字数時間の経過を要する。
+根拠不足時フォールバックは明示ONの音声判断・非TTS台詞だけに作用し、原音不存在・原音終了の認定ではない。送信権限は一台詞一回のみ。
 以下の特殊音声検証は**原音だけ**を扱い、Irodoriサーバー・Voice・TTS区間を事前条件にしない。
 
 ## 隔離検証環境のASRモデル準備（明示実行のみ）
@@ -163,3 +163,7 @@ python -m validation.real_game.benchmark_asr `
 ## GitHubでの専用検証の実行操作
 
 検証専用ドラフトPR（`develop` → `main`、マージ禁止）をクローズしてから再オープンすると、Real Audio Validationを含む3つの重量級検証が起動する。追加branchやワークフロー変更は不要。Fast CIのpush検証とは別に結果を確認する。PRをマージして`main`を変更しないこと。実SenseVoice推論による品質・RTFの測定は実ゲームでの自動進行成立の証拠ではない。
+
+## 音声判定ストレス検証の解釈（2026-10-21）
+
+`ASR_STRESS_SCENARIO.json`に一律の`expected_hold`は存在しない。泣き声・叫び声、別発話、BGM、後続背景音のケースは、PCM時系列・実ASR結果・判定根拠・フォールバック設定・実入力時刻を記録して誤送りと余分な保留を比較する。「背景音声だけで表示文と同一」という作者分類は音源所有を独立に証明しないため、`background_only_same_text`は診断例に限定する。`stress_asr.py`による録音全体の認識結果は実時系列の途中照合精度や実ゲームの合格を保証しない。

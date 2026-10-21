@@ -13,7 +13,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True):
     """Manufacture checker-only records, not an AutoAdv/game execution."""
     records = [{'event': 'trace_started', 'at_ns': 1, 'version': 2}]
     def add(event, **extra):
-        at = len(records) * 100
+        at = len(records) * 1_000_000_000
         if event == 'hook_output':
             extra['received_ns'] = at - 1
         records.append({'event': event, 'at_ns': at, 'seq': len(records), **extra})
@@ -25,19 +25,20 @@ def contract_records(first: int, last: int, *, mode=None, advance=True):
     for i in range(first, last):
         line = SCENARIO[i]
         key = {'session': 1, 'line': i - first + 1}
-        chosen = mode or line['suggested_mode']
+        chosen = mode or ('tts' if line['use_tts'] else ('native' if line['advance_mode']=='audio' else 'reading'))
         raw = text_digest('明日香「' + line['text'] + '」')
         add('hook_output', session=1, pid=50, generation='host-a', connection=1,
             source='HOOK|1|2', address=902, hook_sequence=i+1, context=1, context2=2, raw_hash=raw)
         add('utterance', **key, source='HOOK|1|2', hook_sequence=i+1,
-            raw_hash=raw, body_hash=text_digest(line['text']), mode=chosen, speaker='明日香')
+            raw_hash=raw, body_hash=text_digest(line['text']), advance_mode='text' if chosen=='reading' else 'audio',
+            use_tts=chosen=='tts', text_wait_ms=500, characters=5, uncertain_text_fallback=False, speaker='明日香')
         if chosen == 'native':
             add('native_pcm', **key, frames=960, audio_pid=50)
             add('native_event', **key, status='started', method='asr')
             add('native_event', **key, status='completed', method='asr')
         elif chosen == 'tts':
             add('tts_result', **key, success=True)
-        add('presentation_complete', **key, success=True)
+        add('presentation_complete', **key, success=True, reason='tts' if chosen=='tts' else ('native' if chosen=='native' else 'text'))
         if advance and i+1 < last and not line.get('manual_handoff'):
             add('advance_attempt', **key)
             add('advance_input', **key)
@@ -76,7 +77,7 @@ class RealGameVerifierContract(unittest.TestCase):
         point = next(i for i, r in enumerate(records) if r['event'] == 'advance_attempt')
         records.insert(point, {'event': 'pause_requested', 'session': 1})
         for i, r in enumerate(records):
-            r['at_ns'] = i * 100 + 1
+            r['at_ns'] = i * 1_000_000_000 + 1
             if r['event'] == 'hook_output':
                 r['received_ns'] = r['at_ns'] - 1
             if i:
@@ -153,7 +154,7 @@ class RealGameVerifierContract(unittest.TestCase):
             records.insert(midpoint + 1, {'event': name, 'session': 1})
             midpoint += 1
         for n, r in enumerate(records):
-            r['at_ns'] = n * 100 + 1
+            r['at_ns'] = n * 1_000_000_000 + 1
             if r['event'] == 'hook_output':
                 r['received_ns'] = r['at_ns'] - 1
             if n:
