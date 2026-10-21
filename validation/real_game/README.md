@@ -144,26 +144,29 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 したがって、このケースの誤完了はモデル品質の閾値調整で解決できたと解釈せず、製品の既知の識別限界を
 検出する負荷検証とする。現在の製品がこのケースで安全停止できることは未確認であり、必ずPASSする条件として扱わない。
 
-## 録音を時間順に通したNativeAudio実ASR判定（実モデル専用検証）
+## 実経路での時系列検収
 
-`benchmark_asr`は録音全体を一度に推論し、`stress_asr`は混合音声の全体転写を観測する。
-これらとは別に、`timeline_asr`は同じ録音14音声と特殊音声8場面を
-40msずつ実時間に近い間隔で、送信相当の観測境界から既定600ms後にHOOKが届く条件で**製品の`NativeAudio.feed`・`VoiceActivity`・`JapaneseASR`・`TargetMatcher`**へ渡す。
-原音の観測開始、PCM末尾の無音、部分認識のカバレッジ、発話終了通知、推論滞留を時刻付きで保存する。HOOK受信時刻・原音を固定しても、音声終了・文字数フォールバック・手動引継ぎ・送りの可否は製品`NativeAudio`と`Controller`（`presentation_event`・`try_advance`）を実行して判定する。テストの入力先とフォーカス許可だけを検証用に置換し、判定関数を独立実装しない。背景音声負荷ではフォールバックON/OFFを同じ経路で比較し、音声ファイル終端から判断・模擬入力までの符号付き遅延を出力する。
-旧台詞の推論結果は新台詞へ適用しない。波形の加工・独立ASR判定器・第二の進行Controllerは使用しない。
+録音PCMを`NativeAudio.feed`へ直接投入し、固定HOOKを`Controller.observe`へ渡して
+自動入力を模擬する時系列検証は行わない。音声開始・HOOK到着遅延等の既知条件は
+検証ゲーム側で設定可能だが、**結果の取得は通常GUIのLunaHook受信、実Process Loopback、
+本体NativeAudio/Controller、Windows入力、次HOOKを通して行う**。
+
+Windows上でゲームを起動してから、次のコマンドで通常GUIの実セッションを検収する。
 
 ```powershell
-python -m validation.real_game.timeline_asr --selection all --hook-delay-ms 600 --output asr-timeline.json
-# 原音が完全に終わってからHOOKを受ける条件の追加診断も可能:
-python -m validation.real_game.timeline_asr --selection corpus --hook-delay-ms 3000 --output asr-late-hook.json
+.\validation\real_game\run_live_check.ps1 -Phase native
+.\validation\real_game\run_live_check.ps1 -Phase stress
 ```
 
-`Real Audio Validation`の検証専用PR再オープン時に、この測定を**実モデル**で実行する。
-モデル・録音は通常起動やFast CIで取得しない。録音の末尾には無音を追加し、完了通知が
-「録音ファイル終端より前」に出たかを診断する。ただし録音末尾の無音と実発声終了は異なるため、
-終端前というだけで早送りと断定しない。`native_completions=0`も自動で合格・失格とみなさない。
-データは実Process Loopback、ゲームHOOK、GUI、実入力を経由していないため、
-**実ゲーム検収の成功を示さない**。実ゲームではON/OFF両方の送り・手動引継ぎを別途検証する。
+原音開始がHOOKより先行する場合・終了後にHOOKが届く場合も、実ゲームでその条件を
+発生させ、トレース中のHOOK受信時刻、VAD推定開始/終了、ASR、Controller判断、
+Windows入力、次HOOKから観測する。固定された音声時刻を真値として進行判定に注入しない。
+VAD終了は混合音声による推定であり、ゲーム内再生終了の独立した真値ではない。
+実音声による途中送りを確定評価するにはゲーム側の実際の再生完了イベント等の
+別系統の観測が必要であり、推定時刻だけで合否を確定しない。
+
+録音コーパスはASR精度・速度の**独立計測だけ**に使用する。CIは実ゲームを起動しないため、
+CIの実モデル結果を自動進行の実環境合格と称さない。
 
 ## 音声認識品質と処理速度（任意実行、Fast CI対象外）
 
