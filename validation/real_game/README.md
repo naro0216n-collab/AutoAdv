@@ -144,6 +144,25 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 したがって、このケースの誤完了はモデル品質の閾値調整で解決できたと解釈せず、製品の既知の識別限界を
 検出する負荷検証とする。現在の製品がこのケースで安全停止できることは未確認であり、必ずPASSする条件として扱わない。
 
+## 録音を時間順に通したNativeAudio実ASR判定（実モデル専用検証）
+
+`benchmark_asr`は録音全体を一度に推論し、`stress_asr`は混合音声の全体転写を観測する。
+これらとは別に、`timeline_asr`は同じ録音14音声と特殊音声8場面を
+40msずつ実時間に近い間隔で**製品の`NativeAudio.feed`・`VoiceActivity`・`JapaneseASR`・`TargetMatcher`**へ渡す。
+原音の観測開始、PCM末尾の無音、部分認識のカバレッジ、発話終了通知、推論滞留を時刻付きで保存する。
+旧台詞の推論結果は新台詞へ適用しない。波形の加工・独立ASR判定器・第二の進行Controllerは使用しない。
+
+```powershell
+python -m validation.real_game.timeline_asr --selection all --output asr-timeline.json
+```
+
+`Real Audio Validation`の検証専用PR再オープン時に、この測定を**実モデル**で実行する。
+モデル・録音は通常起動やFast CIで取得しない。録音の末尾には無音を追加し、完了通知が
+「録音ファイル終端より前」に出たかを診断する。ただし録音末尾の無音と実発声終了は異なるため、
+終端前というだけで早送りと断定しない。`native_completions=0`も自動で合格・失格とみなさない。
+データは実Process Loopback、ゲームHOOK、GUI、実入力を経由していないため、
+**実ゲーム検収の成功を示さない**。実ゲームではON/OFF両方の送り・手動引継ぎを別途検証する。
+
 ## 音声認識品質と処理速度（任意実行、Fast CI対象外）
 
 **実モデルの認識精度をFast CIの合否条件にはしない。** 同一モデル・コーパス・前処理ではほぼ不変のため、モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に明示実行する。手元で明示実行する場合は既存のASR環境を利用し、通常起動とFast CIでは取得しない。検証専用ドラフトPRのクローズ→再オープンでは`Real Audio Validation`が隔離キャッシュに固定モデルを検証付きで用意し、実モデルベンチマークを実行する。

@@ -2,22 +2,39 @@
 from __future__ import annotations
 
 import threading
+import sys
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from autoadv.audio_buffer import PCMChunk
+from autoadv.audio_buffer import AudioHistory
 from autoadv.audio_match import VoiceActivity, VADDecision
 from autoadv.conversation import Token
 from autoadv.native_audio import NativeAudio
 
 
 class PacketVadBoundaryTests(unittest.TestCase):
+    def test_prior_line_packet_cannot_enter_new_line_history(self):
+        history = AudioHistory()
+        history.start(11)
+        previous = PCMChunk(980, bytes(40 * 48 * 8), 48000, 2, 4)
+        current = PCMChunk(1020, bytes(20 * 48 * 8), 48000, 2, 4)
+        history.push(previous, target_pid=11)
+        history.push(current, target_pid=11)
+        self.assertEqual(history.since(1000), (current,))
+
     def test_packet_with_speech_then_silence_is_not_currently_playing(self):
         speech_by_frame = iter([True, True, False, False, False, False])
-        activity = VoiceActivity()
-        activity.vad = SimpleNamespace(is_speech=lambda *_: next(speech_by_frame))
+        # Fast CI does not install native VAD. Exercise the *production* frame
+        # aggregation with deterministic VAD verdicts, not fake recognizer
+        # output or an optional native dependency in every unit job.
+        module = SimpleNamespace(Vad=lambda _: SimpleNamespace(
+            is_speech=lambda *_: next(speech_by_frame)))
+        with patch.dict(sys.modules, {'webrtcvad': module}):
+            activity = VoiceActivity()
         # Six 20ms frames within one transport packet. The VAD previously
         # reported active=True for the entire packet when any frame had voice.
         packet = bytes(6 * 960 * 8)

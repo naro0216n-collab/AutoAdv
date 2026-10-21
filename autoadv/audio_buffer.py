@@ -12,7 +12,7 @@ from threading import RLock
 
 @dataclass(frozen=True)
 class PCMChunk:
-    at_ms: int
+    at_ms: int  # local receiver time at packet receipt (end of captured frames)
     frames: bytes
     sample_rate: int
     channels: int
@@ -72,4 +72,7 @@ class AudioHistory:
 
     def since(self, at_ms: int) -> tuple[PCMChunk, ...]:
         with self._lock:
-            return tuple(chunk for chunk in self._chunks if chunk.at_ms + chunk.duration_ms >= at_ms)
+            # at_ms is the packet receipt/end time (ProcessCapture timestamps
+            # after read_packet), not its start. Adding duration here carries
+            # the last packet of the previous line across an input boundary.
+            return tuple(chunk for chunk in self._chunks if chunk.at_ms >= at_ms)
