@@ -102,6 +102,7 @@ class VADDecision:
     frames_analyzed: bool = True
     contains_speech: bool = False  # earlier speech in this packet, possibly now quiet
     mono_peak: float = 0.0  # observed VAD input amplitude; never completion evidence
+    stereo_peak: float = 0.0  # original capture amplitude before channel averaging
 
 
 class VoiceActivity:
@@ -130,6 +131,7 @@ class VoiceActivity:
         # A low peak explains a missing VAD positive without inferring that
         # a foreground voice or a game sound was absent.
         mono_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        stereo_peak = float(np.max(np.abs(stereo))) if stereo.size else 0.0
         pcm = (mono * 32767).astype('<i2').tobytes()
         unit = 48000 * 20 // 1000 * 2
         self._pending.extend(pcm)
@@ -144,4 +146,4 @@ class VoiceActivity:
             voiced = voiced or speech
             latest_active = speech
             self.tail_ms = 0 if speech else self.tail_ms + 20
-        return VADDecision(latest_active, self.tail_ms, analyzed, voiced, mono_peak)
+        return VADDecision(latest_active, self.tail_ms, analyzed, voiced, mono_peak, stereo_peak)

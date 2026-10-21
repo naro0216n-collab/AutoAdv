@@ -141,6 +141,14 @@ class PacketVadBoundaryTests(unittest.TestCase):
         self.assertTrue(result.frames_analyzed)
         self.assertFalse(result.active)
         self.assertAlmostEqual(result.mono_peak, 0.25, places=5)
+        self.assertAlmostEqual(result.stereo_peak, 0.25, places=5)
+        # Stereo antiphase would vanish in the VAD/ASR mono downmix; do
+        # not label zero mono amplitude as proof of zero captured PCM.
+        opposite = stereo.copy()
+        opposite[:, 1] *= -1
+        antiphase = detector.observe_float32_stereo(opposite.tobytes())
+        self.assertEqual(antiphase.mono_peak, 0.0)
+        self.assertAlmostEqual(antiphase.stereo_peak, 0.25, places=5)
         # Audio amplitude alone may be music or SFX: no ASR attribution or
         # completion may be inferred from this observation.
         audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),

@@ -497,7 +497,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 capture_summaries[key] = {
                     name: record.get(name) for name in
                     ('scope', 'pcm_packets', 'pcm_frames', 'heartbeats',
-                     'vad_positive_packets', 'vad_input_peak', 'failure')
+                     'vad_positive_packets', 'vad_input_peak', 'capture_stereo_peak', 'failure')
                 }
 
     for key in native:

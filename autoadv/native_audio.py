@@ -83,6 +83,7 @@ class NativeAudio:
         self._capture_error: str | None = None
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
+        self._capture_stereo_peak = 0.0
         self._last_vad = False
         self._pcm_reported = False
         self._last_active_ms = -1
@@ -135,6 +136,7 @@ class NativeAudio:
         self._tail_decoded = False
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
+        self._capture_stereo_peak = 0.0
         if hasattr(self.activity, 'reset'):
             self.activity.reset()
 
@@ -260,6 +262,7 @@ class NativeAudio:
                         heartbeats=self._capture_heartbeats,
                         vad_positive_packets=self._vad_positive_packets,
                         vad_input_peak=round(self._vad_input_peak, 6),
+                        capture_stereo_peak=round(self._capture_stereo_peak, 6),
                         failure=self._capture_error)
 
     def _sample_start(self) -> int:
@@ -293,6 +296,7 @@ class NativeAudio:
         else:
             error = ''
             self._vad_input_peak = max(self._vad_input_peak, activity.mono_peak)
+            self._capture_stereo_peak = max(self._capture_stereo_peak, activity.stereo_peak)
             if activity.frames_analyzed and (activity.active or activity.contains_speech):
                 self._vad_positive_packets += 1
             if activity.frames_analyzed and not self._pcm_reported:
