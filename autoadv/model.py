@@ -132,7 +132,6 @@ class Profile:
     native_helper: str = ''
     asr_model: str = ''
     asr_tokens: str = ''
-    native_vad_only: bool = False
     inherit_common: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
@@ -156,8 +155,6 @@ class Profile:
             raise ValueError('invalid manual HOOK')
         if any(not k or not v for k, v in self.name_readings.items()):
             raise ValueError('invalid name reading')
-        if type(self.native_vad_only) is not bool:
-            raise ValueError('invalid native voice evidence setting')
         if (type(self.uncertain_text_fallback) is not bool or type(self.default_tts) is not bool
                 or any(type(v) is not bool or not k for k, v in self.speaker_tts.items())):
             raise ValueError('invalid TTS and fallback settings')

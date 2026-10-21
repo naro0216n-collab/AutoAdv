@@ -119,7 +119,6 @@ class SessionDriver:
             AdvanceMode.TEXT.value if self.options['phase'] in ('hook', 'reading') else AdvanceMode.AUDIO.value))
         w.default_tts.setChecked(self.options['phase'] == 'tts')
         w.uncertain_text_fallback.setChecked(bool(self.options.get('fallback', False)))
-        w.native_vad_only.setChecked(False)
         w.repeat.setCurrentText('each_after_input')
         w.hook_flush.setValue(200)
         if self.options['phase'] in ('native', 'mixed', 'stress'):

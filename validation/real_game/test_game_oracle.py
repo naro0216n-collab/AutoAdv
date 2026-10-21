@@ -38,6 +38,35 @@ class IndependentGameOracleContract(unittest.TestCase):
                             for x in observed['diagnostics']))
         self.assertEqual(observed['confirmed_advance_to_next_hook'], 2)
 
+    def test_attempt_without_confirmed_send_cannot_count_as_game_dismissal(self):
+        product = [dict(x) for x in self.product if not (
+            x['event'] == 'advance_input' and x.get('line') == 1)]
+        for i, record in enumerate(product):
+            if i:
+                record['seq'] = i
+        observed = self.verify(product=product)
+        first = observed['line_results'][0]
+        self.assertIsNone(first['game_dismissed_after_input'])
+        self.assertTrue(any('input attempt has no confirmed SendInput' in d
+                            for d in observed['diagnostics']))
+        # The second line still has a confirmed send; the first is unverified.
+        self.assertNotEqual(observed['game_evidence']['lines'][0]['outcome'],
+                            'voice_end_confirmed_then_input')
+
+    def test_voice_timing_uses_confirmed_send_not_attempt(self):
+        product = [dict(x) for x in self.product]
+        attempt = next(x for x in product if x['event'] == 'advance_attempt' and x['line'] == 1)
+        # Preserve the event sequence; move the preflight attempt earlier than
+        # observed game playback, while confirmed SendInput stays unchanged.
+        attempt['at_ns'] -= 200_000_000
+        for rec in product:
+            if rec['event'] in ('presentation_complete',) and rec.get('line') == 1:
+                rec['at_ns'] = min(rec['at_ns'], attempt['at_ns'])
+        result = self.verify(product=product)
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertGreaterEqual(result['performance']['game_voice_end_to_input_ms']['p50'], 0)
+        self.assertEqual(result['game_evidence']['early_inputs'], 0)
+
     def test_game_dismissal_without_autoadv_input_is_not_an_advance_success(self):
         result = self.verify()
         # Last acquired dialogue has no controller input in this checker-only
@@ -50,10 +79,10 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_input_before_voice_end_fails_despite_production_asr_completion(self):
         game = [dict(x) for x in self.game]
         voice_end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
-        attempt = next(x['at_ns'] for x in self.product
-                       if x['event'] == 'advance_attempt' and x['line'] == 1)
-        voice_end['at_ns'] = attempt + 5000000
-        voice_end['last_active_at_ns'] = attempt + 1000000
+        input_at = next(x['at_ns'] for x in self.product
+                        if x['event'] == 'advance_input' and x['line'] == 1)
+        voice_end['at_ns'] = input_at + 5000000
+        voice_end['last_active_at_ns'] = input_at + 1000000
         game.sort(key=lambda x: x['at_ns'])
         result = self.verify(game=game)
         self.assertFalse(result['ok'])
@@ -69,10 +98,10 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_input_within_observer_poll_interval_is_indeterminate_not_early_or_safe(self):
         game = [dict(x) for x in self.game]
         end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
-        attempt = next(x['at_ns'] for x in self.product
-                       if x['event'] == 'advance_attempt' and x['line'] == 1)
-        end['last_active_at_ns'] = attempt - 20_000_000
-        end['at_ns'] = attempt + 30_000_000
+        input_at = next(x['at_ns'] for x in self.product
+                        if x['event'] == 'advance_input' and x['line'] == 1)
+        end['last_active_at_ns'] = input_at - 20_000_000
+        end['at_ns'] = input_at + 30_000_000
         game.sort(key=lambda x: x['at_ns'])
         result = self.verify(game=game)
         self.assertTrue(result['collection_valid'], result['errors'])

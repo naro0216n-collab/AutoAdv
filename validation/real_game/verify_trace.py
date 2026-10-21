@@ -148,6 +148,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         if type(want_voice) is not bool:
             want_voice = None
         attempt = attempts.get(key)
+        actual_input = sent.get(key)
         strict_native = (utterances[key].get('advance_mode') == 'audio' and
                          not utterances[key].get('use_tts'))
         dismissal = line['dismissed']
@@ -162,11 +163,11 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         detail = {'scenario': contract.get('id'), 'game_line': game_number,
                   'completion_reason': reasons.get(key), 'sent': key in sent,
                   'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
-                  'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= attempt)
-                                            if attempt is not None else None),
+                  'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= actual_input)
+                                            if actual_input is not None else None),
                   'outcome': 'unadvanced'}
-        if attempt is not None and dismissal is None:
-            diagnostics.append(f'input not followed by observed game dialogue dismissal: {key}')
+        if actual_input is not None and (dismissal is None or dismissal['at_ns'] < actual_input):
+            diagnostics.append(f'confirmed SendInput not followed by observed game dialogue dismissal: {key}')
         if attempt is not None and key not in sent:
             diagnostics.append(f'input attempt has no confirmed SendInput: {key}')
         # The product's SendInput and following LunaHook already verify the
@@ -177,7 +178,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             result['misattributions'] += 1
             detail['outcome'] = 'background_voice_misattributed'
             diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
-        elif attempt is None:
+        elif actual_input is None:
             result['manual_or_unadvanced'] += 1
             if dismissal is not None:
                 # The game moved without AutoAdv input. That can be an intended
@@ -196,7 +197,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             end = voice_ends[0] if voice_ends else None
             if voice_ends:
                 observed = voice_ends[0]
-                ms = _signed_elapsed_ms(observed['at_ns'], attempt)
+                ms = _signed_elapsed_ms(observed['at_ns'], actual_input)
                 result['latencies'].setdefault('game_voice_end_to_input_ms', []).append(ms)
                 detail['game_end_to_input_ms'] = ms
                 if (decision := presentation_at.get(key)) is not None:
@@ -206,7 +207,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                     result['latencies'].setdefault('game_voice_end_to_vad_estimate_ms', []).append(
                         _signed_elapsed_ms(observed['at_ns'], estimated))
             active_at_dismiss = bool(dismissal and dismissal.get('voice_active'))
-            if active_at_dismiss or (end and attempt < end['last_active_at_ns']):
+            if active_at_dismiss or (end and actual_input < end['last_active_at_ns']):
                 result['early_inputs'] += 1
                 detail['outcome'] = 'early_input'
                 errors.append(f'input while the game voice was still playing: {key}')
@@ -214,7 +215,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 result['unverified_voice_ends'] += 1
                 detail['outcome'] = 'voice_end_unverified'
                 diagnostics.append(f'voice-end not independently observed for input: {key}')
-            elif attempt < end['at_ns']:
+            elif actual_input < end['at_ns']:
                 result['indeterminate_voice_end'] += 1
                 detail['outcome'] = 'voice_end_indeterminate'
                 # An ambiguous interval cannot count as a safe advance, but it
@@ -364,9 +365,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if source not in source_outputs:
                 errors.append(f'utterance without actual selected Luna output: {key}')
         elif event == 'native_ready':
-            if type(record.get('vad_only')) is bool and session in monitoring:
+            if 'vad_only' in record:
+                errors.append(f'removed VAD-only audio configuration in product trace: {session}')
+            if session in monitoring and record.get('audio_pid') == monitoring[session].get('audio_pid'):
                 readiness.add(session)
-                audio_methods[session] = 'vad' if record['vad_only'] else 'asr'
+                audio_methods[session] = 'asr'
                 audio_targets[session] = record.get('audio_pid')
         elif event == 'native_pcm':
             if (key not in utterances or type(record.get('frames')) is not int or record['frames'] <= 0
@@ -396,6 +399,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     elif record.get('stage') == 'playback':
                         measured['tts_playback_ms'].append(duration)
         elif event == 'native_event':
+            if record.get('method') != 'asr':
+                errors.append(f'native event without ASR judgement method: {key}')
             if record.get('status') == 'started':
                 audio_started_at.setdefault(key, at)
             if record.get('status') == 'completed':
@@ -410,7 +415,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if (key not in utterances or type(estimate) is not int or
                     type(onset) is not int or onset > estimate or
                     estimate > at or estimate < 0 or onset < 0 or
-                    record.get('evidence') not in ('asr_vad', 'vad_only')):
+                    record.get('evidence') != 'asr_vad'):
                 errors.append(f'invalid native VAD endpoint evidence: {key}')
             elif key in vad_end_estimates:
                 errors.append(f'duplicate native VAD endpoint: {key}')
@@ -488,7 +493,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     for key in native:
         if (key[0] not in readiness or key not in pcm or
                 methods.get(key) != audio_methods.get(key[0])):
-            errors.append(f'native completion lacks matching real PCM and configured ASR/VAD evidence: {key}')
+            errors.append(f'native completion lacks matching real PCM and ASR/VAD evidence: {key}')
 
     hashes = [utterances[key].get('body_hash') for key in utterance_order]
     # A run may start from a known line in a larger game. It must not skip
@@ -534,8 +539,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 diagnostics.append(f'dialogue observed without preceding AutoAdv SendInput: {previous}')
     confirmed_native = [k for k in links if k in native and k in pcm
                         and methods.get(k) == 'asr']
-    confirmed_vad_only = [k for k in links if k in native and k in pcm
-                          and methods.get(k) == 'vad']
     confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]
     if not utterance_order:
         errors.append('no live dialogue observed')
@@ -668,7 +671,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
         'confirmed_native_asr': len(confirmed_native),
-        'confirmed_native_vad_only': len(confirmed_vad_only), 'confirmed_tts': len(confirmed_tts),
+        'confirmed_tts': len(confirmed_tts),
         'errors': errors, 'diagnostics': diagnostics, 'game_evidence': game_evidence, 'line_results': line_results,
     }
 

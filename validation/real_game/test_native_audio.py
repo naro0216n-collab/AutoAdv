@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import unittest
 import wave
+from types import SimpleNamespace
 
 from autoadv.audio_buffer import PCMChunk
 from autoadv.conversation import Token
@@ -24,8 +25,8 @@ def replay_pcm_into_real_native_activity(file: Path, token: Token):
     events = []
     native = NativeAudio(
         42, Path("not-used-for-offline-samples.dll"),
-        Path("not-used-in-vad-mode.onnx"), Path("not-used-in-vad-mode.tokens"),
-        lambda t, name, reason: events.append((t, name, reason)), vad_only=True,
+        Path("unused-asr.onnx"), Path("unused-asr.tokens"),
+        lambda t, name, reason: events.append((t, name, reason)), recognizer=SimpleNamespace(recognize=lambda _: ''),
         clock=lambda: 0,
     )
     try:
@@ -45,13 +46,13 @@ def replay_pcm_into_real_native_activity(file: Path, token: Token):
             native.feed(PCMChunk(ms, bytes(960 * 2 * 4), 48000, 2, 4))
         after_tail = tuple(events)
         native.cancel()
-        return before_tail, after_tail
+        return before_tail, after_tail, native.rise_ms, native.tail_ms
     finally:
         native.close()
 
 
 class RealRecordedAudioContracts(unittest.TestCase):
-    def test_all_selected_corpus_voices_provide_activity_and_end_only_after_silence(self):
+    def test_real_recordings_provide_activity_but_vad_alone_never_completes(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["samples"]), 14)
         kinds = set()
@@ -62,11 +63,11 @@ class RealRecordedAudioContracts(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(file.read_bytes()).hexdigest(), sample["sha256"])
                 kinds.add(sample["speaker"])
                 ticket = Token(777, 1)
-                before, after = replay_pcm_into_real_native_activity(file, ticket)
-                self.assertIn((ticket, "started", ""), before)
-                self.assertNotIn((ticket, "completed", ""), before,
-                                 "The native path must not advance before trailing silence")
-                self.assertEqual(after.count((ticket, "completed", "")), 1)
+                before, after, onset, tail_ms = replay_pcm_into_real_native_activity(file, ticket)
+                self.assertGreaterEqual(onset, 0, 'recorded speech should be detected by VAD')
+                self.assertGreaterEqual(tail_ms, 300)
+                self.assertFalse(any(kind == 'completed' for _, kind, _ in after),
+                                 'VAD without matching ASR must never complete a line')
         self.assertEqual(kinds, {"normal", "whisper"})
 
     def test_cancelled_utterance_cannot_emit_completion_from_old_recording(self):
@@ -78,7 +79,7 @@ class RealRecordedAudioContracts(unittest.TestCase):
         observed_pcm = []
         native = NativeAudio(
             42, Path("not-used.dll"), Path("unused.onnx"), Path("unused.tokens"),
-            lambda token, kind, _: events.append((token, kind)), vad_only=True,
+            lambda token, kind, _: events.append((token, kind)), recognizer=SimpleNamespace(recognize=lambda _: ''),
             on_pcm=lambda token, frames: observed_pcm.append((token, frames)),
             clock=lambda: 0,
         )

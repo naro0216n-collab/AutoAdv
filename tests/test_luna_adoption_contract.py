@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+import json
 from autoadv.conversation import Controller, Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import Profile, HookSelection, AdvanceMode
@@ -85,41 +86,61 @@ class MultiHookProductContract(unittest.TestCase):
         self.assertTrue(self.c.authorized)
 
 
-class VadOnlyContract(unittest.TestCase):
-    def test_opt_in_vad_without_asr_waits_for_sustained_activity_and_silence(self):
+class NativeRecognitionContract(unittest.TestCase):
+    def test_asr_model_and_tokens_are_required_without_injected_recognizer(self):
+        with self.assertRaises(FileNotFoundError):
+            NativeAudio(31, Path('unused.dll'), Path('missing.onnx'),
+                        Path('missing.tokens'), lambda *_: None)
+
+    def test_vad_activity_and_silence_cannot_complete_without_matching_asr(self):
         events = []
         decisions = iter([VADDecision(True, 0), VADDecision(True, 0),
                           VADDecision(False, 450)])
+
         class Activity:
-            def observe_float32_stereo(self, data):
+            def observe_float32_stereo(self, _frames):
                 return next(decisions)
-        audio = NativeAudio(31, Path('not-installed.dll'), Path('missing.onnx'),
-                            Path('missing.tokens'), lambda *v: events.append(v),
-                            activity=Activity(), vad_only=True, clock=lambda: 0)
+
+        class NoMatchRecognizer:
+            def recognize(self, _samples):
+                return ''
+
+        audio = NativeAudio(31, Path('unused.dll'), Path('missing.onnx'),
+                            Path('missing.tokens'), lambda _t, name, _d: events.append(name),
+                            activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0)
         try:
-            token = Token(1, 1)
-            audio.begin(token, '台詞')
+            audio.begin(Token(1, 1), '台詞')
             for ms in (100, 500, 1000):
                 audio.feed(PCMChunk(ms, bytes(8), 48000, 2, 4))
-            self.assertEqual([(e[0], e[1]) for e in events],
-                             [(token, 'started'), (token, 'completed')])
-            audio.cancel()
-            self.assertIsNone(audio.token)
+            self.assertFalse(audio.attributed)
+            self.assertFalse(audio.completed)
+            self.assertNotIn('completed', events)
+            self.assertNotIn('started', events)
         finally:
             audio.close()
 
-    def test_profile_owns_opt_in_and_wait_limit_across_save_reload(self):
+    def test_profile_has_two_modes_and_no_vad_only_setting(self):
         catalog = Catalog()
         g = catalog.create_game('game')
         p = g.profiles[g.default_profile]
-        p.native_vad_only = True
+        p.advance_mode = AdvanceMode.AUDIO
         p.next_line_timeout_ms = 4200
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'settings.json'
             save(catalog, path)
-            loaded = load(path).games[g.id].profiles[p.id]
-        self.assertTrue(loaded.native_vad_only)
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            self.assertNotIn('native_vad_only', raw['games'][g.id]['profiles'][p.id])
+            # Obsolete persisted options must never resurrect a second
+            # native-completion policy; keep all unrelated profile data.
+            raw['games'][g.id]['profiles'][p.id]['native_vad_only'] = True
+            path.write_text(json.dumps(raw, ensure_ascii=False), encoding='utf-8')
+            loaded_catalog = load(path)
+            loaded = loaded_catalog.games[g.id].profiles[p.id]
+            save(loaded_catalog, path)
+            self.assertNotIn('native_vad_only', path.read_text(encoding='utf-8'))
+        self.assertEqual(loaded.advance_mode, AdvanceMode.AUDIO)
         self.assertEqual(loaded.next_line_timeout_ms, 4200)
+        self.assertFalse(hasattr(loaded, 'native_vad_only'))
         loaded.next_line_timeout_ms = 10
         with self.assertRaises(ValueError):
             loaded.validate()
@@ -127,51 +148,3 @@ class VadOnlyContract(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
-@unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'Qt runtime is required')
-class QtUpstreamHookConnection(unittest.TestCase):
-    def test_selected_luna_threads_are_synchronized_and_unsynced_by_session(self):
-        import os
-        from unittest.mock import patch
-        from PySide6.QtWidgets import QApplication
-        from autoadv.gui import run_gui
-        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-        catalog = Catalog()
-        game = catalog.create_game('Two hook game')
-        profile = game.profiles[game.default_profile]
-        profile.hooks = [HookSelection('HT', 1, 2, 'text'), HookSelection('HS', 3, 4, 'speaker')]
-        profile.speaker_links = {'HT|1|2': 'HS|3|4'}
-        actions = []
-        class FakeHookHost:
-            def command(self, *args, **kwargs):
-                actions.append((args, kwargs))
-            def close(self):
-                pass
-        def run_checks(*_):
-            window = next(w for w in QApplication.topLevelWidgets()
-                          if getattr(w, 'catalog', None) is catalog)
-            try:
-                window.pid.setValue(31)
-                window.hook_host = FakeHookHost()
-                window.host_generation = 'host'
-                window.connection_generation = 2
-                window.controller.begin(profile, Target(31, 90), 'host', 2)
-                window.sources = {TEXT.identity: TEXT, SPEAKER.identity: SPEAKER}
-                window.sync_hook_threads()
-                self.assertEqual([x[0] for x in actions],
-                                 [('sync_thread',), ('sync_thread',)])
-                window._output_group.extend([msg(TEXT, 1, '「はい」'), msg(SPEAKER, 2, '京')])
-                window.present = lambda token: None  # no device needed for this routing contract
-                window.flush_selected_outputs()
-                self.assertEqual(window.controller.utterance.speaker, '京')
-                window.stop_session()
-                self.assertEqual([x[1]['enabled'] for x in actions],
-                                 [True, True, False, False])
-                self.assertEqual(window._synced_sources, {})
-            finally:
-                window.close()
-            return 0
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
-            with patch.object(QApplication, 'exec', run_checks):
-                self.assertEqual(run_gui(), 0)

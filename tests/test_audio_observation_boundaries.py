@@ -49,7 +49,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
         outcomes = iter([VADDecision(False, 400, contains_speech=True)])
         activity = SimpleNamespace(observe_float32_stereo=lambda _: next(outcomes))
         audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
-                            lambda *_: None, activity=activity, vad_only=True,
+                            lambda *_: None, activity=activity, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             clock=lambda: 1000)
         try:
             token = Token(1, 1)
@@ -78,7 +78,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
 
         audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *args: observed.append(args), activity=BlockingActivity(),
-                            vad_only=True, clock=lambda: times[0])
+                            recognizer=SimpleNamespace(recognize=lambda _: ''), clock=lambda: times[0])
         try:
             old, new = Token(1, 1), Token(1, 2)
             audio.begin(old, '古い台詞')
@@ -401,7 +401,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
         times = [1000]
         viewed = []
         audio = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-                            lambda *_: None, vad_only=True,
+                            lambda *_: None, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=SimpleNamespace(observe_float32_stereo=lambda _: (
                                 viewed.append('frame') or VADDecision(True, 0)), reset=lambda: None),
                             clock=lambda: times[0])
@@ -425,7 +425,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
     def test_no_send_does_not_claim_pre_hook_voice_from_prior_line(self):
         times = [1600]
         audio = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-                            lambda *_: None, vad_only=True,
+                            lambda *_: None, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=SimpleNamespace(observe_float32_stereo=lambda _: VADDecision(True, 0),
                                                      reset=lambda: None),
                             clock=lambda: times[0])

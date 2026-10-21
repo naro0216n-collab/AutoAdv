@@ -424,8 +424,6 @@ def run_gui(session_driver=None) -> int:
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
             speech.addRow('Process audio helper DLL (音声判断用)', self.native_helper)
-            self.native_vad_only = QCheckBox('Native voice-only game audio: allow VAD without ASR (cannot identify BGM)')
-            speech.addRow(self.native_vad_only)
             speech.addRow('Japanese ASR model (音声判断用)', self.asr_model)
             speech.addRow('ASR tokens', self.asr_tokens)
             self.next_line_timeout = QSpinBox()
@@ -604,7 +602,6 @@ def run_gui(session_driver=None) -> int:
             self.native_helper.setText(effective.native_helper)
             self.asr_model.setText(effective.asr_model)
             self.asr_tokens.setText(effective.asr_tokens)
-            self.native_vad_only.setChecked(profile.native_vad_only)
             self.next_line_timeout.setValue(effective.next_line_timeout_ms)
             self.refresh_rules()
             self.refresh_selected_hooks()
@@ -646,7 +643,6 @@ def run_gui(session_driver=None) -> int:
                 updated.native_helper = self.native_helper.text().strip()
                 updated.asr_model = self.asr_model.text().strip()
                 updated.asr_tokens = self.asr_tokens.text().strip()
-                updated.native_vad_only = self.native_vad_only.isChecked()
                 updated.next_line_timeout_ms = self.next_line_timeout.value()
                 updated.default_tts = self.default_tts.isChecked()
                 updated.advance_mode = AdvanceMode(self.advance_mode.currentData())
@@ -1428,11 +1424,12 @@ def run_gui(session_driver=None) -> int:
             if profile.advance_mode != AdvanceMode.AUDIO:
                 return
             has_asr = bool(profile.asr_model and profile.asr_tokens)
-            vad_only = not has_asr and profile.native_vad_only
-            if not profile.native_helper or not (has_asr or vad_only):
-                self.note('音声判断にはProcess LoopbackとASR、または明示VAD専用設定が必要です。根拠不足では設定に従います。')
-                if not profile.uncertain_text_fallback:
-                    self.controller.pause('native_audio_unavailable_manual_handoff')
+            if not profile.native_helper or not has_asr:
+                # This is a per-utterance prerequisite, not a session-wide
+                # pause: audio-mode TTS lines require only playback drain.
+                # A non-TTS line enters the normal uncertain-audio fallback
+                # or manual-handoff decision when its text deadline arrives.
+                self.note('非TTSの音声判断にはProcess LoopbackとASRモデル・tokensが必要です。根拠不足では設定に従います。')
                 return
             target = self.controller.target
             if not target:
@@ -1444,7 +1441,6 @@ def run_gui(session_driver=None) -> int:
                     native = NativeAudio(target.audio_pid or target.pid, Path(profile.native_helper),
                         Path(profile.asr_model), Path(profile.asr_tokens),
                         lambda token, event, detail: self.bridge.native.emit(token, event, detail),
-                        vad_only=vad_only,
                         on_pcm=(lambda token, frames: self.bridge.native_pcm.emit(token, frames))
                         if self.validation_trace.path else None,
                         on_inference=(lambda token, metrics:
@@ -1480,9 +1476,8 @@ def run_gui(session_driver=None) -> int:
                 self.refresh_status()
                 return
             self.native_audio = native
-            self.validation_trace.emit('native_ready', session=session,
-                vad_only=bool(native.vad_only), audio_pid=native.pid)
-            self.note('Native process audio ready (VAD-only)' if native.vad_only else 'Native process audio and ASR ready')
+            self.validation_trace.emit('native_ready', session=session, audio_pid=native.pid)
+            self.note('Native process audio and ASR ready')
             token, u = self.controller.token, self.controller.utterance
             if token and u and not self.controller.sent and not self.controller.completed and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts:
                 native.begin(token, u.match_text)
@@ -1496,7 +1491,7 @@ def run_gui(session_driver=None) -> int:
             if token != self.controller.token or token is None:
                 return
             self.validation_trace.emit('native_event', session=token.session, line=token.line,
-                status=event, method='vad' if getattr(self.native_audio, 'vad_only', False) else 'asr')
+                status=event, method='asr')
             u = self.controller.utterance
             if not u or u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return

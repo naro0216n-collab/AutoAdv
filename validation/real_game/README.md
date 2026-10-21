@@ -151,7 +151,7 @@ python -m validation.real_game.prepare_asr_model --verify-only
 ```
 
 隔離ディレクトリを変更する場合は `--directory` を指定し、ベンチマークへも `--model`・`--tokens` を渡す。
-モデルまたはtokensの取得に失敗した場合、実モデルASR検証は**未検収**であり、FakeRecognizer / VAD-onlyの結果を代替しない。
+モデルまたはtokensの取得に失敗した場合、実モデルASR検証は**未検収**であり、FakeRecognizerやVAD単独観測の結果を代替しない。
 
 ## ASR特殊音声・背景ボイスの挑戦シナリオ（Irodori不要）
 

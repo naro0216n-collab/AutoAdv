@@ -28,7 +28,7 @@ def checker_only_records():
     add('hook_connected', pid=41, generation='host', connection=2)
     add('monitor_started', session=2, source='hook', game_id='x', profile_id='p',
         hook_pid=41, input_pid=41, audio_pid=41, generation='host', connection=2)
-    add('native_ready', session=2, audio_pid=41, vad_only=False)
+    add('native_ready', session=2, audio_pid=41)
     add('permit_requested', session=2)
     for i, case in enumerate(LINES, 1):
         key = {'session': 2, 'line': i}

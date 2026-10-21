@@ -34,15 +34,15 @@ def synthetic_game_observations(records, *, phase='mixed'):
                      r.get('session') == key[0] and r.get('hook_sequence') == u.get('hook_sequence')), None)
         if hook is None:
             return []
-        attempt = next((r for r in prior if r['event'] == 'advance_attempt'), None)
+        sent = next((r for r in prior if r['event'] == 'advance_input'), None)
         case = scenario[indexes[0]+i]
         start = hook['at_ns'] - 100
         add('line_started', start, line=i+1, body_hash=u['body_hash'])
         if case['foreground_voice']:
             add('voice_started', start+1, line=i+1, file=case.get('foreground_file', 'unknown'))
-            end_at = ((attempt['at_ns'] - 100) if attempt else (u['at_ns'] + 1000))
+            end_at = ((sent['at_ns'] - 100) if sent else (u['at_ns'] + 1000))
             add('voice_ended', end_at, line=i+1, file=case.get('foreground_file', 'unknown'),
                 last_active_at_ns=end_at-2)
-        if attempt:
-            add('line_dismissed', attempt['at_ns']+1, line=i+1, voice_active=False)
+        if sent:
+            add('line_dismissed', sent['at_ns']+1, line=i+1, voice_active=False)
     return sorted(events, key=lambda r: r['at_ns'])

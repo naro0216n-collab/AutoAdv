@@ -42,7 +42,7 @@ class NativeAudio:
     """Owns one process's capture and one active line; never injects game input."""
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
-                 *, recognizer=None, activity=None, clock=None, vad_only: bool = False,
+                 *, recognizer=None, activity=None, clock=None,
                  on_pcm: Callable[[Token, int], None] | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None,
                  on_voice_end: Callable[[Token, dict], None] | None = None):
@@ -53,8 +53,7 @@ class NativeAudio:
         self.on_voice_end = on_voice_end
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=10000)
-        self.vad_only = vad_only
-        self.asr = None if vad_only else (recognizer if recognizer is not None else JapaneseASR(model, tokens))
+        self.asr = recognizer if recognizer is not None else JapaneseASR(model, tokens)
         self.activity = activity or VoiceActivity()
         self._lock = RLock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='autoadv-asr')
@@ -79,7 +78,6 @@ class NativeAudio:
         self._generation = 0
         self._closed = False
         self._last_vad = False
-        self._vad_voicing_since = -1
         self._pcm_reported = False
         self._last_active_ms = -1
         self._last_unassigned_voice_ms = -1
@@ -117,7 +115,6 @@ class NativeAudio:
     def _reset_observation(self):
         self.active = self.attributed = self.completed = False
         self._inference_at = -1
-        self._vad_voicing_since = -1
         self._pcm_reported = False
         self._last_vad = False
         self.rise_ms = -1
@@ -157,7 +154,7 @@ class NativeAudio:
             # under this lock makes an in-flight packet idempotent.
             buffered = self.history.since(self.window_start_ms)
             pending = [self._consume_locked(c, replay=True) for c in buffered]
-            if buffered and self.rise_ms >= 0 and not self.vad_only and not self.completed:
+            if buffered and self.rise_ms >= 0 and not self.completed:
                 # Decode the *whole* replayed window once, rather than running
                 # a misleading inference on its first short packet.
                 since = self._sample_start()
@@ -169,7 +166,7 @@ class NativeAudio:
                     self._inference_submitted_ms = self.clock()
                     self._inference_at = buffered[-1].at_ms
                     self._tail_decoded = self.tail_ms >= 300
-                    pending.append((token, generation, [], '', None, samples, None,
+                    pending.append((token, generation, [], '', None, samples,
                                     self.tail_ms, self.voice_end_estimate_ms))
         for item in pending:
             self._dispatch(item)
@@ -199,7 +196,7 @@ class NativeAudio:
             # A captured speech candidate must get a chance to be analyzed
             # before the optional uncertain-text fallback. Pending alone does
             # not identify the foreground or prove it is still playing.
-            candidate_pending = bool(not self.vad_only and self._inflight
+            candidate_pending = bool(self._inflight
                         and self._inference_submitted_ms >= 0
                         and now - self._inference_submitted_ms <= 2000
                         and self._last_unassigned_voice_ms >= 0
@@ -248,7 +245,6 @@ class NativeAudio:
         events: list[str] = []
         samples = None
         pcm_frames = None
-        end_estimate = None
         token, generation = self.token, self._generation
         try:
             activity = self.activity.observe_float32_stereo(chunk.frames)
@@ -284,27 +280,11 @@ class NativeAudio:
                 self._last_active_ms = self.clock()
                 self._quiet_notified = False
             elif (activity.frames_analyzed and not activity.active and self.attributed
-                  and activity.tail_silence_ms >= 400 and not self._quiet_notified
-                  and (not self.vad_only or activity.tail_silence_ms < 450)):
+                  and activity.tail_silence_ms >= 400 and not self._quiet_notified):
                 self._quiet_notified = True
                 events.append('quiet')
 
-            if self.vad_only:
-                if activity.frames_analyzed and not self.completed:
-                    if activity.active:
-                        if self._vad_voicing_since < 0:
-                            self._vad_voicing_since = chunk.at_ms
-                        if not self.attributed and chunk.at_ms - self._vad_voicing_since >= 350:
-                            self.attributed = True
-                            self._last_active_ms = self.clock()
-                            events.append('started')
-                    elif not self.attributed:
-                        self._vad_voicing_since = -1
-                    if self.attributed and activity.tail_silence_ms >= 450:
-                        self.completed = True
-                        events.append('completed')
-                        end_estimate = self.voice_end_estimate_ms
-            elif activity.frames_analyzed and self.rise_ms >= 0 and not self.completed and not replay:
+            if activity.frames_analyzed and self.rise_ms >= 0 and not self.completed and not replay:
                 tail_due = (activity.tail_silence_ms >= 300 and
                             self.rise_ms >= 0 and not self._tail_decoded)
                 if not self._inflight and (tail_due or self._inference_at < 0 or
@@ -317,12 +297,12 @@ class NativeAudio:
                         self._tail_decoded = True
                     samples = self.history.since(self._sample_start())
         return (token, generation, events, error, pcm_frames, samples,
-                end_estimate, self.tail_ms, self.voice_end_estimate_ms)
+                self.tail_ms, self.voice_end_estimate_ms)
 
     def _dispatch(self, item):
         if item is None:
             return
-        (token, generation, events, error, pcm_frames, samples, end_estimate,
+        (token, generation, events, error, pcm_frames, samples,
          sampled_tail_ms, sampled_end_ms) = item
         # All callbacks are outside the lock; UI callbacks may synchronously
         # accept an advance and invalidate this very generation.
@@ -331,11 +311,6 @@ class NativeAudio:
                 return
         if pcm_frames is not None and self.on_pcm is not None:
             self.on_pcm(token, pcm_frames)
-        if 'completed' in events and self.on_voice_end and end_estimate is not None and end_estimate >= 0:
-            try:
-                self.on_voice_end(token, {'estimated_end_ms': end_estimate, 'estimated_onset_ms': self.rise_ms, 'source': 'vad_only'})
-            except Exception:
-                pass  # Diagnostics must not gate real playback completion.
         for event in events:
             self.notify(token, event, error if event == 'error' else '')
         if samples:

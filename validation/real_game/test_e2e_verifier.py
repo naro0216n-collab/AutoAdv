@@ -33,7 +33,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
     add('monitor_started', session=1, source='hook', game_id='g', profile_id='p',
         hook_pid=50, audio_pid=50, input_pid=50, generation='host-a', connection=1)
     add('permit_requested', session=1)
-    add('native_ready', session=1, vad_only=False, audio_pid=50)
+    add('native_ready', session=1, audio_pid=50)
     for i in range(first, last):
         line = lines[i]
         key = {'session': 1, 'line': i - first + 1}
@@ -208,20 +208,26 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 0)
         self.assertFalse(result['advancement_observed'])
 
-    def test_explicit_vad_only_product_configuration_does_not_require_asr(self):
+    def test_vad_alone_never_confirms_a_matching_native_utterance(self):
         records = contract_records(9, 12)
         for record in records:
-            if record['event'] == 'native_ready':
-                record['vad_only'] = True
             if record['event'] == 'native_event':
                 record['method'] = 'vad'
             if record['event'] == 'native_voice_end_estimate':
                 record['evidence'] = 'vad_only'
         result = validate(records, phase='native')
-        self.assertTrue(result['collection_valid'], result['errors'])
-        self.assertEqual(result['confirmed_native_asr'], 0)
-        self.assertEqual(result['confirmed_native_vad_only'], 2)
-        self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
+        self.assertFalse(result['collection_valid'])
+        self.assertTrue(any('invalid native VAD endpoint evidence' in error
+                            for error in result['errors']))
+
+    def test_obsolete_vad_only_session_trace_is_not_a_valid_product_path(self):
+        records = contract_records(9, 12)
+        for record in records:
+            if record['event'] == 'native_ready':
+                record['vad_only'] = True
+        result = validate(records, phase='native')
+        self.assertFalse(result['collection_valid'])
+        self.assertTrue(any('removed VAD-only' in e for e in result['errors']))
 
     def test_native_requires_pcm_and_real_asr_not_only_adapter_ready_or_vad(self):
         records = contract_records(9, 12)
