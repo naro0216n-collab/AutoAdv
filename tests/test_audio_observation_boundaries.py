@@ -242,6 +242,110 @@ class InferenceOwnershipTests(unittest.TestCase):
             audio.close()
 
 
+class RealControllerAudioDeadlineTests(unittest.TestCase):
+    def test_pending_native_analysis_defers_fallback_but_unrelated_speech_cannot_hold_forever(self):
+        from threading import Event
+        entered, release = Event(), Event()
+        now = [1000]
+        sent = []
+        class SlowUnrelatedASR:
+            def recognize(self, chunks):
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError('deliberately blocked recognition')
+                return '別の話題です'
+        class ActiveVoice:
+            def observe_float32_stereo(self, frames):
+                return VADDecision(True, 0, contains_speech=True)
+            def reset(self):
+                pass
+        profile = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
+                          uncertain_text_fallback=True,
+                          hooks=[HookSelection('X', 1, 2)])
+        controller = Controller(lambda *_: sent.append('input'), lambda *_: True)
+        controller.begin(profile, Target(11, 22), 'host', 1)
+        controller.permit(True)
+        source = SimpleNamespace(hook_code='X', context=1, context2=2)
+        token = controller.observe(generation='host', connection=1,
+            sequence=1, source=source, text='えっ嘘でしょ。', pid=11)
+        self.assertIsNotNone(token)
+        def notice(t, event, detail):
+            if event == 'started':
+                controller.presentation_event(t, 'native_started')
+            elif event == 'completed':
+                controller.presentation_event(t, 'native_finished')
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            notice, recognizer=SlowUnrelatedASR(), activity=ActiveVoice(),
+            clock=lambda: now[0])
+        try:
+            native.history.start(11)
+            native.boundary()
+            native.begin(token, 'えっ嘘でしょ。')
+            chunk = PCMChunk(1000, bytes(960 * 8), 48000, 2, 4)
+            native.history.push(chunk, target_pid=11)
+            native.feed(chunk)
+            self.assertTrue(entered.wait(1))
+            # Product audio says hold; production Controller has neither
+            # finished nor authorized a send at the fallback deadline.
+            now[0] = 1700
+            self.assertTrue(native.holds_deadline(token))
+            self.assertFalse(controller.completed)
+            self.assertFalse(controller.try_advance())
+            self.assertEqual(sent, [])
+            # After the bounded grace period, the product still labels an
+            # optional send as uncertain, NEVER as native completion.
+            now[0] = 3101
+            self.assertFalse(native.holds_deadline(token))
+            controller.presentation_event(token, 'fallback_elapsed')
+            self.assertEqual(controller.presentation_reason, 'uncertain_text_fallback')
+            self.assertTrue(controller.try_advance())
+            self.assertEqual(sent, ['input'])
+        finally:
+            native.cancel()
+            release.set()
+            native.close()
+        self.assertEqual(sent, ['input'])
+
+    def test_real_worker_only_finishes_on_silence_present_in_decoded_pcm(self):
+        from threading import Event
+        gate, release = Event(), Event()
+        events = []
+        class SlowRecognizer:
+            def recognize(self, chunks):
+                gate.set()
+                release.wait(2)
+                return 'えっ嘘でしょ。'
+        class Activity:
+            def observe_float32_stereo(self, frames):
+                return VADDecision(True, 0, contains_speech=True)
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event),
+            recognizer=SlowRecognizer(), activity=Activity())
+        try:
+            native.history.start(11)
+            native.begin(Token(1, 1), 'えっ嘘でしょ。')
+            pcm = PCMChunk(native.clock(), bytes(960 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            self.assertTrue(gate.wait(1))
+            # Even if later captured audio seems quiet, this inference's
+            # snapshot has no endpoint. It must not complete a dialogue.
+            with native._lock:
+                native.tail_ms = 400
+            release.set()
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertNotIn('completed', events)
+        finally:
+            release.set()
+            native.close()
+
+
 if __name__ == '__main__':
     unittest.main()
 

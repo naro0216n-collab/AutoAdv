@@ -36,6 +36,12 @@ def _elapsed_ms(first: int | None, last: int | None) -> float | None:
     return (last - first) / 1_000_000
 
 
+def _signed_elapsed_ms(first: int | None, last: int | None) -> float | None:
+    if first is None or last is None:
+        return None
+    return (last - first) / 1_000_000
+
+
 def _key(record: dict) -> tuple[object, object]:
     return record.get('session'), record.get('line')
 
@@ -367,9 +373,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if (ms := _elapsed_ms(source_outputs.get(origin), timestamps.get(key))) is not None:
             durations.setdefault('hook_to_utterance_ms', []).append(ms)
         if key in vad_end_estimates:
-            if (ms := _elapsed_ms(vad_end_estimates[key], presentation_at.get(key))) is not None:
+            if (ms := _signed_elapsed_ms(vad_end_estimates[key], presentation_at.get(key))) is not None:
                 durations.setdefault('vad_estimated_end_to_decision_ms', []).append(ms)
-            if (ms := _elapsed_ms(vad_end_estimates[key], attempts.get(key))) is not None:
+            if (ms := _signed_elapsed_ms(vad_end_estimates[key], attempts.get(key))) is not None:
                 durations.setdefault('vad_estimated_end_to_input_ms', []).append(ms)
             if (onset := vad_onset_estimates.get(key)) is not None:
                 # Signed delta: negative means observed voice began before the HOOK.

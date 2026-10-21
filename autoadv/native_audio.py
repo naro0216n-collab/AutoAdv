@@ -82,6 +82,10 @@ class NativeAudio:
         self._vad_voicing_since = -1
         self._pcm_reported = False
         self._last_active_ms = -1
+        self._last_unassigned_voice_ms = -1
+        self._unattributed_since_ms = -1
+        self._inference_submitted_ms = -1
+        self._deadline_grace_from_ms = -1
         self._quiet_notified = False
         self._tail_decoded = False
 
@@ -120,6 +124,10 @@ class NativeAudio:
         self.voice_end_estimate_ms = -1
         self.tail_ms = 0
         self._last_active_ms = -1
+        self._last_unassigned_voice_ms = -1
+        self._unattributed_since_ms = -1
+        self._inference_submitted_ms = -1
+        self._deadline_grace_from_ms = -1
         self._quiet_notified = False
         self._tail_decoded = False
         if hasattr(self.activity, 'reset'):
@@ -158,9 +166,11 @@ class NativeAudio:
                     generation = self._generation
                     self._inflight = True
                     self._inflight_generation = generation
+                    self._inference_submitted_ms = self.clock()
                     self._inference_at = buffered[-1].at_ms
                     self._tail_decoded = self.tail_ms >= 300
-                    pending.append((token, generation, [], '', None, samples, None, self.tail_ms >= 300))
+                    pending.append((token, generation, [], '', None, samples, None,
+                                    self.tail_ms, self.voice_end_estimate_ms))
         for item in pending:
             self._dispatch(item)
 
@@ -174,6 +184,33 @@ class NativeAudio:
             return bool(token == self.token and self.attributed and self._last_vad
                         and self._last_active_ms >= 0
                         and self.clock() - self._last_active_ms <= 1000)
+
+    def holds_deadline(self, token: Token) -> bool:
+        """Only positive correlated activity or a bounded pending ASR analysis
+        can defer the text deadline. An unrelated endless voice loop cannot
+        keep the dialogue alive indefinitely; pending is not native completion.
+        """
+        with self._lock:
+            if token != self.token or self.completed:
+                return False
+            now = self.clock()
+            if self.is_confirmed_playing(token):
+                return True
+            # A captured speech candidate must get a chance to be analyzed
+            # before the optional uncertain-text fallback. Pending alone does
+            # not identify the foreground or prove it is still playing.
+            candidate_pending = bool(not self.vad_only and self._inflight
+                        and self._inference_submitted_ms >= 0
+                        and now - self._inference_submitted_ms <= 2000
+                        and self._last_unassigned_voice_ms >= 0
+                        and now - self._last_unassigned_voice_ms <= 2000
+                        and self._unattributed_since_ms >= 0
+                        and now - self._unattributed_since_ms <= 2000)
+            if not candidate_pending:
+                return False
+            if self._deadline_grace_from_ms < 0:
+                self._deadline_grace_from_ms = now
+            return now - self._deadline_grace_from_ms <= 2000
 
     def cancel(self):
         with self._lock:
@@ -228,6 +265,9 @@ class NativeAudio:
                     self.rise_ms = chunk.at_ms
                 self._last_vad = activity.active
                 if activity.active or activity.contains_speech:
+                    self._last_unassigned_voice_ms = self.clock()
+                    if not self.attributed and self._unattributed_since_ms < 0:
+                        self._unattributed_since_ms = self.clock()
                     self._tail_decoded = False
                     self.voice_end_estimate_ms = -1
                 elif self.rise_ms >= 0 and activity.tail_silence_ms > 0:
@@ -235,6 +275,11 @@ class NativeAudio:
                     # capture-receipt clock, *not* a device playback timestamp.
                     self.voice_end_estimate_ms = chunk.at_ms - activity.tail_silence_ms
             self.tail_ms = activity.tail_silence_ms
+            if (not self.attributed and not self._inflight
+                    and activity.tail_silence_ms >= 500):
+                # A later independent voice candidate earns its own bounded
+                # ASR opportunity after a meaningful silence interval.
+                self._unattributed_since_ms = -1
             if activity.frames_analyzed and activity.active and self.attributed:
                 self._last_active_ms = self.clock()
                 self._quiet_notified = False
@@ -266,16 +311,19 @@ class NativeAudio:
                                            chunk.at_ms - self._inference_at >= 500):
                     self._inflight = True
                     self._inflight_generation = generation
+                    self._inference_submitted_ms = self.clock()
                     self._inference_at = chunk.at_ms
                     if tail_due:
                         self._tail_decoded = True
                     samples = self.history.since(self._sample_start())
-        return token, generation, events, error, pcm_frames, samples, end_estimate, False
+        return (token, generation, events, error, pcm_frames, samples,
+                end_estimate, self.tail_ms, self.voice_end_estimate_ms)
 
     def _dispatch(self, item):
         if item is None:
             return
-        token, generation, events, error, pcm_frames, samples, end_estimate, final_replay = item
+        (token, generation, events, error, pcm_frames, samples, end_estimate,
+         sampled_tail_ms, sampled_end_ms) = item
         # All callbacks are outside the lock; UI callbacks may synchronously
         # accept an advance and invalidate this very generation.
         with self._lock:
@@ -296,7 +344,8 @@ class NativeAudio:
                     return
             submitted_ns = time.perf_counter_ns() if self.on_inference else 0
             try:
-                self._pool.submit(self._infer, token, generation, samples, submitted_ns, final_replay)
+                self._pool.submit(self._infer, token, generation, samples, submitted_ns,
+                                  sampled_tail_ms, sampled_end_ms)
             except RuntimeError:
                 with self._lock:
                     if self._inflight_generation == generation:
@@ -308,7 +357,8 @@ class NativeAudio:
             item = self._consume_locked(chunk)
         self._dispatch(item)
 
-    def _infer(self, token, generation, samples, submitted_ns=0, final_replay=False):
+    def _infer(self, token, generation, samples, submitted_ns=0,
+               submitted_tail_ms=None, submitted_end_ms=None):
         started_ns = time.perf_counter_ns() if self.on_inference else 0
         if not submitted_ns:
             submitted_ns = started_ns
@@ -328,12 +378,21 @@ class NativeAudio:
                         progress.edit_count <= max(1, progress.matched_chars // 6)):
                     self.attributed = True
                     self._last_active_ms = self.clock()
+                    self._unattributed_since_ms = -1
                     events.append('started')
-                if (self.attributed and progress.terminal_candidate and
-                        (progress.tail_confidence >= .90 or final_replay) and self.tail_ms >= 300):
+                # A complete lexical match plus observed trailing silence is
+                # sufficient. Requiring a second identical ASR decode wastes
+                # latency and can turn a valid first final recognition into a
+                # hold when background speech contaminates the next window.
+                # Never apply *later* VAD silence to an earlier ASR sample.
+                # This snapshot belongs to exactly the PCM supplied for decode.
+                tail_at_decode = self.tail_ms if submitted_tail_ms is None else submitted_tail_ms
+                if (self.attributed and progress.terminal_candidate
+                        and tail_at_decode >= 300):
                     self.completed = True
                     events.append('completed')
-                    voice_end_estimate = self.voice_end_estimate_ms
+                    voice_end_estimate = (self.voice_end_estimate_ms if submitted_end_ms is None
+                                          else submitted_end_ms)
                 else:
                     voice_end_estimate = -1
             if self.on_voice_end and 'completed' in events and voice_end_estimate >= 0:

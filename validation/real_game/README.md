@@ -149,7 +149,7 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 `benchmark_asr`は録音全体を一度に推論し、`stress_asr`は混合音声の全体転写を観測する。
 これらとは別に、`timeline_asr`は同じ録音14音声と特殊音声8場面を
 40msずつ実時間に近い間隔で、送信相当の観測境界から既定600ms後にHOOKが届く条件で**製品の`NativeAudio.feed`・`VoiceActivity`・`JapaneseASR`・`TargetMatcher`**へ渡す。
-原音の観測開始、PCM末尾の無音、部分認識のカバレッジ、発話終了通知、推論滞留を時刻付きで保存する。
+原音の観測開始、PCM末尾の無音、部分認識のカバレッジ、発話終了通知、推論滞留を時刻付きで保存する。HOOK受信時刻・原音を固定しても、音声終了・文字数フォールバック・手動引継ぎ・送りの可否は製品`NativeAudio`と`Controller`（`presentation_event`・`try_advance`）を実行して判定する。テストの入力先とフォーカス許可だけを検証用に置換し、判定関数を独立実装しない。背景音声負荷ではフォールバックON/OFFを同じ経路で比較し、音声ファイル終端から判断・模擬入力までの符号付き遅延を出力する。
 旧台詞の推論結果は新台詞へ適用しない。波形の加工・独立ASR判定器・第二の進行Controllerは使用しない。
 
 ```powershell

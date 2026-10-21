@@ -188,5 +188,13 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertFalse(validate(without_pause, phase='mixed')['ok'])
 
 
+class SignedLatencyContract(unittest.TestCase):
+    def test_premature_decision_is_negative_not_dropped(self):
+        from validation.real_game.verify_trace import _signed_elapsed_ms
+        self.assertEqual(_signed_elapsed_ms(2_000_000_000, 1_750_000_000), -250.0)
+        self.assertEqual(_signed_elapsed_ms(2_000_000_000, 2_500_000_000), 500.0)
+        self.assertIsNone(_signed_elapsed_ms(None, 2_000_000_000))
+
+
 if __name__ == '__main__':
     unittest.main()

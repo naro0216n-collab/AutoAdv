@@ -1556,9 +1556,9 @@ def run_gui() -> int:
             if (token != self.controller.token or not u or u.use_tts or
                     u.advance_mode != AdvanceMode.AUDIO or self.controller.completed or self.controller.sent):
                 return
-            if self.native_audio and self.native_audio.is_confirmed_playing(token):
-                # A positive correlated voice segment is still active. Re-evaluate
-                # while that evidence persists, without resetting the deadline.
+            if self.native_audio and self.native_audio.holds_deadline(token):
+                # A correlated voice is active, or a bounded real ASR analysis
+                # of captured speech is pending. Neither grants completion.
                 QTimer.singleShot(200, lambda t=token: self.fallback_due(t))
                 return
             if self.controller.native_playing:
