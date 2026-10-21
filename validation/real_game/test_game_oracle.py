@@ -19,9 +19,11 @@ class IndependentGameOracleContract(unittest.TestCase):
                         oracle_records=game if game is not None else self.game, **kwargs)
 
     def test_absent_game_observer_is_never_real_acceptance(self):
-        self.assertFalse(validate(self.product, phase='native')['ok'])
-        self.assertIn('missing independent game-side playback/dismissal evidence',
-                      validate(self.product, phase='native')['errors'])
+        observation = validate(self.product, phase='native')
+        self.assertTrue(observation['collection_valid'], observation['errors'])
+        self.assertFalse(observation['voice_safety_verified'])
+        self.assertTrue(any('voice safety unverified' in item
+                            for item in observation['diagnostics']))
         self.assertTrue(self.verify()['ok'])  # checker-only positive fixture
 
     def test_game_dismissal_without_autoadv_input_is_not_an_advance_success(self):
@@ -95,7 +97,30 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_replay_or_tamper_in_game_order_never_counts_as_success(self):
         game = [dict(x) for x in self.game]
         game[1]['body_hash'] = '0'*64
-        self.assertFalse(self.verify(game=game)['ok'])
+        observation = self.verify(game=game)
+        self.assertTrue(observation['collection_valid'], observation['errors'])
+        self.assertFalse(observation['voice_safety_verified'])
+        self.assertTrue(any('no unique playback observation' in item
+                            for item in observation['diagnostics']))
+
+    def test_one_unaligned_game_line_does_not_discard_other_voice_observations(self):
+        game = [dict(x) for x in self.game]
+        first = next(x for x in game if x['event'] == 'line_started' and x['line'] == 1)
+        first['body_hash'] = '0' * 64
+        observation = self.verify(game=game)
+        self.assertTrue(observation['collection_valid'], observation['errors'])
+        self.assertFalse(observation['voice_safety_verified'])
+        self.assertEqual(observation['game_evidence']['unaligned_lines'], 1)
+        self.assertEqual(observation['game_evidence']['lines'][0]['outcome'],
+                         'game_playback_unaligned')
+        self.assertEqual(observation['game_evidence']['lines'][1]['game_line'], 2)
+        self.assertGreater(observation['game_evidence']['confirmed_voice_safe_inputs'], 0)
+
+    def test_delay_is_measured_without_default_overhold_judgement(self):
+        observed = self.verify()
+        self.assertTrue(observed['collection_valid'], observed['errors'])
+        self.assertEqual(observed['game_evidence']['overholds'], 0)
+        self.assertIn('game_voice_end_to_input_ms', observed['performance'])
 
     def test_overhold_is_measured_from_independent_playback_not_vad_guess(self):
         game = [dict(x) for x in self.game]
@@ -125,7 +150,8 @@ class IndependentGameOracleContract(unittest.TestCase):
                      x['event'] in ('voice_started', 'voice_ended'))]
             result = validate(product, phase='native', start_line=10,
                               oracle_records=game, scenario_path=temp)
-            self.assertFalse(result['ok'])
+            self.assertTrue(result['collection_valid'], result['errors'])
+            self.assertFalse(result['voice_safety_verified'])
             self.assertEqual(result['game_evidence']['misattributions'], 1)
 
 

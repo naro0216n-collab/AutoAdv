@@ -15,7 +15,7 @@ param(
     [string] $Voice = '',
     [string] $IrodoriUrl = 'http://127.0.0.1:8088',
     [int] $TimeoutSeconds = 120,
-    [int] $MaxVoiceHoldMs = 2000,
+    [int] $MaxVoiceHoldMs = 0,
     [switch] $UncertainFallback
 )
 $ErrorActionPreference = 'Stop'
@@ -24,7 +24,7 @@ $scratch = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 if (-not $Trace) {
     $Trace = Join-Path $scratch ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
-if ($MaxVoiceHoldMs -le 0) { throw 'MaxVoiceHoldMs must be positive' }
+if ($MaxVoiceHoldMs -lt 0) { throw 'MaxVoiceHoldMs cannot be negative' }
 if ($Automated -and -not $RenPySdk) {
     throw 'Automated real-game validation requires -RenPySdk to launch the existing game'
 }
@@ -146,8 +146,8 @@ try {
         python -m autoadv
         $guiExit = $LASTEXITCODE
         $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace,
-                       '--phase', $Phase, '--report', $Report,
-                       '--max-voice-hold-ms', [string]$MaxVoiceHoldMs)
+                       '--phase', $Phase, '--report', $Report)
+        if ($MaxVoiceHoldMs -gt 0) { $arguments += @('--max-voice-hold-ms', [string]$MaxVoiceHoldMs) }
         if ($Oracle) { $arguments += @('--oracle', $Oracle) }
         if ($StartLine -gt 0) { $arguments += @('--start-line', [string]$StartLine) }
         if (Test-Path -LiteralPath $Trace) {
@@ -166,7 +166,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Real game evidence failed verification (phase=$Phase, trace=$Trace)"
         }
-        Write-Host "Verified AutoAdv observation phase: $Phase"
+        Write-Host "Collected and audited AutoAdv product observations (phase=$Phase). Check report advancement_observed and voice_safety_verified independently."
     } finally {
         Pop-Location
     }

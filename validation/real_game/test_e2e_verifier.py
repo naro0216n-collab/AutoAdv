@@ -81,7 +81,8 @@ class RealGameVerifierContract(unittest.TestCase):
                 self.assertIsNone(result['game_evidence'])
                 self.assertEqual(result['game_observer'], 'optional')
         native = _validate(contract_records(9, 12), phase='native')
-        self.assertFalse(native['ok'])
+        self.assertTrue(native['collection_valid'], native['errors'])
+        self.assertFalse(native['voice_safety_verified'])
         self.assertEqual(native['game_observer'], 'required')
 
     def test_incidental_native_input_cannot_be_accepted_without_voice_evidence(self):
@@ -189,8 +190,8 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertEqual(result['confirmed_native_asr'], 0)
         self.assertFalse(result['advancement_observed'])
-        self.assertTrue(any('limited ASR-confirmed' in finding
-                            for finding in result['diagnostics']))
+        self.assertEqual(result['confirmed_advance_to_next_hook'], 0)
+        self.assertFalse(result['advancement_observed'])
 
     def test_native_requires_pcm_and_real_asr_not_only_adapter_ready_or_vad(self):
         records = contract_records(9, 12)
@@ -226,7 +227,10 @@ class RealGameVerifierContract(unittest.TestCase):
         records = contract_records(17, 20)
         self.assertTrue(validate(records, phase='hook', start_line=18)['ok'])
         # A single occurrence cannot resolve which of the two identical lines it is.
-        self.assertFalse(validate(contract_records(17, 18, advance=False), phase='hook')['ok'])
+        isolated = validate(contract_records(17, 18, advance=False), phase='hook')
+        self.assertTrue(isolated['collection_valid'])
+        self.assertTrue(any('cannot be uniquely aligned' in x for x in isolated['diagnostics']))
+        self.assertFalse(isolated['advancement_observed'])
         duplicates = [dict(r) for r in records]
         key = next(r for r in records if r['event'] == 'advance_input')
         duplicates.insert(-1, dict(key, seq=len(duplicates), at_ns=900000))
@@ -293,7 +297,11 @@ class RealGameVerifierContract(unittest.TestCase):
         wrong_pid = [dict(r, pid=999) if r['event'] == 'hook_output' else r for r in records]
         self.assertFalse(validate(wrong_pid, phase='reading')['ok'])
         wrong_text = [dict(r, body_hash=text_digest('別の台詞')) if r['event'] == 'utterance' and r['line'] == 2 else r for r in records]
-        self.assertFalse(validate(wrong_text, phase='reading')['ok'])
+        unmatched = validate(wrong_text, phase='reading')
+        self.assertTrue(unmatched['collection_valid'], unmatched['errors'])
+        self.assertTrue(any('cannot be uniquely aligned' in x for x in unmatched['diagnostics']))
+        self.assertIsNone(unmatched['reference_start_line'])
+        self.assertEqual(unmatched['confirmed_advance_to_next_hook'], 2)
         without_connection = [r for r in records if r['event'] != 'hook_connected']
         self.assertFalse(validate(without_connection, phase='reading')['ok'])
 

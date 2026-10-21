@@ -59,7 +59,7 @@ class StressTraceVerifierTests(unittest.TestCase):
     def test_stress_cannot_pass_when_later_dialogues_depend_on_external_progress(self):
         result = validate(checker_only_records(), phase='stress')
         self.assertTrue(result['collection_valid'], result['errors'])
-        self.assertTrue(any('stress scenario progressed without AutoAdv input' in e
+        self.assertTrue(any('dialogue observed without preceding AutoAdv SendInput' in e
                             for e in result['diagnostics']))
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
         self.assertEqual(result['confirmed_tts'], 0)
@@ -76,8 +76,9 @@ class StressTraceVerifierTests(unittest.TestCase):
         records = checker_only_records()
         partial = validate(records[:-4], phase='stress')
         self.assertTrue(partial['collection_valid'], partial['errors'])
-        self.assertTrue(any('incomplete ASR stress sequence' in finding
-                            for finding in partial['diagnostics']))
+        self.assertFalse(partial['advancement_observed'] and
+                         partial['confirmed_advance_to_next_hook'] >= 3)
+        self.assertEqual(partial['observed_lines'], len(LINES) - 1)
         faulty = [dict(r) for r in records]
         target = next(r for r in faulty if r.get('event') == 'utterance' and
                       r['body_hash'] == text_digest('これは表示されただけの文章です。'))

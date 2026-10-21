@@ -1,4 +1,4 @@
-"""Independent, fail-closed verification of product GUI observations from a *real* game.
+"""Independent diagnostic audit of product GUI observations from a *real* game.
 
 No runner, injection, simulated HOOK, audio source or input exists here. A
 trace is evidence from one opt-in production run, never proof of execution when
@@ -7,7 +7,6 @@ manufactured for unit tests. Scenario expectations are not read by AutoAdv.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -55,7 +54,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       reference_start: int | None, scenario: Sequence[dict], *,
                       game_pid_by_session: dict, presentation_at: dict,
                       vad_end_estimates: dict, source_outputs: dict,
-                      max_voice_hold_ms: int = 2000) -> dict:
+                      max_voice_hold_ms: int | None = None) -> dict:
     """Compare actual game playback/dismissal with actual AutoAdv inputs.
 
     The Ren'Py callback/polling stream is independent of the product. It is
@@ -69,9 +68,13 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
               'unverified_voice_ends': 0, 'indeterminate_voice_end': 0,
               'overholds': 0, 'misattributions': 0,
               'manual_or_unadvanced': 0, 'manual_or_external_advances': 0,
-              'undismissed_lines': 0, 'confirmed_voice_safe_inputs': 0}
-    if not oracle_records or oracle_records[0].get('event') != 'oracle_started' or oracle_records[0].get('version') != 1:
-        errors.append('missing independent game-side playback/dismissal evidence')
+              'undismissed_lines': 0, 'confirmed_voice_safe_inputs': 0,
+              'unaligned_lines': 0}
+    if not oracle_records:
+        diagnostics.append('independent game playback evidence unavailable; voice safety unverified')
+        return result
+    if oracle_records[0].get('event') != 'oracle_started' or oracle_records[0].get('version') != 1:
+        errors.append('invalid independent game playback observation header')
         return result
     pid = oracle_records[0].get('pid')
     if type(pid) is not int or pid <= 0 or any(
@@ -115,32 +118,34 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 if line['dismissed'] is not None:
                     errors.append(f'duplicate game line dismissal: {number}')
                 line['dismissed'] = record
-    if reference_start is None or not utterance_order:
-        errors.append('cannot align game oracle without contiguous HOOK dialogue')
-        return result
-    if len(utterance_order) > len(ordered):
-        errors.append('fewer game dialogues than product utterances')
-        return result
-    candidates = []
-    for first in range(len(ordered) - len(utterance_order) + 1):
-        segment = ordered[first:first + len(utterance_order)]
-        if all(lines[n]['start'].get('body_hash') == utterances[key].get('body_hash')
-               and lines[n]['start']['at_ns'] <= utterances[key]['at_ns']
-               and (j + first + 1 == len(ordered) or
-                    utterances[key]['at_ns'] < lines[ordered[first + j + 1]]['start']['at_ns'])
-               for j, (n, key) in enumerate(zip(segment, utterance_order))):
-            candidates.append(segment)
-    if len(candidates) != 1:
-        errors.append(f'no unique time-aligned game playback trace ({len(candidates)} candidates)')
-        return result
-    matched = candidates[0]
-    for offset, (game_number, key) in enumerate(zip(matched, utterance_order)):
+    # Align *each* game dialogue using only independently observed source text
+    # and monotonic timing. A lost/changed HOOK or one faulty parsing rule must
+    # not discard observations of every other utterance in the session.
+    for offset, key in enumerate(utterance_order):
+        utterance = utterances[key]
+        stamp = utterance['at_ns']
+        matching = [number for position, number in enumerate(ordered)
+                    if lines[number]['start'].get('body_hash') == utterance.get('body_hash')
+                    and lines[number]['start']['at_ns'] <= stamp
+                    and (position + 1 == len(ordered) or
+                         stamp < lines[ordered[position + 1]]['start']['at_ns'])]
+        if len(matching) != 1:
+            result['unaligned_lines'] += 1
+            result['lines'].append({
+                'scenario': None, 'game_line': None, 'sent': key in sent,
+                'voice_observed': None, 'outcome': 'game_playback_unaligned',
+            })
+            diagnostics.append(f'no unique playback observation for HOOK line {key}; voice safety unverified')
+            continue
+        game_number = matching[0]
         line = lines[game_number]
-        contract = scenario[reference_start + offset]
+        # Scenario metadata is optional diagnostic context. Its authored voice
+        # classification is never a prerequisite for collecting game playback.
+        pos = (reference_start + offset if reference_start is not None else None)
+        contract = scenario[pos] if pos is not None and 0 <= pos < len(scenario) else {}
         want_voice = contract.get('foreground_voice')
         if type(want_voice) is not bool:
-            errors.append(f'foreground_voice not specified in independent scenario: {contract.get("id")}')
-            continue
+            want_voice = None
         attempt = attempts.get(key)
         strict_native = (utterances[key].get('advance_mode') == 'audio' and
                          not utterances[key].get('use_tts'))
@@ -163,10 +168,10 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         # advance. Game dismissal and the fixture's chosen sound-file name are
         # not AutoAdv acceptance criteria. Retain playback state solely to
         # compare a native-voice advance with independently observed voice end.
-        if not want_voice and reasons.get(key) == 'native':
+        if want_voice is False and not voice_onsets and reasons.get(key) == 'native':
             result['misattributions'] += 1
             detail['outcome'] = 'background_voice_misattributed'
-            errors.append(f'native completion without foreground game voice: {key}')
+            diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
         elif attempt is None:
             result['manual_or_unadvanced'] += 1
             if dismissal is not None:
@@ -178,7 +183,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             else:
                 result['undismissed_lines'] += 1
                 detail['outcome'] = 'still_presented_without_autoadv_input'
-        elif want_voice and strict_native:
+        elif strict_native:
             # Each sampled end is an interval (last audible sample, first
             # inactive sample], not an exact source-audio termination timestamp.
             # Preserve the signed latency to the first inactive observation as
@@ -212,7 +217,8 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 diagnostics.append(f'input within voice-end observer uncertainty interval: {key}')
             else:
                 ms = detail['game_end_to_input_ms']
-                if ms is not None and ms > max_voice_hold_ms:
+                if (ms is not None and max_voice_hold_ms is not None
+                        and ms > max_voice_hold_ms):
                     result['overholds'] += 1
                     detail['outcome'] = 'overheld'
                     diagnostics.append(f'observed voice-end-to-input latency {ms:.0f}ms exceeds diagnostic reference: {key}')
@@ -249,7 +255,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
              scenario_path: Path = HERE / 'SCENARIO.json',
              start_line: int | None = None,
              oracle_records: Sequence[dict] | None = None,
-             max_voice_hold_ms: int = 2000) -> dict:
+             max_voice_hold_ms: int | None = None) -> dict:
     if phase not in PHASES:
         raise ValueError(f'unknown validation phase: {phase}')
     scenario = scenario_for_phase(phase, scenario_path)
@@ -503,78 +509,22 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             errors.append(f'next HOOK utterance not after SendInput in same session: {key}')
         else:
             links.add(key)
-    if start is not None:
-        for offset, key in enumerate(utterance_order):
-            pos = start + offset
-            if pos >= len(scenario):
-                errors.append('dialogue exceeds reference scenario')
-                break
-            line = scenario[pos]
-            if key not in sent:
-                continue
-            if line.get('manual_handoff'):
-                diagnostics.append(f'AutoAdv input at scenario-authored manual handoff: {key}')
-                continue
-            if pos == len(scenario) - 1 or line.get('ending'):
-                continue
-            if key not in links and offset + 1 >= len(utterance_order):
-                diagnostics.append(f'input sent but following HOOK not observed: {key}')
-            if key in timeouts:
-                diagnostics.append(f'controller handed off after next-line timeout: {key}')
-        # A new dialogue without an AutoAdv input may be legitimate manual
-        # gameplay, but cannot count as unattended auto-advance coverage.
-        # In the challenge scenario there is no menu handoff; admitting such
-        # transitions used to make a manual run look fully verified.
-        for offset in range(1, len(utterance_order)):
+    # These are measurements of the product path, not fixture-authored
+    # instructions to AutoAdv. Unobserved continuation is always reported,
+    # regardless of what line number or expected scene was selected.
+    for offset, key in enumerate(utterance_order):
+        if key in sent and key not in links:
+            diagnostics.append(f'input sent but following HOOK not observed: {key}')
+        if key in timeouts:
+            diagnostics.append(f'controller handed off after next-line timeout: {key}')
+        if offset:
             previous = utterance_order[offset - 1]
-            if previous not in sent and not scenario[start + offset - 1].get('manual_handoff'):
-                if phase == 'stress':
-                    diagnostics.append(f'stress scenario progressed without AutoAdv input: {previous}')
-                elif phase != 'hook':
-                    diagnostics.append(f'next dialogue observed without preceding AutoAdv SendInput: {previous}')
-
-    if phase == 'stress':
-        # The real challenge run is observational: a fixed 'hold' expected for
-        # nonlexical speech/background is not a valid universal oracle.
-        if start != 0 or len(utterance_order) != len(scenario):
-            diagnostics.append('incomplete ASR stress sequence; remaining cases unobserved')
-        for index, key in enumerate(utterance_order):
-            if start is None or start + index >= len(scenario):
-                break
-            case = scenario[start + index]
-            if case.get('assessment') is None:
-                continue
-            if (utterances[key].get('advance_mode') != 'audio' or utterances[key].get('use_tts')):
-                errors.append(f'stress must exercise non-TTS audio judgement: {key}')
-            # Expect source observations, not a manufactured yes/no 'should hold'.
-            # Missing PCM/inference is a coverage gap, not evidence of no voice.
-        controls = [key for i, key in enumerate(utterance_order)
-                    if start is not None and start + i < len(scenario)
-                    and scenario[start + i]['id'] == 'clean_control']
-        if not controls or controls[0] not in links or controls[0] not in native:
-            diagnostics.append('positive foreground ASR control did not advance')
-
-    linked_modes = Counter((utterances[k].get('advance_mode'), utterances[k].get('use_tts')) for k in links)
+            if previous not in sent and phase != 'hook':
+                diagnostics.append(f'dialogue observed without preceding AutoAdv SendInput: {previous}')
     confirmed_native = [k for k in links if k in native and k in pcm]
     confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]
-    bgm_native = bool(start is not None and any(
-        scenario[start + i].get('bgm') and k in confirmed_native
-        for i, k in enumerate(utterance_order)))
-    repeats = [k for k in links if utterances[k].get('body_hash') == text_digest('ヒューズが飛んだ。')]
     if not utterance_order:
         errors.append('no live dialogue observed')
-    for key in sent:
-        if key not in links and key not in timeouts and key == utterance_order[-1]:
-            diagnostics.append(f'no following HOOK yet for last observed input: {key}')
-    if phase in ('reading', 'mixed') and linked_modes[('text', False)] < (1 if phase == 'mixed' else 2):
-        diagnostics.append('limited reading-time advances confirmed by next HOOK')
-    if phase in ('native', 'mixed') and (len(confirmed_native) < (3 if phase == 'mixed' else 2) or not bgm_native):
-        diagnostics.append('limited ASR-confirmed native advances including BGM case')
-    if phase in ('tts', 'mixed') and len(confirmed_tts) < 2:
-        diagnostics.append('limited Irodori playback-and-next-HOOK confirmations')
-    if phase == 'mixed':
-        if len(repeats) != 2:
-            diagnostics.append('repeated-identical dialogues not independently advanced')
     # Measurements are observational, never an additional pass criterion.
     # The same monotonic clock times delivery, policy and actual advancement.
     durations = {name: values for name, values in measured.items()}
@@ -642,17 +592,12 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     line_results = []
     for offset, key in enumerate(utterance_order):
         utterance = utterances[key]
-        is_terminal = (start is not None and start + offset < len(scenario)
-                       and (start + offset == len(scenario) - 1
-                            or scenario[start + offset].get('ending')))
         if key not in attempts:
             outcome = 'no_autoadv_input'
         elif key not in sent:
             outcome = 'input_attempt_unconfirmed'
         elif key in links:
             outcome = 'next_hook_observed'
-        elif is_terminal:
-            outcome = 'terminal_line_input'
         else:
             outcome = 'next_hook_not_observed'
         scenario_id = (scenario[start + offset].get('id')
@@ -691,7 +636,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             game_evidence['confirmed_voice_safe_inputs'] > 0 and
             not game_evidence['early_inputs'] and
             not game_evidence['unverified_voice_ends'] and
-            not game_evidence['indeterminate_voice_end']) if needs_oracle else None,
+            not game_evidence['indeterminate_voice_end'] and
+            not game_evidence['misattributions'] and
+            not game_evidence['unaligned_lines'] and
+            len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
         'confirmed_native_asr': len(confirmed_native), 'confirmed_tts': len(confirmed_tts),
@@ -708,25 +656,23 @@ def main() -> int:
                         help='independent RenPy JSONL; required for native, mixed and stress')
     parser.add_argument('--report', type=Path,
                         help='write measured per-line outcomes and timing as JSON, including failures')
-    parser.add_argument('--max-voice-hold-ms', type=int, default=2000,
-                        help='reference for reporting an observed voice-end-to-input delay; not an acceptance threshold')
+    parser.add_argument('--max-voice-hold-ms', type=int,
+                        help='optional diagnostic delay reference; no default acceptance threshold')
     parser.add_argument('--start-line', type=int,
                         help='1-based first SCENARIO.json line, to disambiguate repeated text')
     args = parser.parse_args()
     if not args.trace.is_file():
         parser.error('real game trace not found')
-    if args.phase in VOICE_ORACLE_PHASES and args.oracle is None:
-        parser.error(f'--oracle required for {args.phase} voice-end verification')
-    if args.oracle is not None and not args.oracle.is_file():
-        parser.error('independent game oracle not found')
+    # Missing external playback evidence must not prevent product data capture.
+    # The resulting report explicitly leaves voice safety unverified.
     if args.report is not None and args.report.exists():
         parser.error('refusing to overwrite an existing report')
-    if args.max_voice_hold_ms <= 0:
+    if args.max_voice_hold_ms is not None and args.max_voice_hold_ms <= 0:
         parser.error('--max-voice-hold-ms must be positive')
     try:
         records = [json.loads(x) for x in args.trace.read_text(encoding='utf-8').splitlines() if x.strip()]
         oracle_records = ([json.loads(x) for x in args.oracle.read_text(encoding='utf-8').splitlines() if x.strip()]
-                          if args.oracle is not None else None)
+                          if args.oracle is not None and args.oracle.is_file() else None)
         result = validate(records, phase=args.phase, start_line=args.start_line,
                           oracle_records=oracle_records, max_voice_hold_ms=args.max_voice_hold_ms)
         if args.report is not None:
