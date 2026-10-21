@@ -5,161 +5,203 @@
       "id": "notice",
       "text": "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。",
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "intro",
       "text": "通常のゲームと同じように、台詞表示・音声再生・選択肢・送り入力が動作します。",
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "instruction",
       "text": "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。",
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "protagonist-1",
       "text": "これは無音声の台詞です。",
       "advance_mode": "audio",
-      "use_tts": true
+      "use_tts": true,
+      "foreground_voice": false
     },
     {
       "id": "protagonist-2",
       "text": "この文章はIrodori TTSの確認に使用します。",
       "advance_mode": "audio",
-      "use_tts": true
+      "use_tts": true,
+      "foreground_voice": false
     },
     {
       "id": "normal-001",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_001.wav"
     },
     {
       "id": "normal-017",
       "text": "あっベルが鳴ってる。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_017.wav"
     },
     {
       "id": "normal-022",
       "text": "猫はにゃーにゃーと鳴く。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_022.wav"
     },
     {
       "id": "bgm-notice",
       "text": "ここからはBGMが流れる状態で、ゲーム内の原音を再生します。",
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "normal-026-bgm",
       "text": "私はいつもミネラルウォーターを持ち歩いています。",
       "bgm": true,
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_026.wav"
     },
     {
       "id": "normal-028-bgm",
       "text": "彼女はスタッフをまとめていけると思いますか？",
       "bgm": true,
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_028.wav"
     },
     {
       "id": "repeat-notice",
       "text": "同一の表示台詞を、異なる音声収録条件で連続して再生します。",
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "normal-001-repeat",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_001.wav"
     },
     {
       "id": "whisper-001",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/whisper_001.wav"
     },
     {
       "id": "whisper-017",
       "text": "あっベルが鳴ってる。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/whisper_017.wav"
     },
     {
       "id": "whisper-022",
       "text": "猫はにゃーにゃーと鳴く。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/whisper_022.wav"
     },
     {
       "id": "same-notice",
       "text": "同じ取得本文が連続する区間です。二重送りと台詞取りこぼしに注意してください。",
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "normal-020-first",
       "text": "ヒューズが飛んだ。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_020.wav"
     },
     {
       "id": "normal-020-second",
       "text": "ヒューズが飛んだ。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_020.wav"
     },
     {
       "id": "choice-notice",
       "text": "次の選択肢は、ユーザー操作によって進めてください。",
       "manual_handoff": true,
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     },
     {
       "id": "normal-010",
       "text": "彼のあだ名は言い得て妙だよね。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_010.wav"
     },
     {
       "id": "normal-012",
       "text": "ゼロという概念は、ヒンドゥー文化に由来している。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_012.wav"
     },
     {
       "id": "normal-021",
       "text": "私はポピュラー音楽を聞きたい。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_021.wav"
     },
     {
       "id": "normal-030",
       "text": "あなたは流感になりかけているか、もっと重い病気かもしれません。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_030.wav"
     },
     {
       "id": "normal-035",
       "text": "彼女は息子に家で行儀よくするように言った。",
       "advance_mode": "audio",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": true,
+      "foreground_file": "audio/voice/normal_035.wav"
     },
     {
       "id": "ending",
       "text": "検証用シナリオを終了します。",
       "ending": true,
       "advance_mode": "text",
-      "use_tts": false
+      "use_tts": false,
+      "foreground_voice": false
     }
   ]
 }

@@ -8,7 +8,7 @@
 - 同じ台詞の連続、停止・再開、ゲーム切替による古い処理の失効
 
 ゲームのビルド、起動、エンジン動作、配布物取得は**検証項目ではない**。
-ゲームの実行そのものは外部の前提条件であり、ゲームのソースにテスト用IPCを追加しない。
+ゲームの実行そのものは外部の前提条件である。検証ゲームには**結果判定専用の独立観測**を追加するが、AutoAdvへ介入するIPC・固定HOOK・模擬PCM・入力命令を追加しない。
 AutoAdv本体は検証シナリオ／台詞一覧／音声ファイルの内容を参照せず、
 通常のLunaHook・Process Loopback・Irodori・Windows入力だけを用いる。
 
@@ -35,8 +35,8 @@ Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
 
 ## 検査B：起動済み実ゲームに対するAutoAdv実経路検収（Windows）
 
-1. 利用者がRen'Pyゲームの実行環境を別途準備してゲームを起動する。
-   これはテストによる検証ではない。
+1. 利用者がRen'Py検証ゲームの実行環境を別途準備し、**起動前に** `AUTOADV_GAME_ORACLE` を未使用のJSONLパスに設定してから、その環境を継承するWindowsシェルでゲームを起動する。
+   この変数はゲームの**観測ログ**だけを有効にし、AutoAdvの入力・音声・HOOKには介入しない。ゲームのビルド・起動はAutoAdv検証器の責務外。
 2. 新規出力先を指定し `AUTOADV_VALIDATION_TRACE` を設定して、通常のAutoAdv GUIを起動。
    Windows PowerShellの例：
 
@@ -48,39 +48,59 @@ Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
    進行は「文字のみ判断」「音声判断」の2択。TTSの利用は話者設定で独立に指定する。音声判断かつTTS非使用の場合にProcess Loopback＋ASR照合を使用する。VAD-onlyは発声帰属の制限を理解して使う。
 4. 自動送りを明示的に許可し、ゲームの通常会話を実行する。
    選択肢では一時停止・手動選択・再許可する。
-5. GUIを閉じて `python -m validation.real_game.verify_trace --phase mixed --trace "$env:AUTOADV_VALIDATION_TRACE"`。
+5. GUIを閉じて `python -m validation.real_game.verify_trace --phase mixed --trace "$env:AUTOADV_VALIDATION_TRACE" --oracle "$env:AUTOADV_GAME_ORACLE"`。**ゲーム側ログ未取得は必ず未検収**。
 
 本検証は、実HOOKの通知、Utteranceの話者／本文、NativeAudio完了、
 TTSの再生完了、実SendInputから得た**同一GUI実行経路の事実**を照合する。
 音声データ・原文・画像はトレースに出力せず、文面はSHA-256で照合する。
 
-HOOK・音声・入力のどれかが成立しない場合は **FAIL** とする。
+HOOK・音声・入力のどれかが成立しない場合は **FAIL** とする。検証ゲームの`voice`チャンネルから独立に得た再生状態と、AutoAdvの実入力時刻が矛盾する場合もFAILとする。ゲーム観測は約20Hzの標本時刻であり、Windows再生デバイスの音響的なサンプル精度を保証しない。終了区間が曖昧なら成功とはせず、未確認として表示する。
 実ゲームの観測記録が未取得の場合は未検収であり、検査Aの成功を検査Bの成功と読み替えない。
 GitHub-hosted Windowsには実ゲーム／音声出力／実験者の入力がないため、
 検査BをFast CIへ偽装して自動成功させない。
+
+## 検証目的・実行範囲（混同禁止）
+
+- **内部契約**: 設定・状態遷移・トークン失効・複合照合の局所検証。合格しても自動送りがゲーム上で成立したとは認定しない。
+- **実モデルASR**: CER・完全一致率・RTFは参考診断のみ。自動進行の合格率や改善効果をこれらで代理しない。
+- **検証用ゲームの実経路**: 実LunaHook、実Process Loopback、製品NativeAudio/Controller、実SendInput、次Hookに加え、独立したRen'Pyゲーム観測によって原音終了と送り時刻を比較。進行の適正、途中送り、過剰保留、不確実時フォールバック、手動引継ぎの台詞単位結果を評価する。検証ゲームを本番の任意ゲームと同一視しない。
+- **利用者の実作品**: 通常のGUI利用と実ゲーム上の確認が別途必要。第三者の市販作品ではゲーム内部の独立した再生終了観測を常に得られるわけではないため、混合PCMのVAD推定を真値として途中送り0件を宣言しない。
+
+検証ゲームのゲーム側観測は `renpy/game/autoadv_oracle.rpy` にあり、
+`config.all_character_callbacks` と `config.periodic_callbacks` を使用して台詞表示・再生状態・台詞を閉じた事実を独立記録する。AutoAdv本体はそのログもシナリオ期待値も読まない。ゲーム側観測は入力・台詞・再生の**操作を一切変更しない**。
+
+ゲームは**AutoAdvを実行する前**に、次の新規出力パスを継承する環境から別途起動する。
+
+```powershell
+$env:AUTOADV_GAME_ORACLE = Join-Path $env:TEMP ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+# このPowerShellから検証ゲームを別途起動する（テストコマンドは起動しない）
+.\validation\real_game\run_live_check.ps1 -Phase native -Oracle $env:AUTOADV_GAME_ORACLE
+```
+
+原音終了後の過剰保留の評価基準を調整する場合は `-MaxVoiceHoldMs` で指定できる（既定2000ms）。これは**検証品質の閾値であり製品の進行ロジックではない**。音声判定の内部設定は変えない。観測終了前の送りはNG、再生終了境界のサンプル精度不足は未確認としてNG、再生終了後の過剰保留は実測値付きでNGとする。文字のみ判断では原音終了を送り条件にしない。
 
 ## 実環境化した検収（2026-10-21）
 
 Windowsにログオンして**ゲームを別途起動した状態**で、通常のAutoAdv GUIを使う。
 `run_live_check.ps1`はゲームのビルド・起動・検証用制御を一切行わない。
 検証に使用する台詞順は `SCENARIO.json`（Ren'Py `script.rpy` の独立した期待値）にのみ置き、製品コードから参照しない。
-実ゲーム以外で人工的に作成したトレースは検収実績として扱わない。
+実ゲーム以外で人工的に作成したトレースは検収実績として扱わない。検証器の単体テストで生成する製品側・ゲーム側の人工ログは**検証器の拒否契約だけ**を検証する。
 
 ```powershell
 # P0-1: HookHostの実接続、取得元を伴うflush出力とUtterance
-.\validation\real_game\run_live_check.ps1 -Phase hook
+.\validation\real_game\run_live_check.ps1 -Phase hook -Oracle $env:AUTOADV_GAME_ORACLE
 
 # P0-2: 文字のみ判断で文字数時間→SendInput→次HOOK（TTS使用は別設定）
-.\validation\real_game\run_live_check.ps1 -Phase reading
+.\validation\real_game\run_live_check.ps1 -Phase reading -Oracle $env:AUTOADV_GAME_ORACLE
 
 # P0-3: 音声判断・TTS非使用のPCM、ASR、原音終了と次HOOK
-.\validation\real_game\run_live_check.ps1 -Phase native
+.\validation\real_game\run_live_check.ps1 -Phase native -Oracle $env:AUTOADV_GAME_ORACLE
 
 # P0-4: 音声判断・TTS使用の合成・実再生完了と次HOOK
-.\validation\real_game\run_live_check.ps1 -Phase tts
+.\validation\real_game\run_live_check.ps1 -Phase tts -Oracle $env:AUTOADV_GAME_ORACLE
 
 # P0-5: 原音/TTS/閲覧、同一文連続、手動停止と再許可の連続検査
-.\validation\real_game\run_live_check.ps1 -Phase mixed
+.\validation\real_game\run_live_check.ps1 -Phase mixed -Oracle $env:AUTOADV_GAME_ORACLE
 ```
 
 対象シナリオの途中から監視する場合は `-StartLine N`（`SCENARIO.json` の1始まりの行番号）を指定する。
@@ -93,13 +113,13 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 
 - HOOKについて、同じHost世代・接続世代・対象PIDのconnected通知、Native取得元のthread/context、LunaHostの出力順序、Utteranceの原文ハッシュと取得元を照合。
 - 入力後の台詞は、入力より*後*にHostが受信したHOOK出力から、同じセッションで生成されたことを確認。単なるSendInput戻り値や、すでに受信済みの候補は成功証拠にしない。
-- 原音について、対象ゲーム音声PIDに紐付くProcess Loopback PCM受信、ASR処理での一致と完了を区別。`native_ready`やVADのみではASR検収を通さない。TTSはVoiceJobsの実再生ドレイン完了を使用。
+- 原音について、対象ゲーム音声PIDに紐付くProcess Loopback PCM受信、ASR処理での一致と完了を区別し、**ゲーム側の実voiceチャンネル終了観測より早い自動入力を失敗**とする。`native_ready`やVADのみではASR検収を通さない。TTSはVoiceJobsの実再生ドレイン完了を使用。
 - 既知の選択肢入口（`choice-notice`）ではAutoAdvの入力を要求せず、利用者が停止・選択して続行する。終端にも次台詞を要求しない。その他の送信に対応する次台詞は必須。
 - `mixed`は同文２回の別取得と別入力・手動停止と再許可も必要。開始から`choice-notice`までの区間で実行可能。
 - 検証器自体の単体テストでは人工記録を使用するが、**実ゲームの合否を生成・保証しない**。公式Windows CIは音声解析・検証器契約の実行のみ。実セッションは利用者の対話Windows環境で別に確認する。
 
 `AUTOADV_VALIDATION_TRACE`を直接設定してGUIを起動した場合も、終了後に
-`python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL>` で同じ照合を行える。
+`python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL> --oracle <ゲーム側JSONL>` で同じ照合を行える。
 旧形式（version 1）のトレースは、入力後HOOK受信時刻とPCM証拠がないため検収対象外。
 
 ## 原音ASRとIrodori TTSの独立性
@@ -135,7 +155,7 @@ Ren'Pyゲームの手動メニュー「ASR非言語発声・背景音声テス�
 
 ```powershell
 python -m validation.real_game.stress_asr --selection all --rounds 2 --output asr-stress.json
-.\validation\real_game\run_live_check.ps1 -Phase stress
+.\validation\real_game\run_live_check.ps1 -Phase stress -Oracle $env:AUTOADV_GAME_ORACLE
 ```
 
 `stress_asr`は実モデルの推論時間・RTF・文字列誤認・背景声の誤帰属リスクを**観測するだけ**で、
@@ -144,7 +164,7 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 したがって、このケースの誤完了はモデル品質の閾値調整で解決できたと解釈せず、製品の既知の識別限界を
 検出する負荷検証とする。現在の製品がこのケースで安全停止できることは未確認であり、必ずPASSする条件として扱わない。
 
-## 実経路での時系列検収
+## 自動送りの実経路での時系列検収
 
 録音PCMを`NativeAudio.feed`へ直接投入し、固定HOOKを`Controller.observe`へ渡して
 自動入力を模擬する時系列検証は行わない。音声開始・HOOK到着遅延等の既知条件は
@@ -154,8 +174,8 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 Windows上でゲームを起動してから、次のコマンドで通常GUIの実セッションを検収する。
 
 ```powershell
-.\validation\real_game\run_live_check.ps1 -Phase native
-.\validation\real_game\run_live_check.ps1 -Phase stress
+.\validation\real_game\run_live_check.ps1 -Phase native -Oracle $env:AUTOADV_GAME_ORACLE
+.\validation\real_game\run_live_check.ps1 -Phase stress -Oracle $env:AUTOADV_GAME_ORACLE
 ```
 
 原音開始がHOOKより先行する場合・終了後にHOOKが届く場合も、実ゲームでその条件を
@@ -165,7 +185,7 @@ VAD終了は混合音声による推定であり、ゲーム内再生終了の�
 実音声による途中送りを確定評価するにはゲーム側の実際の再生完了イベント等の
 別系統の観測が必要であり、推定時刻だけで合否を確定しない。
 
-録音コーパスはASR精度・速度の**独立計測だけ**に使用する。CIは実ゲームを起動しないため、
+録音コーパスは**検証ゲーム内の実再生**とASRの独立計測に使用できる。ただし録音PCMのAutoAdv内部への直接注入を、実経路の証拠にはしない。CIは実ゲームを起動しないため、
 CIの実モデル結果を自動進行の実環境合格と称さない。
 
 ## 音声認識品質と処理速度（任意実行、Fast CI対象外）

@@ -4,7 +4,17 @@ import json
 from pathlib import Path
 import unittest
 from autoadv.validation_trace import text_digest
-from validation.real_game.verify_trace import validate
+from validation.real_game.verify_trace import validate as _validate
+from validation.real_game._synthetic_checker_oracle import synthetic_game_observations
+
+
+def validate(records, *, phase='mixed', **kwargs):
+    # Both inputs are deliberately synthetic and used ONLY to unit-test the
+    # verifier's error handling. Not an AutoAdv/Windows acceptance result.
+    return _validate(records, phase=phase,
+                     oracle_records=synthetic_game_observations(records, phase=phase),
+                     **kwargs)
+
 
 SCENARIO = json.loads((Path(__file__).parent / 'SCENARIO.json').read_text(encoding='utf-8'))['lines']
 

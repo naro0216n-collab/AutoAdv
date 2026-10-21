@@ -46,9 +46,189 @@ def _key(record: dict) -> tuple[object, object]:
     return record.get('session'), record.get('line')
 
 
+def audit_game_oracle(oracle_records: Sequence[dict] | None,
+                      utterance_order: Sequence[tuple], utterances: dict,
+                      attempts: dict, sent: dict, reasons: dict,
+                      reference_start: int | None, scenario: Sequence[dict], *,
+                      game_pid_by_session: dict, presentation_at: dict,
+                      vad_end_estimates: dict, source_outputs: dict,
+                      max_voice_hold_ms: int = 2000) -> dict:
+    """Compare actual game playback/dismissal with actual AutoAdv inputs.
+
+    The Ren'Py callback/polling stream is independent of the product. It is
+    observational, not an alternate source of audio or input for AutoAdv.
+    Game audio polling provides an *interval* for playback end, not sample-
+    precise Windows device-drain ground truth; uncertainty must remain visible.
+    """
+    errors: list[str] = []
+    result = {'errors': errors, 'latencies': {}, 'lines': [], 'early_inputs': 0,
+              'unverified_voice_ends': 0, 'overholds': 0, 'misattributions': 0,
+              'manual_or_unadvanced': 0, 'confirmed_voice_safe_inputs': 0}
+    if not oracle_records or oracle_records[0].get('event') != 'oracle_started' or oracle_records[0].get('version') != 1:
+        errors.append('missing independent game-side playback/dismissal evidence')
+        return result
+    pid = oracle_records[0].get('pid')
+    if type(pid) is not int or pid <= 0 or any(
+            game_pid_by_session.get(key[0]) != pid for key in utterance_order):
+        errors.append('game oracle PID does not match the selected input/window process')
+        return result
+    last_at = -1
+    lines: dict[int, dict] = {}
+    ordered = []
+    for record in oracle_records:
+        at = record.get('at_ns')
+        if (type(at) is not int or at < last_at or record.get('pid') != pid):
+            errors.append('inconsistent independent game clock or process')
+            return result
+        last_at = at
+        event, number = record.get('event'), record.get('line')
+        if event == 'line_started':
+            if type(number) is not int or number <= 0 or number in lines:
+                errors.append('invalid independent game line sequence')
+                return result
+            lines[number] = {'start': record, 'voice_onsets': [], 'voice_ends': [],
+                             'dismissed': None, 'interrupted': False}
+            ordered.append(number)
+        elif event in ('voice_started', 'voice_ended', 'voice_interrupted', 'line_dismissed'):
+            if number not in lines:
+                errors.append(f'game event without a line: {number}')
+                return result
+            line = lines[number]
+            if at < line['start']['at_ns']:
+                errors.append(f'game event predates line: {number}')
+            if event == 'voice_started':
+                line['voice_onsets'].append(record)
+            elif event == 'voice_ended':
+                if (type(record.get('last_active_at_ns')) is not int or
+                        record['last_active_at_ns'] > at):
+                    errors.append(f'bad game playback endpoint interval: {number}')
+                line['voice_ends'].append(record)
+            elif event == 'voice_interrupted':
+                line['interrupted'] = True
+            else:
+                if line['dismissed'] is not None:
+                    errors.append(f'duplicate game line dismissal: {number}')
+                line['dismissed'] = record
+    if reference_start is None or not utterance_order:
+        errors.append('cannot align game oracle without contiguous HOOK dialogue')
+        return result
+    if len(utterance_order) > len(ordered):
+        errors.append('fewer game dialogues than product utterances')
+        return result
+    candidates = []
+    for first in range(len(ordered) - len(utterance_order) + 1):
+        segment = ordered[first:first + len(utterance_order)]
+        if all(lines[n]['start'].get('body_hash') == utterances[key].get('body_hash')
+               and lines[n]['start']['at_ns'] <= utterances[key]['at_ns']
+               and (j + first + 1 == len(ordered) or
+                    utterances[key]['at_ns'] < lines[ordered[first + j + 1]]['start']['at_ns'])
+               for j, (n, key) in enumerate(zip(segment, utterance_order))):
+            candidates.append(segment)
+    if len(candidates) != 1:
+        errors.append(f'no unique time-aligned game playback trace ({len(candidates)} candidates)')
+        return result
+    matched = candidates[0]
+    for offset, (game_number, key) in enumerate(zip(matched, utterance_order)):
+        line = lines[game_number]
+        contract = scenario[reference_start + offset]
+        want_voice = contract.get('foreground_voice')
+        if type(want_voice) is not bool:
+            errors.append(f'foreground_voice not specified in independent scenario: {contract.get("id")}')
+            continue
+        attempt = attempts.get(key)
+        strict_native = (utterances[key].get('advance_mode') == 'audio' and
+                         not utterances[key].get('use_tts'))
+        dismissal = line['dismissed']
+        voice_onsets = line['voice_onsets']
+        voice_ends = line['voice_ends']
+        origin = (key[0], utterances[key].get('source'),
+                  utterances[key].get('hook_sequence'), utterances[key].get('raw_hash'))
+        if voice_onsets:
+            if (ms := _signed_elapsed_ms(voice_onsets[0]['at_ns'],
+                                         source_outputs.get(origin))) is not None:
+                result['latencies'].setdefault('game_voice_onset_to_hook_ms', []).append(ms)
+        detail = {'scenario': contract.get('id'), 'game_line': game_number,
+                  'completion_reason': reasons.get(key), 'sent': key in sent,
+                  'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
+                  'outcome': 'unadvanced'}
+        if attempt is not None and key not in sent:
+            errors.append(f'game progressed without confirmed AutoAdv SendInput: {key}')
+        if attempt is not None and not dismissal:
+            errors.append(f'AutoAdv sent but game did not dismiss dialogue: {key}')
+        elif attempt is not None and dismissal:
+            if not (attempt <= dismissal['at_ns'] and
+                    (offset + 1 == len(matched) or dismissal['at_ns'] <= lines[matched[offset + 1]]['start']['at_ns'])):
+                errors.append(f'game dismissal not causally after input attempt: {key}')
+            ms = _signed_elapsed_ms(attempt, dismissal['at_ns'])
+            if ms is not None:
+                result['latencies'].setdefault('input_to_game_dismiss_ms', []).append(ms)
+        expected_file = contract.get('foreground_file')
+        if want_voice and (not isinstance(expected_file, str) or not expected_file):
+            errors.append(f'expected foreground audio file unspecified: {key}')
+        if want_voice and any(not isinstance(e.get('file'), str) or
+                              not e['file'].replace('\\', '/').endswith(expected_file or '!!')
+                              for e in voice_onsets):
+            errors.append(f'wrong game voice channel source: {key}')
+        if want_voice and not voice_onsets:
+            errors.append(f'foreground game voice was never observed: {key}')
+        if not want_voice and voice_onsets:
+            errors.append(f'unexpected foreground voice in game: {key}')
+        if line['interrupted']:
+            errors.append(f'game voice replaced before verified end: {key}')
+        if not want_voice and reasons.get(key) == 'native':
+            result['misattributions'] += 1
+            detail['outcome'] = 'background_voice_misattributed'
+            errors.append(f'native completion without foreground game voice: {key}')
+        elif attempt is None:
+            result['manual_or_unadvanced'] += 1
+            detail['outcome'] = 'manual_handoff_or_unadvanced'
+        elif want_voice and strict_native:
+            # A decoder match cannot stand in for observing real voice end.
+            # A playback end sampled only after sending the input is too late.
+            # Preserve signed negative latency when an input beats playback
+            # end; never discard these observations as invalid durations.
+            end = next((e for e in voice_ends if e['at_ns'] <= attempt), None)
+            if voice_ends:
+                observed = voice_ends[0]
+                ms = _signed_elapsed_ms(observed['at_ns'], attempt)
+                result['latencies'].setdefault('game_voice_end_to_input_ms', []).append(ms)
+                detail['game_end_to_input_ms'] = ms
+                if (decision := presentation_at.get(key)) is not None:
+                    result['latencies'].setdefault('game_voice_end_to_decision_ms', []).append(
+                        _signed_elapsed_ms(observed['at_ns'], decision))
+                if (estimated := vad_end_estimates.get(key)) is not None:
+                    result['latencies'].setdefault('game_voice_end_to_vad_estimate_ms', []).append(
+                        _signed_elapsed_ms(observed['at_ns'], estimated))
+            active_at_dismiss = bool(dismissal and dismissal.get('voice_active'))
+            if active_at_dismiss or (voice_ends and attempt < voice_ends[0]['last_active_at_ns']):
+                result['early_inputs'] += 1
+                detail['outcome'] = 'early_input'
+                errors.append(f'input while the game voice was still playing: {key}')
+            elif not end:
+                result['unverified_voice_ends'] += 1
+                detail['outcome'] = 'voice_end_unverified'
+                errors.append(f'no independent voice-end observation before input: {key}')
+            else:
+                ms = detail['game_end_to_input_ms']
+                if ms is not None and ms > max_voice_hold_ms:
+                    result['overholds'] += 1
+                    detail['outcome'] = 'overheld'
+                    errors.append(f'input held {ms:.0f}ms after game voice end: {key}')
+                else:
+                    detail['outcome'] = 'voice_end_confirmed_then_input'
+                    result['confirmed_voice_safe_inputs'] += 1
+        else:
+            detail['outcome'] = ('native_voice_not_required_by_text_or_tts_policy'
+                                 if want_voice else 'input_without_foreground_voice')
+        result['lines'].append(detail)
+    return result
+
+
 def validate(records: Sequence[dict], *, phase: str = 'mixed',
              scenario_path: Path = HERE / 'SCENARIO.json',
-             start_line: int | None = None) -> dict:
+             start_line: int | None = None,
+             oracle_records: Sequence[dict] | None = None,
+             max_voice_hold_ms: int = 2000) -> dict:
     if phase not in PHASES:
         raise ValueError(f'unknown validation phase: {phase}')
     if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
@@ -70,6 +250,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     # unmatched candidate-HOOK events as evidence of a live Luna dialogue.
     connections: set[tuple] = set()
     monitoring: dict[object, dict] = {}
+    game_pid_by_session: dict[object, int] = {}
     source_outputs: dict[tuple, int] = {}
     utterances: dict[tuple, dict] = {}
     utterance_order: list[tuple] = []
@@ -90,6 +271,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     pause_after_advance: set[object] = set()
     timeouts: set[tuple] = set()
     methods: dict[tuple, str] = {}
+    reasons: dict[tuple, str] = {}
     presentation_at: dict[tuple, int] = {}
     audio_started_at: dict[tuple, int] = {}
     audio_completed_at: dict[tuple, int] = {}
@@ -117,6 +299,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if session in monitoring:
                 errors.append(f'duplicate monitor session {session}')
             monitoring[session] = record
+            # Hook, audio and UI PIDs may legitimately differ for a game.
+            # The independent game observer identifies the input/window PID;
+            # capture evidence is checked against its separately selected PID.
+            game_pid_by_session[session] = record.get('input_pid')
             authorized.discard(session)
         elif event == 'monitor_ended':
             monitoring.pop(session, None)
@@ -207,6 +393,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if record.get('success') is True:
                 complete.add(key)
                 presentation_at[key] = at
+                reasons[key] = record.get('reason', '')
         elif event == 'permit_requested':
             permits[session] = permits.get(session, 0) + 1
             if session in pause_after_advance:
@@ -397,15 +584,29 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                            next_u.get('hook_sequence'), next_u.get('raw_hash'))
             if (ms := _elapsed_ms(attempts.get(key), source_outputs.get(next_origin))) is not None:
                 durations.setdefault('input_to_next_hook_ms', []).append(ms)
+    # Product observations prove the processing path. Only independent game-side
+    # observations can establish whether the actual voice was still playing
+    # when the product initiated SendInput. Neither CER nor VAD is that oracle.
+    game_evidence = audit_game_oracle(
+        oracle_records, utterance_order, utterances, attempts, sent, reasons,
+        start, scenario, game_pid_by_session=game_pid_by_session,
+        presentation_at=presentation_at, vad_end_estimates=vad_end_estimates,
+        source_outputs=source_outputs, max_voice_hold_ms=max_voice_hold_ms,
+    )
+    errors.extend(game_evidence['errors'])
+    for name, values in game_evidence['latencies'].items():
+        durations.setdefault(name, []).extend(values)
     performance = {name: stats for name, samples in durations.items()
                    if (stats := _summary(samples)) is not None}
     return {
         'performance': performance,
+        'evaluation_scope': ('stress_observation_not_automatic_success' if phase == 'stress'
+                             else 'instrumented_game_advancement'),
         'ok': not errors, 'phase': phase,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
         'confirmed_native_asr': len(confirmed_native), 'confirmed_tts': len(confirmed_tts),
-        'errors': errors,
+        'errors': errors, 'game_evidence': {k: v for k, v in game_evidence.items() if k != 'latencies'},
     }
 
 
@@ -414,14 +615,24 @@ def main() -> int:
     parser.add_argument('--trace', type=Path, required=True, help='fresh AUTOADV_VALIDATION_TRACE JSONL')
     parser.add_argument('--phase', choices=PHASES, required=True,
                         help='hook / reading / native / tts / mixed / stress branch')
+    parser.add_argument('--oracle', type=Path, required=True,
+                        help='independent JSONL recorded by the running RenPy game')
+    parser.add_argument('--max-voice-hold-ms', type=int, default=2000,
+                        help='quality threshold for delay after observed voice end')
     parser.add_argument('--start-line', type=int,
                         help='1-based first SCENARIO.json line, to disambiguate repeated text')
     args = parser.parse_args()
     if not args.trace.is_file():
         parser.error('real game trace not found')
+    if not args.oracle.is_file():
+        parser.error('independent game oracle not found')
+    if args.max_voice_hold_ms <= 0:
+        parser.error('--max-voice-hold-ms must be positive')
     try:
         records = [json.loads(x) for x in args.trace.read_text(encoding='utf-8').splitlines() if x.strip()]
-        result = validate(records, phase=args.phase, start_line=args.start_line)
+        oracle_records = [json.loads(x) for x in args.oracle.read_text(encoding='utf-8').splitlines() if x.strip()]
+        result = validate(records, phase=args.phase, start_line=args.start_line,
+                          oracle_records=oracle_records, max_voice_hold_ms=args.max_voice_hold_ms)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.error(f'invalid real-session trace: {exc}')
     print(json.dumps(result, ensure_ascii=False, indent=2))

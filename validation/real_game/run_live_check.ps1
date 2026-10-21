@@ -6,13 +6,17 @@ param(
     [ValidateSet('hook', 'reading', 'native', 'tts', 'mixed', 'stress')]
     [string] $Phase,
     [int] $StartLine = 0,
-    [string] $Trace = ''
+    [string] $Trace = '',
+    [Parameter(Mandatory = $true)]
+    [string] $Oracle,
+    [int] $MaxVoiceHoldMs = 2000
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 if (-not $Trace) {
     $Trace = Join-Path $env:TEMP ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
+if ($MaxVoiceHoldMs -le 0) { throw 'MaxVoiceHoldMs must be positive' }
 if (Test-Path -LiteralPath $Trace) {
     throw "Refusing to overwrite a prior observation trace: $Trace"
 }
@@ -26,7 +30,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "AutoAdv GUI returned exit code $LASTEXITCODE; no acceptance is possible"
         }
-        $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace, '--phase', $Phase)
+        $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace, '--phase', $Phase, '--oracle', $Oracle, '--max-voice-hold-ms', [string]$MaxVoiceHoldMs)
         if ($StartLine -gt 0) {
             $arguments += @('--start-line', [string]$StartLine)
         }
