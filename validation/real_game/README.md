@@ -48,14 +48,14 @@ Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
    進行は「文字のみ判断」「音声判断」の2択。TTSの利用は話者設定で独立に指定する。音声判断かつTTS非使用の場合にProcess Loopback＋ASR照合を使用する。VAD-onlyは発声帰属の制限を理解して使う。
 4. 自動送りを明示的に許可し、ゲームの通常会話を実行する。
    選択肢では一時停止・手動選択・再許可する。
-5. GUIを閉じて `python -m validation.real_game.verify_trace --phase mixed --trace "$env:AUTOADV_VALIDATION_TRACE" --oracle "$env:AUTOADV_GAME_ORACLE"`。**ゲーム側ログ未取得は必ず未検収**。
+5. GUIを閉じて `python -m validation.real_game.verify_trace --phase mixed --trace "$env:AUTOADV_VALIDATION_TRACE" --oracle "$env:AUTOADV_GAME_ORACLE" --report "$env:TEMP\autoadv-mixed-result.json"`。**原音終了と途中送りの検収にはゲーム側ログが必須**。HOOK・閲覧時間・TTS単独検査では実音声終了の独立観測を要求しない。
 
 本検証は、実HOOKの通知、Utteranceの話者／本文、NativeAudio完了、
 TTSの再生完了、実SendInputから得た**同一GUI実行経路の事実**を照合する。
 音声データ・原文・画像はトレースに出力せず、文面はSHA-256で照合する。
 
 HOOK・音声・入力のどれかが成立しない場合は **FAIL** とする。検証ゲームの`voice`チャンネルから独立に得た再生状態と、AutoAdvの実入力時刻が矛盾する場合もFAILとする。ゲーム観測は約20Hzの標本時刻であり、Windows再生デバイスの音響的なサンプル精度を保証しない。終了区間が曖昧なら成功とはせず、未確認として表示する。
-実ゲームの観測記録が未取得の場合は未検収であり、検査Aの成功を検査Bの成功と読み替えない。
+原音の終了を評価する `native` / `mixed` / `stress`、および他のphaseで実際に非TTS原音による自動送りが含まれる場合は、ゲームの独立観測がなければその進行の安全性を検収しない。`hook`・`reading`・`tts`単独検査ではAutoAdvの実Hook、Controller判断、入力、次Hookの記録でそれぞれの対象範囲を検査できる。検査Aの成功を検査Bの成功と読み替えない。
 GitHub-hosted Windowsには実ゲーム／音声出力／実験者の入力がないため、
 検査BをFast CIへ偽装して自動成功させない。
 
@@ -106,8 +106,10 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 対象シナリオの途中から監視する場合は `-StartLine N`（`SCENARIO.json` の1始まりの行番号）を指定する。
 同文反復から開始して期待値の対応が曖昧な場合は省略不可。
 検証後にGUIを閉じると照合が実行される。実HOOK未成立、実音声・実入力未成立、台詞飛ばし、原音のASR証拠不足、次台詞を受け取れない場合はFAIL。
-単独のHOOK検査は音声処理とSendInputを要求しない。
+単独のHOOK検査は音声処理とSendInputを要求しない。`hook`・`reading`・`tts`の単独検証では `-Oracle` は省略可能。`native`・`mixed`・`stress`では必須。単独検証中でも非TTS原音の送りを記録した場合、その送りの安全性を独立観測なしで合格としない。
 閲覧・原音・TTSはそれぞれ個別に検収でき、最初から音声環境の全要素を用意する必要はない。
+
+実行終了後、`run_live_check.ps1`は製品トレースとは別に `<Trace>.result.json` を保存する。`-Report` で保存先を指定でき、検証器が解析できた不合格についても取得済みの台詞別進行結果、途中送り・過剰保留・未送信、時刻差、および失敗理由を保持する。`verify_trace.py` を直接起動する場合は `--report` を指定する。`line_results` の `no_autoadv_input` は進行成功とみなさず、`game_evidence` の `game_dismissed_without_autoadv_input` は外部入力でゲームが進んだ記録であってAutoAdvの成功ではない。結果に実ゲームのトレースがない場合は、検証器の単体試験結果を実ゲーム検収結果へ転用しない。
 
 **判定内容と制限**：
 
@@ -119,7 +121,7 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 - 検証器自体の単体テストでは人工記録を使用するが、**実ゲームの合否を生成・保証しない**。公式Windows CIは音声解析・検証器契約の実行のみ。実セッションは利用者の対話Windows環境で別に確認する。
 
 `AUTOADV_VALIDATION_TRACE`を直接設定してGUIを起動した場合も、終了後に
-`python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL> --oracle <ゲーム側JSONL>` で同じ照合を行える。
+`python -m validation.real_game.verify_trace --phase hook --trace <新規JSONL> --report <結果JSON>` で同じ製品経路の照合を行える。原音終了と途中送りを検証する場合は `--phase native --oracle <ゲーム側JSONL>` を使用する。
 旧形式（version 1）のトレースは、入力後HOOK受信時刻とPCM証拠がないため検収対象外。
 
 ## 原音ASRとIrodori TTSの独立性

@@ -7,8 +7,8 @@ param(
     [string] $Phase,
     [int] $StartLine = 0,
     [string] $Trace = '',
-    [Parameter(Mandatory = $true)]
-    [string] $Oracle,
+    [string] $Oracle = '',
+    [string] $Report = '',
     [int] $MaxVoiceHoldMs = 2000
 )
 $ErrorActionPreference = 'Stop'
@@ -17,6 +17,13 @@ if (-not $Trace) {
     $Trace = Join-Path $env:TEMP ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($MaxVoiceHoldMs -le 0) { throw 'MaxVoiceHoldMs must be positive' }
+if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
+    throw "Phase $Phase requires -Oracle to compare actual game voice end with AutoAdv input"
+}
+if (-not $Report) { $Report = $Trace + '.result.json' }
+if (Test-Path -LiteralPath $Report) {
+    throw "Refusing to overwrite a prior validation report: $Report"
+}
 if (Test-Path -LiteralPath $Trace) {
     throw "Refusing to overwrite a prior observation trace: $Trace"
 }
@@ -30,11 +37,13 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "AutoAdv GUI returned exit code $LASTEXITCODE; no acceptance is possible"
         }
-        $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace, '--phase', $Phase, '--oracle', $Oracle, '--max-voice-hold-ms', [string]$MaxVoiceHoldMs)
+        $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace, '--phase', $Phase, '--report', $Report, '--max-voice-hold-ms', [string]$MaxVoiceHoldMs)
+        if ($Oracle) { $arguments += @('--oracle', $Oracle) }
         if ($StartLine -gt 0) {
             $arguments += @('--start-line', [string]$StartLine)
         }
         & python @arguments
+        Write-Host "AutoAdv validation report: $Report"
         if ($LASTEXITCODE -ne 0) {
             throw "Real game evidence failed verification (phase=$Phase, trace=$Trace)"
         }

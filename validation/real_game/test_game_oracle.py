@@ -24,6 +24,15 @@ class IndependentGameOracleContract(unittest.TestCase):
                       validate(self.product, phase='native')['errors'])
         self.assertTrue(self.verify()['ok'])  # checker-only positive fixture
 
+    def test_game_dismissal_without_autoadv_input_is_not_an_advance_success(self):
+        result = self.verify()
+        # Last acquired dialogue has no controller input in this checker-only
+        # record; it is a pending game line, not a manual advance or a pass.
+        self.assertEqual(result['game_evidence']['undismissed_lines'], 1)
+        self.assertEqual(result['game_evidence']['manual_or_external_advances'], 0)
+        self.assertEqual(result['game_evidence']['lines'][-1]['outcome'],
+                         'still_presented_without_autoadv_input')
+
     def test_input_before_voice_end_fails_despite_production_asr_completion(self):
         game = [dict(x) for x in self.game]
         voice_end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)

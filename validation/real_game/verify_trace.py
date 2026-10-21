@@ -16,6 +16,9 @@ from autoadv.validation_trace import text_digest
 
 HERE = Path(__file__).resolve().parent
 PHASES = ('hook', 'reading', 'native', 'tts', 'mixed', 'stress')
+# The independent voice-channel observer is needed to judge *native* early
+# advances, not to prove that LunaHook received text or TTS drained.
+VOICE_ORACLE_PHASES = frozenset(('native', 'mixed', 'stress'))
 
 
 def _summary(values: list[float]) -> dict | None:
@@ -63,7 +66,8 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
     errors: list[str] = []
     result = {'errors': errors, 'latencies': {}, 'lines': [], 'early_inputs': 0,
               'unverified_voice_ends': 0, 'overholds': 0, 'misattributions': 0,
-              'manual_or_unadvanced': 0, 'confirmed_voice_safe_inputs': 0}
+              'manual_or_unadvanced': 0, 'manual_or_external_advances': 0,
+              'undismissed_lines': 0, 'confirmed_voice_safe_inputs': 0}
     if not oracle_records or oracle_records[0].get('event') != 'oracle_started' or oracle_records[0].get('version') != 1:
         errors.append('missing independent game-side playback/dismissal evidence')
         return result
@@ -181,7 +185,15 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             errors.append(f'native completion without foreground game voice: {key}')
         elif attempt is None:
             result['manual_or_unadvanced'] += 1
-            detail['outcome'] = 'manual_handoff_or_unadvanced'
+            if dismissal is not None:
+                # The game moved without AutoAdv input. That can be an intended
+                # manual choice or another external input, but never an AutoAdv
+                # success and never equivalent to leaving the dialogue open.
+                result['manual_or_external_advances'] += 1
+                detail['outcome'] = 'game_dismissed_without_autoadv_input'
+            else:
+                result['undismissed_lines'] += 1
+                detail['outcome'] = 'still_presented_without_autoadv_input'
         elif want_voice and strict_native:
             # A decoder match cannot stand in for observing real voice end.
             # A playback end sampled only after sending the input is too late.
@@ -584,29 +596,73 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                            next_u.get('hook_sequence'), next_u.get('raw_hash'))
             if (ms := _elapsed_ms(attempts.get(key), source_outputs.get(next_origin))) is not None:
                 durations.setdefault('input_to_next_hook_ms', []).append(ms)
-    # Product observations prove the processing path. Only independent game-side
-    # observations can establish whether the actual voice was still playing
-    # when the product initiated SendInput. Neither CER nor VAD is that oracle.
-    game_evidence = audit_game_oracle(
-        oracle_records, utterance_order, utterances, attempts, sent, reasons,
-        start, scenario, game_pid_by_session=game_pid_by_session,
-        presentation_at=presentation_at, vad_end_estimates=vad_end_estimates,
-        source_outputs=source_outputs, max_voice_hold_ms=max_voice_hold_ms,
-    )
-    errors.extend(game_evidence['errors'])
-    for name, values in game_evidence['latencies'].items():
-        durations.setdefault(name, []).extend(values)
+    # The product trace establishes the Luna->Controller->input->next-HOOK
+    # path. The independent game observer is additionally required wherever
+    # an actual native-voice advance is being credited, even if the caller
+    # labels the run 'reading' or 'tts'. Never silently certify an incidental
+    # native input without the evidence necessary to judge premature sending.
+    needs_oracle = (phase in VOICE_ORACLE_PHASES or any(
+        key in sent and u.get('advance_mode') == 'audio' and not u.get('use_tts')
+        for key, u in utterances.items()))
+    if oracle_records is not None or needs_oracle:
+        game_evidence = audit_game_oracle(
+            oracle_records, utterance_order, utterances, attempts, sent, reasons,
+            start, scenario, game_pid_by_session=game_pid_by_session,
+            presentation_at=presentation_at, vad_end_estimates=vad_end_estimates,
+            source_outputs=source_outputs, max_voice_hold_ms=max_voice_hold_ms,
+        )
+        errors.extend(game_evidence['errors'])
+        for name, values in game_evidence['latencies'].items():
+            durations.setdefault(name, []).extend(values)
+        game_evidence = {k: v for k, v in game_evidence.items() if k != 'latencies'}
+    else:
+        game_evidence = None
     performance = {name: stats for name, samples in durations.items()
                    if (stats := _summary(samples)) is not None}
+    # Preserve each acquired line, including a terminal observation without an
+    # input. A two-line success count must never hide an unadvanced third line.
+    line_results = []
+    for offset, key in enumerate(utterance_order):
+        utterance = utterances[key]
+        is_terminal = (start is not None and start + offset < len(scenario)
+                       and (start + offset == len(scenario) - 1
+                            or scenario[start + offset].get('ending')))
+        if key not in attempts:
+            outcome = 'no_autoadv_input'
+        elif key not in sent:
+            outcome = 'input_attempt_unconfirmed'
+        elif key in links:
+            outcome = 'next_hook_observed'
+        elif is_terminal:
+            outcome = 'terminal_line_input'
+        else:
+            outcome = 'next_hook_not_observed'
+        scenario_id = (scenario[start + offset].get('id')
+                       if start is not None and start + offset < len(scenario) else None)
+        line_result = {
+            'session': key[0], 'line': key[1], 'scenario': scenario_id,
+            'advance_mode': utterance.get('advance_mode'),
+            'use_tts': utterance.get('use_tts'),
+            'completion_reason': reasons.get(key),
+            'outcome': outcome,
+        }
+        if game_evidence is not None and offset < len(game_evidence['lines']):
+            line_result['game_outcome'] = game_evidence['lines'][offset]['outcome']
+            if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
+                line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
+        line_results.append(line_result)
     return {
         'performance': performance,
         'evaluation_scope': ('stress_observation_not_automatic_success' if phase == 'stress'
-                             else 'instrumented_game_advancement'),
+                             else 'native_voice_timing_and_advancement' if needs_oracle
+                             else 'product_hook_source_only' if phase == 'hook'
+                             else 'product_presentation_input_and_next_hook'),
+        'game_observer': ('required' if needs_oracle else 'optional'),
         'ok': not errors, 'phase': phase,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
         'confirmed_native_asr': len(confirmed_native), 'confirmed_tts': len(confirmed_tts),
-        'errors': errors, 'game_evidence': {k: v for k, v in game_evidence.items() if k != 'latencies'},
+        'errors': errors, 'game_evidence': game_evidence, 'line_results': line_results,
     }
 
 
@@ -615,8 +671,10 @@ def main() -> int:
     parser.add_argument('--trace', type=Path, required=True, help='fresh AUTOADV_VALIDATION_TRACE JSONL')
     parser.add_argument('--phase', choices=PHASES, required=True,
                         help='hook / reading / native / tts / mixed / stress branch')
-    parser.add_argument('--oracle', type=Path, required=True,
-                        help='independent JSONL recorded by the running RenPy game')
+    parser.add_argument('--oracle', type=Path,
+                        help='independent RenPy JSONL; required for native, mixed and stress')
+    parser.add_argument('--report', type=Path,
+                        help='write measured per-line outcomes and timing as JSON, including failures')
     parser.add_argument('--max-voice-hold-ms', type=int, default=2000,
                         help='quality threshold for delay after observed voice end')
     parser.add_argument('--start-line', type=int,
@@ -624,15 +682,24 @@ def main() -> int:
     args = parser.parse_args()
     if not args.trace.is_file():
         parser.error('real game trace not found')
-    if not args.oracle.is_file():
+    if args.phase in VOICE_ORACLE_PHASES and args.oracle is None:
+        parser.error(f'--oracle required for {args.phase} voice-end verification')
+    if args.oracle is not None and not args.oracle.is_file():
         parser.error('independent game oracle not found')
+    if args.report is not None and args.report.exists():
+        parser.error('refusing to overwrite an existing report')
     if args.max_voice_hold_ms <= 0:
         parser.error('--max-voice-hold-ms must be positive')
     try:
         records = [json.loads(x) for x in args.trace.read_text(encoding='utf-8').splitlines() if x.strip()]
-        oracle_records = [json.loads(x) for x in args.oracle.read_text(encoding='utf-8').splitlines() if x.strip()]
+        oracle_records = ([json.loads(x) for x in args.oracle.read_text(encoding='utf-8').splitlines() if x.strip()]
+                          if args.oracle is not None else None)
         result = validate(records, phase=args.phase, start_line=args.start_line,
                           oracle_records=oracle_records, max_voice_hold_ms=args.max_voice_hold_ms)
+        if args.report is not None:
+            with args.report.open('x', encoding='utf-8') as stream:
+                json.dump(result, stream, ensure_ascii=False, indent=2)
+                stream.write('\n')
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.error(f'invalid real-session trace: {exc}')
     print(json.dumps(result, ensure_ascii=False, indent=2))
