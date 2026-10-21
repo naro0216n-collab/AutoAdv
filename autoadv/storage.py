@@ -17,7 +17,7 @@ class CommonSettings:
     default_tts: bool = False
     default_voice: str = ''
     reading_ms: int = 700
-    per_character_wait_ms: int = 160
+    per_character_wait_ms: int = 200
     native_helper: str = ''
     asr_model: str = ''
     asr_tokens: str = ''
@@ -142,7 +142,7 @@ def _read_profile(raw: dict) -> Profile:
                 next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
                 inherit_common=list(raw.get('inherit_common', [])),
                 reading_ms=raw.get('reading_ms', 700),
-                per_character_wait_ms=raw.get('per_character_wait_ms', 160),
+                per_character_wait_ms=raw.get('per_character_wait_ms', 200),
                 hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
                 hook_max_buffer=int(raw.get('hook_max_buffer', 3000)), hook_max_history=int(raw.get('hook_max_history', 1000000)),
                 repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))

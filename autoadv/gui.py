@@ -1534,10 +1534,9 @@ def run_gui() -> int:
                     self.native_audio.begin(token, u.match_text)
                 else:
                     self.note('Native observation unavailable; uncertain audio cannot be certified')
-                if u.uncertain_text_fallback:
-                    QTimer.singleShot(u.text_wait_ms, lambda t=token: self.fallback_due(t))
-                else:
-                    self.note('No native end evidence will hold advance for manual action')
+                # The same reading deadline governs opt-in continuation and
+                # opt-out manual handoff. It never certifies native audio end.
+                QTimer.singleShot(u.text_wait_ms, lambda t=token: self.fallback_due(t))
             if u.use_tts:
                 if not u.voice:
                     self.presentation_event(token, 'tts_finished', success=False)
@@ -1556,7 +1555,7 @@ def run_gui() -> int:
                 QTimer.singleShot(200, lambda t=token: self.fallback_due(t))
                 return
             if self.controller.native_playing:
-                self.presentation_event(token, 'native_quiet')
+                self.presentation_event(token, 'native_evidence_stale')
             self.presentation_event(token, 'fallback_elapsed')
 
         def on_voice(self, token, success, reason):

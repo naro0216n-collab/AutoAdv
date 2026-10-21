@@ -84,10 +84,12 @@ class TwoModeGuiTests(unittest.TestCase):
             self.assertEqual(sent, ['advance'])
         self.run_case(mode=AdvanceMode.AUDIO, tts=False, fallback=True, check=check)
 
-    def test_audio_without_fallback_holds_unknown_speech(self):
+    def test_audio_without_fallback_returns_control_to_user(self):
         def check(window, c, token, requests, sent):
             self.assertEqual(requests, [])
             window.fallback_due(token)
             self.assertEqual(sent, [])
             self.assertFalse(c.completed)
+            self.assertEqual(c.pause_reason, 'native_inconclusive_manual_handoff')
+            self.assertFalse(c.authorized)
         self.run_case(mode=AdvanceMode.AUDIO, tts=False, fallback=False, check=check)

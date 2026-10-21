@@ -68,6 +68,7 @@ class NativeAudio:
         self.tail_ms = 0
         self._inference_at = -1
         self._inflight = False
+        self._inflight_generation: int | None = None
         self._generation = 0
         self._closed = False
         self._last_vad = False
@@ -86,6 +87,10 @@ class NativeAudio:
     def begin(self, token: Token, match_text: str):
         with self._lock:
             self._generation += 1
+            # ASR decoding from the prior utterance may still be running. It
+            # cannot own this utterance's inference slot or later clear it.
+            self._inflight = False
+            self._inflight_generation = None
             self.token = token
             self.matcher = TargetMatcher(match_text)
             self.start_ms = self.clock()
@@ -114,6 +119,8 @@ class NativeAudio:
     def cancel(self):
         with self._lock:
             self._generation += 1
+            self._inflight = False
+            self._inflight_generation = None
             self.token = None
             self.matcher = None
 
@@ -143,7 +150,7 @@ class NativeAudio:
                 if self.on_pcm is not None:
                     self.on_pcm(self.token, len(chunk.frames) // 8)
             if activity.frames_analyzed:
-                if activity.active and not self._last_vad:
+                if (activity.active or activity.contains_speech) and not self._last_vad:
                     self.rise_ms = chunk.at_ms
                 self._last_vad = activity.active
             self.tail_ms = activity.tail_silence_ms
@@ -174,7 +181,7 @@ class NativeAudio:
                     self.completed = True
                     events.append('completed')
             else:
-                if (self.token is None or self.completed):
+                if (self.token is None or self.completed or not activity.frames_analyzed):
                     return
                 if self._inflight or (self._inference_at >= 0 and chunk.at_ms - self._inference_at < 500):
                     for event in events:
@@ -182,6 +189,7 @@ class NativeAudio:
                     return
                 token, generation = self.token, self._generation
                 self._inflight = True
+                self._inflight_generation = generation
                 self._inference_at = chunk.at_ms
                 samples = self.history.since(max(self.boundary_ms, self.start_ms - 2000))
         if self.vad_only:
@@ -235,7 +243,9 @@ class NativeAudio:
             self.notify(token, 'error', 'ASR failure: ' + str(exc))
         finally:
             with self._lock:
-                self._inflight = False
+                if self._inflight_generation == generation:
+                    self._inflight = False
+                    self._inflight_generation = None
 
     def close(self):
         self.cancel()

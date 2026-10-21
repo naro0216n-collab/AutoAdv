@@ -117,7 +117,7 @@ class Profile:
     replacements: list[ReplacementRule] = field(default_factory=list)
     name_readings: dict[str, str] = field(default_factory=dict)
     reading_ms: int = 700
-    per_character_wait_ms: int = 160
+    per_character_wait_ms: int = 200
     hook_flush_ms: int = 500
     hook_codepage: int = 932
     hook_max_buffer: int = 3000

@@ -54,9 +54,10 @@ class TargetMatcher:
 
 @dataclass(frozen=True)
 class VADDecision:
-    active: bool
+    active: bool  # most recently analyzed frame, not any frame in the packet
     tail_silence_ms: int
     frames_analyzed: bool = True
+    contains_speech: bool = False  # earlier speech in this packet, possibly now quiet
 
 
 class VoiceActivity:
@@ -85,6 +86,7 @@ class VoiceActivity:
         unit = 48000 * 20 // 1000 * 2
         self._pending.extend(pcm)
         voiced = False
+        latest_active = False
         analyzed = False
         while len(self._pending) >= unit:
             analyzed = True
@@ -92,5 +94,6 @@ class VoiceActivity:
             del self._pending[:unit]
             speech = self.vad.is_speech(segment, 48000)
             voiced = voiced or speech
+            latest_active = speech
             self.tail_ms = 0 if speech else self.tail_ms + 20
-        return VADDecision(voiced, self.tail_ms, analyzed)
+        return VADDecision(latest_active, self.tail_ms, analyzed, voiced)

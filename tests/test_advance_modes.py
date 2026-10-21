@@ -121,6 +121,31 @@ class ControllerModes(unittest.TestCase):
         self.assertFalse(self.done('native_finished'))
         self.assertTrue(self.ctrl.try_advance())
 
+    def test_uncertain_audio_without_opt_in_hands_control_back_at_reading_deadline(self):
+        self.begin(AdvanceMode.AUDIO, False, False)
+        self.assertFalse(self.done('fallback_elapsed'))
+        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_manual_handoff')
+        self.assertFalse(self.ctrl.authorized)
+        self.assertIsNone(self.ctrl.presentation_reason)
+        self.assertFalse(self.ctrl.try_advance())
+
+    def test_stale_correlated_voice_never_counts_as_native_completion(self):
+        for opt_in in (False, True):
+            with self.subTest(opt_in=opt_in):
+                self.begin(AdvanceMode.AUDIO, False, opt_in)
+                self.assertFalse(self.done('native_started'))
+                self.assertFalse(self.done('fallback_elapsed'))
+                self.assertTrue(self.ctrl.native_playing)
+                self.assertFalse(self.ctrl.try_advance())
+                self.assertEqual(self.done('native_evidence_stale'), opt_in)
+                self.assertEqual(self.ctrl.presentation_reason,
+                                 'uncertain_text_fallback' if opt_in else None)
+                if not opt_in:
+                    self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_manual_handoff')
+                    self.assertFalse(self.ctrl.try_advance())
+                else:
+                    self.assertTrue(self.ctrl.try_advance())
+
     def test_failure_pause_and_stale_token_cannot_send(self):
         self.begin(AdvanceMode.AUDIO, True)
         self.assertFalse(self.done('tts_finished', success=False))

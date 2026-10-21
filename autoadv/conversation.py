@@ -283,17 +283,32 @@ class Controller:
             if self.fallback_elapsed and u.uncertain_text_fallback:
                 return self._presentation_done('uncertain_text_fallback')
             return False
+        if event == 'native_evidence_stale':
+            # Expired positive evidence is not a VAD-observed end, and cannot
+            # justify a native completion. It only releases an uncertain hold.
+            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+                return False
+            self.native_playing = False
+            if self.fallback_elapsed:
+                if u.uncertain_text_fallback:
+                    return self._presentation_done('uncertain_text_fallback')
+                self.pause('native_inconclusive_manual_handoff')
+            return False
         if event == 'native_finished':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
             return self._presentation_done('native')
         if event == 'fallback_elapsed':
-            if (u.advance_mode != AdvanceMode.AUDIO or u.use_tts
-                    or not u.uncertain_text_fallback):
+            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
             self.fallback_elapsed = True
             if not self.native_playing:
-                return self._presentation_done('uncertain_text_fallback')
+                if u.uncertain_text_fallback:
+                    return self._presentation_done('uncertain_text_fallback')
+                # No automatic input: give the user a useful stopped state
+                # instead of an indefinitely ambiguous "presenting" state.
+                if self.authorized:
+                    self.pause('native_inconclusive_manual_handoff')
             return False
         raise ValueError(f'unknown presentation event: {event}')
 
