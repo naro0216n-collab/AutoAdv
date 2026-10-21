@@ -3,7 +3,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from validation.real_game.gui_session import CALIBRATION, calibration_candidates, load_session
+from validation.real_game.gui_session import CALIBRATION, calibration_candidates, load_session, select_game_window
 
 
 class LiveGuiSessionContract(unittest.TestCase):
@@ -16,6 +16,16 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(calibration_candidates(sources, samples, {'a'}), [])
         self.assertEqual(calibration_candidates(sources, {'a': [], 'b': []}, set()), [])
         self.assertEqual(calibration_candidates(sources, {'a': [CALIBRATION], 'b': [CALIBRATION]}, set()), [a, b])
+
+    def test_console_window_is_not_the_renpy_game(self):
+        console = SimpleNamespace(hwnd=1, title='Python console')
+        game = SimpleNamespace(hwnd=2, title='RenPy validation game')
+        classes = {1: 'ConsoleWindowClass', 2: 'SDL_app', 3: 'SDL_app'}
+        choose = lambda rows: select_game_window(rows, lambda hwnd: classes[hwnd])
+        self.assertIs(choose([console, game]), game)
+        self.assertIsNone(choose([console]))
+        with self.assertRaises(ValueError):
+            choose([game, SimpleNamespace(hwnd=3, title='another RenPy window')])
 
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(oracle='game.jsonl', gate='session-gate', executable='renpy.exe',

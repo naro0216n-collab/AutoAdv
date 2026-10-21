@@ -35,6 +35,16 @@ def load_session(environment=None):
     return options
 
 
+def select_game_window(windows, class_name):
+    """Exclude console hosts, never guess among multiple actual game windows."""
+    matches = [window for window in windows
+               if class_name(window.hwnd).casefold() != 'consolewindowclass']
+    if len(matches) > 1:
+        names = [(w.title, class_name(w.hwnd)) for w in matches]
+        raise ValueError(f'ambiguous RenPy GUI windows: {names}')
+    return matches[0] if matches else None
+
+
 class SessionDriver:
     def __init__(self, window, app, options, *, clock=time.monotonic):
         self.w, self.app, self.options = window, app, options
@@ -63,9 +73,17 @@ class SessionDriver:
             raise ValueError('invalid game launch evidence')
         self.game_pid = start['pid']
         matches = [w for w in find_game_windows(self.options['executable']) if w.pid == self.game_pid]
-        if len(matches) > 1:
-            raise ValueError('multiple game windows for the same PID')
-        return matches[0] if matches else None
+        import ctypes
+        from ctypes import wintypes
+        get_class_name = ctypes.windll.user32.GetClassNameW
+        get_class_name.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+        get_class_name.restype = ctypes.c_int
+        def window_class(hwnd):
+            name = ctypes.create_unicode_buffer(256)
+            if not get_class_name(hwnd, name, len(name)):
+                raise OSError('cannot identify RenPy window class')
+            return name.value
+        return select_game_window(matches, window_class)
 
     def _release(self, suffix):
         Path(self.options['gate'] + suffix).write_text('ready', encoding='ascii')

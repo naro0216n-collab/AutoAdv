@@ -19,8 +19,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$scratch = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 if (-not $Trace) {
-    $Trace = Join-Path $env:TEMP ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+    $Trace = Join-Path $scratch ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($MaxVoiceHoldMs -le 0) { throw 'MaxVoiceHoldMs must be positive' }
 if ($Automated -and -not $RenPySdk) {
@@ -52,7 +53,7 @@ if ($RenPySdk -and $StartLine -eq 0) {
     }
 }
 if ($RenPySdk -and -not $Oracle) {
-    $Oracle = Join-Path $env:TEMP ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+    $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
     throw "Phase $Phase requires game voice observations. Supply -Oracle or -RenPySdk."
@@ -67,8 +68,8 @@ $oldScene = $env:AUTOADV_VALIDATION_SCENARIO
 $oldGate = $env:AUTOADV_VALIDATION_CONTROL_FILE
 $oldSession = $env:AUTOADV_VALIDATION_SESSION
 $oldAppData = $env:APPDATA
-$gate = Join-Path $env:TEMP ('autoadv-gate-' + [guid]::NewGuid().ToString('N'))
-$settingsDir = Join-Path $env:TEMP ('autoadv-settings-' + [guid]::NewGuid().ToString('N'))
+$gate = Join-Path $scratch ('autoadv-gate-' + [guid]::NewGuid().ToString('N'))
+$settingsDir = Join-Path $scratch ('autoadv-settings-' + [guid]::NewGuid().ToString('N'))
 $gameProcess = $null
 try {
     if ($Automated) {
@@ -141,16 +142,25 @@ try {
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }
         python -m autoadv
-        if ($LASTEXITCODE -ne 0) {
-            throw "AutoAdv GUI returned exit code $LASTEXITCODE; no acceptance is possible"
-        }
+        $guiExit = $LASTEXITCODE
         $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace,
                        '--phase', $Phase, '--report', $Report,
                        '--max-voice-hold-ms', [string]$MaxVoiceHoldMs)
         if ($Oracle) { $arguments += @('--oracle', $Oracle) }
         if ($StartLine -gt 0) { $arguments += @('--start-line', [string]$StartLine) }
-        & python @arguments
+        if (Test-Path -LiteralPath $Trace) {
+            & python @arguments
+        } else {
+            @{ok = $false; phase = $Phase; errors = @('GUI did not produce a product trace')} |
+                ConvertTo-Json | Set-Content -LiteralPath $Report -Encoding utf8
+            $LASTEXITCODE = 1
+        }
+        $auditExit = $LASTEXITCODE
         Write-Host "AutoAdv validation report: $Report"
+        if ($guiExit -ne 0) {
+            throw "AutoAdv GUI returned exit code $guiExit; game not verified"
+        }
+        $LASTEXITCODE = $auditExit
         if ($LASTEXITCODE -ne 0) {
             throw "Real game evidence failed verification (phase=$Phase, trace=$Trace)"
         }
