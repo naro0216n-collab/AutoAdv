@@ -2,6 +2,7 @@
 import json
 import unittest
 from types import SimpleNamespace
+from validation.real_game.gui_session import SessionDriver
 
 from validation.real_game.gui_session import (CALIBRATION, calibration_candidates,
                                               choose_calibration_source, load_session, select_game_window)
@@ -42,6 +43,27 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertIsNone(choose([console, pseudo]))
         with self.assertRaises(ValueError):
             choose([game, SimpleNamespace(hwnd=3, title='another RenPy window')])
+
+    def test_focus_activation_does_not_fail_before_windows_updates_foreground(self):
+        clock = [0.0]
+        control = SimpleNamespace(authorized=False)
+        actions = []
+        window = SimpleNamespace(controller=control, permit=lambda: setattr(control, 'authorized', True))
+        driver = SessionDriver(window, SimpleNamespace(), {'timeout_seconds': 30, 'phase': 'native'},
+                               clock=lambda: clock[0])
+        driver.state = 'activate'
+        driver._focus_game = lambda: setattr(driver, 'focus_deadline', clock[0] + 3)
+        driver._game_is_focused = lambda: clock[0] >= 0.3
+        driver._release = actions.append
+        driver.tick()
+        self.assertEqual(driver.state, 'await_focus')
+        clock[0] = 0.15
+        driver.tick()
+        self.assertEqual(driver.state, 'await_focus')
+        clock[0] = 0.3
+        driver.tick()
+        self.assertEqual(driver.state, 'running')
+        self.assertEqual(actions, ['.monitoring'])
 
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(gate='session-gate', executable='renpy.exe',

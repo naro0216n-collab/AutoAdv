@@ -74,6 +74,7 @@ class SessionDriver:
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'launch_host'
         self.done_idle = None
+        self.focus_deadline = None
 
     def fail(self, why):
         print('AutoAdv live test failed [' + self.state + ']: ' + why, flush=True)
@@ -141,13 +142,20 @@ class SessionDriver:
         w.connect_game()
 
     def _focus_game(self):
+        # Foreground focus is an ordinary Windows input prerequisite, not
+        # in-game GUI automation. Activation is asynchronous on Windows.
+        import ctypes
+        hwnd = int(self.w.hwnd.text(), 0)
+        ctypes.windll.user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+        self.focus_deadline = self.clock() + 3.0
+
+    def _game_is_focused(self):
         import ctypes
         hwnd = int(self.w.hwnd.text(), 0)
         user32 = ctypes.windll.user32
-        user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
         user32.GetForegroundWindow.restype = ctypes.c_void_p
-        if user32.GetForegroundWindow() != hwnd:
-            raise RuntimeError('game did not gain input focus; auto-advance cannot be tested')
+        return user32.GetForegroundWindow() == hwnd
+
 
     def tick(self):
         if self.clock() > self.deadline:
@@ -187,8 +195,13 @@ class SessionDriver:
                     if not self.w.controller.authorized:
                         raise RuntimeError('AutoAdv not authorized to send')
                 self._focus_game()
-                self._release('.monitoring')
-                self.state = 'running' 
+                self.state = 'await_focus'
+            elif self.state == 'await_focus':
+                if self._game_is_focused():
+                    self._release('.monitoring')
+                    self.state = 'running'
+                elif self.clock() >= self.focus_deadline:
+                    raise RuntimeError('Windows runner cannot focus the game for product SendInput')
             elif self.state == 'running':
                 # Stop once actual selected-Hook outputs demonstrate the
                 # required continuation. No test-owned input is generated.
