@@ -84,6 +84,34 @@ try {
         $env:APPDATA = $settingsDir
         $env:AUTOADV_VALIDATION_CONTROL_FILE = $gate
     }
+    if ($Automated -and $Phase -eq 'native') {
+        # The hosted Windows runner may have no usable render endpoint. Report
+        # the OS prerequisite separately from game and AutoAdv acceptance.
+        # This does not play audio, inspect game state, or alter the product path.
+        $audioEnvironment = [ordered]@{}
+        foreach ($serviceName in @('Audiosrv', 'AudioEndpointBuilder')) {
+            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            $audioEnvironment[$serviceName] = if ($service) { [string]$service.Status } else { 'not_found' }
+        }
+        try {
+            $audioEnvironment['sound_devices'] = @(
+                Get-CimInstance -ClassName Win32_SoundDevice -ErrorAction Stop |
+                    ForEach-Object { [ordered]@{ name = $_.Name; status = $_.Status } }
+            )
+        } catch {
+            $audioEnvironment['sound_devices_error'] = $_.Exception.Message
+        }
+        try {
+            $audioEnvironment['audio_endpoints'] = @(
+                Get-PnpDevice -Class AudioEndpoint -ErrorAction Stop |
+                    ForEach-Object { [ordered]@{ name = $_.FriendlyName; status = [string]$_.Status } }
+            )
+        } catch {
+            $audioEnvironment['audio_endpoints_error'] = $_.Exception.Message
+        }
+        Write-Host ('Windows render environment (diagnostic only): ' +
+            (ConvertTo-Json -InputObject $audioEnvironment -Compress -Depth 4))
+    }
     if ($RenPySdk) {
         $sdk = (Resolve-Path -LiteralPath $RenPySdk).Path
         $pythonExe = Join-Path $sdk 'lib/py3-windows-x86_64/python.exe'
