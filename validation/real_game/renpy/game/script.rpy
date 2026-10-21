@@ -5,14 +5,28 @@ define a = Character("明日香")
 define s = Character("栞")
 define p = Character("主人公")
 
+# The test runner selects an existing scene before the first dialogue.
+# This controls the game fixture only; it never sends an advance or supplies
+# audio/HOOK/decision evidence to AutoAdv.
+init python:
+    import os as _autoadv_fixture_os
+
 label start:
     scene black
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
+        jump asr_stress
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
+        jump standard_voice
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "tts":
+        jump standard_tts
     "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。"
     "通常のゲームと同じように、台詞表示・音声再生・選択肢・送り入力が動作します。"
     "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。"
+label standard_tts:
     p "これは無音声の台詞です。"
     p "この文章はIrodori TTSの確認に使用します。"
 
+label standard_voice:
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
     voice "audio/voice/normal_017.wav"
@@ -43,6 +57,12 @@ label start:
     a "ヒューズが飛んだ。"
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
+
+    # Normal AutoAdv progression ends here in the test-run scene. The original
+    # player-facing menu remains unchanged when no test scene is selected.
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "mixed":
+        "通常会話の検証を終了します。"
+        return
 
     "次の選択肢は、ユーザー操作によって進めてください。"
     menu:
@@ -75,7 +95,7 @@ label asr_stress:
         "CC0実録音の泣き声・叫び声が未配置です。ASR特殊音声の検収は実行できません。"
         return
 
-    "ASR特殊音声検証です。曖昧な区間ではAutoAdvを停止し、手動で次へ進めてください。"
+    "ASR特殊音声検証です。背景発話と非言語音声の進行判断を確認します。"
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
 

@@ -50,17 +50,17 @@ def checker_only_records():
                 reason='text' if case['advance_mode'] == 'text' else 'native')
             add('advance_attempt', **key)
             add('advance_input', **key)
-        elif i < len(LINES):
-            add('pause_requested', session=2)
-            # The person manually advances the game without fabricated auto-input.
-            add('permit_requested', session=2)
+        # The unit fixture contains later-game records but no AutoAdv sends.
+        # Such game progression is not credited to the application.
     return records
 
 
 class StressTraceVerifierTests(unittest.TestCase):
-    def test_observational_stress_sequence_not_blanket_hold(self):
+    def test_stress_cannot_pass_when_later_dialogues_depend_on_external_progress(self):
         result = validate(checker_only_records(), phase='stress')
-        self.assertTrue(result['ok'], result['errors'])
+        self.assertFalse(result['ok'])
+        self.assertTrue(any('stress coverage advanced without AutoAdv input' in e
+                            for e in result['errors']))
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
         self.assertEqual(result['confirmed_tts'], 0)
         self.assertTrue(all('expected_hold' not in c for c in LINES))

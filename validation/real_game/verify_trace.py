@@ -236,6 +236,25 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
     return result
 
 
+def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json') -> list[dict]:
+    # These are test-side expectations, never a source of AutoAdv decisions.
+    if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
+        scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
+    scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
+    if phase == 'mixed' and scenario_path == HERE / 'SCENARIO.json':
+        # The same Ren'Py game terminates before its interactive menu when
+        # launched with AUTOADV_VALIDATION_SCENARIO=mixed.
+        handoff = next((i for i, line in enumerate(scenario) if line.get('manual_handoff')), None)
+        if handoff is None:
+            raise ValueError('mixed game has no menu boundary')
+        scenario = scenario[:handoff] + [{
+            'id': 'auto-test-end', 'text': '通常会話の検証を終了します。',
+            'ending': True, 'advance_mode': 'text', 'use_tts': False,
+            'foreground_voice': False,
+        }]
+    return scenario
+
+
 def validate(records: Sequence[dict], *, phase: str = 'mixed',
              scenario_path: Path = HERE / 'SCENARIO.json',
              start_line: int | None = None,
@@ -243,9 +262,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
              max_voice_hold_ms: int = 2000) -> dict:
     if phase not in PHASES:
         raise ValueError(f'unknown validation phase: {phase}')
-    if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
-        scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
-    scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
+    scenario = scenario_for_phase(phase, scenario_path)
     expected_hashes = [text_digest(x['text']) for x in scenario]
     errors: list[str] = []
     if (not records or records[0].get('event') != 'trace_started'
@@ -275,12 +292,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     timestamps: dict[tuple, int] = {}
     readiness: set[object] = set()
     audio_targets: dict[object, int] = {}
-    permits: dict[object, int] = {}
-    pauses: dict[object, int] = {}
     authorized: set[object] = set()
-    resumed: set[object] = set()
-    advanced_after_resumption: set[object] = set()
-    pause_after_advance: set[object] = set()
     timeouts: set[tuple] = set()
     methods: dict[tuple, str] = {}
     reasons: dict[tuple, str] = {}
@@ -407,14 +419,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 presentation_at[key] = at
                 reasons[key] = record.get('reason', '')
         elif event == 'permit_requested':
-            permits[session] = permits.get(session, 0) + 1
-            if session in pause_after_advance:
-                resumed.add(session)
             authorized.add(session)
         elif event == 'pause_requested':
-            pauses[session] = pauses.get(session, 0) + 1
-            if any(k[0] == session for k in sent):
-                pause_after_advance.add(session)
             authorized.discard(session)
         elif event == 'advance_attempt':
             if key in attempts:
@@ -432,8 +438,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 errors.append(f'input before presentation completion: {key}')
             if session not in monitoring or session not in authorized:
                 errors.append(f'input without active authorized game session: {key}')
-            if session in resumed:
-                advanced_after_resumption.add(session)
             u = utterances.get(key)
             if u:
                 mode, uses_tts = u.get('advance_mode'), u.get('use_tts')
@@ -513,13 +517,17 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 links.add(key)
             if key in timeouts:
                 errors.append(f'next-line timeout despite expected continuation: {key}')
-        # A new dialogue that appeared with no preceding AutoAdv input is not
-        # credited as an automatic advance (except after the menu handoff).
+        # A new dialogue without an AutoAdv input may be legitimate manual
+        # gameplay, but cannot count as unattended auto-advance coverage.
+        # In the challenge scenario there is no menu handoff; admitting such
+        # transitions used to make a manual run look fully verified.
         for offset in range(1, len(utterance_order)):
             previous = utterance_order[offset - 1]
-            if (phase not in ('hook', 'stress') and previous not in sent and
-                    not scenario[start + offset - 1].get('manual_handoff')):
-                errors.append(f'next dialogue lacks preceding AutoAdv SendInput: {previous}')
+            if previous not in sent and not scenario[start + offset - 1].get('manual_handoff'):
+                if phase == 'stress':
+                    errors.append(f'stress coverage advanced without AutoAdv input: {previous}')
+                elif phase != 'hook':
+                    errors.append(f'next dialogue lacks preceding AutoAdv SendInput: {previous}')
 
     if phase == 'stress':
         # The real challenge run is observational: a fixed 'hold' expected for
@@ -560,9 +568,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     if phase == 'mixed':
         if len(repeats) != 2:
             errors.append('two repeated-identical dialogues were not independently advanced')
-        if not any(n >= 2 and s in advanced_after_resumption
-                   for s, n in permits.items()):
-            errors.append('manual pause, reauthorization and further real input not observed')
     # Measurements are observational, never an additional pass criterion.
     # The same monotonic clock times delivery, policy and actual advancement.
     durations = {name: values for name, values in measured.items()}
@@ -615,6 +620,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         for name, values in game_evidence['latencies'].items():
             durations.setdefault(name, []).extend(values)
         game_evidence = {k: v for k, v in game_evidence.items() if k != 'latencies'}
+        if phase == 'stress' and game_evidence['manual_or_external_advances']:
+            # Manual progression through unresolved lines may help inspect
+            # subsequent cases, but it is not a successful unattended
+            # auto-advance run. Report observations without upgrading them.
+            errors.append('stress coverage relied on game progression without AutoAdv input')
     else:
         game_evidence = None
     performance = {name: stats for name, samples in durations.items()

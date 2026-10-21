@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 from autoadv.validation_trace import text_digest
-from validation.real_game.verify_trace import validate as _validate
+from validation.real_game.verify_trace import validate as _validate, scenario_for_phase
 from validation.real_game._synthetic_checker_oracle import synthetic_game_observations
 
 
@@ -17,10 +17,12 @@ def validate(records, *, phase='mixed', **kwargs):
 
 
 SCENARIO = json.loads((Path(__file__).parent / 'SCENARIO.json').read_text(encoding='utf-8'))['lines']
+MIXED_SCENARIO = scenario_for_phase('mixed')
 
 
-def contract_records(first: int, last: int, *, mode=None, advance=True):
+def contract_records(first: int, last: int, *, mode=None, advance=True, lines=None):
     """Manufacture checker-only records, not an AutoAdv/game execution."""
+    lines = SCENARIO if lines is None else lines
     records = [{'event': 'trace_started', 'at_ns': 1, 'version': 2}]
     def add(event, **extra):
         at = len(records) * 1_000_000_000
@@ -33,7 +35,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True):
     add('permit_requested', session=1)
     add('native_ready', session=1, vad_only=False, audio_pid=50)
     for i in range(first, last):
-        line = SCENARIO[i]
+        line = lines[i]
         key = {'session': 1, 'line': i - first + 1}
         chosen = mode or ('tts' if line['use_tts'] else ('native' if line['advance_mode']=='audio' else 'reading'))
         raw = text_digest('明日香「' + line['text'] + '」')
@@ -258,24 +260,46 @@ class RealGameVerifierContract(unittest.TestCase):
         without_connection = [r for r in records if r['event'] != 'hook_connected']
         self.assertFalse(validate(without_connection, phase='reading')['ok'])
 
-    def test_mixed_requires_real_sequential_paths_repeats_pause_and_resume(self):
-        records = contract_records(0, 20)
-        # The session can be paused and explicitly reauthorized during dialogue.
-        midpoint = next(i for i, r in enumerate(records) if r['event'] == 'utterance' and r['line'] == 5)
-        # Insert observations using a coherent monotonic time and sequence.
-        for name in ('pause_requested', 'permit_requested'):
-            records.insert(midpoint + 1, {'event': name, 'session': 1})
-            midpoint += 1
-        for n, r in enumerate(records):
-            r['at_ns'] = n * 1_000_000_000 + 1
-            if r['event'] == 'hook_output':
-                r['received_ns'] = r['at_ns'] - 1
-            if n:
-                r['seq'] = n
+    def test_mixed_auto_progress_does_not_require_manual_pause_or_menu_selection(self):
+        # Covers the complete ordinary scenario up to the pre-menu handoff.
+        # All forward movement is attributed to AutoAdv; no test operator
+        # intervention is required or credited as automatic advancement.
+        records = contract_records(0, 20, lines=MIXED_SCENARIO)
         result = validate(records, phase='mixed')
         self.assertTrue(result['ok'], result['errors'])
-        without_pause = [r for r in records if r['event'] != 'pause_requested']
-        self.assertFalse(validate(without_pause, phase='mixed')['ok'])
+        self.assertEqual(result['confirmed_advance_to_next_hook'], 19)
+        self.assertEqual(result['line_results'][-1]['scenario'], 'auto-test-end')
+        self.assertEqual(result['line_results'][-1]['outcome'], 'no_autoadv_input')
+
+        # A real menu handoff is not permission for AutoAdv to send another
+        # input automatically, and must never count as a successful advance.
+        invalid = contract_records(0, 21)
+        handoff = next(i for i, record in enumerate(invalid)
+                       if record['event'] == 'utterance' and record['line'] == 20)
+        invalid[handoff + 1:handoff + 1] = [
+            {'event': 'advance_attempt', 'session': 1, 'line': 20},
+            {'event': 'advance_input', 'session': 1, 'line': 20},
+        ]
+        for i, record in enumerate(invalid):
+            record['at_ns'] = i * 1_000_000_000 + 1
+            if record['event'] == 'hook_output':
+                record['received_ns'] = record['at_ns'] - 1
+            if i:
+                record['seq'] = i
+        self.assertFalse(validate(invalid, phase='hook')['ok'])
+
+    def test_mixed_stop_rejects_sending_while_paused(self):
+        records = contract_records(0, 20, lines=MIXED_SCENARIO)
+        point = next(i for i, record in enumerate(records)
+                     if record['event'] == 'advance_attempt')
+        records.insert(point, {'event': 'pause_requested', 'session': 1})
+        for i, record in enumerate(records):
+            record['at_ns'] = i * 1_000_000_000 + 1
+            if record['event'] == 'hook_output':
+                record['received_ns'] = record['at_ns'] - 1
+            if i:
+                record['seq'] = i
+        self.assertFalse(validate(records, phase='mixed')['ok'])
 
 
 class SignedLatencyContract(unittest.TestCase):

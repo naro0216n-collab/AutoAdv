@@ -12,8 +12,8 @@ HERE = Path(__file__).parent
 
 
 def synthetic_game_observations(records, *, phase='mixed'):
-    scenario = json.loads((HERE / ('ASR_STRESS_SCENARIO.json' if phase == 'stress'
-                                    else 'SCENARIO.json')).read_text(encoding='utf-8'))['lines']
+    from validation.real_game.verify_trace import scenario_for_phase
+    scenario = scenario_for_phase(phase)
     utterances = [r for r in records if r['event'] == 'utterance']
     if not utterances:
         return []
