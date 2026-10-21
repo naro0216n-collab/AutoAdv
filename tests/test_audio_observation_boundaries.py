@@ -15,10 +15,73 @@ from autoadv.audio_match import VoiceActivity, VADDecision
 from autoadv.conversation import Controller, Target, Token
 from autoadv.model import AdvanceMode, HookSelection, Profile
 from autoadv.native_audio import NativeAudio
-from autoadv.process_audio import CaptureHealth
+from autoadv.process_audio import CaptureHealth, ProcessCapture, HEADER
 
 
 class ProcessCaptureOwnershipTests(unittest.TestCase):
+    def test_helper_without_initial_heartbeat_does_not_claim_readiness(self):
+        from unittest.mock import patch
+        from queue import Queue
+        from threading import Event
+        import autoadv.process_audio as process_audio
+
+        class Stream:
+            def __init__(self, initial):
+                self.q = Queue()
+                if initial is not None:
+                    self.q.put(initial)
+            def read(self, _size):
+                return self.q.get(timeout=1)
+
+        class Proc:
+            def __init__(self, initial):
+                self.stdout = Stream(initial)
+                self.terminated = False
+            def poll(self):
+                return 0 if self.terminated else None
+            def terminate(self):
+                self.terminated = True
+                self.stdout.q.put(b'')
+
+        def new_capture(proc, observed):
+            return ProcessCapture(11, Path('helper.dll'), AudioHistory(),
+                                  lambda _: None, observed.append, clock=lambda: 1000)
+
+        # A Popen success is insufficient: the WASAPI helper must send its
+        # first actual transport packet after StartRecording succeeds.
+        normal = Proc(HEADER.pack(0, 1000, 0))
+        observed = []
+        with patch.object(process_audio.sys, 'platform', 'win32'), \
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(process_audio.subprocess, 'Popen', return_value=normal), \
+             patch.object(process_audio.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            capture = new_capture(normal, observed)
+            try:
+                capture.start()
+                self.assertTrue(any(h.healthy for h in observed))
+            finally:
+                capture.close()
+
+        no_packets = Proc(None)
+        with patch.object(process_audio.sys, 'platform', 'win32'), \
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(process_audio.subprocess, 'Popen', return_value=no_packets), \
+             patch.object(process_audio, 'CAPTURE_STARTUP_TIMEOUT_SECONDS', 0.03), \
+             patch.object(process_audio.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            capture = new_capture(no_packets, [])
+            with self.assertRaisesRegex(TimeoutError, 'did not acknowledge'):
+                capture.start()
+            self.assertTrue(no_packets.terminated)
+
+        eof = Proc(b'')
+        with patch.object(process_audio.sys, 'platform', 'win32'), \
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(process_audio.subprocess, 'Popen', return_value=eof), \
+             patch.object(process_audio.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            capture = new_capture(eof, [])
+            with self.assertRaisesRegex(OSError, 'failed to initialize'):
+                capture.start()
+
     def test_early_helper_failure_is_delivered_to_first_real_utterance(self):
         reported = []
         audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),

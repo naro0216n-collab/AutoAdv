@@ -186,8 +186,8 @@ class SessionDriver:
             elif self.state == 'await_audio':
                 if self.w.native_audio:
                     self.state = 'activate'
-                elif self.w.controller.reason == 'native_audio_unavailable_manual_handoff':
-                    raise RuntimeError('real native audio setup failed')
+                elif self.w.native_audio_setup_error:
+                    raise RuntimeError('product process audio failed to start: ' + self.w.native_audio_setup_error)
             elif self.state == 'activate':
                 if self.options['phase'] != 'hook':
                     self.w.permit()

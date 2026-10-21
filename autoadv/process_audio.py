@@ -18,6 +18,8 @@ from .audio_buffer import PCMChunk, AudioHistory
 
 HEADER = struct.Struct('<IqI')
 MAX_PCM_PACKET = 48000 * 2 * 4  # at most 1 second per packet
+# Called in the GUI's existing background loader, never on the UI thread.
+CAPTURE_STARTUP_TIMEOUT_SECONDS = 12
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class ProcessCapture:
         self.process: subprocess.Popen | None = None
         self.worker: Thread | None = None
         self._lock = Lock()
+        self._startup_ack = Event()
+        self._startup_failure: str | None = None
 
     def start(self) -> None:
         if sys.platform != 'win32' or not self.helper_dll.is_file():
@@ -72,6 +76,15 @@ class ProcessCapture:
         )
         self.worker = Thread(target=self._run, daemon=True, name='autoadv-wasapi')
         self.worker.start()
+        # Popen only acknowledges process creation, not WASAPI activation or
+        # recording readiness. The helper emits its first heartbeat only after
+        # StartRecording; a dead/uninitialized bridge must not be marked ready.
+        if not self._startup_ack.wait(CAPTURE_STARTUP_TIMEOUT_SECONDS):
+            self.close()
+            raise TimeoutError('Process Loopback helper did not acknowledge capture readiness')
+        if self._startup_failure:
+            self.close()
+            raise OSError('Process Loopback helper failed to initialize: ' + self._startup_failure)
 
     def _run(self) -> None:
         try:
@@ -86,8 +99,12 @@ class ProcessCapture:
                     self.on_chunk(local_chunk)
                 self.on_health(CaptureHealth(now, True, 'helper_alive',
                                              len(chunk.frames) // 8 if chunk is not None else 0))
+                self._startup_ack.set()
         except (EOFError, OSError, ValueError) as exc:
             self.history.reset(str(exc))
+            if not self._startup_ack.is_set():
+                self._startup_failure = str(exc)
+                self._startup_ack.set()
             if not self.stop_requested.is_set():
                 self.on_health(CaptureHealth(self.clock(), False, str(exc)))
         finally:

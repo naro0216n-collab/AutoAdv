@@ -86,6 +86,7 @@ def run_gui(session_driver=None) -> int:
             self.server: IrodoriServer | None = None
             self.ocr_worker: OCRWorker | None = None
             self.native_audio: NativeAudio | None = None
+            self.native_audio_setup_error: str | None = None
             self.manual_monitor: WindowsManualMonitor | None = None
             self.native_token: Token | None = None
             self.native_started = False
@@ -1421,6 +1422,7 @@ def run_gui(session_driver=None) -> int:
                 self.refresh_status()
 
         def start_native_audio_if_needed(self, profile: Profile):
+            self.native_audio_setup_error = None
             if profile.advance_mode != AdvanceMode.AUDIO:
                 return
             has_asr = bool(profile.asr_model and profile.asr_tokens)
@@ -1469,6 +1471,7 @@ def run_gui(session_driver=None) -> int:
                     threading.Thread(target=native.close, daemon=True).start()
                 return
             if reason:
+                self.native_audio_setup_error = reason
                 self.note('Native audio unavailable: ' + reason)
                 u = self.controller.utterance
                 if u and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts and not u.uncertain_text_fallback:
