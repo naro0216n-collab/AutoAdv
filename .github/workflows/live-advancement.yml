@@ -48,6 +48,14 @@ jobs:
             Select-Object -First 1 -ExpandProperty DirectoryName
           if (-not $sdk) { throw 'Pinned RenPy SDK runtime was not found' }
           "AUTOADV_RENPY_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Check AutoAdv reading decision through actual Luna and Windows input
+        shell: pwsh
+        run: |
+          & .\validation\real_game\run_live_check.ps1 -Phase reading `
+            -RenPySdk $env:AUTOADV_RENPY_SDK -Automated `
+            -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-reading.jsonl') `
+            -Report (Join-Path $env:RUNNER_TEMP 'autoadv-reading.result.json') `
+            -TimeoutSeconds 120
       - name: Execute existing RenPy game through actual Luna and AutoAdv GUI
         shell: pwsh
         run: |
@@ -62,6 +70,8 @@ jobs:
         with:
           name: live-native-advancement
           path: |
+            ${{ runner.temp }}/autoadv-reading.jsonl
+            ${{ runner.temp }}/autoadv-reading.result.json
             ${{ runner.temp }}/autoadv-native.jsonl
             ${{ runner.temp }}/autoadv-native.result.json
             ${{ runner.temp }}/autoadv-game-*.jsonl
