@@ -1,0 +1,69 @@
+name: AutoAdv Live Advancement
+
+on:
+  pull_request:
+    branches: [main]
+    types: [edited]
+
+permissions:
+  contents: read
+
+# Explicit PR title edit requests only this focused Windows game run;
+# it does not rebuild Luna or launch the other heavyweight suites.
+jobs:
+  native-auto-advance:
+    if: >-
+      ${{ github.event.changes.title != null &&
+          startsWith(github.event.pull_request.title, '[RUN AUTOADV LIVE]') &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.head.ref == 'develop' &&
+          github.event.pull_request.base.ref == 'main' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Install production GUI, Luna and real audio requirements
+        run: python -m pip install '.[gui,native]'
+      - name: Fetch pinned RenPy SDK for existing validation game
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'renpy-sdk'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $zip = Join-Path $root 'renpy-8.4.1-sdk.zip'
+          Invoke-WebRequest -Uri 'https://www.renpy.org/dl/8.4.1/renpy-8.4.1-sdk.zip' -OutFile $zip
+          $expected = 'b542062465b6a253f4286b0fd48b83dd578bd7b6282a52d4c1eaecbfe21f002d'
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "RenPy SDK hash mismatch: $actual" }
+          Expand-Archive -LiteralPath $zip -DestinationPath $root
+          $sdk = Get-ChildItem -LiteralPath $root -Filter renpy.py -Recurse -File |
+            Where-Object { (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'lib/py3-windows-x86_64/python.exe')) } |
+            Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $sdk) { throw 'Pinned RenPy SDK runtime was not found' }
+          "AUTOADV_RENPY_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Execute existing RenPy game through actual Luna and AutoAdv GUI
+        shell: pwsh
+        run: |
+          & .\validation\real_game\run_live_check.ps1 -Phase native `
+            -RenPySdk $env:AUTOADV_RENPY_SDK -Automated `
+            -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-native.jsonl') `
+            -Report (Join-Path $env:RUNNER_TEMP 'autoadv-native.result.json') `
+            -TimeoutSeconds 180
+      - name: Preserve real game observations including failed runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-native-advancement
+          path: |
+            ${{ runner.temp }}/autoadv-native.jsonl
+            ${{ runner.temp }}/autoadv-native.result.json
+            ${{ runner.temp }}/autoadv-game-*.jsonl
+          if-no-files-found: warn
+          retention-days: 30
