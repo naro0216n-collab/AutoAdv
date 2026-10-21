@@ -27,11 +27,20 @@ init -1 python:
             _adv_f.write(_adv_json.dumps(dict(event="oracle_started", version=1,
                 pid=_adv_os.getpid(), at_ns=_adv_time.monotonic_ns())) + "\n")
 
+    def _adv_oracle_playing():
+        # get_playing() can report a queued filename even before the backend
+        # starts it. A nonnegative device-engine position is required here.
+        filename = renpy.music.get_playing(channel="voice")
+        position = renpy.music.get_pos(channel="voice")
+        if not filename or not isinstance(position, (float, int)) or position < 0:
+            return None
+        return filename
+
     def _adv_oracle_sample():
         global _adv_oracle_voice, _adv_oracle_last_active
         if not _adv_oracle_path or _adv_oracle_current is None:
             return
-        playing = renpy.music.get_playing(channel="voice")
+        playing = _adv_oracle_playing()
         if playing:
             if _adv_oracle_voice is None:
                 _adv_oracle_voice = playing
@@ -67,7 +76,7 @@ init -1 python:
             # Sample BEFORE a subsequent statement can replace the voice channel.
             _adv_oracle_sample()
             _adv_oracle_write("line_dismissed", line=_adv_oracle_current,
-                voice_active=bool(renpy.music.get_playing(channel="voice")))
+                voice_active=bool(_adv_oracle_playing()))
             _adv_oracle_current = None
             _adv_oracle_voice = None
             _adv_oracle_last_active = None
