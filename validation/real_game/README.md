@@ -33,6 +33,21 @@ AutoAdv本体は検証シナリオ／台詞一覧／音声ファイルの内容�
 ゲームの実HOOK、Process Loopbackの捕捉、Irodori実音声、Windows実入力の成立は**証明しない**。
 Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
 
+## 自動実行：既存ゲームと製品GUIによる自動進行検査
+
+Windows上のRen'Py SDK（既存`renpy/game`を起動可能なもの）を用意し、
+既存ゲームの通常のHook/Process Loopback/Controller/SendInputを通す：
+
+```powershell
+.\validation\real_game\run_live_check.ps1 -Phase native -RenPySdk C:\renpy-8.4.1 -Automated -TimeoutSeconds 150
+```
+
+`-Automated`は検査**準備だけ**を自動化する。ゲームPID/HWND検出、実LunaHost接続、校正用に受信した候補Hookの一意選択、通常GUIの監視・送り許可、終了後の既存検証器による照合を行う。既存Ren'Pyゲームの実行前バリアでHook選択を待ち、校正用の非対話台詞を一度出力する。校正台詞は自動送りの成績に含めず、以降のゲーム入力はAutoAdvの製品Controllerに限定する。
+
+候補Hookが0件または複数、Native音声捕捉・実ASR・フォーカス・次Hookが成立しない場合は失敗する。ASRの完全一致率を自動進行の合否に用いない。既存設定は一時`APPDATA`で隔離する。Lunaは再ビルドせず、必要時はProcess Loopback helperのみビルドする。
+
+`-Phase reading`は文字時間による通常送り、`-Phase native`はBGM下の原音2台詞から次Hookまでを確認する。`-Phase tts`は別途稼働中の実Irodoriサーバーと`-Voice`が必要。`mixed`/`stress`で原音判定が未確定となった場合、テストが入力して後続場面へ進めたり成功に数えたりしない。
+
 ## 検査B：既存Ren'Pyゲームを用いたAutoAdv実経路検収（Windows）
 
 対象は既存の `renpy/game/script.rpy` であり、ゲームを小さく作り直さない。

@@ -11,6 +11,10 @@ param(
     [string] $Oracle = '',
     [string] $Report = '',
     [string] $RenPySdk = $env:AUTOADV_RENPY_SDK,
+    [switch] $Automated,
+    [string] $Voice = '',
+    [string] $IrodoriUrl = 'http://127.0.0.1:8088',
+    [int] $TimeoutSeconds = 120,
     [int] $MaxVoiceHoldMs = 2000
 )
 $ErrorActionPreference = 'Stop'
@@ -19,6 +23,10 @@ if (-not $Trace) {
     $Trace = Join-Path $env:TEMP ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($MaxVoiceHoldMs -le 0) { throw 'MaxVoiceHoldMs must be positive' }
+if ($Automated -and -not $RenPySdk) {
+    throw 'Automated real-game validation requires -RenPySdk to launch the existing game'
+}
+if ($Automated -and $TimeoutSeconds -lt 10) { throw 'Finite test timeout must be >= 10 seconds' }
 if (-not $Report) { $Report = $Trace + '.result.json' }
 if (Test-Path -LiteralPath $Report) {
     throw "Refusing to overwrite a prior validation report: $Report"
@@ -38,7 +46,7 @@ $scene = switch ($Phase) {
 }
 if ($RenPySdk -and $StartLine -eq 0) {
     $StartLine = switch ($scene) {
-        'native' { 6 }
+        'native' { if ($Automated) { 10 } else { 6 } }
         'tts'    { 4 }
         default  { 1 }
     }
@@ -56,8 +64,20 @@ if ($RenPySdk -and (Test-Path -LiteralPath $Oracle)) {
 $oldTrace = $env:AUTOADV_VALIDATION_TRACE
 $oldOracle = $env:AUTOADV_GAME_ORACLE
 $oldScene = $env:AUTOADV_VALIDATION_SCENARIO
+$oldGate = $env:AUTOADV_VALIDATION_CONTROL_FILE
+$oldSession = $env:AUTOADV_VALIDATION_SESSION
+$oldAppData = $env:APPDATA
+$gate = Join-Path $env:TEMP ('autoadv-gate-' + [guid]::NewGuid().ToString('N'))
+$settingsDir = Join-Path $env:TEMP ('autoadv-settings-' + [guid]::NewGuid().ToString('N'))
 $gameProcess = $null
 try {
+    if ($Automated) {
+        # Only the normal AutoAdv GUI uses this isolated settings root.
+        # No user's saved game/voice/Hook preferences are overwritten.
+        $null = New-Item -ItemType Directory -Path $settingsDir
+        $env:APPDATA = $settingsDir
+        $env:AUTOADV_VALIDATION_CONTROL_FILE = $gate
+    }
     if ($RenPySdk) {
         $sdk = (Resolve-Path -LiteralPath $RenPySdk).Path
         $pythonExe = Join-Path $sdk 'lib/py3-windows-x86_64/python.exe'
@@ -92,6 +112,34 @@ try {
     Push-Location $repo
     try {
         # All advancement remains in the production GUI Controller.
+        if ($Automated) {
+            $gameExe = (Resolve-Path -LiteralPath $pythonExe).Path
+            $config = @{
+                oracle = $Oracle; gate = $gate; executable = $gameExe;
+                phase = $Phase; timeout_seconds = $TimeoutSeconds;
+                dialogues = $(switch ($Phase) {
+                    'hook' { 1 }; 'reading' { 3 }; 'native' { 3 };
+                    'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
+                });
+                voice = $Voice; irodori_url = $IrodoriUrl
+            }
+            if ($Phase -in @('native', 'mixed', 'stress')) {
+                # Build only AutoAdv's process-audio bridge, not Luna or other suites.
+                $helper = Join-Path $repo 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll'
+                if (-not (Test-Path -LiteralPath $helper)) {
+                    & dotnet build (Join-Path $repo 'integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj') --configuration Release --nologo
+                    if ($LASTEXITCODE -ne 0) { throw 'Real process loopback helper build failed' }
+                }
+                $modelRoot = & python -c 'from validation.real_game.prepare_asr_model import default_model_directory; print(default_model_directory())'
+                if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve verified ASR model directory' }
+                & python -m validation.real_game.prepare_asr_model --directory $modelRoot
+                if ($LASTEXITCODE -ne 0) { throw 'Pinned production ASR model unavailable' }
+                $config.helper = $helper
+                $config.model = Join-Path $modelRoot 'model.int8.onnx'
+                $config.tokens = Join-Path $modelRoot 'tokens.txt'
+            }
+            $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
+        }
         python -m autoadv
         if ($LASTEXITCODE -ne 0) {
             throw "AutoAdv GUI returned exit code $LASTEXITCODE; no acceptance is possible"
@@ -114,6 +162,9 @@ try {
     $env:AUTOADV_VALIDATION_TRACE = $oldTrace
     $env:AUTOADV_GAME_ORACLE = $oldOracle
     $env:AUTOADV_VALIDATION_SCENARIO = $oldScene
+    $env:AUTOADV_VALIDATION_CONTROL_FILE = $oldGate
+    $env:AUTOADV_VALIDATION_SESSION = $oldSession
+    $env:APPDATA = $oldAppData
     if ($null -ne $gameProcess -and -not $gameProcess.HasExited) {
         # Only the process launched by this invocation is eligible for cleanup.
         Stop-Process -Id $gameProcess.Id -ErrorAction SilentlyContinue

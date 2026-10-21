@@ -13,10 +13,19 @@ init python:
 
 label start:
     scene black
+    # Optional fixture readiness barrier. Only the first unmeasured calibration
+    # output is produced here. No test code advances any measured dialogue.
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_CONTROL_FILE"):
+        $ _adv_gate = _autoadv_fixture_os.environ["AUTOADV_VALIDATION_CONTROL_FILE"]
+        while not _autoadv_fixture_os.path.isfile(_adv_gate + ".attached"):
+            $ renpy.pause(.1, hard=True)
+        $ renpy.say(None, "AutoAdvフック校正専用", interact=False)
+        while not _autoadv_fixture_os.path.isfile(_adv_gate + ".monitoring"):
+            $ renpy.pause(.1, hard=True)
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
         jump asr_stress
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
-        jump standard_voice
+        jump bgm_voice
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "tts":
         jump standard_tts
     "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。"
@@ -35,6 +44,7 @@ label standard_voice:
     a "猫はにゃーにゃーと鳴く。"
 
     "ここからはBGMが流れる状態で、ゲーム内の原音を再生します。"
+label bgm_voice:
     play music "audio/music/original_synth_loop.wav" fadein 0.2
     voice "audio/voice/normal_026.wav"
     a "私はいつもミネラルウォーターを持ち歩いています。"
