@@ -81,6 +81,8 @@ class NativeAudio:
         self._capture_pcm_frames = 0
         self._capture_heartbeats = 0
         self._capture_error: str | None = None
+        self._vad_positive_packets = 0
+        self._vad_input_peak = 0.0
         self._last_vad = False
         self._pcm_reported = False
         self._last_active_ms = -1
@@ -131,6 +133,8 @@ class NativeAudio:
         self._deadline_grace_from_ms = -1
         self._quiet_notified = False
         self._tail_decoded = False
+        self._vad_positive_packets = 0
+        self._vad_input_peak = 0.0
         if hasattr(self.activity, 'reset'):
             self.activity.reset()
 
@@ -254,6 +258,8 @@ class NativeAudio:
                         pcm_packets=self._capture_pcm_packets,
                         pcm_frames=self._capture_pcm_frames,
                         heartbeats=self._capture_heartbeats,
+                        vad_positive_packets=self._vad_positive_packets,
+                        vad_input_peak=round(self._vad_input_peak, 6),
                         failure=self._capture_error)
 
     def _sample_start(self) -> int:
@@ -286,6 +292,9 @@ class NativeAudio:
             error = 'VAD failure: ' + str(exc)
         else:
             error = ''
+            self._vad_input_peak = max(self._vad_input_peak, activity.mono_peak)
+            if activity.frames_analyzed and (activity.active or activity.contains_speech):
+                self._vad_positive_packets += 1
             if activity.frames_analyzed and not self._pcm_reported:
                 self._pcm_reported = True
                 pcm_frames = len(chunk.frames) // 8

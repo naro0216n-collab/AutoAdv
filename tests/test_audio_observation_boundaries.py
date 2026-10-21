@@ -131,6 +131,31 @@ class PacketVadBoundaryTests(unittest.TestCase):
         history.push(current, target_pid=11)
         self.assertEqual(history.since(1000), (current,))
 
+    def test_vad_input_amplitude_is_observation_not_speech_attribution(self):
+        import numpy as np
+        vad = SimpleNamespace(is_speech=lambda *_: False)
+        with patch.dict(sys.modules, {'webrtcvad': SimpleNamespace(Vad=lambda _: vad)}):
+            detector = VoiceActivity()
+        stereo = np.full((960, 2), 0.25, dtype='<f4')
+        result = detector.observe_float32_stereo(stereo.tobytes())
+        self.assertTrue(result.frames_analyzed)
+        self.assertFalse(result.active)
+        self.assertAlmostEqual(result.mono_peak, 0.25, places=5)
+        # Audio amplitude alone may be music or SFX: no ASR attribution or
+        # completion may be inferred from this observation.
+        audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+                            lambda *_: None, recognizer=SimpleNamespace(recognize=lambda _: ''),
+                            activity=detector, clock=lambda: 1000)
+        try:
+            audio.begin(Token(1, 1), '台詞')
+            audio.feed(PCMChunk(1000, stereo.tobytes(), 48000, 2, 4))
+            status = audio.capture_status()
+            self.assertAlmostEqual(status['vad_input_peak'], 0.25, places=5)
+            self.assertEqual(status['vad_positive_packets'], 0)
+            self.assertFalse(audio.completed)
+        finally:
+            audio.close()
+
     def test_packet_with_speech_then_silence_is_not_currently_playing(self):
         speech_by_frame = iter([True, True, False, False, False, False])
         # Fast CI does not install native VAD. Exercise the *production* frame

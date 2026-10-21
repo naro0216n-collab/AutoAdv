@@ -101,6 +101,7 @@ class VADDecision:
     tail_silence_ms: int
     frames_analyzed: bool = True
     contains_speech: bool = False  # earlier speech in this packet, possibly now quiet
+    mono_peak: float = 0.0  # observed VAD input amplitude; never completion evidence
 
 
 class VoiceActivity:
@@ -125,6 +126,10 @@ class VoiceActivity:
             raise ValueError('invalid float32 stereo PCM')
         stereo = np.frombuffer(frames, dtype='<f4').reshape((-1, 2))
         mono = np.clip(stereo.mean(axis=1), -1, 1)
+        # This already-decoded PCM input is the exact signal seen by VAD.
+        # A low peak explains a missing VAD positive without inferring that
+        # a foreground voice or a game sound was absent.
+        mono_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
         pcm = (mono * 32767).astype('<i2').tobytes()
         unit = 48000 * 20 // 1000 * 2
         self._pending.extend(pcm)
@@ -139,4 +144,4 @@ class VoiceActivity:
             voiced = voiced or speech
             latest_active = speech
             self.tail_ms = 0 if speech else self.tail_ms + 20
-        return VADDecision(latest_active, self.tail_ms, analyzed, voiced)
+        return VADDecision(latest_active, self.tail_ms, analyzed, voiced, mono_peak)
