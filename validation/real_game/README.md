@@ -117,7 +117,7 @@ Windowsにログオンして**ゲームを別途起動した状態**で、通常
 実HOOKからの原音検収では、GUIで該当作品のASRモデル／tokensに、この隔離キャッシュのパスを明示指定する。
 TTS専用の作品設定にはASRモデルの指定も準備も要求しない。
 版・SHA-256は `ASR_MODEL.json` に固定し、既存ファイルが不一致なら上書きせず失敗する。
-新規取得は検証者が下記を明示実行したときに限る。通常起動、Fast CI、Real Audio Validationでは取得しない。
+新規取得は検証者が下記を明示実行したとき、または検証専用ドラフトPRを再オープンしてReal Audio Validationの実モデル検証を要求したときに限る。通常起動とFast CIでは取得しない。
 
 ```powershell
 python -m validation.real_game.prepare_asr_model
@@ -146,7 +146,7 @@ python -m validation.real_game.stress_asr --selection all --rounds 2 --output as
 
 ## 音声認識品質と処理速度（任意実行、Fast CI対象外）
 
-**実モデルの認識精度をFast CIの合否条件にはしない。** 同一モデル・コーパス・前処理ではほぼ不変のため、モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に明示実行する。モデルの取得・インストールは行わず、既存のASR環境を利用する。通常の`Real Audio Validation`ワークフローも、この実モデルベンチマークは自動実行しない。
+**実モデルの認識精度をFast CIの合否条件にはしない。** 同一モデル・コーパス・前処理ではほぼ不変のため、モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に明示実行する。手元で明示実行する場合は既存のASR環境を利用し、通常起動とFast CIでは取得しない。検証専用ドラフトPRのクローズ→再オープンでは`Real Audio Validation`が隔離キャッシュに固定モデルを検証付きで用意し、実モデルベンチマークを実行する。
 
 ```powershell
 python -m validation.real_game.benchmark_asr `
@@ -159,3 +159,7 @@ python -m validation.real_game.benchmark_asr `
 通常の実ゲーム検収 (`run_live_check.ps1`) は、検証トレースに追加された**製品処理そのものの時間**を集計する。`verify_trace.py`のJSON結果に含まれる`performance`は、HOOK取得通知→Utterance、Utterance→提示完了、提示完了→入力試行、入力試行→次HOOK受信、実ASR推論・キュー待ち、Irodori合成・実再生の各時間とRTFのP50/P95／最大値／件数。`input_to_next_hook_ms`は次HOOKの受信元時刻を使う。トレースを有効にしていない一般利用時には追加診断を記録しない。
 
 計測時は実際に使用するCPU/GPU・ASRモデル・音声機器・ゲーム負荷を記録して比較する。少数の台詞から得たP95は推定値であり、異なるPCやCIランナーとの絶対性能比較には使用しない。待ち時間には原音の実再生・閲覧時間が含まれるため、純粋な処理オーバーヘッドと分けて解釈する。音声が認識できない場合や入力権限が失効した場合、計測値の大小ではなく本体の既存状態遷移と安全停止を検証する。
+
+## GitHubでの専用検証の実行操作
+
+検証専用ドラフトPR（`develop` → `main`、マージ禁止）をクローズしてから再オープンすると、Real Audio Validationを含む3つの重量級検証が起動する。追加branchやワークフロー変更は不要。Fast CIのpush検証とは別に結果を確認する。PRをマージして`main`を変更しないこと。実SenseVoice推論による品質・RTFの測定は実ゲームでの自動進行成立の証拠ではない。
