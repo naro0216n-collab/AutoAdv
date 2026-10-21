@@ -35,6 +35,8 @@ jobs:
         run: python -m validation.real_game.benchmark_asr --conditions clean quiet noise clipped truncated bgm --rounds 1 --output asr-benchmark.json
       - name: Measure real production ASR on nonlexical and competing voices
         run: python -m validation.real_game.stress_asr --selection all --rounds 1 --output asr-stress.json
+      - name: Observe timed recordings through production NativeAudio
+        run: python -m validation.real_game.timeline_asr --selection all --output asr-timeline.json
       - name: Upload inference observations, not model or recorded audio
         if: always()
         uses: actions/upload-artifact@v4
@@ -43,5 +45,6 @@ jobs:
           path: |
             asr-benchmark.json
             asr-stress.json
+            asr-timeline.json
           if-no-files-found: warn
           retention-days: 30
