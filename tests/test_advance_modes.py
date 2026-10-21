@@ -40,6 +40,21 @@ class ReadingCharacters(unittest.TestCase):
         self.assertTrue(u.use_tts)
         self.assertEqual(interpret('「……」', p, session=1, line=2, source='x', sequence=2).text_wait_ms, 350)
 
+    def test_prose_colon_and_url_are_not_speaker_delimiters(self):
+        profile = make_profile()
+        for raw in (
+            'AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。',
+            'これは説明です：https://example.org/voice',
+            '彼は「京：おはよう」と書いた。',
+        ):
+            with self.subTest(raw=raw):
+                utterance = interpret(raw, profile, session=1, line=1, source='hook', sequence=1)
+                self.assertEqual(utterance.speaker, '')
+                self.assertEqual(utterance.text, __import__('unicodedata').normalize('NFKC', raw))
+        explicit = interpret('京：おはようございます。', profile,
+                             session=1, line=1, source='hook', sequence=1)
+        self.assertEqual((explicit.speaker, explicit.text), ('京', 'おはようございます。'))
+
     def test_speaker_tts_independent_of_advance_mode(self):
         p = make_profile(AdvanceMode.AUDIO, True, True)
         p.speaker_tts = {'京': False}

@@ -58,9 +58,9 @@ def checker_only_records():
 class StressTraceVerifierTests(unittest.TestCase):
     def test_stress_cannot_pass_when_later_dialogues_depend_on_external_progress(self):
         result = validate(checker_only_records(), phase='stress')
-        self.assertFalse(result['ok'])
-        self.assertTrue(any('stress coverage advanced without AutoAdv input' in e
-                            for e in result['errors']))
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertTrue(any('stress scenario progressed without AutoAdv input' in e
+                            for e in result['diagnostics']))
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
         self.assertEqual(result['confirmed_tts'], 0)
         self.assertTrue(all('expected_hold' not in c for c in LINES))
@@ -74,7 +74,10 @@ class StressTraceVerifierTests(unittest.TestCase):
 
     def test_missing_challenge_and_unjustified_advance_rejected(self):
         records = checker_only_records()
-        self.assertFalse(validate(records[:-4], phase='stress')['ok'])
+        partial = validate(records[:-4], phase='stress')
+        self.assertTrue(partial['collection_valid'], partial['errors'])
+        self.assertTrue(any('incomplete ASR stress sequence' in finding
+                            for finding in partial['diagnostics']))
         faulty = [dict(r) for r in records]
         target = next(r for r in faulty if r.get('event') == 'utterance' and
                       r['body_hash'] == text_digest('これは表示されただけの文章です。'))

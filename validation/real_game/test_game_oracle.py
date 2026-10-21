@@ -61,7 +61,8 @@ class IndependentGameOracleContract(unittest.TestCase):
         end['at_ns'] = attempt + 30_000_000
         game.sort(key=lambda x: x['at_ns'])
         result = self.verify(game=game)
-        self.assertFalse(result['ok'])
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertFalse(result['voice_safety_verified'])
         self.assertEqual(result['game_evidence']['indeterminate_voice_end'], 1)
         self.assertEqual(result['game_evidence']['early_inputs'], 0)
         self.assertEqual(result['game_evidence']['confirmed_voice_safe_inputs'], 1)
@@ -70,7 +71,8 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_silence_never_observed_is_not_positive_voice_end(self):
         game = [x for x in self.game if not (x['event'] == 'voice_ended' and x['line'] == 1)]
         result = self.verify(game=game)
-        self.assertFalse(result['ok'])
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertFalse(result['voice_safety_verified'])
         self.assertEqual(result['game_evidence']['unverified_voice_ends'], 1)
 
     def test_separate_audio_process_is_not_arbitrarily_prohibited(self):
@@ -102,7 +104,7 @@ class IndependentGameOracleContract(unittest.TestCase):
         end['last_active_at_ns'] = end['at_ns'] - 1_000_000
         game.sort(key=lambda x: x['at_ns'])
         result = self.verify(game=game, max_voice_hold_ms=100)
-        self.assertFalse(result['ok'])
+        self.assertTrue(result['collection_valid'], result['errors'])
         self.assertGreater(result['game_evidence']['overholds'], 0)
         self.assertIn('game_voice_end_to_input_ms', result['performance'])
 

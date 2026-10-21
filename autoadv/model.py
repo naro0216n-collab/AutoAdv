@@ -71,7 +71,9 @@ class ReplacementRule:
 DEFAULT_STRUCTURE_RULES = (
     StructureRule(r'^\s*(?P<speaker>[^\s「」『』\n]{1,40})\s*[「『](?P<body>.*)[」』]\s*$'),
     StructureRule(r'^\s*(?P<speaker>[^\n]{1,40})\n(?P<body>.+)$'),
-    StructureRule(r'^\s*(?P<speaker>[^\s：:\n]{1,40})\s*[：:]\s*(?P<body>.+)$'),
+    # A colon in dialogue (notably https://) is not a speaker separator.
+    # Unusual names can still be handled through a game's explicit rules.
+    StructureRule(r'^\s*(?P<speaker>[^\s「」『』、。，．！？!?（）()：:\n]{1,40})\s*[：:]\s*(?!https?://)(?P<body>.+)$'),
     StructureRule(r'^\s*[「『](?P<body>.*)[」』]\s*$'),
 )
 

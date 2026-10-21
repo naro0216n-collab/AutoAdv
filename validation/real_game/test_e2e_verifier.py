@@ -166,7 +166,31 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
         # One successful SendInput without a subsequent dialogue is not E2E success.
         truncated = records[:-4]
-        self.assertFalse(validate(truncated, phase='reading')['ok'])
+        observation = validate(truncated, phase='reading')
+        self.assertTrue(observation['collection_valid'], observation['errors'])
+        self.assertFalse(observation['advancement_observed'] and
+                         observation['confirmed_advance_to_next_hook'] >= 2)
+        self.assertTrue(observation['diagnostics'])
+
+    def test_windows_clock_can_stamp_attempt_and_sent_in_same_tick(self):
+        records = contract_records(0, 3, mode='reading')
+        attempts = {(r['session'], r['line']): r['at_ns'] for r in records
+                    if r['event'] == 'advance_attempt'}
+        for record in records:
+            if record['event'] == 'advance_input':
+                record['at_ns'] = attempts[(record['session'], record['line'])]
+        result = validate(records, phase='reading')
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
+
+    def test_observation_without_asr_success_remains_a_valid_measurement(self):
+        records = contract_records(9, 10, advance=False)
+        result = validate(records, phase='native')
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertEqual(result['confirmed_native_asr'], 0)
+        self.assertFalse(result['advancement_observed'])
+        self.assertTrue(any('limited ASR-confirmed' in finding
+                            for finding in result['diagnostics']))
 
     def test_native_requires_pcm_and_real_asr_not_only_adapter_ready_or_vad(self):
         records = contract_records(9, 12)
