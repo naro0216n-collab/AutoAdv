@@ -3,7 +3,8 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from validation.real_game.gui_session import CALIBRATION, calibration_candidates, load_session, select_game_window
+from validation.real_game.gui_session import (CALIBRATION, calibration_candidates,
+                                              choose_calibration_source, load_session, select_game_window)
 
 
 class LiveGuiSessionContract(unittest.TestCase):
@@ -16,6 +17,19 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(calibration_candidates(sources, samples, {'a'}), [])
         self.assertEqual(calibration_candidates(sources, {'a': [], 'b': []}, set()), [])
         self.assertEqual(calibration_candidates(sources, {'a': [CALIBRATION], 'b': [CALIBRATION]}, set()), [a, b])
+
+    def test_multiple_actual_calibration_hooks_do_not_block_product_evaluation(self):
+        # Duplicate *real* Hook outputs are routine. Select one through the
+        # existing GUI; the product must still capture the next real dialogue.
+        a = SimpleNamespace(identity='a', address=20)
+        b = SimpleNamespace(identity='b', address=10)
+        sources = {'a': a, 'b': b}
+        samples = {'a': ['prefix ' + CALIBRATION], 'b': [CALIBRATION]}
+        self.assertIs(choose_calibration_source(sources, samples, set()), b)
+        samples['a'] = [CALIBRATION]
+        self.assertIs(choose_calibration_source(sources, samples, set()), a)
+        self.assertIs(choose_calibration_source(sources, samples, {'a'}), b)
+        self.assertIsNone(choose_calibration_source(sources, samples, {'a', 'b'}))
 
     def test_console_window_is_not_the_renpy_game(self):
         console = SimpleNamespace(hwnd=1, title='Python console')

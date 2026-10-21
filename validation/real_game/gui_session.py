@@ -1,8 +1,8 @@
 """Drive existing GUI actions for the existing Ren'Py fixture, never game input.
 
 The game only receives advance input from the production Controller and its
-WindowsAdvancementInput. A unique *actual* LunaHook source is selected using
-an unmeasured calibration line; absence/ambiguity is a test failure.
+WindowsAdvancementInput. A source is selected from *actual* LunaHook outputs
+of an unmeasured calibration line; continuation is judged by the product path.
 """
 from __future__ import annotations
 
@@ -19,6 +19,24 @@ def calibration_candidates(sources, samples, ambiguous):
     return [source for identity, source in sources.items()
             if identity not in ambiguous
             and any(CALIBRATION in sample for sample in samples.get(identity, ()))]
+
+
+def choose_calibration_source(sources, samples, ambiguous):
+    """Pick one *observed* GUI Hook candidate, as a user would for a game.
+
+    Multiple real Luna threads can emit the same line. They are distinct Hook
+    candidates, not a reason to refuse to start the product. Favor complete
+    calibration output, then stable Hook identity; the subsequent live trace
+    must still establish actual dialogue progression and cannot be synthesized.
+    """
+    candidates = calibration_candidates(sources, samples, ambiguous)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda source: (
+        not any(line.strip() == CALIBRATION for line in samples.get(source.identity, ())),
+        source.identity,
+        source.address,
+    ))
 
 
 def load_session(environment=None):
@@ -146,12 +164,9 @@ class SessionDriver:
                     self._release('.attached')
                     self.state = 'calibration'
             elif self.state == 'calibration':
-                candidates = calibration_candidates(self.w.sources, self.w.source_samples,
-                                                    self.w.ambiguous_sources)
-                if candidates:
-                    if len(candidates) != 1:
-                        raise RuntimeError('ambiguous actual LunaHook calibration outputs')
-                    src = candidates[0]
+                src = choose_calibration_source(self.w.sources, self.w.source_samples,
+                                                 self.w.ambiguous_sources)
+                if src:
                     row = self.w.source_rows[(src.identity, src.address)]
                     self.w.source_table.selectRow(row)
                     self.w.select_hook('text')

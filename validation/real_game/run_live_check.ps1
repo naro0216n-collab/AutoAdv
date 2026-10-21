@@ -59,7 +59,7 @@ if ($RenPySdk -and $Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) 
 if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
     throw "Phase $Phase requires game voice observations. Supply -Oracle or -RenPySdk."
 }
-if ($RenPySdk -and (Test-Path -LiteralPath $Oracle)) {
+if ($RenPySdk -and $Oracle -and (Test-Path -LiteralPath $Oracle)) {
     throw "Refusing to reuse an existing game observation file: $Oracle"
 }
 

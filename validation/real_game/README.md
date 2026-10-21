@@ -42,9 +42,9 @@ Windows上のRen'Py SDK（既存`renpy/game`を起動可能なもの）を用意
 .\validation\real_game\run_live_check.ps1 -Phase native -RenPySdk C:\renpy-8.4.1 -Automated -TimeoutSeconds 150
 ```
 
-`-Automated`は検査**準備だけ**を自動化する。ゲームPID/HWND検出、実LunaHost接続、校正用に受信した候補Hookの一意選択、通常GUIの監視・送り許可、終了後の既存検証器による照合を行う。既存Ren'Pyゲームの実行前バリアでHook選択を待ち、校正用の非対話台詞を一度出力する。校正台詞は自動送りの成績に含めず、以降のゲーム入力はAutoAdvの製品Controllerに限定する。
+`-Automated`は検査**準備だけ**を自動化する。ゲームPID/HWND検出、実LunaHost接続、校正用に受信した実Hook候補からの決定的な選択、通常GUIの監視・送り許可、終了後の既存検証器による照合を行う。既存Ren'Pyゲームの実行前バリアでHook選択を待ち、校正用の非対話台詞を一度出力する。校正台詞は自動送りの成績に含めず、以降のゲーム入力はAutoAdvの製品Controllerに限定する。
 
-候補Hookが0件または複数、Native音声捕捉・実ASR・フォーカス・次Hookが成立しない場合は失敗する。ASRの完全一致率を自動進行の合否に用いない。既存設定は一時`APPDATA`で隔離する。Lunaは再ビルドせず、必要時はProcess Loopback helperのみビルドする。
+校正に一致する実Hook候補がない場合や、Native音声捕捉・実ASR・フォーカス・次Hookが成立しない場合は失敗する。同一校正台詞を出す複数の実Hookは通常どおり選択し、選んだHookが後続台詞を実際に取得できたかで成否を判定する。ASRの完全一致率を自動進行の合否に用いない。既存設定は一時`APPDATA`で隔離する。Lunaは再ビルドせず、必要時はProcess Loopback helperのみビルドする。
 
 `-Phase reading`は文字時間による通常送り、`-Phase native`はBGM下の原音2台詞から次Hookまでを確認する。音声判断が不確実なときの文字数フォールバックは`-UncertainFallback`で明示的に有効化できる。`-Phase tts`は別途稼働中の実Irodoriサーバーと`-Voice`が必要。`mixed`/`stress`で原音判定が未確定となった場合、テストが入力して後続場面へ進めたり成功に数えたりしない。
 
