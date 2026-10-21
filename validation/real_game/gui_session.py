@@ -24,7 +24,7 @@ def calibration_candidates(sources, samples, ambiguous):
 def load_session(environment=None):
     env = os.environ if environment is None else environment
     options = json.loads(env['AUTOADV_VALIDATION_SESSION'])
-    mandatory = ('oracle', 'gate', 'executable', 'phase', 'timeout_seconds')
+    mandatory = ('gate', 'executable', 'phase', 'timeout_seconds')
     for key in mandatory:
         if not options.get(key):
             raise ValueError('missing validation session option: ' + key)
@@ -55,7 +55,6 @@ class SessionDriver:
         self.clock = clock
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'launch_host'
-        self.game_pid = None
         self.done_idle = None
 
     def fail(self, why):
@@ -65,20 +64,12 @@ class SessionDriver:
         self.app.exit(3)
 
     def _game_target(self):
+        # Detect only the known Ren'Py SDL surface from the configured
+        # executable. Game-side playback observations are not required for
+        # hooking, text advancement or TTS playback acceptance.
         from autoadv.game_windows import find_game_windows
-        oracle = Path(self.options['oracle'])
-        if not oracle.is_file():
-            return None
-        lines = oracle.read_text(encoding='utf-8').splitlines()
-        if not lines:
-            return None
-        start = json.loads(lines[0])
-        if start.get('event') != 'oracle_started' or type(start.get('pid')) is not int:
-            raise ValueError('invalid game launch evidence')
-        self.game_pid = start['pid']
-        matches = [w for w in find_game_windows(self.options['executable']) if w.pid == self.game_pid]
-        import ctypes
         from ctypes import wintypes
+        import ctypes
         get_class_name = ctypes.windll.user32.GetClassNameW
         get_class_name.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
         get_class_name.restype = ctypes.c_int
@@ -87,7 +78,7 @@ class SessionDriver:
             if not get_class_name(hwnd, name, len(name)):
                 raise OSError('cannot identify RenPy window class')
             return name.value
-        return select_game_window(matches, window_class)
+        return select_game_window(find_game_windows(self.options['executable']), window_class)
 
     def _release(self, suffix):
         Path(self.options['gate'] + suffix).write_text('ready', encoding='ascii')

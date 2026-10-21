@@ -53,7 +53,7 @@ if ($RenPySdk -and $StartLine -eq 0) {
         default  { 1 }
     }
 }
-if ($RenPySdk -and -not $Oracle) {
+if ($RenPySdk -and $Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
     $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
@@ -96,7 +96,7 @@ try {
         $gameProcess = Start-Process -FilePath $pythonExe -WorkingDirectory $sdk `
             -ArgumentList "`"$renpyScript`" `"$project`" run" -PassThru
         $deadline = [System.Diagnostics.Stopwatch]::StartNew()
-        while (-not (Test-Path -LiteralPath $Oracle -PathType Leaf)) {
+        while ($Oracle -and -not (Test-Path -LiteralPath $Oracle -PathType Leaf)) {
             if ($gameProcess.HasExited) {
                 throw "Ren'Py game exited before writing its observation start record ($($gameProcess.ExitCode))"
             }
@@ -105,7 +105,7 @@ try {
             }
             Start-Sleep -Milliseconds 200
         }
-        Write-Host "Existing Ren'Py validation game started (scene=$scene; observer=$Oracle)"
+        Write-Host "Existing Ren'Py validation game launched (scene=$scene)"
     } else {
         Write-Host 'Using an already running game; no game input is driven by the checker.'
     }

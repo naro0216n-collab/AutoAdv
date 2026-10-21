@@ -30,9 +30,13 @@ class LiveGuiSessionContract(unittest.TestCase):
             choose([game, SimpleNamespace(hwnd=3, title='another RenPy window')])
 
     def test_requires_bound_game_target_and_finite_timeout(self):
-        valid = dict(oracle='game.jsonl', gate='session-gate', executable='renpy.exe',
+        valid = dict(gate='session-gate', executable='renpy.exe',
                      phase='native', timeout_seconds=120)
         self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(valid)})['phase'], 'native')
+        # Game-side Oracle is needed only when independently grading audio end;
+        # it is not an AutoAdv GUI launcher dependency.
+        for phase in ('hook', 'reading', 'tts'):
+            self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(dict(valid, phase=phase))})['phase'], phase)
         for key in valid:
             missing = dict(valid)
             del missing[key]
