@@ -2,7 +2,7 @@
 
 この領域では、実録音による音声処理契約、検証基盤自身の契約、実ゲームを通した製品経路検収を分離する。ゲームエンジンのビルド、Ren'Py自体の正常性、配布物生成の成功をAutoAdvの合否へ混ぜない。
 
-AutoAdv実経路で確認する対象は、LunaHookが受信した取得元と順序、本文・話者の解釈、Windows Process Loopbackからの原音観測、NativeAudio/Controllerの判断、Irodori TTSの実再生完了、明示許可を伴うWindows入力、入力後の次Hookである。検証ゲーム側は独立した時刻・再生状態だけを記録し、AutoAdvへHook、PCM、判断結果、入力命令を注入しない。
+AutoAdv実経路で確認する対象は、LunaHookが受信した取得元と順序、本文・話者の解釈、Windows Process Loopbackからの原音観測、NativeAudio/Controllerの判断、Irodori TTSのWindows音声システム上の再生完了、明示許可を伴うWindows入力、入力後の次Hookである。検証ゲーム側は独立した時刻・再生状態だけを記録し、AutoAdvへHook、PCM、判断結果、入力命令を注入しない。物理スピーカーやヘッドホンから音が可聴であることはRealAudioの成立条件ではなく、ゲームまたはAutoAdvの実再生ストリームとProcess Loopbackの実PCMがシステム上で成立していることを扱う。
 
 ## 検証層
 
@@ -72,7 +72,7 @@ Ren'Py版と固定SDK SHA-256は生成元の診断情報としてmanifestへ残�
 
 fixtureソースとprebuilt runtimeが一致しない、または対応assetが存在しない場合はAutoAdv製品失敗ではなく検証前提不成立として停止する。Live workflow内で代わりにRen'Py SDKを取得してゲームを再構築しない。
 
-校正用の非対話台詞 `AutoAdvフック校正専用` は測定対象外である。ゲームはAutoAdvのHook接続完了を待ってこの台詞を一度出し、検証driverはApplicationが保持する実取得候補から本文取得元を選択してCapture Workspaceへ確定する。その後に監視と自動送りを開始する。同一校正台詞を複数の実Hookが出した場合は決定的に一つを選び、その取得元が後続実台詞を取得できたかで評価する。
+校正用の非対話台詞 `AutoAdvフック校正専用` は測定対象外である。実台詞と同じ話者付き構造で一度出し、検証driverはApplication自身が各取得元へ適用した構造抽出Previewで本文がこの校正文へ確定する候補だけを本文取得元候補とする。生文字列に校正文を含むだけでは採用しない。本文だけを返す候補を優先し、話者＋本文を返す候補しかない場合もApplicationの通常`auto`抽出で本文が校正文へ分離できるものは利用できる。確定後に監視と自動送りを開始し、その取得レシピが後続実台詞でも成立したかで評価する。
 
 ## 収録コンテンツ・権利
 
@@ -84,7 +84,7 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 `reading` は文字時間による通常送り、`native` はTTS非使用の原音3件から開始する。`tts` は実IrodoriサーバーとVoiceを必要とする。`mixed` は原音・TTS・文字待機の混在、`stress` は背景発話、非言語発声、誤帰属、不確実状態を扱う。
 
-`native` / `mixed` / `stress` ではゲーム側oracleによる原音再生終了の独立観測を必要とする。`hook` / `reading` / `tts` では原音終了oracleを合否条件にしない。ゲーム側oracleは `autoadv_oracle.rpy` にあり、台詞表示、再生状態、dismissalを記録するだけでゲーム進行を変更しない。
+`native` / `mixed` / `stress` ではゲーム側oracleによる音声エンジン上の原音再生終了の独立観測を必要とする。物理出力の可聴性は要求しない。`hook` / `reading` / `tts` では原音終了oracleを合否条件にしない。ゲーム側oracleは `autoadv_oracle.rpy` にあり、台詞表示、再生状態、dismissalを記録するだけでゲーム進行を変更しない。
 
 原音が不確実なケースでテスト側が入力して後続場面へ進めることは禁止する。安全停止した時点で未到達の後続台詞を検査済み扱いしない。`line_results` の `no_autoadv_input` や外部dismissalを製品成功へ読み替えない。
 

@@ -1,6 +1,6 @@
 # Observation *inside the validation game*, never imported by AutoAdv.
 # AUTOADV_GAME_ORACLE must be set BEFORE launching the actual Ren'Py process.
-# This records game playback state, not mock PCM, HOOK notifications or input.
+# This records Ren'Py/Windows audio-system playback state, not acoustic audibility, mock PCM, HOOK notifications or input.
 init -1 python:
     import hashlib as _adv_hashlib
     import json as _adv_json
@@ -29,7 +29,8 @@ init -1 python:
 
     def _adv_oracle_playing():
         # get_playing() can report a queued filename even before the backend
-        # starts it. A nonnegative device-engine position is required here.
+        # starts it. A nonnegative audio-engine position is required here;
+        # physical speaker/headphone audibility is deliberately outside the contract.
         filename = renpy.music.get_playing(channel="voice")
         position = renpy.music.get_pos(channel="voice")
         if not filename or not isinstance(position, (float, int)) or position < 0:

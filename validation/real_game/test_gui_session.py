@@ -11,27 +11,47 @@ from validation.real_game.gui_session import (
 
 
 class LiveGuiSessionContract(unittest.TestCase):
-    def test_selects_only_real_observed_hook_output(self):
-        a = SimpleNamespace(identity='a')
-        b = SimpleNamespace(identity='b')
-        sources = {'a': a, 'b': b}
-        samples = {'a': ['別の台詞', CALIBRATION], 'b': ['無関係']}
-        self.assertEqual(calibration_candidates(sources, samples, set()), [a])
-        self.assertEqual(calibration_candidates(sources, samples, {'a'}), [])
-        self.assertEqual(calibration_candidates(sources, {'a': [], 'b': []}, set()), [])
+    def test_selects_only_product_previewed_calibration_body(self):
+        exact = SimpleNamespace(
+            identity='a', address=20, ambiguous=False, history=(CALIBRATION,),
+            samples=(SimpleNamespace(raw=CALIBRATION, speaker='', body=CALIBRATION),))
+        structured = SimpleNamespace(
+            identity='b', address=10, ambiguous=False,
+            history=('明日香\n' + CALIBRATION,),
+            samples=(SimpleNamespace(raw='明日香\n' + CALIBRATION,
+                                     speaker='明日香', body=CALIBRATION),))
+        speaker_only = SimpleNamespace(
+            identity='c', address=30, ambiguous=False, history=('明日香',),
+            samples=(SimpleNamespace(raw='明日香', speaker='', body='明日香'),))
+        noisy = SimpleNamespace(
+            identity='d', address=35, ambiguous=False, history=('prefix ' + CALIBRATION,),
+            samples=(SimpleNamespace(raw='prefix ' + CALIBRATION, speaker='',
+                                     body='prefix ' + CALIBRATION),))
+        ambiguous = SimpleNamespace(
+            identity='e', address=40, ambiguous=True, history=(CALIBRATION,),
+            samples=(SimpleNamespace(raw=CALIBRATION, speaker='', body=CALIBRATION),))
         self.assertEqual(calibration_candidates(
-            sources, {'a': [CALIBRATION], 'b': [CALIBRATION]}, set()), [a, b])
+            (exact, structured, speaker_only, noisy, ambiguous)), [exact, structured])
+        self.assertEqual(calibration_candidates((speaker_only, noisy, ambiguous)), [])
 
-    def test_multiple_actual_calibration_hooks_use_deterministic_real_source(self):
-        a = SimpleNamespace(identity='a', address=20)
-        b = SimpleNamespace(identity='b', address=10)
-        sources = {'a': a, 'b': b}
-        samples = {'a': ['prefix ' + CALIBRATION], 'b': [CALIBRATION]}
-        self.assertIs(choose_calibration_source(sources, samples, set()), b)
-        samples['a'] = [CALIBRATION]
-        self.assertIs(choose_calibration_source(sources, samples, set()), a)
-        self.assertIs(choose_calibration_source(sources, samples, {'a'}), b)
-        self.assertIsNone(choose_calibration_source(sources, samples, {'a', 'b'}))
+    def test_calibration_prefers_body_only_then_structured_product_preview(self):
+        exact = SimpleNamespace(
+            identity='z-body', address=20, ambiguous=False, history=(CALIBRATION,),
+            samples=(SimpleNamespace(raw=CALIBRATION, speaker='', body=CALIBRATION),))
+        structured = SimpleNamespace(
+            identity='a-structured', address=10, ambiguous=False,
+            history=('明日香\n' + CALIBRATION,),
+            samples=(SimpleNamespace(raw='明日香\n' + CALIBRATION,
+                                     speaker='明日香', body=CALIBRATION),))
+        self.assertIs(choose_calibration_source((structured, exact)), exact)
+        self.assertIs(choose_calibration_source((structured,)), structured)
+        self.assertIsNone(choose_calibration_source(()))
+
+
+    def test_fixture_calibration_uses_real_speaker_structure(self):
+        script = Path('validation/real_game/renpy/game/script.rpy').read_text(encoding='utf-8')
+        self.assertIn('renpy.say(a, "' + CALIBRATION + '", interact=False)', script)
+        self.assertNotIn('renpy.say(None, "' + CALIBRATION + '", interact=False)', script)
 
     def test_console_window_is_not_the_renpy_game(self):
         console = SimpleNamespace(hwnd=1, title='Python console')
@@ -47,8 +67,9 @@ class LiveGuiSessionContract(unittest.TestCase):
 
     def test_calibration_recipe_is_committed_through_application_owner(self):
         source = SimpleNamespace(identity='hook-a', address=91)
-        candidate = SimpleNamespace(identity='hook-a', address=91, ambiguous=False,
-                                    history=(CALIBRATION,))
+        candidate = SimpleNamespace(
+            identity='hook-a', address=91, ambiguous=False, history=(CALIBRATION,),
+            samples=(SimpleNamespace(raw=CALIBRATION, speaker='', body=CALIBRATION),))
         calls = []
         product = SimpleNamespace(
             capture_view=lambda: SimpleNamespace(candidates=(candidate,)),
@@ -63,7 +84,7 @@ class LiveGuiSessionContract(unittest.TestCase):
                                {'timeout_seconds': 30, 'phase': 'reading'})
         self.assertTrue(driver._select_calibration_source())
         self.assertEqual(calls, [
-            ('preset', ('hook-a', 91, 'body')),
+            ('preset', ('hook-a', 91, 'auto')),
             ('field', ('body', 'hook-a', 91)),
             ('field', ('speaker', None)),
         ])
@@ -102,8 +123,9 @@ class LiveGuiSessionContract(unittest.TestCase):
         recorded = []
         closed = []
         source = SimpleNamespace(identity='hook-a')
-        candidate = SimpleNamespace(identity='hook-a', address=7, ambiguous=False,
-                                    history=('unrelated text',))
+        candidate = SimpleNamespace(
+            identity='hook-a', address=7, ambiguous=False, history=('unrelated text',),
+            samples=(SimpleNamespace(raw='unrelated text', speaker='', body='unrelated text'),))
         runtime = SimpleNamespace(session=4, token=None, pause_reason=None)
         product = SimpleNamespace(
             capture_view=lambda: SimpleNamespace(candidates=(candidate,)),

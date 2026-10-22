@@ -14,22 +14,34 @@ import time
 CALIBRATION = 'AutoAdvフック校正専用'
 
 
-def calibration_candidates(sources, samples, ambiguous):
-    """Choose from actual Luna observations; no invented Hook identity."""
-    return [source for identity, source in sources.items()
-            if identity not in ambiguous
-            and any(CALIBRATION in sample for sample in samples.get(identity, ()))]
+def calibration_candidates(candidates):
+    """Use the product's extraction preview, not raw substring matching.
+
+    The fixture deliberately emits calibration with a speaker.  A source is
+    usable only when AutoAdv's ordinary ``auto`` extraction resolves its body
+    to the calibration text.  This rejects speaker-only/noisy outputs while
+    keeping both body-only and structured speaker+body Hook sources usable.
+    """
+    return [candidate for candidate in candidates
+            if not candidate.ambiguous
+            and any(sample.body == CALIBRATION for sample in candidate.samples)]
 
 
-def choose_calibration_source(sources, samples, ambiguous):
-    """Pick one observed Hook candidate deterministically for the fixture."""
-    candidates = calibration_candidates(sources, samples, ambiguous)
-    if not candidates:
+def choose_calibration_source(candidates):
+    """Pick one product-previewed candidate deterministically.
+
+    Prefer a source whose raw output already is the body.  If an engine only
+    exposes speaker+body together, the product's structural extraction preview
+    is sufficient and remains the recipe used for later dialogue.
+    """
+    matches = calibration_candidates(candidates)
+    if not matches:
         return None
-    return min(candidates, key=lambda source: (
-        not any(line.strip() == CALIBRATION for line in samples.get(source.identity, ())),
-        source.identity,
-        source.address,
+    return min(matches, key=lambda candidate: (
+        not any(sample.body == CALIBRATION and sample.raw.strip() == CALIBRATION
+                for sample in candidate.samples),
+        candidate.identity,
+        candidate.address,
     ))
 
 
@@ -67,32 +79,16 @@ class SessionDriver:
         self.done_idle = None
         self.audio_deadline = None
 
-    def _capture_observations(self):
-        view = self.product.capture_view()
-        sources = {}
-        samples = {}
-        ambiguous = set()
-        for candidate in view.candidates:
-            if candidate.ambiguous:
-                ambiguous.add(candidate.identity)
-                continue
-            source = self.product.capture_source(
-                candidate.identity, candidate.address, require_unique=False)
-            if source is not None:
-                sources[candidate.identity] = source
-                samples[candidate.identity] = list(candidate.history)
-        return sources, samples, ambiguous
-
     def fail(self, why):
-        sources, samples, ambiguous = self._capture_observations()
+        candidates = self.product.capture_view().candidates
         connection = self.product.hook_connection_state()
         runtime = self.product.runtime_state()
         details = dict(
             luna_connected=connection.connected,
-            candidate_hooks=len(self.product.capture_view().candidates),
-            sampled_hooks=sum(bool(samples.get(identity)) for identity in sources),
-            ambiguous_hooks=len(ambiguous),
-            calibration_matches=len(calibration_candidates(sources, samples, ambiguous)),
+            candidate_hooks=len(candidates),
+            sampled_hooks=sum(bool(candidate.history) for candidate in candidates),
+            ambiguous_hooks=sum(candidate.ambiguous for candidate in candidates),
+            calibration_matches=len(calibration_candidates(candidates)),
             luna_host_alive=self.product.hook_host_running,
             runtime_session=runtime.session,
             runtime_line=(runtime.token.line if runtime.token is not None else 0),
@@ -178,11 +174,17 @@ class SessionDriver:
             raise RuntimeError('could not activate the selected validation game')
 
     def _select_calibration_source(self):
-        sources, samples, ambiguous = self._capture_observations()
-        source = choose_calibration_source(sources, samples, ambiguous)
+        candidate = choose_calibration_source(self.product.capture_view().candidates)
+        if candidate is None:
+            return False
+        source = self.product.capture_source(
+            candidate.identity, candidate.address, require_unique=False)
         if source is None:
             return False
-        self.product.set_capture_extraction_preset(source.identity, source.address, 'body')
+        # Keep the same product extraction semantics that proved the calibration
+        # body.  Forcing the raw string to ``body`` would later fold a speaker
+        # line into the ASR target and invalidate native-audio attribution.
+        self.product.set_capture_extraction_preset(source.identity, source.address, 'auto')
         self.product.set_capture_field_source('body', source.identity, source.address)
         self.product.set_capture_field_source('speaker', None)
         saved = self.product.commit_capture()

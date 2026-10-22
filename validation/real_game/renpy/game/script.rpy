@@ -19,7 +19,7 @@ label start:
         $ _adv_gate = _autoadv_fixture_os.environ["AUTOADV_VALIDATION_CONTROL_FILE"]
         while not _autoadv_fixture_os.path.isfile(_adv_gate + ".attached"):
             $ renpy.pause(.1, hard=True)
-        $ renpy.say(None, "AutoAdvフック校正専用", interact=False)
+        $ renpy.say(a, "AutoAdvフック校正専用", interact=False)
         while not _autoadv_fixture_os.path.isfile(_adv_gate + ".monitoring"):
             $ renpy.pause(.1, hard=True)
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
