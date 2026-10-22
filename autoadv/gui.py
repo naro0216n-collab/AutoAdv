@@ -1747,7 +1747,8 @@ def run_gui(session_driver=None) -> int:
                     if not accepted:
                         return
                     index = options.index(selected)
-                self.stop_session()
+                # Re-selecting an already attached window is a no-op; changing
+                # PID is handled by connect_game's single Host transition.
                 self.pid.setValue(windows[index].pid)
                 self.hwnd.setText(hex(windows[index].hwnd))
                 self.hook_target.setText(options[index])

@@ -95,9 +95,47 @@ class RunningTargetGuiTests(unittest.TestCase):
                 self.assertEqual(window._connecting_pid, next_target.pid)
                 self.assertEqual(window.hook_host.child.poll(), None)
             finally:
+                window.hook_host = None  # fake Host has no subprocess to close
                 window.close()
             return 0
 
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', inspect):
+                self.assertEqual(run_gui(), 0)
+    def test_saved_window_selection_attaches_without_extra_clicks(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from types import SimpleNamespace
+        from autoadv.gui import run_gui
+        from autoadv.storage import Catalog
+        catalog = Catalog()
+        catalog.create_game('Saved novel', r'C:\Games\Novel.exe')
+        target = WindowCandidate(137, 9988, 'Saved novel', r'C:\Games\Novel.exe')
+
+        def inspect(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            commands = Mock()
+            starts = []
+            try:
+                def fake_host_start():
+                    starts.append('start')
+                    window.hook_host = SimpleNamespace(command=commands,
+                        child=SimpleNamespace(poll=lambda: None))
+                window.start_host = fake_host_start
+                with patch('autoadv.gui.find_game_windows', return_value=(target,)):
+                    window.detect_game()
+                    commands.assert_any_call('connect', pid=137)
+                    self.assertEqual(len(starts), 1)
+                    commands.reset_mock()
+                    window.detect_registered_game()
+                    commands.assert_not_called()
+                    self.assertEqual(len(starts), 1)
+                    self.assertEqual(window.pid.value(), 137)
+            finally:
+                window.hook_host = None
+                window.close()
+            return 0
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
