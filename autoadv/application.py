@@ -1632,6 +1632,10 @@ class AutoAdvApplication:
 
     def start_irodori(self, on_result: Callable[[VoiceServiceView], None]) -> None:
         """Connect or start Irodori without making connection management a UI task."""
+        # A server generation change invalidates both preview and runtime HTTP
+        # work.  Do not let an old synthesis finish against a replaced endpoint.
+        self.cancel_voice_preview()
+        self.cancel_voice()
         self._irodori_epoch += 1
         epoch = self._irodori_epoch
         if self._irodori_server is not None:
@@ -1658,6 +1662,8 @@ class AutoAdvApplication:
         threading.Thread(target=work, daemon=True, name='autoadv-irodori').start()
 
     def close_irodori(self) -> None:
+        self.cancel_voice_preview()
+        self.cancel_voice()
         self._irodori_epoch += 1
         server, self._irodori_server = self._irodori_server, None
         if server is not None:

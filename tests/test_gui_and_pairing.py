@@ -66,6 +66,9 @@ class GuiSourceArchitectureTests(unittest.TestCase):
         self.assertNotIn('from .native_audio import NativeAudio', source)
         self.assertNotIn('from .ocr import OCRWorker', source)
         self.assertNotIn('from .voice import VoiceJobs', source)
+        self.assertIn('self.audition_voice_choice = QComboBox()', source)
+        voice_change = source.split('def speaker_voice_changed', 1)[1].split('except Exception as exc:', 1)[0]
+        self.assertNotIn('refresh_speaker_choices', voice_change)
         self.assertNotIn('self.native_audio', source)
         self.assertNotIn('self.ocr_worker', source)
         self.assertNotIn('self.jobs', source)
@@ -190,6 +193,59 @@ class WindowsGuiInitialization(unittest.TestCase):
                 self.assertIn('TTS: Voice v3', window.editor_preview.toPlainText())
                 self.assertEqual(window.ui_sections['speakers'].title(), '話者・音声')
                 self.assertIsNot(window.ui_sections['source_format'], window.ui_sections['speakers'])
+            finally:
+                window.close()
+            return 0
+
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', inspect):
+                self.assertEqual(run_gui(), 0)
+
+    def test_irodori_audition_switches_voice_ids_without_rebuilding_the_active_row(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+        from autoadv.storage import Catalog
+
+        catalog = Catalog()
+        game = catalog.create_game('試聴確認')
+        profile = game.profiles[game.default_profile]
+        profile.default_voice = 'voice-1'
+        profile.inherit_common = [name for name in profile.inherit_common if name != 'default_voice']
+        profile.speaker_tts['京'] = True
+        profile.speaker_voices['京'] = 'voice-1'
+
+        def inspect(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            try:
+                window.on_server(SimpleNamespace(issue='', voices=('voice-1', 'voice-2', 'voice-3')))
+                row = next(i for i in range(window.speaker_table.rowCount())
+                           if window.speaker_table.item(i, 0).text() == '京')
+                combo = window.speaker_table.cellWidget(row, 2)
+                calls = []
+                window.application.start_voice_preview = lambda reading, voice: calls.append((reading, voice))
+
+                combo.setCurrentText('voice-2')
+                QApplication.processEvents()
+                self.assertIs(window.speaker_table.cellWidget(row, 2), combo)
+                self.assertEqual(window.current_profile().speaker_voices['京'], 'voice-2')
+                window.speaker_table.cellWidget(row, 3).click()
+                self.assertEqual(calls[-1], (window.audition_text.text(), 'voice-2'))
+                self.assertEqual(window.audition_voice_choice.currentText(), 'voice-2')
+
+                window.audition_voice_choice.setCurrentText('voice-3')
+                window.btn_audition.click()
+                self.assertEqual(calls[-1], (window.audition_text.text(), 'voice-3'))
+                window.on_server(SimpleNamespace(issue='', voices=('voice-3', 'voice-2', 'voice-1')))
+                self.assertEqual(window.audition_voice_choice.currentText(), 'voice-3')
+                refreshed_row = next(i for i in range(window.speaker_table.rowCount())
+                                     if window.speaker_table.item(i, 0).text() == '京')
+                self.assertEqual(window.speaker_table.cellWidget(refreshed_row, 2).currentText(), 'voice-2')
+                window.audition_voice_choice.setCurrentText('voice-1')
+                window.btn_audition.click()
+                self.assertEqual(calls[-1], (window.audition_text.text(), 'voice-1'))
             finally:
                 window.close()
             return 0

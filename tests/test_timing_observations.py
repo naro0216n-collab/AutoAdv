@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -88,6 +88,57 @@ class PerformanceObservationTests(unittest.TestCase):
         self.assertEqual([r[1] for r in observed], ['synthesis', 'playback'])
         self.assertEqual([r[3] for r in observed], [100, 100])
         self.assertTrue(all(r[2] >= 0 for r in observed))
+
+    def test_latest_voice_job_supersedes_inflight_synthesis_without_stale_playback(self):
+        import io
+        import wave
+        from time import monotonic, sleep
+
+        with io.BytesIO() as stream:
+            with wave.open(stream, 'wb') as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(24000)
+                writer.writeframes(bytes(240 * 2))
+            wav = stream.getvalue()
+
+        first_started = Event()
+        release_first = Event()
+        synthesized = []
+        played = []
+        reported = []
+
+        def fake_synthesize(_url, _reading, voice):
+            synthesized.append(voice)
+            if voice == 'voice-1':
+                first_started.set()
+                release_first.wait(2)
+            return wav
+
+        def fake_play(_audio, cancelled):
+            played.append(cancelled.is_set())
+            return not cancelled.is_set()
+
+        jobs = VoiceJobs(lambda *args: reported.append(args))
+        token = Token(4, 2)
+        with patch('autoadv.voice.synthesize', side_effect=fake_synthesize), \
+             patch('autoadv.voice.play', side_effect=fake_play):
+            jobs.start(token, 'http://unused', '試聴', 'voice-1')
+            self.assertTrue(first_started.wait(1))
+            jobs.start(token, 'http://unused', '試聴', 'voice-2')
+            deadline = monotonic() + 2
+            while not reported and monotonic() < deadline:
+                sleep(.001)
+            release_first.set()
+            deadline = monotonic() + 2
+            while len(synthesized) < 2 and monotonic() < deadline:
+                sleep(.001)
+            sleep(.02)
+
+        self.assertEqual(synthesized, ['voice-1', 'voice-2'])
+        self.assertEqual(played, [False])
+        self.assertEqual(reported, [(token, True, '')])
+
 
 
 if __name__ == '__main__':

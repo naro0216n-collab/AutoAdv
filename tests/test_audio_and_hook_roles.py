@@ -49,7 +49,9 @@ class NativeAndAudioContract(unittest.TestCase):
             return Response()
         with patch('autoadv.voice.request.urlopen', opener):
             self.assertEqual(synthesize('http://127.0.0.1:8088', 'こんにちは', 'voice-1'), payload)
+            self.assertEqual(synthesize('http://127.0.0.1:8088', 'こんにちは', 'voice-2'), payload)
         self.assertIn(b'"voice": "voice-1"', calls[0].data)
+        self.assertIn(b'"voice": "voice-2"', calls[1].data)
         with self.assertRaises(ValueError):
             synthesize('http://127.0.0.1:8088', 'こんにちは', '')
 

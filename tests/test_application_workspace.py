@@ -554,15 +554,31 @@ def test_application_owns_irodori_lifecycle_and_ignores_stale_results(monkeypatc
         def close(self):
             self.closed = True
 
+    class FakeJobs:
+        instances = []
+        def __init__(self, report, on_timing=None):
+            self.report = report
+            self.cancelled = 0
+            FakeJobs.instances.append(self)
+        def start(self, *_):
+            pass
+        def cancel(self):
+            self.cancelled += 1
+
     monkeypatch.setattr(application_module.threading, 'Thread', DeferredThread)
     monkeypatch.setattr(application_module, 'IrodoriServer', FakeServer)
+    monkeypatch.setattr(application_module, 'VoiceJobs', FakeJobs)
     app, _ = app_with_game()
+    app.configure_voice_jobs(on_result=None, on_preview=lambda *_: None)
+    runtime_jobs, preview_jobs = FakeJobs.instances
     received = []
 
     app.start_irodori(received.append)
+    assert (runtime_jobs.cancelled, preview_jobs.cancelled) == (1, 1)
     first = FakeServer.instances[-1]
     first_work = DeferredThread.pending.pop(0)
     app.start_irodori(received.append)
+    assert (runtime_jobs.cancelled, preview_jobs.cancelled) == (2, 2)
     second = FakeServer.instances[-1]
     second_work = DeferredThread.pending.pop(0)
     assert first.closed
@@ -575,6 +591,7 @@ def test_application_owns_irodori_lifecycle_and_ignores_stale_results(monkeypatc
 
     app.close_irodori()
     assert second.closed
+    assert (runtime_jobs.cancelled, preview_jobs.cancelled) == (3, 3)
 
 def test_application_owns_selected_thread_sync_state():
     class Child:

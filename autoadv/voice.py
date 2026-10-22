@@ -4,7 +4,7 @@ import io
 import json
 import wave
 import time
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Callable
 from urllib import parse, request
 from .conversation import Token
@@ -46,12 +46,14 @@ def play(audio: bytes, cancelled: Event) -> bool:
 
 
 class VoiceJobs:
-    """One active presentation; every completion is tied to a session/line token."""
+    """One active presentation; superseded workers can never report as current."""
     def __init__(self, report: Callable[[Token, bool, str], None],
                  on_timing: Callable[[Token, str, float, float], None] | None = None):
         self.report = report
         self.on_timing = on_timing
         self.cancelled: Event | None = None
+        self._generation = 0
+        self._lock = Lock()
 
     def _timing(self, token: Token, stage: str, started_ns: int, audio_ms: float) -> None:
         try:
@@ -61,23 +63,43 @@ class VoiceJobs:
         except Exception:
             pass  # Observability is not part of the TTS completion contract.
 
+    def _is_current(self, generation: int, event: Event) -> bool:
+        with self._lock:
+            return (generation == self._generation and self.cancelled is event
+                    and not event.is_set())
+
     def cancel(self) -> None:
-        if self.cancelled:
-            self.cancelled.set()
-            self.cancelled = None
+        with self._lock:
+            self._generation += 1
+            event, self.cancelled = self.cancelled, None
+        if event is not None:
+            event.set()
 
     def start(self, token: Token, url: str, reading: str, voice: str) -> None:
-        self.cancel()
         event = Event()
-        self.cancelled = event
+        with self._lock:
+            previous = self.cancelled
+            self._generation += 1
+            generation = self._generation
+            self.cancelled = event
+        if previous is not None:
+            previous.set()
+
+        def finish_current() -> None:
+            with self._lock:
+                if generation == self._generation and self.cancelled is event:
+                    self.cancelled = None
+
         def run():
             try:
                 started_ns = time.perf_counter_ns() if self.on_timing else 0
                 audio = synthesize(url, reading, voice)
+                if not self._is_current(generation, event):
+                    return
+                audio_ms = 0.0
                 if self.on_timing:
                     # Diagnostic inspection must never turn successful synthesis
                     # into a playback failure.
-                    audio_ms = 0.0
                     try:
                         with wave.open(io.BytesIO(audio), 'rb') as wav:
                             audio_ms = wav.getnframes() * 1000.0 / wav.getframerate()
@@ -85,11 +107,15 @@ class VoiceJobs:
                         pass
                     self._timing(token, 'synthesis', started_ns, audio_ms)
                 playback_ns = time.perf_counter_ns() if self.on_timing else 0
-                success = not event.is_set() and play(audio, event)
-                if self.on_timing and not event.is_set():
+                success = play(audio, event)
+                if not self._is_current(generation, event):
+                    return
+                if self.on_timing:
                     self._timing(token, 'playback', playback_ns, audio_ms)
                 self.report(token, success, '' if success else 'TTS cancelled')
             except Exception as exc:
-                if not event.is_set():
+                if self._is_current(generation, event):
                     self.report(token, False, f'{type(exc).__name__}: {exc}')
+            finally:
+                finish_current()
         Thread(target=run, name='autoadv-tts', daemon=True).start()

@@ -1,5 +1,6 @@
 """Contract tests for independent audio choice, two progress modes, state and persistence."""
 import json
+from copy import deepcopy
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,27 @@ class ControllerModes(unittest.TestCase):
 
     def done(self, event, success=True):
         return self.ctrl.presentation_event(self.token, event, success=success)
+
+    def test_staged_speaker_voice_change_applies_only_to_the_next_utterance(self):
+        profile = make_profile(AdvanceMode.TEXT, True)
+        profile.speaker_tts['京'] = True
+        profile.speaker_voices['京'] = 'voice-1'
+        ctrl = Controller(lambda *_: None, lambda _: True)
+        ctrl.begin(profile, Target(10, 20), 'generation', 1)
+        first = ctrl.observe(generation='generation', connection=1, sequence=1,
+                             source=SOURCE, text='京「一つ目」', pid=10)
+        self.assertIsNotNone(first)
+        self.assertEqual(ctrl.utterance.voice, 'voice-1')
+
+        updated = deepcopy(profile)
+        updated.speaker_voices['京'] = 'voice-2'
+        ctrl.stage_profile(updated)
+        self.assertEqual(ctrl.utterance.voice, 'voice-1')
+
+        second = ctrl.observe(generation='generation', connection=1, sequence=2,
+                              source=SOURCE, text='京「二つ目」', pid=10)
+        self.assertIsNotNone(second)
+        self.assertEqual(ctrl.utterance.voice, 'voice-2')
 
     def test_text_tts_requires_both_in_either_order(self):
         for first, second in (('tts_finished', 'text_elapsed'), ('text_elapsed', 'tts_finished')):

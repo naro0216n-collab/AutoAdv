@@ -417,6 +417,8 @@ def run_gui(session_driver=None) -> int:
             self.btn_add_speaker = QPushButton('追加'); self.btn_add_speaker.clicked.connect(self.add_speaker_inline)
             for w, stretch in ((self.new_speaker_name,2),(self.new_speaker_tts,0),(self.new_speaker_voice,2),(self.btn_add_speaker,0)): add_speaker_layout.addWidget(w, stretch)
             speech.addRow(add_speaker)
+            self.audition_voice_choice = QComboBox(); self.audition_voice_choice.setEditable(True)
+            speech.addRow('試聴Voice', self.audition_voice_choice)
             self.audition_text = QLineEdit('音声の試聴です。')
             self.btn_audition = QPushButton('試聴'); self.btn_audition.clicked.connect(self.audition_voice)
             self.btn_stop_audition = QPushButton('停止'); self.btn_stop_audition.clicked.connect(self.application.cancel_voice_preview)
@@ -878,6 +880,7 @@ def run_gui(session_driver=None) -> int:
             self.uncertain_text_fallback.setChecked(effective.uncertain_text_fallback)
             self.per_character_wait_ms.setValue(effective.per_character_wait_ms)
             self.default_voice.setEditText(effective.default_voice)
+            self.audition_voice_choice.setEditText(effective.default_voice)
             self.reading_ms.setValue(effective.reading_ms)
             self.insert_pc_hooks_on_attach.setChecked(profile.insert_pc_hooks)
             self.hook_flush.setValue(profile.hook_flush_ms)
@@ -1009,13 +1012,21 @@ def run_gui(session_driver=None) -> int:
             if p.speaker_voices.get(name, '') == voice.strip():
                 return
             try:
+                # Do not rebuild the table from inside QComboBox.currentTextChanged.
+                # Replacing the active combo during its own selection event can leave
+                # the adjacent preview action bound to a stale widget/selection.
                 self.application.set_speaker_voice(name, voice)
-                self.refresh_speaker_choices(name)
-                self.refresh_capture_workspace()
                 self.refresh_rule_preview()
             except Exception as exc:
                 self.note('話者のVoiceを変更できません: ' + str(exc))
                 self.refresh_speaker_choices(name)
+
+        def audition_speaker_voice(self, name: str):
+            p = self.current_profile()
+            if p is None:
+                return
+            effective = self.catalog.effective_profile(p)
+            self.audition_voice_id(p.speaker_voices.get(name, effective.default_voice))
 
         def delete_speaker_name(self, name: str):
             if not self.current_profile():
@@ -1033,6 +1044,10 @@ def run_gui(session_driver=None) -> int:
             try:
                 if not voice:
                     raise ValueError('Voice IDを選択してください')
+                # Keep the concrete Voice ID being auditioned visible.  Preview
+                # never infers its source from whichever settings widget happened
+                # to be edited most recently.
+                self.audition_voice_choice.setEditText(voice)
                 self.application.start_voice_preview(self.audition_text.text(), voice)
             except Exception as exc:
                 self.note('試聴できません: ' + str(exc))
@@ -1065,7 +1080,7 @@ def run_gui(session_driver=None) -> int:
                     voice.currentTextChanged.connect(lambda value, n=name: self.speaker_voice_changed(n, value))
                     self.speaker_table.setCellWidget(row, 2, voice)
                     audition = QPushButton('試聴')
-                    audition.clicked.connect(lambda _=False, c=voice: self.audition_voice_id(c.currentText()))
+                    audition.clicked.connect(lambda _=False, n=name: self.audition_speaker_voice(n))
                     self.speaker_table.setCellWidget(row, 3, audition)
                     remove = QPushButton('削除')
                     remove.clicked.connect(lambda _=False, n=name: self.delete_speaker_name(n))
@@ -1312,7 +1327,7 @@ def run_gui(session_driver=None) -> int:
             self.refresh_rule_preview()
 
         def audition_voice(self):
-            self.audition_voice_id(self.default_voice.currentText())
+            self.audition_voice_id(self.audition_voice_choice.currentText())
 
         def on_preview(self, success, reason):
             self.note('試聴が終了しました' if success else '試聴: ' + reason)
@@ -1549,13 +1564,19 @@ def run_gui(session_driver=None) -> int:
             self.server_status.clear()
             self.server_status.hide()
             self.btn_server.hide()
-            for control in (self.default_voice, self.new_speaker_voice):
-                existing = control.currentText()
+            for control in (self.default_voice, self.new_speaker_voice, self.audition_voice_choice):
+                existing = control.currentText().strip()
                 blocked = control.blockSignals(True)
                 try:
                     control.clear()
                     control.addItems(list(view.voices))
-                    control.setEditText(existing)
+                    if existing:
+                        control.setEditText(existing)
+                    elif control is self.audition_voice_choice:
+                        profile = self.current_profile()
+                        default = self.catalog.effective_profile(profile).default_voice if profile else ''
+                        if default:
+                            control.setEditText(default)
                 finally:
                     control.blockSignals(blocked)
             self.refresh_speaker_choices()
