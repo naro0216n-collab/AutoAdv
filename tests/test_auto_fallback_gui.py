@@ -29,7 +29,9 @@ class TwoModeGuiTests(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                self.assertEqual(window.advance_mode.count(), 2)
+                self.assertTrue(window.advance_text_button.isVisible())
+                self.assertTrue(window.advance_audio_button.isVisible())
+                self.assertEqual(window.current_advance_mode(), mode)
                 c = window.controller
                 c.input_send = lambda *_: sent.append('advance')
                 c.preflight = lambda *_: True

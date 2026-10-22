@@ -37,7 +37,7 @@ def run_gui(session_driver=None) -> int:
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
                                    QLabel, QPushButton, QComboBox, QFileDialog,
                                    QSpinBox, QGroupBox, QMessageBox, QCheckBox, QScrollArea, QInputDialog,
-                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu)
+                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu, QButtonGroup)
 
     class SignalBridge(QObject):
         hook = Signal(int, object)
@@ -85,6 +85,10 @@ def run_gui(session_driver=None) -> int:
             self.connection_generation = 0
             self.attached_pid = 0
             self._resume_monitor_requested = False
+            self._pending_monitor_apply = False
+            self._loading_profile = False
+            self._profile_dirty = False
+            self._override_drafts = {}
             self.sources: dict[str, ThreadSource] = {}
             self.source_samples: dict[str, deque[str]] = {}
             self.ambiguous_sources: set[str] = set()
@@ -115,19 +119,39 @@ def run_gui(session_driver=None) -> int:
             tabs = QTabWidget()
             root = QWidget()
             root_layout = QVBoxLayout(root)
+            header = QHBoxLayout()
             self.context_banner = QLabel('作品を選択してください')
             self.context_banner.setStyleSheet('font-size: 15px; font-weight: 600; padding: 7px;')
-            root_layout.addWidget(self.context_banner)
+            header.addWidget(self.context_banner, 1)
+            self.profile_save_state = QLabel('作品を選択してください')
+            self.profile_save_state.setProperty('statusChip', True)
+            header.addWidget(self.profile_save_state)
+            self.btn_save = QPushButton('作品設定を保存')
+            self.btn_save.setProperty('primary', True)
+            self.btn_save.clicked.connect(self.save_profile)
+            header.addWidget(self.btn_save)
+            root_layout.addLayout(header)
             overview = QHBoxLayout()
             self.overview_capture = QLabel('取得: 未接続')
             self.overview_voice = QLabel('音声: 未接続')
             self.overview_advance = QLabel('自動送り: 停止')
             for label in (self.overview_capture, self.overview_voice, self.overview_advance):
-                label.setStyleSheet('padding: 6px; border: 1px solid palette(mid); border-radius: 4px;')
+                label.setProperty('statusChip', True)
                 overview.addWidget(label, 1)
             root_layout.addLayout(overview)
             root_layout.addWidget(tabs, 1)
             self.setCentralWidget(root)
+            root.setStyleSheet("""
+                QGroupBox { font-weight: 600; margin-top: 10px; padding-top: 10px; }
+                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+                QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox { min-height: 28px; }
+                QPushButton { padding: 4px 10px; }
+                QPushButton[primary="true"] { font-weight: 700; border: 2px solid palette(highlight); }
+                QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }
+                QTableWidget { gridline-color: palette(mid); selection-background-color: palette(highlight); }
+                QHeaderView::section { font-weight: 600; padding: 5px; }
+                QLabel[statusChip="true"] { padding: 6px 10px; border: 1px solid palette(mid); border-radius: 6px; }
+            """)
             pages = {}
             self.page_scrollers = {}
             for key, name in (('home', 'プレイ'), ('hook', '台詞取得'), ('tune', '台詞・音声')):
@@ -154,6 +178,7 @@ def run_gui(session_driver=None) -> int:
             self.tabs = tabs
             self.ui_sections = {}
             self.section_toggles = {}
+            self.section_summaries = {}
 
             def group(title, *, page='home', section=None, detail=False):
                 box = QGroupBox(title)
@@ -163,17 +188,22 @@ def run_gui(session_driver=None) -> int:
                     outer = QVBoxLayout(wrapper)
                     outer.setContentsMargins(0, 0, 0, 0)
                     toggle = QToolButton()
-                    toggle.setText('詳細設定: ' + title)
+                    toggle.setText('設定を編集 — ' + title)
                     toggle.setCheckable(True)
                     toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
                     toggle.setArrowType(Qt.ArrowType.RightArrow)
                     toggle.toggled.connect(box.setVisible)
+                    summary = QLabel('現在値を確認中')
+                    summary.setWordWrap(True)
+                    summary.setStyleSheet('padding: 2px 8px;')
                     if section:
                         self.section_toggles[section] = toggle
+                        self.section_summaries[section] = summary
                     toggle.toggled.connect(lambda checked, button=toggle:
                                            button.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow))
                     box.setVisible(False)
                     outer.addWidget(toggle)
+                    outer.addWidget(summary)
                     outer.addWidget(box)
                     widget = wrapper
                 else:
@@ -185,6 +215,27 @@ def run_gui(session_driver=None) -> int:
                 if section:
                     self.ui_sections[section] = widget
                 return form
+
+            self.inherit_controls = {}
+            self.inherit_source_labels = {}
+            self.profile_setting_rows = {}
+
+            def profile_setting_row(key, control):
+                wrapper = QWidget()
+                layout = QHBoxLayout(wrapper)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(8)
+                layout.addWidget(control, 1)
+                inherit = QCheckBox('共通値を使用')
+                inherit.toggled.connect(lambda checked, name=key: self.inheritance_changed(name, checked))
+                source = QLabel('作品設定')
+                source.setMinimumWidth(115)
+                layout.addWidget(inherit)
+                layout.addWidget(source)
+                self.inherit_controls[key] = inherit
+                self.inherit_source_labels[key] = source
+                self.profile_setting_rows[key] = wrapper
+                return wrapper
 
             # Shared defaults are edited near the relevant game setting rather
             # than collected in a parallel and unrelated configuration screen.
@@ -210,10 +261,22 @@ def run_gui(session_driver=None) -> int:
             for key in COMMON_FIELDS:
                 value = getattr(self.catalog.common, key)
                 if key == 'advance_mode':
-                    control = QComboBox()
-                    control.addItem('文字のみ判断', AdvanceMode.TEXT.value)
-                    control.addItem('音声判断', AdvanceMode.AUDIO.value)
-                    control.setCurrentIndex(control.findData(value.value))
+                    control = QWidget()
+                    layout = QHBoxLayout(control)
+                    layout.setContentsMargins(0, 0, 0, 0)
+                    group = QButtonGroup(self)
+                    group.setExclusive(True)
+                    text_button = QPushButton('文字のみ判断')
+                    audio_button = QPushButton('音声判断')
+                    for button, mode in ((text_button, AdvanceMode.TEXT), (audio_button, AdvanceMode.AUDIO)):
+                        button.setCheckable(True)
+                        button.setProperty('advanceMode', mode.value)
+                        group.addButton(button)
+                        layout.addWidget(button, 1)
+                    (audio_button if value == AdvanceMode.AUDIO else text_button).setChecked(True)
+                    self.common_advance_mode_group = group
+                    self.common_advance_text_button = text_button
+                    self.common_advance_audio_button = audio_button
                 elif isinstance(value, bool):
                     control = QCheckBox('有効')
                     control.setChecked(value)
@@ -242,10 +305,10 @@ def run_gui(session_driver=None) -> int:
                 if button is not self.btn_save_common:
                     button.clicked.connect(self.save_common)
                 destination.addRow(button)
-            self.server_status = QLabel('Irodori: not connected')
+            self.server_status = QLabel('Irodori: 未接続')
             self.btn_host = QPushButton('LunaHook Hostを単独起動（通常は接続時に自動起動）')
             self.btn_host.clicked.connect(self.start_host)
-            self.host_status = QLabel('LunaHook: disconnected')
+            self.host_status = QLabel('LunaHook: 未接続')
 
             games = group('ゲームを選ぶ', section='games')
             game_details = group('作品・プロファイルの管理', section='game_details', detail=True)
@@ -268,9 +331,9 @@ def run_gui(session_driver=None) -> int:
             self.game_exe.setPlaceholderText('次回以降の識別に使用するEXEのパス')
             game_details.addRow('ゲーム実行ファイル', self.game_exe)
             self.audio_exe = QLineEdit()
-            self.audio_exe.setPlaceholderText('Optional: separate audio process executable')
+            self.audio_exe.setPlaceholderText('別プロセスで音声を出す場合のみEXEを指定')
             self.input_exe = QLineEdit()
-            self.input_exe.setPlaceholderText('Optional: separate input window executable')
+            self.input_exe.setPlaceholderText('別プロセスへ入力する場合のみEXEを指定')
             self.btn_launch = QPushButton('登録済みのゲームを起動')
             self.btn_launch.clicked.connect(self.launch_game)
             games.addRow(self.btn_launch)
@@ -309,40 +372,41 @@ def run_gui(session_driver=None) -> int:
             target_details.addRow('音声出力プロセスのEXE（別プロセス時のみ）', self.audio_exe)
             target_details.addRow('入力対象のEXE（別プロセス時のみ）', self.input_exe)
             ocr_details = group('OCRによる台詞取得の設定', page='hook', section='ocr_details', detail=True)
-            self.hook_target = QLabel('まず「ゲーム・自動進行」で実行中のゲームを選択してください')
+            self.hook_target = QLabel('まず「プレイ」で実行中のゲームを選択してください')
+            self.hook_target.setWordWrap(True)
             capture.addRow(self.hook_target)
             self.pid = QSpinBox()
             self.pid.setRange(0, 2147483647)
             self.hwnd = QLineEdit()
-            self.hwnd.setPlaceholderText('HWND e.g. 0x12345')
-            hook_details.addRow('HOOK process PID (current run)', self.pid)
+            self.hwnd.setPlaceholderText('例: 0x12345')
+            hook_details.addRow('HOOK対象PID（現在の実行）', self.pid)
             self.audio_pid = QSpinBox()
             self.audio_pid.setRange(0, 2147483647)
-            self.audio_pid.setSpecialValueText('Use HOOK PID')
+            self.audio_pid.setSpecialValueText('HOOK PIDを使用')
             self.input_pid = QSpinBox()
             self.input_pid.setRange(0, 2147483647)
-            self.input_pid.setSpecialValueText('Use HOOK PID')
+            self.input_pid.setSpecialValueText('HOOK PIDを使用')
             target_details.addRow('音声出力プロセスPID（未指定ならHOOK）', self.audio_pid)
             target_details.addRow('入力先プロセスPID（未指定ならHOOK）', self.input_pid)
             target_details.addRow('入力先ウィンドウ識別子（HWND）', self.hwnd)
-            self.attach = QPushButton('HOOK接続を再試行')
+            self.attach = QPushButton('接続を再試行')
             self.attach.clicked.connect(self.connect_game)
             hook_details.addRow(self.attach)
-            capture.addRow(self.host_status)
-            self.btn_discover = QPushButton('Find windows matching registered game executable')
+            self.btn_discover = QPushButton('登録済みEXEから実行中ゲームを再検出')
             self.btn_discover.clicked.connect(self.detect_game)
             hook_details.addRow(self.btn_discover)
-            self.btn_discover_all = QPushButton('Identify a running game from all registered executables')
+            self.btn_discover_all = QPushButton('登録済み全作品から実行中ゲームを識別')
             self.btn_discover_all.clicked.connect(self.detect_registered_game)
             hook_details.addRow(self.btn_discover_all)
-            self.btn_audio_target = QPushButton('Find audio process by saved executable')
-            self.btn_input_target = QPushButton('Find input window by saved executable')
+            self.btn_audio_target = QPushButton('保存EXEから音声プロセスを検出')
+            self.btn_input_target = QPushButton('保存EXEから入力ウィンドウを検出')
             self.btn_audio_target.clicked.connect(lambda: self.detect_associated_target('audio'))
             self.btn_input_target.clicked.connect(lambda: self.detect_associated_target('input'))
             target_details.addRow(self.btn_audio_target)
             target_details.addRow(self.btn_input_target)
             self.source_mode = QComboBox()
-            self.source_mode.addItems(['hook', 'ocr'])
+            self.source_mode.addItem('LunaHook', 'hook')
+            self.source_mode.addItem('OCR', 'ocr')
             capture.addRow('取得方法', self.source_mode)
             self.ocr_exe = QLineEdit('tesseract')
             self.ocr_lang = QLineEdit('jpn')
@@ -353,137 +417,117 @@ def run_gui(session_driver=None) -> int:
             self.ocr_stability = QSpinBox()
             self.ocr_stability.setRange(1, 10)
             ocr_details.addRow('OCRの安定確認回数', self.ocr_stability)
-            self.source_mode.currentTextChanged.connect(
-                lambda selected: self.reveal_section('ocr_details', 'hook') if selected == 'ocr' else None)
-            self.source_table = QTableWidget(0, 4)
-            self.source_table.setHorizontalHeaderLabels(['実際に受信した本文', '用途', '取得元', '受信状態'])
+            self.source_mode.currentIndexChanged.connect(
+                lambda *_: self.reveal_section('ocr_details', 'hook') if self.source_mode.currentData() == 'ocr' else None)
+
+            capture.addRow(QLabel('ゲームで台詞を表示すると、実際に本文を受信した取得元だけが並びます。'
+                                  '使用・役割・優先順位・話者対応を各行で直接設定します。'))
+            self.source_table = QTableWidget(0, 7)
+            self.source_table.setHorizontalHeaderLabels(
+                ['使用', '役割', '優先', '対応話者', '実際に受信した本文', '取得元', '状態'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.source_table.setMinimumHeight(205)
-            self.source_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            self.source_table.setColumnWidth(1, 120)
-            self.source_table.setColumnWidth(2, 140)
+            self.source_table.setMinimumHeight(245)
+            self.source_table.verticalHeader().setVisible(False)
+            self.source_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+            self.source_table.setColumnWidth(0, 55)
+            self.source_table.setColumnWidth(1, 105)
+            self.source_table.setColumnWidth(2, 70)
+            self.source_table.setColumnWidth(3, 210)
+            self.source_table.setColumnWidth(5, 145)
+            self.source_table.setColumnWidth(6, 105)
             self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
-            capture.addRow('取得した本文', self.source_table)
-            self.hook_preview = QPlainTextEdit()
-            self.hook_preview.setReadOnly(True)
-            self.hook_preview.setMaximumHeight(130)
-            capture.addRow('選択した本文と直近の履歴', self.hook_preview)
-            self.btn_test_hook_text = QPushButton('この候補の原文を本文整形で試す')
-            self.btn_test_hook_text.clicked.connect(self.use_selected_hook_as_example)
-            capture.addRow(self.btn_test_hook_text)
+            self.source_table.itemChanged.connect(self.hook_use_changed)
+            capture.addRow(self.source_table)
             row = QHBoxLayout()
-            self.text_hook = QPushButton('この候補を本文に使用')
-            self.speaker_hook = QPushButton('この候補を話者に使用')
-            self.text_hook.clicked.connect(lambda: self.select_hook('text'))
-            self.speaker_hook.clicked.connect(lambda: self.select_hook('speaker'))
-            row.addWidget(self.text_hook)
-            row.addWidget(self.speaker_hook)
-            capture.addRow(row)
             self.btn_find = QPushButton('ほかの取得候補を探す')
             self.btn_find.clicked.connect(self.find_hooks)
-            capture.addRow(self.btn_find)
-            self.btn_recovery = QPushButton('文字化け・接続などの取得条件を調整')
+            self.btn_find.setProperty('primary', True)
+            self.btn_test_hook_text = QPushButton('選択行の原文で台詞・音声を調整')
+            self.btn_test_hook_text.clicked.connect(self.use_selected_hook_as_example)
+            self.btn_recovery = QPushButton('取得条件を調整')
             self.btn_recovery.clicked.connect(lambda: self.reveal_section('hook_details', 'hook'))
-            capture.addRow(self.btn_recovery)
+            row.addWidget(self.btn_find)
+            row.addWidget(self.btn_test_hook_text)
+            row.addWidget(self.btn_recovery)
+            capture.addRow(row)
+            self.hook_preview = QPlainTextEdit()
+            self.hook_preview.setReadOnly(True)
+            self.hook_preview.setMaximumHeight(115)
+            capture.addRow('選択行の直近履歴', self.hook_preview)
+            self.hook_capture_status = QLabel('HOOK取得: 未接続')
+            self.hook_capture_status.setWordWrap(True)
+            capture.addRow(self.hook_capture_status)
+            self.selected_hooks = QLabel('使用するHOOKが未選択です')
+            self.selected_hooks.setWordWrap(True)
+            capture.addRow('現在の割当', self.selected_hooks)
+            self.hook_reconnect = QLabel('保存済みHOOK: 未接続')
+            self.hook_reconnect.setWordWrap(True)
+            capture.addRow(self.hook_reconnect)
+            self.active_hook_status = QLabel('監視中の本文HOOK: なし')
+            capture.addRow(self.active_hook_status)
+
             self.btn_pc_hooks = QPushButton('Win32汎用HOOKを追加する')
             self.btn_pc_hooks.clicked.connect(self.insert_pc_hooks)
             hook_details.addRow(self.btn_pc_hooks)
-            capture.addRow(QLabel('ゲーム内で台詞を表示すると、実際に受信された本文が並びます。'))
             self.insert_pc_hooks_on_attach = QCheckBox('この作品では接続時にWin32汎用HOOKを追加する')
             hook_details.addRow(self.insert_pc_hooks_on_attach)
-            self.hook_capture_status = QLabel('HOOK取得: 未接続')
-            capture.addRow(self.hook_capture_status)
             self.manual_hook = QLineEdit()
-            self.manual_hook.setPlaceholderText('Manual Luna HOOK code')
+            self.manual_hook.setPlaceholderText('Luna HOOKコードを手入力')
             hook_details.addRow('手動HOOKコード（通常は不要）', self.manual_hook)
             self.hook_technical_info = QLabel('取得元を選択すると識別情報を表示します')
             self.hook_technical_info.setWordWrap(True)
-            hook_details.addRow('現在選択中の取得元', self.hook_technical_info)
-            self.btn_insert = QPushButton('詳細操作: HOOKコードを手動追加')
+            hook_details.addRow('選択行の技術情報', self.hook_technical_info)
+            self.btn_insert = QPushButton('HOOKコードを手動追加')
             self.btn_insert.clicked.connect(self.insert_hook)
             hook_details.addRow(self.btn_insert)
-            self.btn_unselect_hook = QPushButton('選択済みHOOKの割当を解除')
-            self.btn_unselect_hook.clicked.connect(self.unselect_hook)
-            hook_details.addRow(self.btn_unselect_hook)
-            self.selected_hooks = QLabel('Selected HOOKs: none')
-            capture.addRow(self.selected_hooks)
-            self.saved_hook_choice = QComboBox()
-            hook_details.addRow('保存したHOOKの優先順位', self.saved_hook_choice)
-            row = QHBoxLayout()
-            self.btn_hook_up = QPushButton('HOOKの優先度を上げる')
-            self.btn_hook_down = QPushButton('HOOKの優先度を下げる')
-            self.btn_hook_up.clicked.connect(lambda: self.move_saved_hook(-1))
-            self.btn_hook_down.clicked.connect(lambda: self.move_saved_hook(1))
-            row.addWidget(self.btn_hook_up)
-            row.addWidget(self.btn_hook_down)
-            hook_details.addRow(row)
-            self.hook_reconnect = QLabel('Saved HOOKs: not connected')
-            capture.addRow(self.hook_reconnect)
-            self.active_hook_status = QLabel('Active dialogue HOOK: not monitoring')
-            capture.addRow(self.active_hook_status)
-            self.paired_text_hook = QComboBox()
-            self.paired_speaker_hook = QComboBox()
-            hook_details.addRow('本文HOOK', self.paired_text_hook)
-            hook_details.addRow('対応する話者HOOK', self.paired_speaker_hook)
-            self.btn_pair = QPushButton('本文HOOKと話者HOOKを対応づける')
-            self.btn_pair.clicked.connect(self.pair_hooks)
-            hook_details.addRow(self.btn_pair)
-            self.btn_monitor = QPushButton('現在の作品設定を保存して監視開始')
-            self.btn_monitor.clicked.connect(self.begin_monitor)
-            self.btn_to_play = QPushButton('台詞を選択できたらプレイ画面へ')
+            self.btn_to_play = QPushButton('プレイ画面へ')
             self.btn_to_play.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
             capture.addRow(self.btn_to_play)
 
-            # Multiple saved speaker assignments are visible as rows. Selection
-            # edits a *single row*, never silently overwrites an unrelated name.
+            # Speaker settings are edited on the row they affect. Selection is
+            # only a visual focus; it is never a prerequisite for changing TTS/Voice.
             speech = group('話者別の音声設定', page='tune', section='speakers')
             speech.addRow(self.btn_server)
             speech.addRow(self.server_status)
-            speech.addRow(QLabel('この作品の話者ごとにTTS使用有無とVoiceを設定します。'
-                                 '一覧にない話者には以下の既定設定が使われます。'))
+            speech.addRow(QLabel('一覧にない話者には作品既定を使用します。話者行のTTS・Voiceはその場で保存され、次の台詞から適用されます。'))
             self.default_tts = QCheckBox('未登録の話者でもTTSで読み上げる')
-            speech.addRow(self.default_tts)
+            speech.addRow('未登録話者のTTS', profile_setting_row('default_tts', self.default_tts))
             self.default_voice = QComboBox()
             self.default_voice.setEditable(True)
-            speech.addRow('未登録話者のVoice', self.default_voice)
-            self.btn_save_speaker_defaults = QPushButton('この作品の既定TTS設定を保存（共通設定より優先）')
-            self.btn_save_speaker_defaults.clicked.connect(self.save_speaker_defaults)
-            speech.addRow(self.btn_save_speaker_defaults)
-            self.speaker_table = QTableWidget(0, 3)
-            self.speaker_table.setHorizontalHeaderLabels(['話者名', 'TTS使用', 'Voice ID（未指定は既定）'])
-            self.configure_editor_table(self.speaker_table)
-            self.speaker_table.itemSelectionChanged.connect(self.show_speaker_override)
-            speech.addRow('登録済み話者（選択すると編集）', self.speaker_table)
-            self.speaker_name = QLineEdit()
-            self.speaker_name.setPlaceholderText('ゲームに表示される話者名を正確に入力')
-            speech.addRow('話者名', self.speaker_name)
-            self.speaker_tts = QCheckBox('この話者はTTSで読み上げる（OFFは原音／文字判断）')
-            speech.addRow(self.speaker_tts)
-            self.speaker_voice = QComboBox()
-            self.speaker_voice.setEditable(True)
-            speech.addRow('この話者のVoice ID', self.speaker_voice)
-            row = QHBoxLayout()
-            self.btn_assign = QPushButton('話者を追加・変更して保存')
-            self.btn_assign.clicked.connect(self.assign_speaker)
-            row.addWidget(self.btn_assign)
-            self.btn_new_speaker = QPushButton('新しい話者')
-            self.btn_new_speaker.clicked.connect(self.clear_speaker_editor)
-            row.addWidget(self.btn_new_speaker)
-            self.btn_unassign = QPushButton('選択した話者を削除')
-            self.btn_unassign.clicked.connect(self.remove_speaker)
-            row.addWidget(self.btn_unassign)
-            speech.addRow(row)
-            speech.addRow(QLabel('音声設定と自動進行方式は独立です。変更は保存後の次の台詞から反映します。'))
-            self.speaker_example_raw = QPlainTextEdit()
-            self.speaker_example_raw.setMaximumHeight(65)
-            self.speaker_example_raw.setPlaceholderText('例: 大和「おはようございます」')
-            speech.addRow('話者判定を試すHOOK原文', self.speaker_example_raw)
-            self.speaker_preview = QPlainTextEdit()
-            self.speaker_preview.setReadOnly(True)
-            self.speaker_preview.setMinimumHeight(115)
-            speech.addRow('話者設定の適用結果（本文整形タブの例文と連動）', self.speaker_preview)
+            speech.addRow('未登録話者のVoice', profile_setting_row('default_voice', self.default_voice))
+            self.speaker_table = QTableWidget(0, 5)
+            self.speaker_table.setHorizontalHeaderLabels(['話者', 'TTS', 'Voice', '試聴', '削除'])
+            self.speaker_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.speaker_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.speaker_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+            self.speaker_table.setAlternatingRowColors(True)
+            self.speaker_table.setMinimumHeight(190)
+            self.speaker_table.verticalHeader().setVisible(False)
+            self.speaker_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.speaker_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            self.speaker_table.setColumnWidth(1, 70)
+            self.speaker_table.setColumnWidth(3, 80)
+            self.speaker_table.setColumnWidth(4, 70)
+            self.speaker_table.itemChanged.connect(self.speaker_row_item_changed)
+            speech.addRow(self.speaker_table)
+            add_speaker = QHBoxLayout()
+            self.new_speaker_name = QLineEdit()
+            self.new_speaker_name.setPlaceholderText('新しい話者名')
+            self.new_speaker_tts = QCheckBox('TTS')
+            self.new_speaker_tts.setChecked(True)
+            self.new_speaker_voice = QComboBox()
+            self.new_speaker_voice.setEditable(True)
+            self.new_speaker_voice.setMinimumWidth(180)
+            self.btn_add_speaker = QPushButton('話者を追加')
+            self.btn_add_speaker.clicked.connect(self.add_speaker_inline)
+            add_speaker.addWidget(self.new_speaker_name, 2)
+            add_speaker.addWidget(self.new_speaker_tts)
+            add_speaker.addWidget(self.new_speaker_voice, 2)
+            add_speaker.addWidget(self.btn_add_speaker)
+            speech.addRow(add_speaker)
+            speech.addRow(QLabel('音声設定と自動進行方式は独立です。現在進行中の台詞は変更しません。'))
             audition = group('Voiceの試聴', page='tune', section='audition')
             self.audition_text = QLineEdit('音声の試聴です。')
             audition.addRow('試聴する文章', self.audition_text)
@@ -504,11 +548,7 @@ def run_gui(session_driver=None) -> int:
             self.example_raw.setPlaceholderText('例: 大和「おはようございます」')
             self.example_raw.setPlainText('大和「おはようございます」')
             self.example_raw.setMaximumHeight(85)
-            self.example_raw.textChanged.connect(
-                lambda: self.sync_example(self.example_raw, self.speaker_example_raw))
-            self.speaker_example_raw.textChanged.connect(
-                lambda: self.sync_example(self.speaker_example_raw, self.example_raw))
-            self.speaker_example_raw.setPlainText(self.example_raw.toPlainText())
+            self.example_raw.textChanged.connect(self.refresh_rule_preview)
             preview.addRow('試したいHOOK原文', self.example_raw)
             self.editor_preview = QPlainTextEdit()
             self.editor_preview.setReadOnly(True)
@@ -618,28 +658,31 @@ def run_gui(session_driver=None) -> int:
             replacement.addRow(row)
 
             reading = group('固有名詞の読みを直す', page='tune', section='reading')
-            reading.addRow(QLabel('漢字の単語境界で読み替えます。長い単語を先に処理します。'
-                                  '表示本文やASR照合文は変更しません。'))
-            self.reading_table = QTableWidget(0, 2)
-            self.reading_table.setHorizontalHeaderLabels(['表記', '読み'])
-            self.configure_editor_table(self.reading_table)
-            self.reading_table.itemSelectionChanged.connect(self.show_reading_rule)
-            reading.addRow('登録済みの読み', self.reading_table)
-            self.reading_word = QLineEdit()
-            self.reading_value = QLineEdit()
-            reading.addRow('表記', self.reading_word)
-            reading.addRow('読み仮名', self.reading_value)
-            row = QHBoxLayout()
-            self.btn_reading = QPushButton('読みを追加・変更')
-            self.btn_reading.clicked.connect(self.add_reading)
-            row.addWidget(self.btn_reading)
-            self.btn_reading_new = QPushButton('新規作成')
-            self.btn_reading_new.clicked.connect(self.clear_reading_editor)
-            row.addWidget(self.btn_reading_new)
-            self.btn_reading_remove = QPushButton('選択した読みを削除')
-            self.btn_reading_remove.clicked.connect(self.remove_reading)
-            row.addWidget(self.btn_reading_remove)
-            reading.addRow(row)
+            reading.addRow(QLabel('表示本文やASR照合文は変更せず、TTS読み上げだけを単語単位で置換します。'))
+            self.reading_table = QTableWidget(0, 3)
+            self.reading_table.setHorizontalHeaderLabels(['表記', '読み', '削除'])
+            self.reading_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.reading_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.reading_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+            self.reading_table.setAlternatingRowColors(True)
+            self.reading_table.setMinimumHeight(155)
+            self.reading_table.verticalHeader().setVisible(False)
+            self.reading_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.reading_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            self.reading_table.setColumnWidth(2, 70)
+            self.reading_table.itemChanged.connect(self.reading_row_item_changed)
+            reading.addRow(self.reading_table)
+            add_reading = QHBoxLayout()
+            self.new_reading_word = QLineEdit()
+            self.new_reading_word.setPlaceholderText('表記')
+            self.new_reading_value = QLineEdit()
+            self.new_reading_value.setPlaceholderText('読み')
+            self.btn_add_reading = QPushButton('読みを追加')
+            self.btn_add_reading.clicked.connect(self.add_reading_inline)
+            add_reading.addWidget(self.new_reading_word, 2)
+            add_reading.addWidget(self.new_reading_value, 2)
+            add_reading.addWidget(self.btn_add_reading)
+            reading.addRow(add_reading)
 
             advanced = hook_details
             audio_details = group('音声判断のモデルと捕捉環境', section='audio_details', detail=True)
@@ -659,23 +702,20 @@ def run_gui(session_driver=None) -> int:
             advanced.addRow('Luna文字バッファの上限', self.hook_buffer)
             self.input_key = QSpinBox()
             self.input_key.setRange(1, 254)
-            advance_details.addRow('送信する仮想キーコード', self.input_key)
+            advance_details.addRow('送信する仮想キーコード', profile_setting_row('input_key', self.input_key))
             self.native_helper = QLineEdit()
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
-            audio_details.addRow('音声捕捉ヘルパーDLL（音声判断のみ）', self.native_helper)
-            audio_details.addRow('日本語ASRモデル（音声判断のみ）', self.asr_model)
-            audio_details.addRow('ASR語彙ファイル', self.asr_tokens)
+            audio_details.addRow('音声捕捉ヘルパーDLL（音声判断のみ）', profile_setting_row('native_helper', self.native_helper))
+            audio_details.addRow('日本語ASRモデル（音声判断のみ）', profile_setting_row('asr_model', self.asr_model))
+            audio_details.addRow('ASR語彙ファイル', profile_setting_row('asr_tokens', self.asr_tokens))
             self.next_line_timeout = QSpinBox()
             self.next_line_timeout.setRange(1000, 120000)
-            advance_details.addRow('次の台詞を待つ時間（ms）', self.next_line_timeout)
+            advance_details.addRow('次の台詞を待つ時間（ms）', profile_setting_row('next_line_timeout_ms', self.next_line_timeout))
             self.repeat = QComboBox()
             self.repeat.addItem('連続した同文を重複として扱う', 'distinct_only')
             self.repeat.addItem('送り後の同文は別台詞として扱う', 'each_after_input')
             advance_details.addRow('同一本文の連続取得', self.repeat)
-            self.inherit_controls = {}
-            self.btn_save = QPushButton('作品の設定を保存')
-            self.btn_save.clicked.connect(self.save_profile)
             live_dialogue = group('現在の台詞と適用結果', section='current_dialogue')
             self.preview = QPlainTextEdit()
             self.preview.setReadOnly(True)
@@ -685,54 +725,54 @@ def run_gui(session_driver=None) -> int:
             self.btn_edit_current.clicked.connect(self.edit_current_dialogue)
             live_dialogue.addRow(self.btn_edit_current)
 
-            for w in (self.structure_pattern, self.structure_condition, self.replace_pattern,
-                      self.replace_value, self.reading_word, self.reading_value, self.speaker_name):
+            for w in (self.structure_pattern, self.structure_condition, self.replace_pattern, self.replace_value):
                 w.textChanged.connect(lambda _=None, control=w: self.preview_from_control(control))
-            for w in (self.structure_enabled, self.replace_regex, self.replace_enabled,
-                      self.speaker_tts, self.default_tts):
+            for w in (self.structure_enabled, self.replace_regex, self.replace_enabled, self.default_tts):
                 w.toggled.connect(lambda _=None, control=w: self.preview_from_control(control))
-            for w in (self.replace_target, self.default_voice, self.speaker_voice):
+            for w in (self.replace_target, self.default_voice):
                 w.currentTextChanged.connect(lambda _=None, control=w: self.preview_from_control(control))
             advance = group('進行方式と自動送り', section='advance')
-            advance.addRow(self.btn_monitor)
-            self.btn_resume = QPushButton('保存した設定で接続・監視（自動送りは停止のまま）')
-            self.btn_resume.clicked.connect(self.resume_saved_game)
-            games.addRow(self.btn_resume)
-            self.advance_mode = QComboBox()
-            self.advance_mode.addItem('文字のみ判断', AdvanceMode.TEXT.value)
-            self.advance_mode.addItem('音声判断', AdvanceMode.AUDIO.value)
-            advance.addRow('進行方式', self.advance_mode)
-            self.uncertain_text_fallback = QCheckBox('音声判定が不確かなとき、文字数待機時間で進む（早送りの可能性あり）')
-            advance.addRow(self.uncertain_text_fallback)
+            self.advance_mode_widget = QWidget()
+            mode_layout = QHBoxLayout(self.advance_mode_widget)
+            mode_layout.setContentsMargins(0, 0, 0, 0)
+            self.advance_mode_group = QButtonGroup(self)
+            self.advance_mode_group.setExclusive(True)
+            self.advance_text_button = QPushButton('文字のみ判断')
+            self.advance_audio_button = QPushButton('音声判断')
+            for button, value in ((self.advance_text_button, AdvanceMode.TEXT.value),
+                                  (self.advance_audio_button, AdvanceMode.AUDIO.value)):
+                button.setCheckable(True)
+                button.setProperty('advanceMode', value)
+                self.advance_mode_group.addButton(button)
+                mode_layout.addWidget(button, 1)
+            self.advance_text_button.setChecked(True)
+            advance.addRow('進行方式', profile_setting_row('advance_mode', self.advance_mode_widget))
+            self.uncertain_text_fallback = QCheckBox('不確実時は文字数時間で進む（途中送りの可能性あり）')
+            advance.addRow('音声判断のフォールバック', profile_setting_row('uncertain_text_fallback', self.uncertain_text_fallback))
             self.per_character_wait_ms = QSpinBox()
             self.per_character_wait_ms.setRange(1, 600000)
-            advance.addRow('記号除外の1文字あたり待機時間（ms）', self.per_character_wait_ms)
+            self.per_character_wait_ms.setSuffix(' ms / 文字')
+            advance.addRow('記号除外の1文字待機', profile_setting_row('per_character_wait_ms', self.per_character_wait_ms))
             self.reading_ms = QSpinBox()
             self.reading_ms.setRange(1, 600000)
-            advance.addRow('最低表示時間（ms）', self.reading_ms)
+            self.reading_ms.setSuffix(' ms')
+            advance.addRow('最低表示時間', profile_setting_row('reading_ms', self.reading_ms))
             self.wait_preview = QLabel('計数: - / 待機時間: -')
-            advance.addRow('現在台詞の計数と確定時間', self.wait_preview)
-            advance.addRow(QLabel('文字のみ判断は原音を途中で送る場合があります。音声判断で確証がなければ停止します。'))
-            row = QHBoxLayout()
-            self.btn_permit = QPushButton('自動送りを許可')
-            self.btn_pause = QPushButton('自動送りを停止')
-            row.addWidget(self.btn_permit)
-            row.addWidget(self.btn_pause)
-            self.btn_permit.clicked.connect(self.permit)
-            self.btn_pause.clicked.connect(self.pause)
-            advance.addRow(row)
-            self.status = QLabel('Status: not monitoring')
-            advance.addRow(self.status)
-            advance.addRow(self.btn_save)
-            inherit_targets = {
-                'default_tts': speech, 'default_voice': speech,
-                'native_helper': audio_details, 'asr_model': audio_details, 'asr_tokens': audio_details,
-                'input_key': advance_details, 'next_line_timeout_ms': advance_details,
-                'advance_mode': advance, 'uncertain_text_fallback': advance,
-                'reading_ms': advance, 'per_character_wait_ms': advance,
-            }
+            advance.addRow('現在台詞', self.wait_preview)
+            self.audio_environment_summary = QLabel('音声判断環境: 未確認')
+            self.audio_environment_summary.setWordWrap(True)
+            advance.addRow(self.audio_environment_summary)
+            advance.addRow(QLabel('文字のみ判断は原音終了を確認しません。音声判断で根拠が不足した場合は上のフォールバック設定に従います。'))
+            self.advance_authorization = QPushButton('自動送り: 停止')
+            self.advance_authorization.setCheckable(True)
+            self.advance_authorization.setProperty('primary', True)
+            self.advance_authorization.toggled.connect(self.set_advance_authorization)
+            advance.addRow('入力許可', self.advance_authorization)
+            self.status = QLabel('監視: 停止 / 自動送り: 停止')
+            self.status.setWordWrap(True)
+            advance.addRow('現在状態', self.status)
             self.profile_field_controls = {
-                'advance_mode': self.advance_mode,
+                'advance_mode': self.advance_mode_widget,
                 'uncertain_text_fallback': self.uncertain_text_fallback,
                 'default_tts': self.default_tts, 'default_voice': self.default_voice,
                 'reading_ms': self.reading_ms,
@@ -741,11 +781,26 @@ def run_gui(session_driver=None) -> int:
                 'asr_tokens': self.asr_tokens, 'input_key': self.input_key,
                 'next_line_timeout_ms': self.next_line_timeout,
             }
-            for key in COMMON_FIELDS:
-                control = QCheckBox('共通設定を継承: ' + common_titles[key])
-                self.inherit_controls[key] = control
-                control.toggled.connect(lambda _checked, name=key: self.refresh_inherited_control(name))
-                inherit_targets[key].addRow(control)
+            for button in (self.advance_text_button, self.advance_audio_button):
+                button.toggled.connect(lambda checked, key='advance_mode': checked and self.profile_setting_changed(key))
+            for key, control in self.profile_field_controls.items():
+                if key == 'advance_mode':
+                    continue
+                if isinstance(control, QCheckBox):
+                    control.toggled.connect(lambda _=False, name=key: self.profile_setting_changed(name))
+                elif isinstance(control, QSpinBox):
+                    control.valueChanged.connect(lambda _=0, name=key: self.profile_setting_changed(name))
+                elif isinstance(control, QComboBox):
+                    control.currentTextChanged.connect(lambda _='', name=key: self.profile_setting_changed(name))
+                elif isinstance(control, QLineEdit):
+                    control.textChanged.connect(lambda _='', name=key: self.profile_setting_changed(name))
+            for control in (self.hook_flush, self.hook_codepage, self.hook_history, self.hook_buffer,
+                            self.repeat, self.source_mode, self.ocr_exe, self.ocr_lang, self.ocr_region,
+                            self.ocr_stability, self.insert_pc_hooks_on_attach, self.game_exe, self.audio_exe, self.input_exe):
+                signal = (control.currentIndexChanged if isinstance(control, QComboBox) else
+                          control.valueChanged if isinstance(control, QSpinBox) else
+                          control.toggled if isinstance(control, QCheckBox) else control.textChanged)
+                signal.connect(lambda _=None: self.mark_profile_dirty())
             self.log = QPlainTextEdit()
             self.log.setReadOnly(True)
             self.log.setMaximumHeight(120)
@@ -769,7 +824,7 @@ def run_gui(session_driver=None) -> int:
             self.intervention_timer.start()
             self.confirm_migration_if_needed()
             self.fill_games()
-            if self.irodori_path.text().strip():
+            if self.irodori_url.text().strip():
                 QTimer.singleShot(0, self.start_server)
 
         def note(self, message):
@@ -803,8 +858,10 @@ def run_gui(session_driver=None) -> int:
             from .storage import CommonSettings
             values = {}
             for key, widget in self.common_controls.items():
-                if isinstance(widget, QComboBox):
-                    values[key] = AdvanceMode(widget.currentData())
+                if key == 'advance_mode':
+                    values[key] = AdvanceMode.AUDIO if self.common_advance_audio_button.isChecked() else AdvanceMode.TEXT
+                elif isinstance(widget, QComboBox):
+                    values[key] = widget.currentText().strip()
                 elif isinstance(widget, QCheckBox):
                     values[key] = widget.isChecked()
                 elif isinstance(widget, QSpinBox):
@@ -816,6 +873,7 @@ def run_gui(session_driver=None) -> int:
                 common.validate()
                 self.catalog.common = common
                 self.persist()
+                self.refresh_section_summaries()
                 if self.current_profile() and not self.controller.profile:
                     self.choose_profile()
                 self.note('Common defaults saved; any active session keeps its previous effective settings')
@@ -876,30 +934,195 @@ def run_gui(session_driver=None) -> int:
             self.profile_choice.blockSignals(False)
             self.choose_profile()
 
+        def current_advance_mode(self) -> AdvanceMode:
+            return (AdvanceMode.AUDIO if self.advance_audio_button.isChecked() else AdvanceMode.TEXT)
+
+        def set_advance_mode(self, mode: AdvanceMode):
+            button = self.advance_audio_button if mode == AdvanceMode.AUDIO else self.advance_text_button
+            blocked = [(b, b.blockSignals(True)) for b in (self.advance_text_button, self.advance_audio_button)]
+            try:
+                button.setChecked(True)
+            finally:
+                for b, previous in blocked:
+                    b.blockSignals(previous)
+            self.update_audio_environment_summary()
+
+        def set_advance_authorization(self, enabled: bool):
+            if enabled:
+                self.permit()
+            else:
+                self.pause()
+
+        def update_audio_environment_summary(self):
+            mode = self.current_advance_mode() if hasattr(self, 'advance_audio_button') else AdvanceMode.TEXT
+            helper = self.native_helper.text().strip() if hasattr(self, 'native_helper') else ''
+            model = self.asr_model.text().strip() if hasattr(self, 'asr_model') else ''
+            tokens = self.asr_tokens.text().strip() if hasattr(self, 'asr_tokens') else ''
+            if mode == AdvanceMode.TEXT:
+                text = '音声判断環境: この方式では使用しません'
+            elif helper and model and tokens:
+                text = '音声判断環境: 準備済み'
+            else:
+                missing = []
+                if not helper: missing.append('捕捉ヘルパー')
+                if not model: missing.append('ASRモデル')
+                if not tokens: missing.append('語彙')
+                text = '音声判断環境: 未準備 — ' + ' / '.join(missing)
+            if hasattr(self, 'audio_environment_summary'):
+                self.audio_environment_summary.setText(text)
+
+
+        def mark_profile_dirty(self):
+            if self._loading_profile or not self.current_profile():
+                return
+            self._profile_dirty = True
+            if hasattr(self, 'profile_save_state'):
+                self.profile_save_state.setText('未保存の変更あり')
+            self.refresh_section_summaries()
+
+        def profile_setting_changed(self, key: str):
+            if self._loading_profile:
+                return
+            self.mark_profile_dirty()
+            if key in self.inherit_controls:
+                self.refresh_inherited_control(key)
+            else:
+                self.update_audio_environment_summary()
+            self.refresh_section_summaries()
+
+
+        def profile_control_value(self, key: str):
+            if key == 'advance_mode':
+                return self.current_advance_mode()
+            control = self.profile_field_controls[key]
+            if isinstance(control, QCheckBox):
+                return control.isChecked()
+            if isinstance(control, QSpinBox):
+                return control.value()
+            if isinstance(control, QComboBox):
+                return control.currentText().strip()
+            return control.text().strip()
+
+        def set_profile_control_value(self, key: str, value):
+            if key == 'advance_mode':
+                self.set_advance_mode(value)
+                return
+            control = self.profile_field_controls[key]
+            previous = control.blockSignals(True)
+            try:
+                if isinstance(control, QCheckBox):
+                    control.setChecked(bool(value))
+                elif isinstance(control, QSpinBox):
+                    control.setValue(int(value))
+                elif isinstance(control, QComboBox):
+                    control.setEditText(str(value))
+                else:
+                    control.setText(str(value))
+            finally:
+                control.blockSignals(previous)
+
+        def inheritance_changed(self, key: str, inherited: bool):
+            if key not in self.profile_field_controls:
+                return
+            profile = self.current_profile()
+            if not self._loading_profile and profile:
+                if inherited:
+                    self._override_drafts[key] = self.profile_control_value(key)
+                else:
+                    self.set_profile_control_value(
+                        key, self._override_drafts.get(key, getattr(profile, key)))
+            self.refresh_inherited_control(key)
+            if not self._loading_profile:
+                self.mark_profile_dirty()
+
+        @staticmethod
+        def _short_path(value: str) -> str:
+            value = (value or '').strip()
+            if not value:
+                return '未設定'
+            return ntpath.basename(value.rstrip('/\\')) or value
+
+        def refresh_section_summaries(self):
+            if not getattr(self, 'section_summaries', None):
+                return
+            profile = self.current_profile()
+            game = self.catalog.games.get(self.game_id)
+            summaries = {}
+            summaries['irodori'] = (
+                f'接続先 {self.irodori_url.text().strip() or "未設定"} / '
+                f'{self.server_status.text() if hasattr(self, "server_status") else "未接続"}')
+            if game and profile:
+                summaries['game_details'] = (
+                    f'実行 {self._short_path(self.game_exe.text())} / '
+                    f'音声 {self._short_path(self.audio_exe.text())} / '
+                    f'入力 {self._short_path(self.input_exe.text())}')
+                summaries['target_details'] = (
+                    f'HOOK PID {self.pid.value() or "未選択"} / '
+                    f'音声 PID {self.audio_pid.value() or self.pid.value() or "自動"} / '
+                    f'入力 PID {self.input_pid.value() or self.pid.value() or "自動"}')
+                summaries['hook_details'] = (
+                    f'flush {self.hook_flush.value()} ms / codepage {self.hook_codepage.value()} / '
+                    f'履歴 {self.hook_history.value()} / buffer {self.hook_buffer.value()}')
+                summaries['ocr_details'] = (
+                    f'{self._short_path(self.ocr_exe.text())} / {self.ocr_lang.text().strip() or "言語未設定"} / '
+                    f'安定 {self.ocr_stability.value()}回')
+                summaries['audio_details'] = self.audio_environment_summary.text()
+                summaries['advance_details'] = (
+                    f'送りキー {self.input_key.value()} / 次台詞待ち {self.next_line_timeout.value()} ms / '
+                    f'重複 {self.repeat.currentText()}')
+                summaries['extraction'] = f'抽出規則 {len(profile.structure_rules)}件'
+                summaries['replacement'] = f'置換規則 {len(profile.replacements)}件'
+            common = self.catalog.common
+            common_mode = '音声判断' if common.advance_mode == AdvanceMode.AUDIO else '文字のみ判断'
+            summaries['common_advance'] = (
+                f'{common_mode} / 1文字 {common.per_character_wait_ms} ms / '
+                f'最低表示 {common.reading_ms} ms / 不確実時フォールバック '
+                f'{"ON" if common.uncertain_text_fallback else "OFF"}')
+            summaries['common_audio'] = (
+                f'helper {self._short_path(common.native_helper)} / '
+                f'ASR {self._short_path(common.asr_model)} / tokens {self._short_path(common.asr_tokens)}')
+            for key, label in self.section_summaries.items():
+                label.setText(summaries.get(key, '現在値は上の基本設定から参照できます'))
+
         def refresh_inherited_control(self, key: str):
-            """The displayed value and editability agree with the saved source."""
+            """Show the effective value and its owner beside the setting it affects."""
             checkbox = self.inherit_controls[key]
             control = self.profile_field_controls[key]
             inherited = checkbox.isChecked()
-            control.setEnabled(not inherited)
-            if not inherited:
-                return
-            value = getattr(self.catalog.common, key)
-            was_blocked = control.blockSignals(True)
-            try:
+            source = self.inherit_source_labels.get(key)
+            if key == 'advance_mode':
+                for button in (self.advance_text_button, self.advance_audio_button):
+                    button.setEnabled(not inherited)
+                if inherited:
+                    self.set_advance_mode(self.catalog.common.advance_mode)
+                value_text = '音声判断' if self.current_advance_mode() == AdvanceMode.AUDIO else '文字のみ判断'
+            else:
+                control.setEnabled(not inherited)
+                if inherited:
+                    value = getattr(self.catalog.common, key)
+                    was_blocked = control.blockSignals(True)
+                    try:
+                        if isinstance(control, QCheckBox):
+                            control.setChecked(value)
+                        elif isinstance(control, QSpinBox):
+                            control.setValue(value)
+                        elif isinstance(control, QComboBox):
+                            control.setEditText(value)
+                        else:
+                            control.setText(value)
+                    finally:
+                        control.blockSignals(was_blocked)
                 if isinstance(control, QCheckBox):
-                    control.setChecked(value)
+                    value_text = 'ON' if control.isChecked() else 'OFF'
                 elif isinstance(control, QSpinBox):
-                    control.setValue(value)
+                    value_text = str(control.value())
                 elif isinstance(control, QComboBox):
-                    if key == 'advance_mode':
-                        control.setCurrentIndex(control.findData(value.value))
-                    else:
-                        control.setEditText(value)
+                    value_text = control.currentText()
                 else:
-                    control.setText(value)
-            finally:
-                control.blockSignals(was_blocked)
+                    value_text = control.text()
+            if source is not None:
+                source.setText(('共通: ' if inherited else '作品: ') + value_text)
+            self.update_audio_environment_summary()
             self.refresh_rule_preview()
 
         def choose_profile(self, *_):
@@ -907,12 +1130,18 @@ def run_gui(session_driver=None) -> int:
             self.stop_session()
             self.profile_id = self.profile_choice.currentData() or ''
             profile = self.current_profile()
+            self._loading_profile = True
             if not profile:
                 self.context_banner.setText('編集対象: 作品とプロファイルを選択してください')
                 for table in (self.speaker_table, self.structure_table,
                               self.replacement_table, self.reading_table):
                     table.setRowCount(0)
+                self._loading_profile = False
+                self._profile_dirty = False
+                if hasattr(self, 'profile_save_state'):
+                    self.profile_save_state.setText('作品を選択してください')
                 self.refresh_rule_preview()
+                self.refresh_section_summaries()
                 return
             game = self.catalog.games[self.game_id]
             self.context_banner.setText(f'編集対象: {game.name} / {profile.name}  ―  この作品の設定を編集中')
@@ -920,7 +1149,7 @@ def run_gui(session_driver=None) -> int:
             for key, widget in self.inherit_controls.items():
                 widget.setChecked(key in profile.inherit_common)
             self.default_tts.setChecked(effective.default_tts)
-            self.advance_mode.setCurrentIndex(self.advance_mode.findData(effective.advance_mode.value))
+            self.set_advance_mode(effective.advance_mode)
             self.uncertain_text_fallback.setChecked(effective.uncertain_text_fallback)
             self.per_character_wait_ms.setValue(effective.per_character_wait_ms)
             self.default_voice.setEditText(effective.default_voice)
@@ -932,7 +1161,7 @@ def run_gui(session_driver=None) -> int:
             self.hook_history.setValue(profile.hook_max_history)
             self.input_key.setValue(effective.input_key)
             self.repeat.setCurrentIndex(self.repeat.findData(profile.repeat_rule))
-            self.source_mode.setCurrentText(profile.source)
+            self.source_mode.setCurrentIndex(max(0, self.source_mode.findData(profile.source)))
             self.ocr_exe.setText(profile.ocr.executable)
             self.ocr_lang.setText(profile.ocr.language)
             self.ocr_region.setText(','.join(map(str, profile.ocr.region)))
@@ -941,20 +1170,22 @@ def run_gui(session_driver=None) -> int:
             self.asr_model.setText(effective.asr_model)
             self.asr_tokens.setText(effective.asr_tokens)
             self.next_line_timeout.setValue(effective.next_line_timeout_ms)
+            self._override_drafts = {field: getattr(profile, field) for field in COMMON_FIELDS}
             for field in COMMON_FIELDS:
                 self.refresh_inherited_control(field)
             self.refresh_rules()
             self.refresh_selected_hooks()
             self.refresh_speaker_choices()
-            self.refresh_hook_pairs()
             # Editors must never carry the previous game's unsaved draft.
             self.clear_structure_editor()
             self.clear_replacement_editor()
-            self.clear_reading_editor()
-            self.clear_speaker_editor()
             self._preview_edit_kind = None
             self.refresh_rule_preview()
-            self.refresh_rule_preview()
+            self._loading_profile = False
+            self._profile_dirty = False
+            if hasattr(self, 'profile_save_state'):
+                self.profile_save_state.setText('保存済み')
+            self.refresh_section_summaries()
 
         def add_game(self):
             try:
@@ -984,7 +1215,7 @@ def run_gui(session_driver=None) -> int:
             try:
                 updated = copy.deepcopy(p)
                 from .model import OCRSettings
-                updated.source = self.source_mode.currentText()
+                updated.source = self.source_mode.currentData()
                 updated.ocr = OCRSettings(self.ocr_exe.text().strip(), self.ocr_lang.text().strip(),
                     tuple(int(x.strip()) for x in self.ocr_region.text().split(',')),
                     stable_samples=self.ocr_stability.value())
@@ -993,7 +1224,7 @@ def run_gui(session_driver=None) -> int:
                 updated.asr_tokens = self.asr_tokens.text().strip()
                 updated.next_line_timeout_ms = self.next_line_timeout.value()
                 updated.default_tts = self.default_tts.isChecked()
-                updated.advance_mode = AdvanceMode(self.advance_mode.currentData())
+                updated.advance_mode = self.current_advance_mode()
                 updated.uncertain_text_fallback = self.uncertain_text_fallback.isChecked()
                 updated.per_character_wait_ms = self.per_character_wait_ms.value()
                 updated.default_voice = self.default_voice.currentText().strip()
@@ -1009,7 +1240,7 @@ def run_gui(session_driver=None) -> int:
                 # Inherited values are not custom overrides. Retain dormant
                 # per-game values so switching inheritance off restores them.
                 for field in updated.inherit_common:
-                    setattr(updated, field, getattr(p, field))
+                    setattr(updated, field, self._override_drafts.get(field, getattr(p, field)))
                 updated.validate()
                 game = self.catalog.games[self.game_id]
                 game.profiles[updated.id] = updated
@@ -1017,7 +1248,15 @@ def run_gui(session_driver=None) -> int:
                 game.audio_executable = self.audio_exe.text().strip()
                 game.input_executable = self.input_exe.text().strip()
                 self.persist()
-                self.note('Profile saved; restart monitoring to apply new rules')
+                self._profile_dirty = False
+                if hasattr(self, 'profile_save_state'):
+                    self.profile_save_state.setText('保存済み')
+                self.refresh_section_summaries()
+                if self.controller.profile and self.controller.profile.id == updated.id:
+                    self._pending_monitor_apply = True
+                    self.note('作品設定を保存しました。現在の台詞は維持し、次の選択HOOK出力から監視設定を更新します。')
+                else:
+                    self.note('作品設定を保存しました。次の監視開始から適用します。')
                 return True
             except Exception as exc:
                 self.note('Profile not saved: ' + str(exc))
@@ -1066,85 +1305,141 @@ def run_gui(session_driver=None) -> int:
                 except Exception:
                     self.catalog.games[self.game_id].profiles[original.id] = original
                     raise
-                self.note(message + '。監視中の台詞は変更しません。再監視時に新しい設定を適用します。')
+                if self.controller.profile and self.controller.profile.id == updated.id:
+                    self.controller.profile = self.catalog.effective_profile(updated)
+                self.note(message + '。現在の台詞は固定し、次の台詞から適用します。')
                 return True
             except Exception as exc:
                 self.note('設定を保存できません: ' + str(exc))
                 return False
 
-        def save_speaker_defaults(self):
-            def change(p):
-                p.default_tts = self.default_tts.isChecked()
-                p.default_voice = self.default_voice.currentText().strip()
-                p.inherit_common = [key for key in p.inherit_common
-                                    if key not in ('default_tts', 'default_voice')]
-            if self.commit_rule_edit(change, '作品の既定TTS設定を保存しました'):
-                self.inherit_controls['default_tts'].setChecked(False)
-                self.inherit_controls['default_voice'].setChecked(False)
-                self.refresh_speaker_choices()
-                self.refresh_rule_preview()
-
-        def assign_speaker(self):
-            name = self.speaker_name.text().strip()
+        def add_speaker_inline(self):
+            name = self.new_speaker_name.text().strip()
             if not name:
                 self.note('話者名を入力してください')
                 return
-            row = self.selected_editor_row(self.speaker_table)
-            old = self.speaker_table.item(row, 0).text() if row >= 0 else None
-            exists = {self.speaker_table.item(i, 0).text() for i in range(self.speaker_table.rowCount())}
-            if name in exists and name != old:
-                self.note('同名の話者が存在します。一覧から選択して変更してください')
+            p = self.current_profile()
+            if p and (name in p.speaker_tts or name in p.speaker_voices):
+                self.note('同名の話者が既にあります。該当行を直接編集してください')
                 return
-            def change(p):
-                if old and old != name:
-                    p.speaker_tts.pop(old, None)
-                    p.speaker_voices.pop(old, None)
-                p.speaker_tts[name] = self.speaker_tts.isChecked()
-                p.speaker_voices[name] = self.speaker_voice.currentText().strip()
-            if self.commit_rule_edit(change, '話者設定を保存しました'):
+            enabled = self.new_speaker_tts.isChecked()
+            voice = self.new_speaker_voice.currentText().strip()
+            def change(profile):
+                profile.speaker_tts[name] = enabled
+                profile.speaker_voices[name] = voice
+            if self.commit_rule_edit(change, '話者設定を追加しました'):
+                self.new_speaker_name.clear()
+                self.new_speaker_voice.setEditText('')
                 self.refresh_speaker_choices(name)
 
-        def clear_speaker_editor(self):
-            self.speaker_table.clearSelection()
-            self.speaker_name.clear()
-            self.speaker_tts.setChecked(self.default_tts.isChecked())
-            self.speaker_voice.setEditText('')
-            self._preview_edit_kind = 'speaker'
-            self.refresh_rule_preview()
+        def speaker_row_item_changed(self, item):
+            if getattr(self, '_refreshing_speakers', False):
+                return
+            row = item.row()
+            if row < 0 or row >= self.speaker_table.rowCount():
+                return
+            name_item = self.speaker_table.item(row, 0)
+            if name_item is None:
+                return
+            name = name_item.text().strip()
+            old = name_item.data(Qt.ItemDataRole.UserRole) or name
+            p = self.current_profile()
+            if not p or not name:
+                self.refresh_speaker_choices(old if p else None)
+                return
+            if item.column() == 0 and name != old:
+                existing = set(p.speaker_tts) | set(p.speaker_voices)
+                if name in existing:
+                    self.note('同名の話者が既にあります')
+                    self.refresh_speaker_choices(old)
+                    return
+                def rename(profile):
+                    tts = profile.speaker_tts.pop(old, profile.default_tts)
+                    voice = profile.speaker_voices.pop(old, '')
+                    profile.speaker_tts[name] = tts
+                    profile.speaker_voices[name] = voice
+                if self.commit_rule_edit(rename, '話者名を変更しました'):
+                    self.refresh_speaker_choices(name)
+                else:
+                    self.refresh_speaker_choices(old)
+            elif item.column() == 1:
+                enabled = item.checkState() == Qt.CheckState.Checked
+                if self.commit_rule_edit(lambda profile: profile.speaker_tts.__setitem__(name, enabled),
+                                         '話者のTTS設定を変更しました'):
+                    self.refresh_speaker_choices(name)
+
+        def speaker_voice_changed(self, name: str, voice: str):
+            if getattr(self, '_refreshing_speakers', False):
+                return
+            p = self.current_profile()
+            if not p or name not in set(p.speaker_tts) | set(p.speaker_voices):
+                return
+            if p.speaker_voices.get(name, '') == voice.strip():
+                return
+            if self.commit_rule_edit(lambda profile: profile.speaker_voices.__setitem__(name, voice.strip()),
+                                     '話者のVoiceを変更しました'):
+                self.refresh_speaker_choices(name)
+
+        def delete_speaker_name(self, name: str):
+            p = self.current_profile()
+            if not p:
+                return
+            def change(profile):
+                profile.speaker_tts.pop(name, None)
+                profile.speaker_voices.pop(name, None)
+            if self.commit_rule_edit(change, '話者を削除しました'):
+                self.refresh_speaker_choices()
+
+        def audition_voice_id(self, voice: str):
+            voice = voice.strip() or self.default_voice.currentText().strip()
+            try:
+                if not voice:
+                    raise ValueError('Voice IDを選択してください')
+                self.preview_jobs.start(Token(-1, -1), self.catalog.irodori_url,
+                                        self.audition_text.text(), voice)
+            except Exception as exc:
+                self.note('試聴できません: ' + str(exc))
 
         def refresh_speaker_choices(self, selected=None):
             p = self.current_profile()
             names = sorted(set(p.speaker_tts) | set(p.speaker_voices)) if p else []
             effective = self.catalog.effective_profile(p) if p else None
-            rows = [(name, '使う' if p.speaker_tts.get(name, effective.default_tts) else '使わない',
-                     p.speaker_voices.get(name, '') or '（作品既定）') for name in names]
-            self.fill_editor_table(self.speaker_table, rows,
-                                   names.index(selected) if selected in names else -1)
+            self._refreshing_speakers = True
+            self.speaker_table.blockSignals(True)
+            try:
+                self.speaker_table.setRowCount(len(names))
+                for row, name in enumerate(names):
+                    name_item = QTableWidgetItem(name)
+                    name_item.setData(Qt.ItemDataRole.UserRole, name)
+                    self.speaker_table.setItem(row, 0, name_item)
+                    tts_item = QTableWidgetItem('')
+                    tts_item.setFlags(tts_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    tts_item.setCheckState(Qt.CheckState.Checked if p.speaker_tts.get(name, effective.default_tts)
+                                           else Qt.CheckState.Unchecked)
+                    self.speaker_table.setItem(row, 1, tts_item)
+                    voice = QComboBox()
+                    voice.setEditable(True)
+                    choices = [self.default_voice.itemText(i) for i in range(self.default_voice.count())]
+                    current = p.speaker_voices.get(name, '')
+                    for value in choices:
+                        if value and voice.findText(value) < 0:
+                            voice.addItem(value)
+                    voice.setEditText(current)
+                    voice.currentTextChanged.connect(lambda value, n=name: self.speaker_voice_changed(n, value))
+                    self.speaker_table.setCellWidget(row, 2, voice)
+                    audition = QPushButton('試聴')
+                    audition.clicked.connect(lambda _=False, c=voice: self.audition_voice_id(c.currentText()))
+                    self.speaker_table.setCellWidget(row, 3, audition)
+                    remove = QPushButton('削除')
+                    remove.clicked.connect(lambda _=False, n=name: self.delete_speaker_name(n))
+                    self.speaker_table.setCellWidget(row, 4, remove)
+                self.speaker_table.clearSelection()
+                if selected in names:
+                    self.speaker_table.selectRow(names.index(selected))
+            finally:
+                self.speaker_table.blockSignals(False)
+                self._refreshing_speakers = False
             self.refresh_rule_preview()
-
-        def show_speaker_override(self):
-            row = self.selected_editor_row(self.speaker_table)
-            p = self.current_profile()
-            if row >= 0 and p:
-                name = self.speaker_table.item(row, 0).text()
-                self.speaker_name.setText(name)
-                self.speaker_tts.setChecked(p.speaker_tts.get(name, p.default_tts))
-                self.speaker_voice.setEditText(p.speaker_voices.get(name, ''))
-                self._preview_edit_kind = 'speaker'
-                self.refresh_rule_preview()
-
-        def remove_speaker(self):
-            row = self.selected_editor_row(self.speaker_table)
-            if row < 0:
-                self.note('削除する話者を一覧から選んでください')
-                return
-            name = self.speaker_table.item(row, 0).text()
-            def change(p):
-                p.speaker_tts.pop(name, None)
-                p.speaker_voices.pop(name, None)
-            if self.commit_rule_edit(change, '話者を削除しました'):
-                self.refresh_speaker_choices()
-                self.clear_speaker_editor()
 
         def refresh_rules(self, focus=None, row=-1):
             p = self.current_profile()
@@ -1158,9 +1453,7 @@ def run_gui(session_driver=None) -> int:
                  {'tts': 'TTS', 'asr': 'ASR', 'both': '両方'}[rule.target],
                  '正規表現' if rule.regex else '通常文字列')
                 for rule in p.replacements], row if focus == 'replacement' else -1)
-            words = list(p.name_readings)
-            self.fill_editor_table(self.reading_table, [(word, p.name_readings[word]) for word in words],
-                                   row if focus == 'reading' else -1)
+            self.refresh_reading_table()
             self.refresh_rule_preview()
 
         def show_structure_rule(self):
@@ -1292,61 +1585,80 @@ def run_gui(session_driver=None) -> int:
                 self.refresh_rules()
                 self.clear_replacement_editor()
 
-        def show_reading_rule(self):
-            row = self.selected_editor_row(self.reading_table)
+        def reading_row_item_changed(self, item):
+            if getattr(self, '_refreshing_readings', False):
+                return
+            row = item.row()
+            word_item = self.reading_table.item(row, 0)
+            reading_item = self.reading_table.item(row, 1)
+            if not word_item or not reading_item:
+                return
+            word = word_item.text().strip()
+            reading = reading_item.text().strip()
+            old = word_item.data(Qt.ItemDataRole.UserRole) or word
             p = self.current_profile()
-            if row >= 0 and p:
-                name = self.reading_table.item(row, 0).text()
-                self.reading_word.setText(name)
-                self.reading_value.setText(p.name_readings[name])
-                self._preview_edit_kind = 'reading'
-                self.refresh_rule_preview()
+            if not p or not word or not reading:
+                self.refresh_reading_table(old if p else None)
+                return
+            if word != old and word in p.name_readings:
+                self.note('同じ表記が既にあります')
+                self.refresh_reading_table(old)
+                return
+            def change(profile):
+                if old != word:
+                    profile.name_readings.pop(old, None)
+                profile.name_readings[word] = reading
+            if self.commit_rule_edit(change, '読みを変更しました'):
+                self.refresh_reading_table(word)
+            else:
+                self.refresh_reading_table(old)
 
-        def clear_reading_editor(self):
-            self.reading_table.clearSelection()
-            self.reading_word.clear()
-            self.reading_value.clear()
-            self._preview_edit_kind = 'reading'
-            self.refresh_rule_preview()
-
-        def add_reading(self):
-            word = self.reading_word.text().strip()
-            reading = self.reading_value.text().strip()
+        def add_reading_inline(self):
+            word = self.new_reading_word.text().strip()
+            reading = self.new_reading_value.text().strip()
             if not word or not reading:
                 self.note('表記と読みの両方を入力してください')
                 return
-            row = self.selected_editor_row(self.reading_table)
-            old = self.reading_table.item(row, 0).text() if row >= 0 else None
             p = self.current_profile()
-            if p and word in p.name_readings and old != word:
-                self.note('同じ表記が既にあります。一覧で選択して変更してください')
+            if p and word in p.name_readings:
+                self.note('同じ表記が既にあります。該当行を直接編集してください')
                 return
-            def change(profile):
-                if old and old != word:
-                    profile.name_readings.pop(old, None)
-                profile.name_readings[word] = reading
-            if self.commit_rule_edit(change, '読みを保存しました'):
-                self.refresh_rules('reading', list(self.current_profile().name_readings).index(word))
+            if self.commit_rule_edit(lambda profile: profile.name_readings.__setitem__(word, reading),
+                                     '読みを追加しました'):
+                self.new_reading_word.clear()
+                self.new_reading_value.clear()
+                self.refresh_reading_table(word)
 
-        def remove_reading(self):
-            row = self.selected_editor_row(self.reading_table)
-            if row < 0:
-                self.note('削除する読みを一覧から選んでください')
-                return
-            word = self.reading_table.item(row, 0).text()
-            if self.commit_rule_edit(lambda p: p.name_readings.pop(word), '読みを削除しました'):
-                self.refresh_rules()
-                self.clear_reading_editor()
+        def delete_reading_word(self, word: str):
+            if self.current_profile() and self.commit_rule_edit(
+                    lambda profile: profile.name_readings.pop(word, None), '読みを削除しました'):
+                self.refresh_reading_table()
+
+        def refresh_reading_table(self, selected=None):
+            p = self.current_profile()
+            words = list(p.name_readings) if p else []
+            self._refreshing_readings = True
+            self.reading_table.blockSignals(True)
+            try:
+                self.reading_table.setRowCount(len(words))
+                for row, word in enumerate(words):
+                    word_item = QTableWidgetItem(word)
+                    word_item.setData(Qt.ItemDataRole.UserRole, word)
+                    self.reading_table.setItem(row, 0, word_item)
+                    self.reading_table.setItem(row, 1, QTableWidgetItem(p.name_readings[word]))
+                    remove = QPushButton('削除')
+                    remove.clicked.connect(lambda _=False, w=word: self.delete_reading_word(w))
+                    self.reading_table.setCellWidget(row, 2, remove)
+                self.reading_table.clearSelection()
+                if selected in words:
+                    self.reading_table.selectRow(words.index(selected))
+            finally:
+                self.reading_table.blockSignals(False)
+                self._refreshing_readings = False
+            self.refresh_rule_preview()
 
         def audition_voice(self):
-            voice = self.speaker_voice.currentText().strip() or self.default_voice.currentText().strip()
-            try:
-                if not voice:
-                    raise ValueError('Voice IDを選択してください')
-                self.preview_jobs.start(Token(-1, -1), self.catalog.irodori_url,
-                                        self.audition_text.text(), voice)
-            except Exception as exc:
-                self.note('試聴できません: ' + str(exc))
+            self.audition_voice_id(self.default_voice.currentText())
 
         def on_preview(self, success, reason):
             self.note('試聴が終了しました' if success else '試聴: ' + reason)
@@ -1364,10 +1676,6 @@ def run_gui(session_driver=None) -> int:
             elif control in (self.replace_pattern, self.replace_value, self.replace_target,
                              self.replace_regex, self.replace_enabled):
                 self._preview_edit_kind = 'replacement'
-            elif control in (self.reading_word, self.reading_value):
-                self._preview_edit_kind = 'reading'
-            elif control in (self.speaker_name, self.speaker_voice, self.speaker_tts):
-                self._preview_edit_kind = 'speaker'
             self.refresh_rule_preview()
 
         def refresh_rule_preview(self, *_):
@@ -1376,7 +1684,6 @@ def run_gui(session_driver=None) -> int:
             p = self.current_profile()
             if p is None:
                 self.editor_preview.setPlainText('作品を選択してください。')
-                self.speaker_preview.setPlainText('作品を選択してください。')
                 return
             draft = copy.deepcopy(self.catalog.effective_profile(p))
             draft.default_tts = self.default_tts.isChecked()
@@ -1401,19 +1708,6 @@ def run_gui(session_driver=None) -> int:
                         draft.replacements[row] = rule
                     else:
                         draft.replacements.append(rule)
-                elif kind == 'reading' and self.reading_word.text().strip() and self.reading_value.text().strip():
-                    row = self.selected_editor_row(self.reading_table)
-                    if row >= 0:
-                        draft.name_readings.pop(self.reading_table.item(row, 0).text(), None)
-                    draft.name_readings[self.reading_word.text().strip()] = self.reading_value.text().strip()
-                elif kind == 'speaker' and self.speaker_name.text().strip():
-                    row = self.selected_editor_row(self.speaker_table)
-                    if row >= 0:
-                        old = self.speaker_table.item(row, 0).text()
-                        draft.speaker_tts.pop(old, None)
-                        draft.speaker_voices.pop(old, None)
-                    draft.speaker_tts[self.speaker_name.text().strip()] = self.speaker_tts.isChecked()
-                    draft.speaker_voices[self.speaker_name.text().strip()] = self.speaker_voice.currentText().strip()
                 raw = self.example_raw.toPlainText()
                 trace = []
                 u = interpret(raw, draft, session=0, line=0, source='preview', sequence=0, trace=trace)
@@ -1428,22 +1722,10 @@ def run_gui(session_driver=None) -> int:
                     f'設定: TTS {"使用" if u.use_tts else "不使用"} / Voice {u.voice or "（未指定）"}\n'
                     f'計数: {u.character_count}文字 / 文字待機: {u.text_wait_ms}ms\n'
                     f'適用履歴: {" / ".join(trace)}')
-                editing_name = self.speaker_name.text().strip()
-                editing_line = (
-                    f'編集中の話者「{editing_name}」: '
-                    f'TTS {"使用" if draft.speaker_tts.get(editing_name, draft.default_tts) else "不使用"} / '
-                    f'Voice {draft.speaker_voices.get(editing_name, draft.default_voice) or "（未指定）"}\n'
-                    if editing_name else '編集中の話者: 未選択\n')
-                self.speaker_preview.setPlainText(
-                    editing_line +
-                    f'例文から判別した話者: {u.speaker or "（未判別）"}\n'
-                    f'例文の設定: TTS {"使用" if u.use_tts else "不使用"} / '
-                    f'Voice {u.voice or "（未指定）"}\n'
-                    f'例文に適用した設定: {"話者別" if u.speaker in draft.speaker_tts or u.speaker in draft.speaker_voices else "作品既定"}')
                 self._preview_utterance = u
                 self.btn_edit_detected_speaker.setEnabled(bool(u.speaker))
                 self.preview_state.setText('保存済み設定の結果' if kind is None else
-                    '編集中の入力値を仮適用しています。変更は「追加・変更」から保存してください。')
+                    '編集中の複雑な規則を仮適用しています。保存すると次の台詞から反映します。')
             except (ValueError, re.error, IndexError) as exc:
                 self._preview_utterance = None
                 self.btn_edit_detected_speaker.setEnabled(False)
@@ -1470,25 +1752,27 @@ def run_gui(session_driver=None) -> int:
             if not u or not u.speaker:
                 self.show_task_section('extraction')
                 return
-            self.speaker_table.clearSelection()
+            self.tabs.setCurrentIndex(self.text_tab_index)
+            self.page_scrollers['tune'].ensureWidgetVisible(self.ui_sections['speakers'])
             for row in range(self.speaker_table.rowCount()):
                 if self.speaker_table.item(row, 0).text() == u.speaker:
                     self.speaker_table.selectRow(row)
-                    break
-            else:
-                self.clear_speaker_editor()
-                self.speaker_name.setText(u.speaker)
-            self.tabs.setCurrentIndex(self.text_tab_index)
-            self.page_scrollers['tune'].ensureWidgetVisible(self.ui_sections['speakers'])
-            self.speaker_name.setFocus()
+                    self.speaker_table.scrollToItem(self.speaker_table.item(row, 0))
+                    return
+            self.new_speaker_name.setText(u.speaker)
+            self.new_speaker_name.setFocus()
 
         def edit_preview_reading(self):
             chosen = self.example_raw.textCursor().selectedText().strip()
-            self.clear_reading_editor()
-            if chosen:
-                self.reading_word.setText(chosen)
             self.show_task_section('reading')
-            self.reading_word.setFocus()
+            if chosen:
+                p = self.current_profile()
+                if p and chosen in p.name_readings:
+                    self.refresh_reading_table(chosen)
+                else:
+                    self.new_reading_word.setText(chosen)
+                    self.new_reading_value.setFocus()
+
 
         def edit_current_dialogue(self):
             u = self.controller.utterance
@@ -1641,15 +1925,18 @@ def run_gui(session_driver=None) -> int:
             if isinstance(result, str):
                 self.server_status.setText('Irodori: ' + result)
                 self.overview_voice.setText('音声: 接続失敗')
+                self.refresh_section_summaries()
                 return
             self.server_status.setText(f'Irodori: {result.status} ({result.origin}); {result.message}')
             self.overview_voice.setText('音声: ' + ('接続中' if result.status == 'connected' else result.status))
             if result.status == 'connected':
-                for control in (self.default_voice, self.speaker_voice):
+                for control in (self.default_voice, self.new_speaker_voice):
                     existing = control.currentText()
                     control.clear()
                     control.addItems(list(result.voices))
                     control.setEditText(existing)
+                self.refresh_speaker_choices()
+            self.refresh_section_summaries()
 
         def start_host(self):
             self.stop_session()
@@ -1680,16 +1967,50 @@ def run_gui(session_driver=None) -> int:
         def launch_game(self):
             game = self.catalog.games.get(self.game_id)
             if not game or not game.executable.strip():
-                self.note('Specify the game executable before launching')
+                self.note('ゲーム実行ファイルを登録してください')
                 return
             try:
                 target = Path(game.executable)
                 if not target.is_file():
                     raise FileNotFoundError(target)
-                subprocess.Popen([str(target)], cwd=str(target.parent))
-                self.note('Game launch requested; choose its window after startup')
+                process = subprocess.Popen([str(target)], cwd=str(target.parent))
+                self._launched_game_pid = process.pid
+                self._launch_watch_executable = str(target)
+                self._launch_watch_attempts = 0
+                if getattr(self, '_launch_watch_timer', None) is None:
+                    self._launch_watch_timer = QTimer(self)
+                    self._launch_watch_timer.setInterval(300)
+                    self._launch_watch_timer.timeout.connect(self.poll_launched_game)
+                self._launch_watch_timer.start()
+                self.note('ゲームを起動しました。対象ウィンドウを自動識別して接続します。')
             except Exception as exc:
-                self.note('Game launch failed: ' + str(exc))
+                self.note('ゲームを起動できません: ' + str(exc))
+
+        def poll_launched_game(self):
+            executable = getattr(self, '_launch_watch_executable', '')
+            if not executable:
+                return
+            self._launch_watch_attempts = getattr(self, '_launch_watch_attempts', 0) + 1
+            try:
+                windows = find_game_windows(executable)
+            except Exception as exc:
+                if self._launch_watch_attempts >= 50:
+                    self._launch_watch_timer.stop()
+                    self.note('起動後のウィンドウ識別に失敗しました: ' + str(exc))
+                return
+            direct = [w for w in windows if w.pid == getattr(self, '_launched_game_pid', 0)]
+            chosen = direct[0] if len(direct) == 1 else (windows[0] if len(windows) == 1 else None)
+            if chosen is not None:
+                self._launch_watch_timer.stop()
+                self.use_running_target(chosen)
+                return
+            if self._launch_watch_attempts >= 50:
+                self._launch_watch_timer.stop()
+                if windows:
+                    self.note('起動した作品に複数の候補があります。実行中ゲーム一覧から対象を選択してください。')
+                else:
+                    self.note('起動したゲームのウィンドウを自動識別できませんでした。実行中ゲーム一覧から選択してください。')
+
 
         def pick_running_game(self):
             """A first-use flow independent of saved EXE, PID or known HOOK code."""
@@ -1833,33 +2154,6 @@ def run_gui(session_driver=None) -> int:
                           int(self.hwnd.text().strip(), 0),
                           hook_pid=hook_pid, audio_pid=self.audio_pid.value() or hook_pid)
 
-        def resume_saved_game(self):
-            """Reuse the selected product profile without re-running setup or granting input."""
-            profile = self.current_profile()
-            if profile is None:
-                self.note('プレイする作品を選択してください')
-                return
-            if profile.source == 'hook' and not any(h.role == 'text' for h in profile.hooks):
-                self.tabs.setCurrentIndex(1)
-                self.note('まずゲームから実際の本文を取得し、使用するHOOKを選択してください')
-                return
-            if not self.pid.value() or not self.hwnd.text().strip():
-                self.detect_game()
-            if not self.pid.value() or not self.hwnd.text().strip():
-                self.note('実行中のゲームを選択してください。複数のゲームがある場合はウィンドウを指定します。')
-                return
-            if profile.source == 'ocr':
-                self.begin_monitor(save_draft=False)
-                return
-            if self.attached_pid == self.pid.value() and self.host_generation:
-                self._resume_monitor_requested = True
-                self.start_saved_monitor_when_ready()
-                return
-            self.connect_game()
-            # A failure to launch the Host must never grant auto input.
-            if self.hook_host and self.hook_host.child and self.hook_host.child.poll() is None:
-                self._resume_monitor_requested = True
-                self.note('保存済みHOOKの復元待ちです。接続・取得の状態を表示します。')
 
         def start_saved_monitor_when_ready(self):
             if not self._resume_monitor_requested:
@@ -1882,7 +2176,7 @@ def run_gui(session_driver=None) -> int:
             try:
                 updated = copy.deepcopy(profile)
                 from .model import OCRSettings
-                updated.source = self.source_mode.currentText()
+                updated.source = self.source_mode.currentData()
                 updated.ocr = OCRSettings(self.ocr_exe.text().strip(), self.ocr_lang.text().strip(),
                     tuple(int(x.strip()) for x in self.ocr_region.text().split(',')),
                     stable_samples=self.ocr_stability.value())
@@ -1907,13 +2201,18 @@ def run_gui(session_driver=None) -> int:
             if not profile:
                 self.note('作品を登録してください')
                 return
+            self._resume_monitor_requested = bool(profile.source == 'hook' and any(h.role == 'text' for h in profile.hooks))
             if profile.source == 'ocr':
                 self.host_status.setText('取得方法: OCR（LunaHook接続は不要）')
+                if self.hwnd.text().strip():
+                    QTimer.singleShot(0, lambda: self.begin_monitor(save_draft=False))
                 return
             if (self.hook_host and self.hook_host.child is not None and
                     self.hook_host.child.poll() is None and
                     (self.attached_pid == self.pid.value() and self.host_generation or
                      self._connecting_pid == self.pid.value())):
+                if self.attached_pid == self.pid.value() and self.host_generation:
+                    self.start_saved_monitor_when_ready()
                 return
             # The capture settings alone are saved at connection time. Neither
             # voice nor advancement drafts are committed or auto-authorized.
@@ -1961,19 +2260,19 @@ def run_gui(session_driver=None) -> int:
             self.hook_capture_status.setText('取得: 未接続または本文未受信')
             self.refresh_hook_connection()
 
-        def chosen_source(self):
-            row = self.source_table.currentRow()
-            if row < 0:
+        def source_from_candidate_row(self, row: int):
+            if row < 0 or row >= self.source_table.rowCount():
                 return None
-            item = self.source_table.item(row, 2)
-            if item is None:
-                return None
-            identity = item.data(256)
+            item = self.source_table.item(row, 4)
+            identity = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
             if not isinstance(identity, (tuple, list)) or len(identity) != 2:
                 return None
             key, address = identity
             source = self.sources.get(key)
             return source if source and source.address == address and key not in self.ambiguous_sources else None
+
+        def chosen_source(self):
+            return self.source_from_candidate_row(self.source_table.currentRow())
 
         def remove_candidate_row(self, row: int):
             self.source_table.removeRow(row)
@@ -1981,12 +2280,7 @@ def run_gui(session_driver=None) -> int:
                                 if index != row}
 
         def try_discovered_hook(self, code: str):
-            """Use Luna's discovered code immediately, without another choice UI.
-
-            Search callbacks are not proof of dialogue. Only native output may
-            appear in the candidate list, and only a user-selected trial is
-            persisted for the next game session.
-            """
+            """Trial a discovered Luna code; only real output can become a visible row."""
             if not code or code in self._searched_codes:
                 return
             self._searched_codes.add(code)
@@ -2005,20 +2299,29 @@ def run_gui(session_driver=None) -> int:
             if self.attached_pid and self.host_generation:
                 received = sum(bool(values) for values in self.source_samples.values())
                 self.hook_capture_status.setText(
-                    f'ゲームに接続中: 本文を受信した取得元 {received}件 / 未受信 {len(self.sources) - received}件')
+                    f'接続中: 本文受信済み {received}件 / 未受信 {len(self.sources) - received}件')
+            else:
+                self.hook_capture_status.setText('未接続: プレイ画面で実行中ゲームを選択してください')
             if hasattr(self, 'overview_capture'):
                 self.overview_capture.setText('台詞取得: ' + ('接続中' if self.attached_pid and self.host_generation
                                               else '未接続'))
+            self.refresh_section_summaries()
 
         def refresh_candidate_actions(self, *_):
             source = self.chosen_source()
             history = self.source_samples.get(source.identity, ()) if source else ()
-            self.text_hook.setEnabled(bool(source and history))
-            self.speaker_hook.setEnabled(bool(source and history))
             self.btn_test_hook_text.setEnabled(bool(history))
 
+        @staticmethod
+        def hook_for_source(profile: Profile | None, source: ThreadSource | None):
+            if not profile or not source:
+                return None
+            return next((hook for hook in profile.hooks if hook.matches(source)), None)
+
+        def candidate_row_for_source(self, source: ThreadSource):
+            return self.source_rows.get((source.identity, source.address), -1)
+
         def update_candidate(self, source: ThreadSource, sample: str | None):
-            code = source.hook_code
             key = (source.identity, source.address)
             if sample is not None and sample.strip():
                 history = self.source_samples.setdefault(source.identity, deque(maxlen=4))
@@ -2034,73 +2337,221 @@ def run_gui(session_driver=None) -> int:
                 self.source_rows[key] = row
             else:
                 row = self.source_rows[key]
+
             profile = self.current_profile()
-            role = '未割当'
-            if profile:
-                for i, hook in enumerate(profile.hooks):
-                    if hook.matches(source):
-                        role = f'{hook.role} #{1 + sum(h.role == hook.role for h in profile.hooks[:i])}'
-                        break
-            if source.identity in self.ambiguous_sources:
-                role = '識別衝突（使用不可）'
-            values = (latest[-1], role, source.hook_name or '取得元', '受信中')
-            for col, value in enumerate(values):
-                item = self.source_table.item(row, col)
-                if item is None:
-                    item = QTableWidgetItem()
-                    self.source_table.setItem(row, col, item)
-                item.setText(value)
-                if col == 2:
-                    item.setData(256, key)
+            hook = self.hook_for_source(profile, source)
+            ambiguous = source.identity in self.ambiguous_sources
+            self._refreshing_hook_rows = True
+            self.source_table.blockSignals(True)
+            try:
+                use_item = self.source_table.item(row, 0) or QTableWidgetItem('')
+                flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable
+                if not ambiguous:
+                    flags |= Qt.ItemFlag.ItemIsEnabled
+                use_item.setFlags(flags)
+                use_item.setCheckState(Qt.CheckState.Checked if hook and not ambiguous else Qt.CheckState.Unchecked)
+                use_item.setToolTip('この取得元を作品設定で使用する')
+                self.source_table.setItem(row, 0, use_item)
+
+                role = QComboBox()
+                role.addItem('本文', 'text')
+                role.addItem('話者', 'speaker')
+                role.setCurrentIndex(max(0, role.findData(hook.role if hook else 'text')))
+                role.setEnabled(not ambiguous)
+                role.currentIndexChanged.connect(
+                    lambda _=0, identity=source.identity, address=source.address, control=role:
+                    self.hook_role_changed(identity, address, control.currentData()))
+                self.source_table.setCellWidget(row, 1, role)
+
+                priority = QSpinBox()
+                priority.setRange(1, max(1, len(profile.hooks) if profile else 1))
+                hook_index = profile.hooks.index(hook) if profile and hook in profile.hooks else 0
+                priority.setValue(hook_index + 1)
+                priority.setEnabled(bool(hook) and not ambiguous)
+                priority.setToolTip('小さい番号ほど優先。変更すると保存順序を直接入れ替えます。')
+                priority.valueChanged.connect(
+                    lambda value, identity=source.identity, address=source.address:
+                    self.hook_priority_changed(identity, address, value))
+                self.source_table.setCellWidget(row, 2, priority)
+
+                pair = QComboBox()
+                pair.addItem('対応なし', '')
+                if profile:
+                    for speaker_hook in profile.hooks:
+                        if speaker_hook.role == 'speaker':
+                            pair.addItem(speaker_hook.code, speaker_hook.identity)
+                if hook and hook.role == 'text':
+                    pair.setCurrentIndex(max(0, pair.findData(profile.speaker_links.get(hook.identity, ''))))
+                pair.setEnabled(bool(hook and hook.role == 'text') and not ambiguous)
+                pair.currentIndexChanged.connect(
+                    lambda _=0, identity=source.identity, address=source.address, control=pair:
+                    self.hook_pair_changed(identity, address, control.currentData() or ''))
+                self.source_table.setCellWidget(row, 3, pair)
+
+                sample_item = self.source_table.item(row, 4) or QTableWidgetItem()
+                sample_item.setText(latest[-1])
+                sample_item.setData(Qt.ItemDataRole.UserRole, key)
+                self.source_table.setItem(row, 4, sample_item)
+                source_item = self.source_table.item(row, 5) or QTableWidgetItem()
+                source_item.setText(source.hook_name or source.hook_code or '取得元')
+                self.source_table.setItem(row, 5, source_item)
+                status_item = self.source_table.item(row, 6) or QTableWidgetItem()
+                status_item.setText('識別衝突' if ambiguous else '受信中')
+                self.source_table.setItem(row, 6, status_item)
+            finally:
+                self.source_table.blockSignals(False)
+                self._refreshing_hook_rows = False
             if self.source_table.currentRow() == row:
                 self.show_hook_preview()
             self.refresh_candidate_actions()
             self.refresh_capture_status()
 
+        def hook_use_changed(self, item):
+            if getattr(self, '_refreshing_hook_rows', False) or item.column() != 0:
+                return
+            source = self.source_from_candidate_row(item.row())
+            if not source:
+                return
+            checked = item.checkState() == Qt.CheckState.Checked
+            role_control = self.source_table.cellWidget(item.row(), 1)
+            role = role_control.currentData() if role_control else 'text'
+            self.set_source_hook_assignment(source, role if checked else None)
+
+        def source_by_identity_address(self, identity: str, address: int):
+            source = self.sources.get(identity)
+            return source if source and source.address == address and identity not in self.ambiguous_sources else None
+
+        def hook_role_changed(self, identity: str, address: int, role: str):
+            if getattr(self, '_refreshing_hook_rows', False):
+                return
+            source = self.source_by_identity_address(identity, address)
+            hook = self.hook_for_source(self.current_profile(), source)
+            if source and hook and hook.role != role:
+                self.set_source_hook_assignment(source, role)
+
+        def set_source_hook_assignment(self, source: ThreadSource, role: str | None):
+            original = self.current_profile()
+            if original is None:
+                return
+            try:
+                updated = copy.deepcopy(original)
+                existing = next((h for h in updated.hooks if h.matches(source)), None)
+                insertion_index = updated.hooks.index(existing) if existing else len(updated.hooks)
+                if existing:
+                    updated.hooks.remove(existing)
+                    updated.speaker_links = {t: v for t, v in updated.speaker_links.items()
+                                             if t != existing.identity and v != existing.identity}
+                if role is not None:
+                    selection = HookSelection(source.hook_code, source.context, source.context2, role)
+                    updated.hooks.insert(insertion_index, selection)
+                    if source.hook_code in self._trial_hook_codes and source.hook_code not in updated.inserted_hooks:
+                        updated.inserted_hooks.append(source.hook_code)
+                updated.validate()
+                self.stop_session()
+                self.catalog.games[self.game_id].profiles[updated.id] = updated
+                try:
+                    self.persist()
+                except Exception:
+                    self.catalog.games[self.game_id].profiles[original.id] = original
+                    raise
+                self.refresh_selected_hooks()
+                if any(h.role == 'text' for h in updated.hooks) and self.attached_pid and self.host_generation:
+                    self._resume_monitor_requested = True
+                    self.start_saved_monitor_when_ready()
+                self.note('HOOK割当を保存しました。自動送り権限は停止したまま監視設定を更新します。')
+            except Exception as exc:
+                self.catalog.games[self.game_id].profiles[original.id] = original
+                self.note('HOOK割当を保存できません: ' + str(exc))
+                self.refresh_selected_hooks()
+
+        def hook_priority_changed(self, identity: str, address: int, value: int):
+            if getattr(self, '_refreshing_hook_rows', False):
+                return
+            source = self.source_by_identity_address(identity, address)
+            original = self.current_profile()
+            hook = self.hook_for_source(original, source)
+            if not original or not hook:
+                return
+            old_index = original.hooks.index(hook)
+            new_index = max(0, min(len(original.hooks) - 1, value - 1))
+            if old_index == new_index:
+                return
+            updated = copy.deepcopy(original)
+            moved = updated.hooks.pop(old_index)
+            updated.hooks.insert(new_index, moved)
+            try:
+                updated.validate()
+                self.stop_session()
+                self.catalog.games[self.game_id].profiles[updated.id] = updated
+                self.persist()
+                self.refresh_selected_hooks()
+                if any(h.role == 'text' for h in updated.hooks) and self.attached_pid and self.host_generation:
+                    self._resume_monitor_requested = True
+                    self.start_saved_monitor_when_ready()
+            except Exception as exc:
+                self.catalog.games[self.game_id].profiles[original.id] = original
+                self.note('HOOK優先順位を保存できません: ' + str(exc))
+                self.refresh_selected_hooks()
+
+        def hook_pair_changed(self, identity: str, address: int, speaker_identity: str):
+            if getattr(self, '_refreshing_hook_rows', False):
+                return
+            source = self.source_by_identity_address(identity, address)
+            original = self.current_profile()
+            hook = self.hook_for_source(original, source)
+            if not original or not hook or hook.role != 'text':
+                return
+            current = original.speaker_links.get(hook.identity, '')
+            if current == speaker_identity:
+                return
+            updated = copy.deepcopy(original)
+            if speaker_identity:
+                updated.speaker_links[hook.identity] = speaker_identity
+            else:
+                updated.speaker_links.pop(hook.identity, None)
+            try:
+                updated.validate()
+                self.stop_session()
+                self.catalog.games[self.game_id].profiles[updated.id] = updated
+                self.persist()
+                self.refresh_selected_hooks()
+                if self.attached_pid and self.host_generation:
+                    self._resume_monitor_requested = True
+                    self.start_saved_monitor_when_ready()
+            except Exception as exc:
+                self.catalog.games[self.game_id].profiles[original.id] = original
+                self.note('HOOK対応関係を保存できません: ' + str(exc))
+                self.refresh_selected_hooks()
+
         def refresh_selected_hooks(self):
             profile = self.current_profile()
             hooks = profile.hooks if profile else []
-            selected = self.saved_hook_choice.currentData()
-            self.saved_hook_choice.blockSignals(True)
-            self.saved_hook_choice.clear()
-            for index, hook in enumerate(hooks):
-                self.saved_hook_choice.addItem(f'{index + 1}. {hook.role}: {hook.identity}', hook.identity)
-            chosen = self.saved_hook_choice.findData(selected)
-            self.saved_hook_choice.setCurrentIndex(chosen if chosen >= 0 else (0 if hooks else -1))
-            self.saved_hook_choice.blockSignals(False)
-            self.selected_hooks.setText('選択中の取得元: ' + ', '.join(f'{"本文" if h.role == "text" else "話者"}: {h.code}' for h in hooks) if hooks else '使用するHOOKが未選択です')
-            self.refresh_hook_pairs()
-            for source in self.sources.values():
+            if hooks:
+                parts = []
+                for index, hook in enumerate(hooks):
+                    label = '本文' if hook.role == 'text' else '話者'
+                    link = profile.speaker_links.get(hook.identity, '') if hook.role == 'text' else ''
+                    suffix = f' → 話者 {next((h.code for h in hooks if h.identity == link), link)}' if link else ''
+                    parts.append(f'{index + 1}. {label} {hook.code}{suffix}')
+                self.selected_hooks.setText(' / '.join(parts))
+            else:
+                self.selected_hooks.setText('使用するHOOKが未選択です')
+            for source in tuple(self.sources.values()):
                 self.update_candidate(source, None)
             self.refresh_hook_connection()
-
-        def move_saved_hook(self, movement):
-            profile = self.current_profile()
-            if not profile:
-                return
-            index = self.saved_hook_choice.currentIndex()
-            target = index + movement
-            if index < 0 or target < 0 or target >= len(profile.hooks):
-                return
-            self.stop_session()
-            profile.hooks[index], profile.hooks[target] = profile.hooks[target], profile.hooks[index]
-            self.persist()
-            self.refresh_selected_hooks()
-            self.saved_hook_choice.setCurrentIndex(target)
-            self.note('HOOK priority saved; restart monitoring to apply')
 
         def refresh_hook_connection(self):
             if not hasattr(self, 'hook_reconnect'):
                 return
             profile = self.current_profile()
             if not profile or not profile.hooks:
-                self.hook_reconnect.setText('Saved HOOKs: none selected')
+                self.hook_reconnect.setText('保存済みHOOK: 未選択')
                 return
             ready = [h for h in profile.hooks if h.identity in self.sources and h.identity not in self.ambiguous_sources]
             absent = [h for h in profile.hooks if h.identity not in self.sources]
             ambiguous = [h for h in profile.hooks if h.identity in self.ambiguous_sources]
-            self.hook_reconnect.setText(f'Saved HOOKs: {len(ready)}/{len(profile.hooks)} observed; '
-                f'{len(absent)} waiting; {len(ambiguous)} ambiguous. Missing selections require user review.')
+            self.hook_reconnect.setText(
+                f'保存済みHOOK: {len(ready)}/{len(profile.hooks)}件を確認 / 待機 {len(absent)} / 識別衝突 {len(ambiguous)}')
 
         def on_host_hook(self, epoch: int, event: HookEvent):
             if epoch == self._host_epoch:
@@ -2174,8 +2625,8 @@ def run_gui(session_driver=None) -> int:
                     self.update_candidate(source, event.text if event.kind == 'output' else None)
                 self.refresh_hook_connection()
                 self.refresh_capture_status()
+                self.start_saved_monitor_when_ready()
                 if event.kind == 'created':
-                    self.start_saved_monitor_when_ready()
                     self.validation_trace.emit('hook_candidate_created', pid=event.process_id,
                         generation=event.host_generation, connection=event.connection_generation,
                         source=source.identity, hook_sequence=event.sequence)
@@ -2187,6 +2638,11 @@ def run_gui(session_driver=None) -> int:
             if event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value():
                 self.sync_hook_threads()
             if event.kind == 'output' and event.source:
+                pending_profile = self.current_profile()
+                if (self._pending_monitor_apply and pending_profile and
+                        any(h.matches(event.source) for h in pending_profile.hooks)):
+                    self._pending_monitor_apply = False
+                    self.begin_monitor(save_draft=False)
                 if (self.controller.profile and self.controller.profile.source == 'hook'
                         and event.process_id == (self.controller.target.hook_pid or self.controller.target.pid)
                         and event.host_generation == self.controller.source_generation
@@ -2239,56 +2695,6 @@ def run_gui(session_driver=None) -> int:
                     self.host_status.setText('LunaHost自身には接続できません。ゲームを選択してください。')
                 self.note('LunaHost: ' + event.detail)
 
-        def select_hook(self, role: str):
-            p = self.current_profile()
-            source = self.chosen_source()
-            if not p or not source:
-                self.note('本文の出力を確認できたHOOK候補を選択してください')
-                return
-            self.stop_session()
-            selection = HookSelection(source.hook_code, source.context, source.context2, role)
-            if selection not in p.hooks:
-                if any(h.code == selection.code and h.context == selection.context and
-                       h.context2 == selection.context2 for h in p.hooks):
-                    self.note('This HOOK already has another role; remove it before reassigning')
-                    return
-                p.hooks.append(selection)
-            # Trial inserts from a search are session-only until the player has
-            # actually seen and selected their real native dialogue output.
-            if source.hook_code in self._trial_hook_codes and source.hook_code not in p.inserted_hooks:
-                p.inserted_hooks.append(source.hook_code)
-            self.persist()
-            self.refresh_selected_hooks()
-
-        def refresh_hook_pairs(self):
-            self.paired_text_hook.clear()
-            self.paired_speaker_hook.clear()
-            p = self.current_profile()
-            if p:
-                for hook in p.hooks:
-                    control = self.paired_text_hook if hook.role == 'text' else self.paired_speaker_hook
-                    control.addItem(hook.identity, hook.identity)
-
-        def pair_hooks(self):
-            p = self.current_profile()
-            text_source = self.paired_text_hook.currentData()
-            speaker_source = self.paired_speaker_hook.currentData()
-            if p and text_source and speaker_source:
-                p.speaker_links[text_source] = speaker_source
-                p.validate()
-                self.persist()
-                self.note(f'Speaker HOOK {speaker_source} paired to {text_source}')
-
-        def unselect_hook(self):
-            p = self.current_profile()
-            identity = self.saved_hook_choice.currentData()
-            if p and identity:
-                self.stop_session()
-                p.hooks = [h for h in p.hooks if h.identity != identity]
-                p.speaker_links = {t: v for t, v in p.speaker_links.items()
-                                   if t != identity and v != identity}
-                self.persist()
-                self.refresh_selected_hooks()
 
         def show_hook_preview(self, *_):
             source = self.chosen_source()
@@ -2638,12 +3044,22 @@ def run_gui(session_driver=None) -> int:
                             audio_pid=self.native_audio.pid,
                             **self.native_audio.capture_status())
                     self._last_validation_handoff = marker
-            targets = (f'HOOK {c.target.hook_pid or c.target.pid}; audio {c.target.audio_pid or c.target.pid}; '
-                       f'input {c.target.pid}/{hex(c.target.hwnd)}') if c.target else 'no target'
-            self.status.setText(f'Status: {c.reason} | permission={c.authorized} | '
-                                f'line={c.line_no} | sent={c.sent} | completion={c.presentation_reason or "pending"} | {targets}')
+            targets = (f'HOOK {c.target.hook_pid or c.target.pid} / 音声 {c.target.audio_pid or c.target.pid} / '
+                       f'入力 {c.target.pid}:{hex(c.target.hwnd)}') if c.target else '対象未設定'
+            monitoring = '監視中' if c.profile else '停止'
+            completion = c.presentation_reason or '判定待ち'
+            pause_reason = f' / 停止理由: {c.pause_reason}' if c.pause_reason else ''
+            self.status.setText(
+                f'監視: {monitoring} / 自動送り: {"許可" if c.authorized else "停止"} / '
+                f'台詞: {c.line_no} / 入力: {"送信済み" if c.sent else "未送信"} / '
+                f'提示完了: {completion}{pause_reason}\n{targets}')
+            if hasattr(self, 'advance_authorization'):
+                previous = self.advance_authorization.blockSignals(True)
+                self.advance_authorization.setChecked(bool(c.authorized))
+                self.advance_authorization.setText('自動送り: 許可中' if c.authorized else '自動送り: 停止')
+                self.advance_authorization.blockSignals(previous)
             self.overview_advance.setText('自動送り: ' +
-                ('許可中' if c.authorized else '停止 / 要確認') +
+                ('許可中' if c.authorized else '停止') +
                 (' ― ' + c.pause_reason if c.pause_reason else ''))
             if c.profile and c.utterance:
                 self.overview_capture.setText('台詞: ' +
@@ -2651,10 +3067,10 @@ def run_gui(session_driver=None) -> int:
             elif not self.attached_pid:
                 self.overview_capture.setText('台詞取得: 未接続')
             if c.profile and c.profile.source == 'hook':
-                self.active_hook_status.setText('Active dialogue HOOK: ' +
-                    (c.active_text_source or 'waiting for selected source output'))
+                self.active_hook_status.setText('監視中の本文HOOK: ' +
+                    (c.active_text_source or '選択HOOKの出力待ち'))
             else:
-                self.active_hook_status.setText('Active dialogue HOOK: not monitoring')
+                self.active_hook_status.setText('監視中の本文HOOK: なし')
 
         def stop_session(self):
             self.validation_trace.emit('monitor_ended', session=self.controller.session)

@@ -59,12 +59,13 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.example_raw.setPlainText('大和「おはよう」')
                 self.assertIn('話者: 大和', window.editor_preview.toPlainText())
                 self.assertIn('Voice v2', window.editor_preview.toPlainText())
-                window.speaker_table.selectRow(1)
-                window.speaker_name.setText('大和')
-                window.speaker_voice.setEditText('v3')
-                self.assertIn('Voice v3', window.editor_preview.toPlainText())
-                window.assign_speaker()
+                row = next(i for i in range(window.speaker_table.rowCount())
+                           if window.speaker_table.item(i, 0).text() == '大和')
+                voice = window.speaker_table.cellWidget(row, 2)
+                voice.setEditText('v3')
                 self.assertEqual(window.current_profile().speaker_voices['大和'], 'v3')
+                self.assertIn('Voice v3', window.editor_preview.toPlainText())
+                self.assertFalse(hasattr(window, 'assign_speaker'))
                 window.clear_structure_editor()
                 window.structure_pattern.setText(r'^(?P<speaker>[^「」]+)「(?P<body>.+)」$')
                 self.assertIn('優先順位 1', window.editor_preview.toPlainText())
@@ -168,14 +169,20 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 for section in ('game_details', 'target_details', 'advance_details', 'audio_details',
                                 'hook_details', 'ocr_details', 'irodori', 'extraction', 'replacement'):
                     self.assertIn(section, window.section_toggles)
+                    self.assertIn(section, window.section_summaries)
                     self.assertFalse(window.section_toggles[section].isChecked())
+                    self.assertTrue(window.section_summaries[section].text())
                 self.assertTrue(window.inherit_controls['reading_ms'].isChecked())
                 self.assertEqual(window.reading_ms.value(), 900)
+                self.assertIn('共通: 900', window.inherit_source_labels['reading_ms'].text())
                 self.assertFalse(window.reading_ms.isEnabled())
                 window.inherit_controls['reading_ms'].setChecked(False)
                 self.assertTrue(window.reading_ms.isEnabled())
+                self.assertEqual(window.reading_ms.value(), 1750)
                 window.reading_ms.setValue(1200)
+                self.assertEqual(window.profile_save_state.text(), '未保存の変更あり')
                 self.assertTrue(window.save_profile())
+                self.assertEqual(window.profile_save_state.text(), '保存済み')
                 self.assertEqual(profile.reading_ms, 1750)  # old instance not overwritten
                 self.assertEqual(window.current_profile().reading_ms, 1200)
                 window.inherit_controls['reading_ms'].setChecked(True)
@@ -185,7 +192,7 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 window.btn_recovery.click()
                 self.assertTrue(window.section_toggles['hook_details'].isChecked())
                 self.assertEqual(window.tabs.currentIndex(), 1)
-                window.source_mode.setCurrentText('ocr')
+                window.source_mode.setCurrentIndex(window.source_mode.findData('ocr'))
                 self.assertTrue(window.section_toggles['ocr_details'].isChecked())
             finally:
                 window.close()
@@ -211,16 +218,28 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 # An ordinary user can find the related editor directly from a sample.
                 window.example_raw.setPlainText('京「おはよう」')
                 window.btn_edit_detected_speaker.click()
-                self.assertEqual(window.speaker_name.text(), '京')
+                self.assertEqual(window.new_speaker_name.text(), '京')
                 self.assertEqual(window.tabs.currentIndex(), 2)
                 window.btn_fix_extraction.click()
                 self.assertTrue(window.section_toggles['extraction'].isChecked())
-                window.btn_resume.click()
-                self.assertEqual(window.tabs.currentIndex(), 2)  # No PID/window: no connect
+                self.assertFalse(hasattr(window, 'btn_resume'))
+                self.assertFalse(hasattr(window, 'btn_monitor'))
+                window.pid.setValue(101)
+                window.hwnd.setText('0x1234')
+                commands = Mock()
+                window.hook_host = SimpleNamespace(command=commands,
+                    child=SimpleNamespace(poll=lambda: None))
+                window.connect_game()
                 self.assertFalse(window.controller.authorized)
-                self.assertIsNone(window.controller.profile)
-                self.assertFalse(window._resume_monitor_requested)
+                window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=101))
+                src = ThreadSource(101, 0x500, 1, 2, 'HOOK-1', 'HOOK-1')
+                window.on_hook(HookEvent('output', 'host', 1, 2, 200,
+                                         process_id=101, source=src, text='京「おはよう」'))
+                QApplication.processEvents()
+                self.assertIsNotNone(window.controller.profile)
+                self.assertFalse(window.controller.authorized)
             finally:
+                window.hook_host = None
                 window.close()
             return 0
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
