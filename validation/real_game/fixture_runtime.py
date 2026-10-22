@@ -21,13 +21,20 @@ _NORMALIZED_TEXT_SUFFIXES = {'.rpy', '.txt'}
 
 
 def _iter_source_files(root: Path):
-    for path in sorted(p for p in root.rglob('*') if p.is_file()):
+    files = []
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
         relative = path.relative_to(root)
         if any(part in _IGNORED_SOURCE_PARTS for part in relative.parts):
             continue
         if path.suffix.lower() in _IGNORED_SOURCE_SUFFIXES:
             continue
-        yield relative, path
+        files.append((relative, path))
+    # pathlib ordering follows the host path flavour: Windows compares paths
+    # case-insensitively while POSIX does not. Fixture identity must not depend
+    # on the machine calculating it, so order by one canonical POSIX spelling.
+    yield from sorted(files, key=lambda item: item[0].as_posix())
 
 
 def _digest_bytes(path: Path) -> bytes:
