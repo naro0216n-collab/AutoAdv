@@ -65,7 +65,6 @@ class SessionDriver:
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.done_idle = None
-        self.focus_deadline = None
         self.audio_deadline = None
 
     def _capture_observations(self):
@@ -193,21 +192,6 @@ class SessionDriver:
             raise RuntimeError('monitor could not start from the committed capture recipe')
         return True
 
-    def _focus_game(self):
-        import ctypes
-        hwnd = self.product.runtime_target_state().hwnd
-        if not hwnd:
-            raise RuntimeError('validation game window is unavailable for input')
-        ctypes.windll.user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
-        self.focus_deadline = self.clock() + 3.0
-
-    def _game_is_focused(self):
-        import ctypes
-        hwnd = self.product.runtime_target_state().hwnd
-        user32 = ctypes.windll.user32
-        user32.GetForegroundWindow.restype = ctypes.c_void_p
-        return bool(hwnd and user32.GetForegroundWindow() == hwnd)
-
     def tick(self):
         if self.clock() > self.deadline:
             self.fail('finite live-run timeout; no manual game input substituted')
@@ -239,14 +223,8 @@ class SessionDriver:
                     self.w.permit()
                     if not self.product.runtime_state().authorized:
                         raise RuntimeError('AutoAdv not authorized to send')
-                self._focus_game()
-                self.state = 'await_focus'
-            elif self.state == 'await_focus':
-                if self._game_is_focused():
-                    self._release('.monitoring')
-                    self.state = 'running'
-                elif self.clock() >= self.focus_deadline:
-                    raise RuntimeError('Windows runner cannot focus the game for product SendInput')
+                self._release('.monitoring')
+                self.state = 'running'
             elif self.state == 'running':
                 runtime = self.product.runtime_state()
                 if runtime.token is not None and runtime.pause_reason:

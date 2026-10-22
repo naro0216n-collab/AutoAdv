@@ -62,7 +62,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
 
 class RealGameVerifierContract(unittest.TestCase):
     def test_hook_phase_accepts_real_source_provenance_without_auto_input(self):
-        # Hook acquisition by itself needs neither ASR, Irodori nor SendInput.
+        # Hook acquisition by itself needs neither ASR, Irodori nor advance input.
         records = contract_records(0, 2, advance=False)
         self.assertTrue(validate(records, phase='hook')['ok'])
 
@@ -167,7 +167,7 @@ class RealGameVerifierContract(unittest.TestCase):
         result = validate(records, phase='reading')
         self.assertTrue(result['ok'], result['errors'])
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
-        # One successful SendInput without a subsequent dialogue is not E2E success.
+        # One successful advance input without a subsequent dialogue is not E2E success.
         truncated = records[:-4]
         observation = validate(truncated, phase='reading')
         self.assertTrue(observation['collection_valid'], observation['errors'])
@@ -300,7 +300,7 @@ class RealGameVerifierContract(unittest.TestCase):
                  for r in records]
         self.assertFalse(validate(wrong, phase='reading')['ok'])
 
-        # The game may react between key-down and SendInput's return.
+        # The game may react before the targeted key-up is posted.
         attempt = first_send
         positive = [dict(r, received_ns=attempt + 1)
                     if r['event'] == 'hook_output' and r['hook_sequence'] == 2 else r

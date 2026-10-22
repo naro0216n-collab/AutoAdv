@@ -68,8 +68,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             ('field', ('speaker', None)),
         ])
 
-    def test_focus_activation_uses_gui_authorization_action_and_application_state(self):
-        clock = [0.0]
+    def test_activation_authorizes_without_stealing_game_focus(self):
         runtime = SimpleNamespace(authorized=False)
         product = SimpleNamespace(runtime_state=lambda: runtime)
         actions = []
@@ -79,17 +78,9 @@ class LiveGuiSessionContract(unittest.TestCase):
         window = SimpleNamespace(application=product, permit=permit)
         driver = SessionDriver(window, SimpleNamespace(),
                                {'timeout_seconds': 30, 'phase': 'native'},
-                               clock=lambda: clock[0])
+                               clock=lambda: 0.0)
         driver.state = 'activate'
-        driver._focus_game = lambda: setattr(driver, 'focus_deadline', clock[0] + 3)
-        driver._game_is_focused = lambda: clock[0] >= 0.3
         driver._release = actions.append
-        driver.tick()
-        self.assertEqual(driver.state, 'await_focus')
-        clock[0] = 0.15
-        driver.tick()
-        self.assertEqual(driver.state, 'await_focus')
-        clock[0] = 0.3
         driver.tick()
         self.assertEqual(driver.state, 'running')
         self.assertEqual(actions, ['permit', '.monitoring'])

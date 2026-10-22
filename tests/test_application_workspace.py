@@ -15,7 +15,7 @@ def app_with_game():
     calls = []
     app = AutoAdvApplication(
         catalog, lambda: calls.append('save'),
-        input_send=lambda *_: None, preflight=lambda *_: True)
+        input_send=lambda *_: None, target_ready=lambda *_: True)
     app.select_profile(game.id, game.default_profile)
     return app, calls
 
@@ -811,7 +811,7 @@ def test_catalog_crud_rolls_back_when_persistence_fails():
     original_default = game.default_profile
     app = AutoAdvApplication(
         catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
-        input_send=lambda *_: None, preflight=lambda *_: True)
+        input_send=lambda *_: None, target_ready=lambda *_: True)
     app.select_profile(game.id, second.id)
     original_profiles = set(game.profiles)
     import pytest
@@ -831,7 +831,7 @@ def test_capture_commit_failure_keeps_the_workspace_draft_intact():
     game = catalog.create_game('Game')
     app = AutoAdvApplication(
         catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
-        input_send=lambda *_: None, preflight=lambda *_: True)
+        input_send=lambda *_: None, target_ready=lambda *_: True)
     app.select_profile(game.id, game.default_profile)
     candidate = source('RECOVERY', 7)
     app.observe_capture(candidate, 'きぬ「本文」', sequence=1)
@@ -853,7 +853,7 @@ def test_import_catalog_rolls_back_application_source_when_persistence_fails():
     game = catalog.create_game('Game')
     app = AutoAdvApplication(
         catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
-        input_send=lambda *_: None, preflight=lambda *_: True)
+        input_send=lambda *_: None, target_ready=lambda *_: True)
     app.select_profile(game.id, game.default_profile)
     replacement = Catalog()
     replacement.create_game('Imported')
@@ -927,7 +927,7 @@ def test_application_owns_text_presentation_deadline_and_next_line_timeout():
     app = AutoAdvApplication(
         catalog, lambda: None,
         input_send=lambda target, key: sent.append((target.pid, key)),
-        preflight=lambda _target: True)
+        target_ready=lambda _target: True)
     profile = app.select_profile(game.id, game.default_profile)
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]

@@ -28,9 +28,9 @@ class Token:
 class Controller:
     """Callbacks from devices never send input; only try_advance may do that."""
     def __init__(self, input_send: Callable[[Target, int], None],
-                 preflight: Callable[[Target], bool]):
+                 target_ready: Callable[[Target], bool]):
         self.input_send = input_send
-        self.preflight = preflight
+        self.target_ready = target_ready
         self.session = 0
         self.target: Target | None = None
         self.profile: Profile | None = None
@@ -413,8 +413,8 @@ class Controller:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent
                 and self.pause_reason is None):
             return False
-        if not self.preflight(self.target):
-            self.pause('target_not_foreground')
+        if not self.target_ready(self.target):
+            self.pause('target_unavailable')
             return False
         # Reserve the line before external I/O. An exception never causes an unsafe retry.
         self.sent = True

@@ -535,7 +535,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
                             on_voice_end=lambda t, m: end_observations.append((t, m)))
         try:
             audio.history.start(11)
-            audio.boundary()  # prior SendInput, long before Luna's flush
+            audio.boundary()  # prior advance input, long before Luna's flush
             for when in (1100, 1300, 1500):
                 packet = PCMChunk(when, bytes(960 * 8), 48000, 2, 4)
                 audio.history.push(packet, target_pid=11)

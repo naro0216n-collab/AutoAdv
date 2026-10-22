@@ -1,6 +1,6 @@
 """Real recorded Japanese audio through AutoAdv's native activity path.
 
-This does NOT certify live LunaHook, Windows Process Loopback, GUI or SendInput.
+This does NOT certify live LunaHook, Windows Process Loopback, GUI or targeted input.
 No game build or launch is performed. The independent live suite handles those
 AutoAdv responsibilities when an already running game is available.
 """

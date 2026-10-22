@@ -15,9 +15,9 @@ def profile():
 class DialogueContractTests(unittest.TestCase):
     def setUp(self):
         self.sent = []
-        self.foreground = True
+        self.target_ready = True
         self.controller = Controller(lambda t, k: self.sent.append((t, k)),
-                                     lambda t: self.foreground)
+                                     lambda t: self.target_ready)
         self.controller.begin(profile(), Target(101, 202), 'host-a', 1)
 
     def output(self, text, seq, *, source=SOURCE, gen='host-a', pid=101, conn=1):
@@ -111,13 +111,13 @@ class DialogueContractTests(unittest.TestCase):
         self.assertTrue(self.controller.authorized)
         self.assertFalse(self.controller.try_advance())
 
-    def test_foreground_check_and_failure_do_not_retry(self):
+    def test_target_readiness_hold_can_resume_without_rewriting_auto_mode(self):
         self.controller.permit(True)
         token = self.output('台詞', 1)
         self.controller.presentation_event(token, 'text_elapsed')
-        self.foreground = False
+        self.target_ready = False
         self.assertFalse(self.controller.try_advance())
-        self.foreground = True
+        self.target_ready = True
         self.controller.permit(True)
         self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 1)

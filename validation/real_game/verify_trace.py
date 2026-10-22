@@ -167,10 +167,10 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                                             if actual_input is not None else None),
                   'outcome': 'unadvanced'}
         if actual_input is not None and (dismissal is None or dismissal['at_ns'] < actual_input):
-            diagnostics.append(f'confirmed SendInput not followed by observed game dialogue dismissal: {key}')
+            diagnostics.append(f'confirmed advance input not followed by observed game dialogue dismissal: {key}')
         if attempt is not None and key not in sent:
-            diagnostics.append(f'input attempt has no confirmed SendInput: {key}')
-        # The product's SendInput and following LunaHook already verify the
+            diagnostics.append(f'input attempt has no confirmed advance input: {key}')
+        # The product's targeted input and following LunaHook already verify the
         # advance. Game dismissal and the fixture's chosen sound-file name are
         # not AutoAdv acceptance criteria. Retain playback state solely to
         # compare a native-voice advance with independently observed voice end.
@@ -438,13 +438,13 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             authorized.discard(session)
         elif event == 'advance_attempt':
             if key in attempts:
-                errors.append(f'duplicate SendInput attempt: {key}')
+                errors.append(f'duplicate advance input attempt: {key}')
             attempts[key] = at
         elif event == 'advance_input':
             if key not in attempts or attempts[key] > at:
-                errors.append(f'SendInput lacks a preceding real attempt: {key}')
+                errors.append(f'advance input lacks a preceding real attempt: {key}')
             if key in sent:
-                errors.append(f'double SendInput for one line: {key}')
+                errors.append(f'double advance input for one line: {key}')
             sent[key] = at
             if key not in utterances:
                 errors.append(f'input without observed utterance: {key}')
@@ -464,11 +464,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     if completion_reason != expected_reason:
                         errors.append(f'text-mode completion contract not observed: {key}')
                     if uses_tts and key not in tts:
-                        errors.append(f'TTS SendInput before actual playback completion: {key}')
+                        errors.append(f'TTS advance input before actual playback completion: {key}')
                     wait = u.get('text_wait_ms')
                     if (type(wait) is not int or wait <= 0 or not completed or
                             completed['at_ns'] - timestamps[key] < wait * 1_000_000):
-                        errors.append(f'text SendInput before computed reading time: {key}')
+                        errors.append(f'text advance input before computed reading time: {key}')
                 elif uses_tts:
                     if key not in tts or completion_reason != 'tts':
                         errors.append(f'audio-judgment TTS requires playback drain: {key}')
@@ -532,7 +532,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                        next_u.get('hook_sequence'), next_u.get('raw_hash'))
         if (subsequent[0] != key[0] or timestamps[subsequent] <= sent[key]
                 or source_outputs.get(next_origin, 0) <= attempts.get(key, sent[key])):
-            errors.append(f'next HOOK utterance not after SendInput in same session: {key}')
+            errors.append(f'next HOOK utterance not after advance input in same session: {key}')
         else:
             links.add(key)
     # These are measurements of the product path, not fixture-authored
@@ -546,7 +546,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if offset:
             previous = utterance_order[offset - 1]
             if previous not in sent and phase != 'hook':
-                diagnostics.append(f'dialogue observed without preceding AutoAdv SendInput: {previous}')
+                diagnostics.append(f'dialogue observed without preceding AutoAdv advance input: {previous}')
     confirmed_native = [k for k in links if k in native and k in pcm
                         and methods.get(k) == 'asr']
     confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]

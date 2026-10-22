@@ -182,7 +182,7 @@ class CaptureHostEventOutcome:
 
 
 _PLAY_ISSUES = {
-    'target_not_foreground': ('ゲームが前面にないため、この台詞の自動送りを保留しています。', None),
+    'target_unavailable': ('自動送り先のゲームウィンドウを確認できないため、この台詞の自動送りを保留しています。', None),
     'next_line_timeout': ('送り後に次の台詞を取得できません。会話取得を確認してください。', 'open_capture'),
     'ambiguous_identical_line': ('同じ本文が続き、次の台詞か判断できないため自動送りを保留しています。', 'open_capture'),
     'ambiguous_multihook_lines': ('同じ本文取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
@@ -525,7 +525,7 @@ class AutoAdvApplication:
     """
 
     def __init__(self, catalog: Catalog, persist: Callable[[], None], *,
-                 input_send: Callable | None = None, preflight: Callable | None = None):
+                 input_send: Callable | None = None, target_ready: Callable | None = None):
         self.catalog = catalog
         self._persist = persist
         self.game_id = ''
@@ -534,7 +534,7 @@ class AutoAdvApplication:
         self._runtime_capture_problem: CaptureProblemView | None = None
         self._raw_input_send = input_send or self._windows_input_send
         self._input_observer: Callable[[str, Token | None], None] | None = None
-        self.controller = Controller(self._send_runtime_input, preflight or self._windows_preflight)
+        self.controller = Controller(self._send_runtime_input, target_ready or self._windows_target_ready)
         self.hook_host: HookHost | None = None
         self._host_epoch = 0
         self._irodori_server: IrodoriServer | None = None
@@ -571,15 +571,26 @@ class AutoAdvApplication:
         self._hook_error_observer: Callable[[str], None] | None = None
 
     @staticmethod
-    def _windows_preflight(target: Target) -> bool:
+    def _windows_target_ready(target: Target) -> bool:
+        """Confirm the selected HWND still belongs to the configured input process.
+
+        Foreground focus is deliberately irrelevant: runtime input is posted
+        directly to this HWND and must not steal focus from the user.
+        """
         if sys.platform != 'win32':
             return False
         user32 = ctypes.windll.user32
-        user32.GetForegroundWindow.restype = ctypes.c_void_p
-        focus = user32.GetForegroundWindow()
+        user32.IsWindow.argtypes = (ctypes.c_void_p,)
+        user32.IsWindow.restype = ctypes.c_int
+        user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+        user32.GetWindowThreadProcessId.restype = ctypes.c_uint32
+        hwnd = ctypes.c_void_p(target.hwnd)
+        if not user32.IsWindow(hwnd):
+            return False
         pid = ctypes.c_uint32()
-        user32.GetWindowThreadProcessId(ctypes.c_void_p(focus), ctypes.byref(pid))
-        return focus == target.hwnd and pid.value == target.pid
+        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
+            return False
+        return pid.value == target.pid
 
     @staticmethod
     def _windows_input_send(target: Target, virtual_key: int) -> None:

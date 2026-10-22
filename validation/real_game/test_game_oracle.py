@@ -47,7 +47,7 @@ class IndependentGameOracleContract(unittest.TestCase):
         observed = self.verify(product=product)
         first = observed['line_results'][0]
         self.assertIsNone(first['game_dismissed_after_input'])
-        self.assertTrue(any('input attempt has no confirmed SendInput' in d
+        self.assertTrue(any('input attempt has no confirmed advance input' in d
                             for d in observed['diagnostics']))
         # The second line still has a confirmed send; the first is unverified.
         self.assertNotEqual(observed['game_evidence']['lines'][0]['outcome'],
@@ -57,7 +57,7 @@ class IndependentGameOracleContract(unittest.TestCase):
         product = [dict(x) for x in self.product]
         attempt = next(x for x in product if x['event'] == 'advance_attempt' and x['line'] == 1)
         # Preserve the event sequence; move the preflight attempt earlier than
-        # observed game playback, while confirmed SendInput stays unchanged.
+        # observed game playback, while confirmed advance input stays unchanged.
         attempt['at_ns'] -= 200_000_000
         for rec in product:
             if rec['event'] in ('presentation_complete',) and rec.get('line') == 1:

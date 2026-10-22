@@ -56,7 +56,7 @@ if ($GameExecutable -and $StartLine -eq 0) {
         default  { 1 }
     }
 }
-# Text-mode SendInput without a following Hook needs existing game-side
+# Text-mode targeted input without a following Hook needs existing game-side
 # dismissal evidence to distinguish unhandled input from missed text capture.
 # This is diagnostics only, not a new game-state acceptance criterion.
 if ($GameExecutable -and ($Phase -in @('native', 'mixed', 'stress') -or

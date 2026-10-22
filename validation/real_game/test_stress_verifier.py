@@ -59,7 +59,7 @@ class StressTraceVerifierTests(unittest.TestCase):
     def test_stress_cannot_pass_when_later_dialogues_depend_on_external_progress(self):
         result = validate(checker_only_records(), phase='stress')
         self.assertTrue(result['collection_valid'], result['errors'])
-        self.assertTrue(any('dialogue observed without preceding AutoAdv SendInput' in e
+        self.assertTrue(any('dialogue observed without preceding AutoAdv advance input' in e
                             for e in result['diagnostics']))
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
         self.assertEqual(result['confirmed_tts'], 0)

@@ -7,7 +7,6 @@ from autoadv.hook_host_worker import NativeHost, ipc_json
 from autoadv.luna_abi import load_exports
 from autoadv.hook_host import parse_host_event, HookHost
 from autoadv.luna_abi import validate_abi
-from autoadv.windows_input import input_types
 
 
 class NativeBoundary(unittest.TestCase):
@@ -108,8 +107,6 @@ class NativeBoundary(unittest.TestCase):
 
     def test_abi_definitions_remain_valid(self):
         validate_abi()
-        structures = input_types()
-        self.assertEqual(len(structures), 3)
 
 
 if __name__ == '__main__':
