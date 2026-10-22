@@ -70,11 +70,17 @@ class Controller:
         # Prefer the highest-priority saved source that is already observed.
         self.active_text_source = next((h.identity for h in profile.hooks
             if h.role == 'text' and h.identity in available_sources), None)
-        self.pause_reason = None
-        self.reason = 'advance_not_authorized'
+        self.pause_reason = None if self.authorized else 'advance_not_authorized'
+        self.reason = 'presenting' if self.authorized else 'advance_not_authorized'
         return self.session
 
     def close(self, reason: str = 'stopped') -> None:
+        """End monitoring without rewriting the user's AUTO ON/OFF choice.
+
+        Authorization is an application-level user choice, while a monitoring
+        session owns targets, utterances and device generations. Reconnecting a
+        Host or rebuilding capture therefore holds input but never toggles AUTO.
+        """
         self.session += 1
         self.profile = None
         self.pending_profile = None
@@ -84,15 +90,15 @@ class Controller:
         self.highest_sequence = 0
         self.utterance = None
         self.line_no = 0
-        self.authorized = self.completed = self.sent = False
+        self.completed = self.sent = False
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source = None
         self.external_transition_ns = 0
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
-        self.pause_reason = None
-        self.reason = reason
+        self.pause_reason = reason if self.authorized else 'advance_not_authorized'
+        self.reason = self.pause_reason
 
     def stage_profile(self, profile: Profile) -> None:
         """Apply compatible setting edits at the next utterance boundary.
@@ -386,11 +392,12 @@ class Controller:
         Runtime uncertainty is represented by ``pause_reason`` and must not
         silently turn the user's mode switch off.
         """
-        if allowed and self.profile is not None:
+        if allowed:
             self.authorized = True
             # Re-enabling is an explicit user operation and may retry a
-            # previously held line. System events never perform this step.
-            self.pause_reason = None
+            # previously held line. With no active monitor it is simply an ON
+            # preference waiting for a session; no input can be emitted.
+            self.pause_reason = None if self.profile is not None else 'not_monitoring'
         else:
             self.authorized = False
             self.pause_reason = 'advance_not_authorized'

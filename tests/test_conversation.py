@@ -78,12 +78,12 @@ class DialogueContractTests(unittest.TestCase):
         self.controller.presentation_event(b, 'text_elapsed')
         self.assertTrue(self.controller.try_advance())
 
-    def test_session_switch_invalidates_old_audio_and_permission(self):
+    def test_session_switch_invalidates_old_audio_but_preserves_user_auto_choice(self):
         self.controller.permit(True)
         old = self.output('古い', 1)
         self.controller.begin(profile(), Target(102, 203), 'host-b', 1)
         self.assertFalse(self.controller.presentation_event(old, 'text_elapsed'))
-        self.assertFalse(self.controller.authorized)
+        self.assertTrue(self.controller.authorized)
         self.assertFalse(self.controller.try_advance())
 
     def test_runtime_hold_preserves_auto_mode_and_next_line_resumes(self):
@@ -141,6 +141,23 @@ class DialogueContractTests(unittest.TestCase):
         self.assertEqual(result.reading, 'とうきょうへ行く(いく)')
         self.assertEqual(result.use_tts, False)
         self.assertEqual(result.speaker, '京')
+
+
+    def test_auto_can_be_enabled_before_monitoring_and_survives_begin_close(self):
+        c = Controller(lambda *_: None, lambda _: True)
+        self.assertFalse(c.authorized)
+        c.permit(True)
+        self.assertTrue(c.authorized)
+        self.assertEqual(c.reason, 'not_monitoring')
+        c.begin(profile(), Target(101, 202), 'host-a', 1)
+        self.assertTrue(c.authorized)
+        self.assertFalse(c.try_advance())
+        c.close('session_changed')
+        self.assertTrue(c.authorized)
+        self.assertEqual(c.reason, 'session_changed')
+        c.permit(False)
+        self.assertFalse(c.authorized)
+        self.assertEqual(c.reason, 'advance_not_authorized')
 
     def test_unique_hook_role(self):
         p = profile()
@@ -215,10 +232,10 @@ class HookBoundaryContractTests(unittest.TestCase):
         self.assertEqual(self.controller.token, before)
         self.assertTrue(self.controller.authorized)
 
-    def test_old_session_clear_does_not_authorize_new_game(self):
+    def test_old_session_clear_preserves_existing_user_authorization(self):
         first = self.sent_line('同じ')
         self.out('', 2)
         self.controller.begin(profile(), Target(102, 203), 'host-b', 2)
         self.assertFalse(self.controller.presentation_event(first, 'text_elapsed'))
-        self.assertFalse(self.controller.authorized)
+        self.assertTrue(self.controller.authorized)
         self.assertIsNone(self.out('同じ', 3))

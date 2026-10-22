@@ -2873,7 +2873,7 @@ def run_gui(session_driver=None) -> int:
                     hook_pid=target.hook_pid or target.pid, audio_pid=target.audio_pid or target.pid,
                     input_pid=target.pid, generation=self.controller.source_generation,
                     connection=self.controller.connection_generation)
-                self.note('監視を開始しました。自動送りは停止したままです。')
+                self.note('監視を開始しました。自動送りは' + ('ONです。' if self.controller.authorized else 'OFFです。'))
             except Exception as exc:
                 self.stop_session()
                 self.note(f'監視を開始できません: {exc}')

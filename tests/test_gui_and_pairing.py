@@ -203,6 +203,49 @@ class TaskOrientedGuiContracts(unittest.TestCase):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
+    def test_auto_toggle_can_be_enabled_before_monitor_and_survives_monitor_start(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+        from autoadv.storage import Catalog
+        catalog = Catalog()
+        game = catalog.create_game('作品', 'C:/Game.exe')
+        profile = game.profiles[game.default_profile]
+        profile.hooks = [HookSelection('HOOK-1', 1, 2, 'text')]
+
+        def inspect(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            try:
+                self.assertFalse(window.controller.authorized)
+                window.advance_authorization.click()
+                self.assertTrue(window.controller.authorized)
+                self.assertTrue(window.advance_authorization.isChecked())
+                self.assertIn('監視停止', window.overview_advance.text())
+                window.pid.setValue(101)
+                window.hwnd.setText('0x1234')
+                commands = Mock()
+                window.hook_host = SimpleNamespace(command=commands,
+                    child=SimpleNamespace(poll=lambda: None))
+                window.connect_game()
+                self.assertTrue(window.controller.authorized)
+                window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=101))
+                src = ThreadSource(101, 0x500, 1, 2, 'HOOK-1', 'HOOK-1')
+                window.on_hook(HookEvent('output', 'host', 1, 2, 200,
+                                         process_id=101, source=src, text='京「おはよう」'))
+                QApplication.processEvents()
+                self.assertIsNotNone(window.controller.profile)
+                self.assertTrue(window.controller.authorized)
+                self.assertTrue(window.advance_authorization.isChecked())
+                self.assertIn('自動送り: ON', window.overview_advance.text())
+            finally:
+                window.hook_host = None
+                window.close()
+            return 0
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', inspect):
+                self.assertEqual(run_gui(), 0)
+
     def test_livedialogue_edit_and_saved_resume_do_not_authorize_input(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
