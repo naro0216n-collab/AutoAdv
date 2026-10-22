@@ -1,5 +1,6 @@
 # Execute AutoAdv's ordinary GUI against the existing Ren'Py validation game.
-# Optional SDK launch is environment setup, not a game-engine acceptance test.
+# Prebuilt fixture launch is supported without constructing the game in this run.
+# The RenPySdk source-fixture path is retained only across the workflow migration checkpoint.
 # No game-side code issues advance inputs or supplies observations to AutoAdv.
 [CmdletBinding()]
 param(
@@ -10,10 +11,14 @@ param(
     [string] $Trace = '',
     [string] $Oracle = '',
     [string] $Report = '',
+    [string] $GameExecutable = $env:AUTOADV_VALIDATION_GAME,
     [string] $RenPySdk = $env:AUTOADV_RENPY_SDK,
     [switch] $Automated,
     [string] $Voice = '',
     [string] $IrodoriUrl = 'http://127.0.0.1:8088',
+    [string] $ProcessLoopbackHelper = '',
+    [string] $AsrModel = '',
+    [string] $AsrTokens = '',
     [int] $TimeoutSeconds = 120,
     [int] $MaxVoiceHoldMs = 0,
     [switch] $UncertainFallback
@@ -25,8 +30,11 @@ if (-not $Trace) {
     $Trace = Join-Path $scratch ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($MaxVoiceHoldMs -lt 0) { throw 'MaxVoiceHoldMs cannot be negative' }
-if ($Automated -and -not $RenPySdk) {
-    throw 'Automated real-game validation requires -RenPySdk to launch the existing game'
+if ($GameExecutable -and $RenPySdk) {
+    throw 'Specify either -GameExecutable or -RenPySdk, not both'
+}
+if ($Automated -and -not ($GameExecutable -or $RenPySdk)) {
+    throw 'Automated real-game validation requires -GameExecutable (or -RenPySdk for fixture-source development)'
 }
 if ($Automated -and $TimeoutSeconds -lt 10) { throw 'Finite test timeout must be >= 10 seconds' }
 if (-not $Report) { $Report = $Trace + '.result.json' }
@@ -46,7 +54,7 @@ $scene = switch ($Phase) {
     'mixed'  { 'mixed' }
     default  { 'start' }
 }
-if ($RenPySdk -and $StartLine -eq 0) {
+if (($GameExecutable -or $RenPySdk) -and $StartLine -eq 0) {
     $StartLine = switch ($scene) {
         'native' { 6 }
         'tts'    { 4 }
@@ -56,14 +64,14 @@ if ($RenPySdk -and $StartLine -eq 0) {
 # Text-mode SendInput without a following Hook needs existing game-side
 # dismissal evidence to distinguish unhandled input from missed text capture.
 # This is diagnostics only, not a new game-state acceptance criterion.
-if ($RenPySdk -and ($Phase -in @('native', 'mixed', 'stress') -or
+if (($GameExecutable -or $RenPySdk) -and ($Phase -in @('native', 'mixed', 'stress') -or
         ($Automated -and $Phase -eq 'reading')) -and -not $Oracle) {
     $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
-    throw "Phase $Phase requires game voice observations. Supply -Oracle or -RenPySdk."
+    throw "Phase $Phase requires game voice observations. Supply -Oracle or launch the validation fixture."
 }
-if ($RenPySdk -and $Oracle -and (Test-Path -LiteralPath $Oracle)) {
+if (($GameExecutable -or $RenPySdk) -and $Oracle -and (Test-Path -LiteralPath $Oracle)) {
     throw "Refusing to reuse an existing game observation file: $Oracle"
 }
 
@@ -161,32 +169,48 @@ public static class AudioRenderProbe {
         Write-Host ('Windows render environment (diagnostic only): ' +
             (ConvertTo-Json -InputObject $audioEnvironment -Compress -Depth 4))
     }
-    if ($RenPySdk) {
-        $sdk = (Resolve-Path -LiteralPath $RenPySdk).Path
-        $pythonExe = Join-Path $sdk 'lib/py3-windows-x86_64/python.exe'
-        $renpyScript = Join-Path $sdk 'renpy.py'
-        $project = Join-Path $repo 'validation/real_game/renpy'
-        if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf) -or
-            -not (Test-Path -LiteralPath $renpyScript -PathType Leaf)) {
-            throw "Ren'Py SDK runtime not found at $sdk"
+    $resolvedGameExe = ''
+    $sourceFixturePython = ''
+    if ($GameExecutable) {
+        $resolvedGameExe = (Resolve-Path -LiteralPath $GameExecutable).Path
+        if (-not (Test-Path -LiteralPath $resolvedGameExe -PathType Leaf)) {
+            throw "Prebuilt validation game executable not found: $resolvedGameExe"
         }
         $env:AUTOADV_GAME_ORACLE = $Oracle
         $env:AUTOADV_VALIDATION_SCENARIO = $scene
-        # This is the existing game and Ren'Py's documented normal 'run'
-        # command. It is neither a second game nor a game-side input driver.
-        $gameProcess = Start-Process -FilePath $pythonExe -WorkingDirectory $sdk `
+        # Fixture build/packaging is deliberately outside this acceptance run.
+        # This step only starts an already built game process.
+        $gameProcess = Start-Process -FilePath $resolvedGameExe `
+            -WorkingDirectory (Split-Path -Parent $resolvedGameExe) -PassThru
+    } elseif ($RenPySdk) {
+        # Source-fixture launch remains available across the workflow migration
+        # checkpoint; the prebuilt Live workflow replaces it in the next publish.
+        $sdk = (Resolve-Path -LiteralPath $RenPySdk).Path
+        $sourceFixturePython = Join-Path $sdk 'lib/py3-windows-x86_64/python.exe'
+        $renpyScript = Join-Path $sdk 'renpy.py'
+        $project = Join-Path $repo 'validation/real_game/renpy'
+        if (-not (Test-Path -LiteralPath $sourceFixturePython -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $renpyScript -PathType Leaf)) {
+            throw "Ren'Py SDK runtime not found at $sdk"
+        }
+        $resolvedGameExe = (Resolve-Path -LiteralPath $sourceFixturePython).Path
+        $env:AUTOADV_GAME_ORACLE = $Oracle
+        $env:AUTOADV_VALIDATION_SCENARIO = $scene
+        $gameProcess = Start-Process -FilePath $sourceFixturePython -WorkingDirectory $sdk `
             -ArgumentList "`"$renpyScript`" `"$project`" run" -PassThru
+    }
+    if ($null -ne $gameProcess) {
         $deadline = [System.Diagnostics.Stopwatch]::StartNew()
         while ($Oracle -and -not (Test-Path -LiteralPath $Oracle -PathType Leaf)) {
             if ($gameProcess.HasExited) {
-                throw "Ren'Py game exited before writing its observation start record ($($gameProcess.ExitCode))"
+                throw "Validation game exited before writing its observation start record ($($gameProcess.ExitCode))"
             }
             if ($deadline.Elapsed.TotalSeconds -gt 40) {
-                throw 'RenPy game did not start observation within 40 seconds'
+                throw 'Validation game did not start observation within 40 seconds'
             }
             Start-Sleep -Milliseconds 200
         }
-        Write-Host "Existing Ren'Py validation game launched (scene=$scene)"
+        Write-Host "Validation game launched (scene=$scene)"
     } else {
         Write-Host 'Using an already running game; no game input is driven by the checker.'
     }
@@ -196,7 +220,7 @@ public static class AudioRenderProbe {
     try {
         # All advancement remains in the production GUI Controller.
         if ($Automated) {
-            $gameExe = (Resolve-Path -LiteralPath $pythonExe).Path
+            $gameExe = $resolvedGameExe
             $config = @{
                 oracle = $Oracle; gate = $gate; executable = $gameExe;
                 phase = $Phase; timeout_seconds = $TimeoutSeconds;
@@ -208,19 +232,34 @@ public static class AudioRenderProbe {
                 fallback = [bool]$UncertainFallback
             }
             if ($Phase -in @('native', 'mixed', 'stress')) {
-                # Build only AutoAdv's process-audio bridge, not Luna or other suites.
-                $helper = Join-Path $repo 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll'
-                if (-not (Test-Path -LiteralPath $helper)) {
-                    & dotnet build (Join-Path $repo 'integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj') --configuration Release --nologo
-                    if ($LASTEXITCODE -ne 0) { throw 'Real process loopback helper build failed' }
+                $externalAudioRuntime = ($ProcessLoopbackHelper -and $AsrModel -and $AsrTokens)
+                if (-not $externalAudioRuntime -and $RenPySdk) {
+                    # The source-fixture path keeps the current Live workflow valid
+                    # until the workflow-only migration is published.
+                    $ProcessLoopbackHelper = Join-Path $repo 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll'
+                    if (-not (Test-Path -LiteralPath $ProcessLoopbackHelper)) {
+                        & dotnet build (Join-Path $repo 'integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj') --configuration Release --nologo
+                        if ($LASTEXITCODE -ne 0) { throw 'Real process loopback helper build failed' }
+                    }
+                    $modelRoot = & python -c 'from validation.real_game.prepare_asr_model import default_model_directory; print(default_model_directory())'
+                    if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve verified ASR model directory' }
+                    & python -m validation.real_game.prepare_asr_model --directory $modelRoot
+                    if ($LASTEXITCODE -ne 0) { throw 'Pinned production ASR model unavailable' }
+                    $AsrModel = Join-Path $modelRoot 'model.int8.onnx'
+                    $AsrTokens = Join-Path $modelRoot 'tokens.txt'
                 }
-                $modelRoot = & python -c 'from validation.real_game.prepare_asr_model import default_model_directory; print(default_model_directory())'
-                if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve verified ASR model directory' }
-                & python -m validation.real_game.prepare_asr_model --directory $modelRoot
-                if ($LASTEXITCODE -ne 0) { throw 'Pinned production ASR model unavailable' }
-                $config.helper = $helper
-                $config.model = Join-Path $modelRoot 'model.int8.onnx'
-                $config.tokens = Join-Path $modelRoot 'tokens.txt'
+                foreach ($dependency in @(
+                    @{ name = 'Process Loopback helper'; path = $ProcessLoopbackHelper },
+                    @{ name = 'ASR model'; path = $AsrModel },
+                    @{ name = 'ASR tokens'; path = $AsrTokens }
+                )) {
+                    if (-not $dependency.path -or -not (Test-Path -LiteralPath $dependency.path -PathType Leaf)) {
+                        throw ("Live audio prerequisite is unavailable: " + $dependency.name)
+                    }
+                }
+                $config.helper = (Resolve-Path -LiteralPath $ProcessLoopbackHelper).Path
+                $config.model = (Resolve-Path -LiteralPath $AsrModel).Path
+                $config.tokens = (Resolve-Path -LiteralPath $AsrTokens).Path
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }

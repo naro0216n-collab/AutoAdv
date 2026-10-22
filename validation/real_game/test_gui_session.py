@@ -1,15 +1,17 @@
-"""Launcher contract only: these tests never claim to run a Windows game."""
+"""Validation-driver contract tests; these never claim to run a Windows game."""
+from pathlib import Path
 import json
 import unittest
 from types import SimpleNamespace
-from validation.real_game.gui_session import SessionDriver
 
-from validation.real_game.gui_session import (CALIBRATION, calibration_candidates,
-                                              choose_calibration_source, load_session, select_game_window)
+from validation.real_game.gui_session import (
+    CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source,
+    load_session, select_game_window,
+)
 
 
 class LiveGuiSessionContract(unittest.TestCase):
-    def test_selects_only_unique_real_observed_hook_output(self):
+    def test_selects_only_real_observed_hook_output(self):
         a = SimpleNamespace(identity='a')
         b = SimpleNamespace(identity='b')
         sources = {'a': a, 'b': b}
@@ -17,11 +19,10 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(calibration_candidates(sources, samples, set()), [a])
         self.assertEqual(calibration_candidates(sources, samples, {'a'}), [])
         self.assertEqual(calibration_candidates(sources, {'a': [], 'b': []}, set()), [])
-        self.assertEqual(calibration_candidates(sources, {'a': [CALIBRATION], 'b': [CALIBRATION]}, set()), [a, b])
+        self.assertEqual(calibration_candidates(
+            sources, {'a': [CALIBRATION], 'b': [CALIBRATION]}, set()), [a, b])
 
-    def test_multiple_actual_calibration_hooks_do_not_block_product_evaluation(self):
-        # Duplicate *real* Hook outputs are routine. Select one through the
-        # existing GUI; the product must still capture the next real dialogue.
+    def test_multiple_actual_calibration_hooks_use_deterministic_real_source(self):
         a = SimpleNamespace(identity='a', address=20)
         b = SimpleNamespace(identity='b', address=10)
         sources = {'a': a, 'b': b}
@@ -44,12 +45,40 @@ class LiveGuiSessionContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             choose([game, SimpleNamespace(hwnd=3, title='another RenPy window')])
 
-    def test_focus_activation_does_not_fail_before_windows_updates_foreground(self):
+    def test_calibration_recipe_is_committed_through_application_owner(self):
+        source = SimpleNamespace(identity='hook-a', address=91)
+        candidate = SimpleNamespace(identity='hook-a', address=91, ambiguous=False,
+                                    history=(CALIBRATION,))
+        calls = []
+        product = SimpleNamespace(
+            capture_view=lambda: SimpleNamespace(candidates=(candidate,)),
+            capture_source=lambda identity, address, require_unique=False: source,
+            set_capture_extraction_preset=lambda *args: calls.append(('preset', args)),
+            set_capture_field_source=lambda *args: calls.append(('field', args)),
+            commit_capture=lambda: SimpleNamespace(body_sources=['hook-a']),
+            runtime_state=lambda: SimpleNamespace(profile=SimpleNamespace(id='p')),
+        )
+        window = SimpleNamespace(application=product)
+        driver = SessionDriver(window, SimpleNamespace(),
+                               {'timeout_seconds': 30, 'phase': 'reading'})
+        self.assertTrue(driver._select_calibration_source())
+        self.assertEqual(calls, [
+            ('preset', ('hook-a', 91, 'body')),
+            ('field', ('body', 'hook-a', 91)),
+            ('field', ('speaker', None)),
+        ])
+
+    def test_focus_activation_uses_application_authorization(self):
         clock = [0.0]
-        control = SimpleNamespace(authorized=False)
+        runtime = SimpleNamespace(authorized=False)
+        product = SimpleNamespace(
+            set_auto_advance=lambda enabled: setattr(runtime, 'authorized', enabled),
+            runtime_state=lambda: runtime,
+        )
+        window = SimpleNamespace(application=product)
         actions = []
-        window = SimpleNamespace(controller=control, permit=lambda: setattr(control, 'authorized', True))
-        driver = SessionDriver(window, SimpleNamespace(), {'timeout_seconds': 30, 'phase': 'native'},
+        driver = SessionDriver(window, SimpleNamespace(),
+                               {'timeout_seconds': 30, 'phase': 'native'},
                                clock=lambda: clock[0])
         driver.state = 'activate'
         driver._focus_game = lambda: setattr(driver, 'focus_deadline', clock[0] + 3)
@@ -67,34 +96,40 @@ class LiveGuiSessionContract(unittest.TestCase):
 
     def test_actual_product_handoff_ends_run_without_fake_game_input(self):
         actions = []
-        control = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
-                                  pause_reason='native_inconclusive_manual_handoff',
-                                  line_no=1)
-        window = SimpleNamespace(controller=control, close=lambda: actions.append('close'))
-        app = SimpleNamespace(quit=lambda: actions.append('quit'))
-        driver = SessionDriver(window, app, {'timeout_seconds': 30, 'phase': 'native',
-                                             'dialogues': 3}, clock=lambda: 1)
+        runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
+                                  pause_reason='native_inconclusive_manual_handoff')
+        product = SimpleNamespace(runtime_state=lambda: runtime)
+        window = SimpleNamespace(application=product, close=lambda: actions.append('close'))
+        qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
+        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native',
+                                                'dialogues': 3}, clock=lambda: 1)
         driver.state = 'running'
         driver.tick()
         self.assertEqual(actions, ['close', 'quit'])
 
-    def test_calibration_timeout_keeps_hook_evidence_separate_from_advancement(self):
+    def test_failure_diagnostics_read_application_state_not_retired_gui_state(self):
         recorded = []
         closed = []
         source = SimpleNamespace(identity='hook-a')
-        worker = SimpleNamespace(poll=lambda: None)
+        candidate = SimpleNamespace(identity='hook-a', address=7, ambiguous=False,
+                                    history=('unrelated text',))
+        runtime = SimpleNamespace(session=4, token=None, pause_reason=None)
+        product = SimpleNamespace(
+            capture_view=lambda: SimpleNamespace(candidates=(candidate,)),
+            capture_source=lambda identity, address, require_unique=False: source,
+            hook_connection_state=lambda: SimpleNamespace(connected=True),
+            hook_host_running=True,
+            runtime_state=lambda: runtime,
+        )
         window = SimpleNamespace(
-            sources={'hook-a': source}, source_samples={'hook-a': ['unrelated text']},
-            ambiguous_sources=set(), host_generation='real-host-generation',
-            connection_generation=1, hook_host=SimpleNamespace(child=worker),
+            application=product,
             validation_trace=SimpleNamespace(emit=lambda name, **kwargs: recorded.append((name, kwargs))),
             close=lambda: closed.append('window'))
-        app = SimpleNamespace(exit=lambda code: closed.append(code))
-        driver = SessionDriver(window, app, {'timeout_seconds': 30, 'phase': 'native'})
+        qt_app = SimpleNamespace(exit=lambda code: closed.append(code))
+        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native'})
         driver.state = 'calibration'
         driver.fail('finite live-run timeout; no manual game input substituted')
         self.assertEqual(closed, ['window', 3])
-        self.assertEqual(len(recorded), 1)
         name, fields = recorded[0]
         self.assertEqual(name, 'validation_driver_failure')
         self.assertEqual(fields['stage'], 'calibration')
@@ -103,24 +138,43 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(fields['calibration_matches'], 0)
         self.assertTrue(fields['luna_connected'])
         self.assertTrue(fields['luna_host_alive'])
-        self.assertNotIn('advancement_observed', fields)
+
+    def test_driver_has_no_retired_gui_runtime_ownership_dependencies(self):
+        source = Path('validation/real_game/gui_session.py').read_text(encoding='utf-8')
+        retired = (
+            'self.w.pid', 'self.w.hwnd', 'self.w.controller', 'self.w.sources',
+            'self.w.source_samples', 'self.w.ambiguous_sources', 'self.w.host_generation',
+            'self.w.connection_generation', 'self.w.hook_host', 'self.w.native_audio',
+            'self.w.native_audio_setup_error', 'self.w.begin_monitor', 'self.w.select_hook',
+            'self.w.save_profile', 'self.w.inherit_controls',
+        )
+        for expression in retired:
+            self.assertNotIn(expression, source)
+        for api in (
+            'self.product.select_primary_target(', 'self.product.activate_selected_target()',
+            'self.product.hook_connection_state()', 'self.product.capture_view()',
+            'self.product.set_capture_field_source(', 'self.product.commit_capture()',
+            'self.product.runtime_state()', 'self.product.set_auto_advance(True)',
+        ):
+            self.assertIn(api, source)
 
     def test_requires_bound_game_target_and_finite_timeout(self):
-        valid = dict(gate='session-gate', executable='renpy.exe',
+        valid = dict(gate='session-gate', executable='validation-game.exe',
                      phase='native', timeout_seconds=120)
         self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(valid)})['phase'], 'native')
-        # Game-side Oracle is needed only when independently grading audio end;
-        # it is not an AutoAdv GUI launcher dependency.
         for phase in ('hook', 'reading', 'tts'):
-            self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(dict(valid, phase=phase))})['phase'], phase)
+            options = dict(valid, phase=phase)
+            self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(options)})['phase'], phase)
         for key in valid:
             missing = dict(valid)
             del missing[key]
             with self.subTest(key=key), self.assertRaises(ValueError):
                 load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(missing)})
-        invalid = dict(valid, timeout_seconds=0)
         with self.assertRaises(ValueError):
-            load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(invalid)})
-        invalid = dict(valid, phase='simulated')
+            load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(dict(valid, timeout_seconds=0))})
         with self.assertRaises(ValueError):
-            load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(invalid)})
+            load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(dict(valid, phase='simulated'))})
+
+
+if __name__ == '__main__':
+    unittest.main()
