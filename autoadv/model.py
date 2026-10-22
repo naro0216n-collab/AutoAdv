@@ -217,34 +217,52 @@ def count_reading_characters(body: str) -> int:
     return sum(countable(i, c) for i, c in enumerate(without_ruby))
 
 
-def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,
-              sequence: int, side_speaker: str = '') -> Utterance:
-    body, speaker = raw, side_speaker.strip()
-    for rule in profile.structure_rules:
+def matching_structure_rule(raw: str, profile: Profile) -> tuple[re.Match | None, int | None]:
+    """Use the product's exact first-match rule order for UI explanations."""
+    for index, rule in enumerate(profile.structure_rules):
         if not rule.enabled or (rule.condition and not re.search(rule.condition, raw, re.S)):
             continue
-        matched = re.fullmatch(rule.pattern, raw, re.S)
-        if matched:
-            body = matched.group('body')
-            if not speaker:
-                speaker = (matched.groupdict().get('speaker') or '').strip()
-            break
+        match = re.fullmatch(rule.pattern, raw, re.S)
+        if match:
+            return match, index
+    return None, None
+
+
+def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,
+              sequence: int, side_speaker: str = '', trace: list[str] | None = None) -> Utterance:
+    body, speaker = raw, side_speaker.strip()
+    matched, matched_index = matching_structure_rule(raw, profile)
+    if matched:
+        body = matched.group('body')
+        if not speaker:
+            speaker = (matched.groupdict().get('speaker') or '').strip()
+    if trace is not None:
+        trace.append(f'抽出: 優先順位 {matched_index + 1}' if matched_index is not None else '抽出: 規則なし（原文のまま）')
     body = unicodedata.normalize('NFKC', body).strip()
     reading = _RUBY.sub(lambda m: m.group(2), body)
     for word, replacement in sorted(profile.name_readings.items(), key=lambda item: -len(item[0])):
+        prior = reading
         reading = re.sub(r'(?<!' + _KANJI + ')' + re.escape(word) + r'(?!' + _KANJI + ')',
                          lambda _: replacement, reading)
+        if trace is not None and reading != prior:
+            trace.append(f'読み: {word} → {replacement}')
     match_text = _RUBY.sub(lambda m: m.group(1), body)
-    for rule in profile.replacements:
+    for index, rule in enumerate(profile.replacements, 1):
         if not rule.enabled:
             continue
         def replace(text):
             return (re.sub(rule.pattern, rule.replacement, text) if rule.regex else
                     text.replace(rule.pattern, rule.replacement))
         if rule.target in ('tts', 'both'):
-            reading = replace(reading)
+            updated = replace(reading)
+            if trace is not None and updated != reading:
+                trace.append(f'置換 {index}: TTS文を変更')
+            reading = updated
         if rule.target in ('asr', 'both'):
-            match_text = replace(match_text)
+            updated = replace(match_text)
+            if trace is not None and updated != match_text:
+                trace.append(f'置換 {index}: ASR文を変更')
+            match_text = updated
     use_tts = profile.speaker_tts.get(speaker, profile.default_tts)
     voice = profile.speaker_voices.get(speaker, profile.default_voice)
     count = count_reading_characters(body)

@@ -9,13 +9,14 @@ import copy
 import ntpath
 from collections import deque
 from pathlib import Path
+import re
 
 from .conversation import Controller, Target, Token
 from .hook_host import HookHost
 from .luna_runtime import runtime_dir, adopted_runtime, RELEASE
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import AdvanceMode, HookSelection, Profile, StructureRule, ReplacementRule, COMMON_FIELDS
+from .model import AdvanceMode, HookSelection, Profile, StructureRule, ReplacementRule, COMMON_FIELDS, interpret, matching_structure_rule
 from .storage import Catalog, load, save
 from .voice import VoiceJobs
 from .native_audio import NativeAudio
@@ -103,32 +104,50 @@ def run_gui(session_driver=None) -> int:
             # The normal first-run workflow is foremost; specialist settings have
             # their own tabs, rather than filling the first screen with ABI fields.
             tabs = QTabWidget()
-            self.setCentralWidget(tabs)
+            root = QWidget()
+            root_layout = QVBoxLayout(root)
+            self.context_banner = QLabel('編集対象: 作品が選択されていません')
+            self.context_banner.setStyleSheet('font-weight: 600; padding: 6px;')
+            root_layout.addWidget(self.context_banner)
+            root_layout.addWidget(tabs, 1)
+            self.setCentralWidget(root)
             pages = {}
             for key, name in (('home', 'ゲーム・自動進行'), ('hook', 'HOOK候補'),
-                              ('voice', '音声・本文整形'), ('settings', '詳細・共通設定')):
+                              ('speakers', '話者・音声'), ('text', '本文整形'), ('settings', '詳細・共通設定')):
                 scroller = QScrollArea()
                 scroller.setWidgetResizable(True)
                 panel = QWidget()
                 scroller.setWidget(panel)
                 layout = QVBoxLayout(panel)
-                tabs.addTab(scroller, name)
+                if key == 'text':
+                    self.text_tab_index = tabs.count()
+                    text_page = QWidget()
+                    text_layout = QVBoxLayout(text_page)
+                    text_preview_area = QVBoxLayout()
+                    text_layout.addLayout(text_preview_area)
+                    text_layout.addWidget(scroller, 1)
+                    tabs.addTab(text_page, name)
+                else:
+                    tabs.addTab(scroller, name)
                 pages[key] = layout
             self.tabs = tabs
 
             def group(title, *, page='home'):
                 widget = QGroupBox(title)
                 form = QFormLayout(widget)
-                pages[page].addWidget(widget)
+                if page == 'text' and title.startswith('適用前後を試す'):
+                    text_preview_area.addWidget(widget)
+                else:
+                    pages[page].addWidget(widget)
                 return form
-            environment = group('Common environment', page='settings')
+            environment = group('共通環境（詳細設定）', page='settings')
             self.irodori_path = QLineEdit(self.catalog.irodori_root)
             self.luna_runtime_status = QLabel(f'{RELEASE}: {runtime_dir()}')
             self.irodori_url = QLineEdit(self.catalog.irodori_url)
-            environment.addRow('Installed Irodori folder', self.irodori_path)
-            environment.addRow('Irodori URL', self.irodori_url)
-            environment.addRow('Adopted Luna runtime (fixed, not downloaded on launch)', self.luna_runtime_status)
-            self.btn_server = QPushButton('Connect / start Irodori and read Voices')
+            environment.addRow('Irodoriサーバーフォルダ', self.irodori_path)
+            environment.addRow('Irodori接続先URL', self.irodori_url)
+            environment.addRow('同梱Luna実行資産の場所', self.luna_runtime_status)
+            self.btn_server = QPushButton('Irodoriに接続してVoice一覧を取得')
             environment.addRow(self.btn_server)
             self.btn_server.clicked.connect(self.start_server)
             self.common_controls = {}
@@ -161,8 +180,8 @@ def run_gui(session_driver=None) -> int:
                 else:
                     control = QLineEdit(value)
                 self.common_controls[key] = control
-                environment.addRow('Common: ' + common_titles[key], control)
-            self.btn_save_common = QPushButton('Save common audio and advance defaults')
+                environment.addRow('共通: ' + common_titles[key], control)
+            self.btn_save_common = QPushButton('共通設定を保存')
             self.btn_save_common.clicked.connect(self.save_common)
             environment.addRow(self.btn_save_common)
             self.server_status = QLabel('Irodori: not connected')
@@ -176,52 +195,52 @@ def run_gui(session_driver=None) -> int:
             game_details = group('作品・プロファイルの詳細登録', page='settings')
             self.game_choice = QComboBox()
             self.game_choice.currentIndexChanged.connect(self.choose_game)
-            games.addRow('Game', self.game_choice)
+            games.addRow('作品', self.game_choice)
             self.btn_pick_running = QPushButton('実行中のゲーム・プロセスから選択して登録')
             self.btn_pick_running.clicked.connect(self.pick_running_game)
             games.addRow(self.btn_pick_running)
             games.addRow(QLabel('初回は上のボタンから選択。PIDやHOOKコードの入力は不要です。'))
             self.new_game = QLineEdit()
-            self.new_game.setPlaceholderText('Game display name')
-            self.btn_game = QPushButton('Register game')
+            self.new_game.setPlaceholderText('作品名')
+            self.btn_game = QPushButton('作品を登録')
             row = QHBoxLayout()
             row.addWidget(self.new_game)
             row.addWidget(self.btn_game)
             game_details.addRow(row)
             self.btn_game.clicked.connect(self.add_game)
             self.game_exe = QLineEdit()
-            self.game_exe.setPlaceholderText('Optional game executable path for future sessions')
-            game_details.addRow('Game executable', self.game_exe)
+            self.game_exe.setPlaceholderText('次回以降の識別に使用するEXEのパス')
+            game_details.addRow('ゲーム実行ファイル', self.game_exe)
             self.audio_exe = QLineEdit()
             self.audio_exe.setPlaceholderText('Optional: separate audio process executable')
-            game_details.addRow('Audio process executable', self.audio_exe)
+            game_details.addRow('音声出力プロセスのEXE（別プロセス時のみ）', self.audio_exe)
             self.input_exe = QLineEdit()
             self.input_exe.setPlaceholderText('Optional: separate input window executable')
-            game_details.addRow('Input process executable', self.input_exe)
-            self.btn_launch = QPushButton('Launch registered game')
+            game_details.addRow('入力対象のEXE（別プロセス時のみ）', self.input_exe)
+            self.btn_launch = QPushButton('登録済みのゲームを起動')
             self.btn_launch.clicked.connect(self.launch_game)
             games.addRow(self.btn_launch)
-            self.btn_import = QPushButton('Import existing Luna game settings (preview and confirm)')
+            self.btn_import = QPushButton('Luna設定をプレビューして取り込む')
             game_details.addRow(self.btn_import)
             self.btn_import.clicked.connect(self.import_luna)
-            self.btn_import_legacy = QPushButton('Import previous AutoAdv v2 settings (preview and confirm)')
+            self.btn_import_legacy = QPushButton('旧AutoAdv設定をプレビューして取り込む')
             game_details.addRow(self.btn_import_legacy)
             self.btn_import_legacy.clicked.connect(self.import_legacy)
             self.profile_choice = QComboBox()
             self.profile_choice.currentIndexChanged.connect(self.choose_profile)
-            games.addRow('Profile', self.profile_choice)
+            games.addRow('作品プロファイル', self.profile_choice)
             self.new_profile = QLineEdit()
-            self.new_profile.setPlaceholderText('New profile name')
-            self.btn_profile = QPushButton('Add profile')
+            self.new_profile.setPlaceholderText('新しい設定名')
+            self.btn_profile = QPushButton('プロファイルを追加')
             row = QHBoxLayout()
             row.addWidget(self.new_profile)
             row.addWidget(self.btn_profile)
             game_details.addRow(row)
             self.btn_profile.clicked.connect(self.add_profile)
-            self.btn_dup = QPushButton('Duplicate profile')
-            self.btn_rename = QPushButton('Rename profile')
-            self.btn_delete = QPushButton('Delete profile')
-            self.btn_default = QPushButton('Use as default profile')
+            self.btn_dup = QPushButton('プロファイルを複製')
+            self.btn_rename = QPushButton('プロファイル名を変更')
+            self.btn_delete = QPushButton('プロファイルを削除')
+            self.btn_default = QPushButton('この作品の既定プロファイルにする')
             for button, handler in ((self.btn_dup, self.duplicate_profile),
                                     (self.btn_rename, self.rename_profile),
                                     (self.btn_delete, self.delete_profile),
@@ -265,16 +284,16 @@ def run_gui(session_driver=None) -> int:
             hook_details.addRow(self.btn_input_target)
             self.source_mode = QComboBox()
             self.source_mode.addItems(['hook', 'ocr'])
-            capture.addRow('Text source', self.source_mode)
+            capture.addRow('台詞の取得方法（HOOK / OCR）', self.source_mode)
             self.ocr_exe = QLineEdit('tesseract')
             self.ocr_lang = QLineEdit('jpn')
             self.ocr_region = QLineEdit('0,0,640,180')
-            hook_details.addRow('Installed Tesseract executable', self.ocr_exe)
-            hook_details.addRow('OCR language', self.ocr_lang)
-            hook_details.addRow('OCR region x,y,width,height', self.ocr_region)
+            hook_details.addRow('Tesseractの実行ファイル', self.ocr_exe)
+            hook_details.addRow('OCRの言語', self.ocr_lang)
+            hook_details.addRow('OCRの領域 x,y,幅,高さ', self.ocr_region)
             self.ocr_stability = QSpinBox()
             self.ocr_stability.setRange(1, 10)
-            hook_details.addRow('OCR repeated stable captures', self.ocr_stability)
+            hook_details.addRow('OCRの安定確認回数', self.ocr_stability)
             self.source_table = QTableWidget(0, 6)
             self.source_table.setHorizontalHeaderLabels(['取得した本文', '用途', 'HOOK名', 'PID', 'Context', 'Thread'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -290,6 +309,9 @@ def run_gui(session_driver=None) -> int:
             self.hook_preview.setReadOnly(True)
             self.hook_preview.setMaximumHeight(130)
             capture.addRow('選択した候補の原文プレビュー', self.hook_preview)
+            self.btn_test_hook_text = QPushButton('この候補の原文を本文整形で試す')
+            self.btn_test_hook_text.clicked.connect(self.use_selected_hook_as_example)
+            capture.addRow(self.btn_test_hook_text)
             row = QHBoxLayout()
             self.text_hook = QPushButton('この候補を本文に使用')
             self.speaker_hook = QPushButton('この候補を話者に使用')
@@ -314,26 +336,26 @@ def run_gui(session_driver=None) -> int:
             self.btn_insert.clicked.connect(self.insert_hook)
             hook_details.addRow(self.btn_insert)
             self.found_hooks = QTableWidget(0, 2)
-            self.found_hooks.setHorizontalHeaderLabels(['HOOK code', 'Search sample'])
+            self.found_hooks.setHorizontalHeaderLabels(['HOOKコード', '探索サンプル'])
             self.found_hooks.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.found_hooks.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.found_hooks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.found_hooks.setMinimumHeight(110)
             self.found_hooks.horizontalHeader().setStretchLastSection(True)
             capture.addRow('追加探索で見つかった候補', self.found_hooks)
-            self.btn_found = QPushButton('Insert selected search result')
+            self.btn_found = QPushButton('選んだ探索候補をHOOKに追加')
             self.btn_found.clicked.connect(self.insert_found)
             capture.addRow(self.btn_found)
-            self.btn_unselect_hook = QPushButton('Remove saved HOOK role')
+            self.btn_unselect_hook = QPushButton('選択済みHOOKの割当を解除')
             self.btn_unselect_hook.clicked.connect(self.unselect_hook)
             hook_details.addRow(self.btn_unselect_hook)
             self.selected_hooks = QLabel('Selected HOOKs: none')
             capture.addRow(self.selected_hooks)
             self.saved_hook_choice = QComboBox()
-            hook_details.addRow('Saved HOOK priority (first dialogue HOOK is preferred)', self.saved_hook_choice)
+            hook_details.addRow('保存したHOOKの優先順位', self.saved_hook_choice)
             row = QHBoxLayout()
-            self.btn_hook_up = QPushButton('Move saved HOOK up')
-            self.btn_hook_down = QPushButton('Move saved HOOK down')
+            self.btn_hook_up = QPushButton('HOOKの優先度を上げる')
+            self.btn_hook_down = QPushButton('HOOKの優先度を下げる')
             self.btn_hook_up.clicked.connect(lambda: self.move_saved_hook(-1))
             self.btn_hook_down.clicked.connect(lambda: self.move_saved_hook(1))
             row.addWidget(self.btn_hook_up)
@@ -345,136 +367,255 @@ def run_gui(session_driver=None) -> int:
             capture.addRow(self.active_hook_status)
             self.paired_text_hook = QComboBox()
             self.paired_speaker_hook = QComboBox()
-            capture.addRow('Dialogue HOOK to associate', self.paired_text_hook)
-            capture.addRow('Speaker HOOK to associate', self.paired_speaker_hook)
-            self.btn_pair = QPushButton('Assign speaker HOOK to dialogue HOOK')
+            capture.addRow('本文HOOK', self.paired_text_hook)
+            capture.addRow('対応する話者HOOK', self.paired_speaker_hook)
+            self.btn_pair = QPushButton('本文HOOKと話者HOOKを対応づける')
             self.btn_pair.clicked.connect(self.pair_hooks)
             capture.addRow(self.btn_pair)
             self.btn_monitor = QPushButton('選択したHOOKで監視開始')
             self.btn_monitor.clicked.connect(self.begin_monitor)
             capture.addRow(self.btn_monitor)
 
-            speech = group('Dialogue and voice routing', page='voice')
-            self.default_tts = QCheckBox('未知話者にTTSを使用（進行モードと独立）')
-            speech.addRow('Unknown speaker TTS', self.default_tts)
+            # Multiple saved speaker assignments are visible as rows. Selection
+            # edits a *single row*, never silently overwrites an unrelated name.
+            speech = group('1. 話者別の音声設定', page='speakers')
+            speech.addRow(QLabel('この作品の話者ごとにTTS使用有無とVoiceを設定します。'
+                                 '一覧にない話者には以下の既定設定が使われます。'))
+            self.default_tts = QCheckBox('未登録の話者でもTTSで読み上げる')
+            speech.addRow(self.default_tts)
             self.default_voice = QComboBox()
             self.default_voice.setEditable(True)
-            speech.addRow('Default Irodori Voice ID', self.default_voice)
+            speech.addRow('未登録話者のVoice', self.default_voice)
+            self.btn_save_speaker_defaults = QPushButton('この作品の既定TTS設定を保存（共通設定より優先）')
+            self.btn_save_speaker_defaults.clicked.connect(self.save_speaker_defaults)
+            speech.addRow(self.btn_save_speaker_defaults)
+            self.speaker_table = QTableWidget(0, 3)
+            self.speaker_table.setHorizontalHeaderLabels(['話者名', 'TTS使用', 'Voice ID（未指定は既定）'])
+            self.configure_editor_table(self.speaker_table)
+            self.speaker_table.itemSelectionChanged.connect(self.show_speaker_override)
+            speech.addRow('登録済み話者（選択すると編集）', self.speaker_table)
             self.speaker_name = QLineEdit()
-            self.speaker_name.setPlaceholderText('Character name, empty = default')
-            speech.addRow('Speaker override', self.speaker_name)
-            self.speaker_tts = QCheckBox('この話者にIrodori TTSを使用')
-            speech.addRow('Speaker TTS', self.speaker_tts)
+            self.speaker_name.setPlaceholderText('ゲームに表示される話者名を正確に入力')
+            speech.addRow('話者名', self.speaker_name)
+            self.speaker_tts = QCheckBox('この話者はTTSで読み上げる（OFFは原音／文字判断）')
+            speech.addRow(self.speaker_tts)
             self.speaker_voice = QComboBox()
             self.speaker_voice.setEditable(True)
-            speech.addRow('Speaker Voice', self.speaker_voice)
-            self.speaker_overrides = QComboBox()
-            self.speaker_overrides.currentIndexChanged.connect(self.show_speaker_override)
-            speech.addRow('Saved speaker overrides', self.speaker_overrides)
-            self.btn_unassign = QPushButton('Remove selected speaker override')
+            speech.addRow('この話者のVoice ID', self.speaker_voice)
+            row = QHBoxLayout()
+            self.btn_assign = QPushButton('話者を追加・変更して保存')
+            self.btn_assign.clicked.connect(self.assign_speaker)
+            row.addWidget(self.btn_assign)
+            self.btn_new_speaker = QPushButton('新しい話者')
+            self.btn_new_speaker.clicked.connect(self.clear_speaker_editor)
+            row.addWidget(self.btn_new_speaker)
+            self.btn_unassign = QPushButton('選択した話者を削除')
             self.btn_unassign.clicked.connect(self.remove_speaker)
-            speech.addRow(self.btn_unassign)
+            row.addWidget(self.btn_unassign)
+            speech.addRow(row)
+            speech.addRow(QLabel('音声設定と自動進行方式は独立です。変更は保存後の次の台詞から反映します。'))
+            self.speaker_example_raw = QPlainTextEdit()
+            self.speaker_example_raw.setMaximumHeight(65)
+            self.speaker_example_raw.setPlaceholderText('例: 大和「おはようございます」')
+            speech.addRow('話者判定を試すHOOK原文', self.speaker_example_raw)
+            self.speaker_preview = QPlainTextEdit()
+            self.speaker_preview.setReadOnly(True)
+            self.speaker_preview.setMinimumHeight(115)
+            speech.addRow('話者設定の適用結果（本文整形タブの例文と連動）', self.speaker_preview)
+            audition = group('2. Irodori Voiceの試聴', page='speakers')
+            self.audition_text = QLineEdit('音声の試聴です。')
+            audition.addRow('試聴する文章', self.audition_text)
+            row = QHBoxLayout()
+            self.btn_audition = QPushButton('選択中のVoiceを試聴')
+            self.btn_audition.clicked.connect(self.audition_voice)
+            row.addWidget(self.btn_audition)
+            self.btn_stop_audition = QPushButton('試聴を止める')
+            self.btn_stop_audition.clicked.connect(self.preview_jobs.cancel)
+            row.addWidget(self.btn_stop_audition)
+            audition.addRow(row)
+
+            # The very same product interpreter is used for this test surface.
+            preview = group('適用前後を試す（ゲームへの入力・音声再生なし）', page='text')
+            preview.addRow(QLabel('HOOKから受信した原文、または任意の台詞を入力します。'
+                                  '規則は上から順に評価され、抽出は最初の一致だけを採用します。'))
+            self.example_raw = QPlainTextEdit()
+            self.example_raw.setPlaceholderText('例: 大和「おはようございます」')
+            self.example_raw.setPlainText('大和「おはようございます」')
+            self.example_raw.setMaximumHeight(85)
+            self.example_raw.textChanged.connect(
+                lambda: self.sync_example(self.example_raw, self.speaker_example_raw))
+            self.speaker_example_raw.textChanged.connect(
+                lambda: self.sync_example(self.speaker_example_raw, self.example_raw))
+            self.speaker_example_raw.setPlainText(self.example_raw.toPlainText())
+            preview.addRow('試したいHOOK原文', self.example_raw)
+            self.editor_preview = QPlainTextEdit()
+            self.editor_preview.setReadOnly(True)
+            self.editor_preview.setMinimumHeight(155)
+            preview.addRow('適用後（本文・話者・TTS文・ASR照合文・Voice）', self.editor_preview)
+            self.preview_state = QLabel('保存済みの作品設定を使用')
+            preview.addRow(self.preview_state)
+
+            extraction = group('1. 話者と本文の抽出（先頭に近い規則が優先）', page='text')
+            extraction.addRow(QLabel('正規表現では本文に (?P<body>...) 、話者を取る場合は'
+                                     ' (?P<speaker>...) を指定します。最初に一致した有効規則だけを使います。'))
+            self.structure_table = QTableWidget(0, 4)
+            self.structure_table.setHorizontalHeaderLabels(['優先順位', '有効', '適用条件（任意）', '抽出パターン'])
+            self.configure_editor_table(self.structure_table)
+            self.structure_table.itemSelectionChanged.connect(self.show_structure_rule)
+            extraction.addRow('登録済み抽出規則', self.structure_table)
+            self.structure_template = QComboBox()
+            for label, value in (
+                ('よくある形式を選ぶ（まだ適用しない）', ''),
+                ('話者「本文」', r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」\s*$'),
+                ('話者：本文', r'^\s*(?P<speaker>[^：:\n]+)[：:]\s*(?P<body>.+)$'),
+                ('話者の次行に本文', r'^\s*(?P<speaker>[^\n]+)\n(?P<body>.+)$'),
+                ('「本文」のみ', r'^\s*「(?P<body>.*?)」\s*$'),
+            ):
+                self.structure_template.addItem(label, value)
+            self.btn_apply_template = QPushButton('選択した形式を編集欄へ')
+            self.btn_apply_template.clicked.connect(self.use_structure_template)
+            extraction.addRow('抽出パターンの例', self.structure_template)
+            extraction.addRow(self.btn_apply_template)
             self.structure_pattern = QLineEdit()
-            self.structure_pattern.setPlaceholderText('regex with named body and optional speaker')
-            speech.addRow('Add dialogue extraction regex', self.structure_pattern)
-            self.btn_structure = QPushButton('Add prioritized extraction rule')
+            self.structure_pattern.setPlaceholderText(r'^(?P<speaker>.+?)「(?P<body>.+)」$')
+            extraction.addRow('抽出する正規表現', self.structure_pattern)
+            self.structure_condition = QLineEdit()
+            self.structure_condition.setPlaceholderText('空欄なら全ての原文を対象')
+            extraction.addRow('適用条件（正規表現・任意）', self.structure_condition)
+            self.structure_enabled = QCheckBox('有効')
+            self.structure_enabled.setChecked(True)
+            extraction.addRow(self.structure_enabled)
+            row = QHBoxLayout()
+            self.btn_structure = QPushButton('規則を追加・変更')
             self.btn_structure.clicked.connect(self.add_structure_rule)
-            speech.addRow(self.btn_structure)
-            self.rules_display = QPlainTextEdit()
-            self.rules_display.setReadOnly(True)
-            self.rules_display.setMaximumHeight(75)
-            speech.addRow('Extraction rules in priority order', self.rules_display)
-            self.structure_choice = QComboBox()
-            speech.addRow('Selected structure rule', self.structure_choice)
-            self.btn_structure_up = QPushButton('Increase rule priority')
+            row.addWidget(self.btn_structure)
+            self.btn_structure_new = QPushButton('新規作成')
+            self.btn_structure_new.clicked.connect(self.clear_structure_editor)
+            row.addWidget(self.btn_structure_new)
+            extraction.addRow(row)
+            row = QHBoxLayout()
+            self.btn_structure_up = QPushButton('上へ（優先度↑）')
             self.btn_structure_up.clicked.connect(self.raise_structure_rule)
-            self.btn_structure_down = QPushButton('Decrease rule priority')
+            self.btn_structure_down = QPushButton('下へ（優先度↓）')
             self.btn_structure_down.clicked.connect(self.lower_structure_rule)
-            self.btn_structure_remove = QPushButton('Remove extraction rule')
+            self.btn_structure_remove = QPushButton('選択規則を削除')
             self.btn_structure_remove.clicked.connect(self.remove_structure_rule)
             for btn in (self.btn_structure_up, self.btn_structure_down, self.btn_structure_remove):
-                speech.addRow(btn)
+                row.addWidget(btn)
+            extraction.addRow(row)
+
+            replacement = group('2. 読み上げ用・原音照合用の文字列置換（上から順に適用）', page='text')
+            replacement.addRow(QLabel('表示本文は変更しません。TTSは読み上げ文、ASRは原音照合文のみを変更します。'))
+            self.replacement_table = QTableWidget(0, 5)
+            self.replacement_table.setHorizontalHeaderLabels(['有効', '一致対象', '置換後', '適用先', '正規表現'])
+            self.configure_editor_table(self.replacement_table)
+            self.replacement_table.itemSelectionChanged.connect(self.show_replacement_rule)
+            replacement.addRow('登録済み置換規則（適用順）', self.replacement_table)
             self.replace_pattern = QLineEdit()
             self.replace_value = QLineEdit()
             self.replace_target = QComboBox()
-            self.replace_target.addItems(['tts', 'asr', 'both'])
-            self.replace_regex = QCheckBox('Regular expression')
-            speech.addRow('Text replacement match', self.replace_pattern)
-            speech.addRow('Replacement text', self.replace_value)
-            speech.addRow('Apply to', self.replace_target)
-            speech.addRow(self.replace_regex)
-            self.btn_replace = QPushButton('Add text replacement')
+            self.replace_target.addItem('読み上げ（TTS）のみ', 'tts')
+            self.replace_target.addItem('原音照合（ASR）のみ', 'asr')
+            self.replace_target.addItem('両方', 'both')
+            self.replace_regex = QCheckBox('正規表現を使用')
+            self.replace_enabled = QCheckBox('有効')
+            self.replace_enabled.setChecked(True)
+            replacement.addRow('置換する文字列', self.replace_pattern)
+            replacement.addRow('置換後の文字列', self.replace_value)
+            replacement.addRow('置換の適用先', self.replace_target)
+            replacement.addRow(self.replace_regex)
+            replacement.addRow(self.replace_enabled)
+            row = QHBoxLayout()
+            self.btn_replace = QPushButton('置換規則を追加・変更')
             self.btn_replace.clicked.connect(self.add_replacement)
-            speech.addRow(self.btn_replace)
-            self.replacement_choice = QComboBox()
-            speech.addRow('Saved replacements', self.replacement_choice)
-            self.btn_replacement_remove = QPushButton('Remove selected replacement')
+            row.addWidget(self.btn_replace)
+            self.btn_replace_new = QPushButton('新規作成')
+            self.btn_replace_new.clicked.connect(self.clear_replacement_editor)
+            row.addWidget(self.btn_replace_new)
+            self.btn_replacement_remove = QPushButton('選択規則を削除')
             self.btn_replacement_remove.clicked.connect(self.remove_replacement)
-            speech.addRow(self.btn_replacement_remove)
+            row.addWidget(self.btn_replacement_remove)
+            replacement.addRow(row)
+            row = QHBoxLayout()
+            self.btn_replace_up = QPushButton('上へ（先に適用）')
+            self.btn_replace_up.clicked.connect(lambda: self.move_replacement_rule(-1))
+            self.btn_replace_down = QPushButton('下へ（後に適用）')
+            self.btn_replace_down.clicked.connect(lambda: self.move_replacement_rule(1))
+            row.addWidget(self.btn_replace_up)
+            row.addWidget(self.btn_replace_down)
+            replacement.addRow(row)
+
+            reading = group('3. 固有名詞の読み（TTSの読み上げ文のみ）', page='text')
+            reading.addRow(QLabel('漢字の単語境界で読み替えます。長い単語を先に処理します。'
+                                  '表示本文やASR照合文は変更しません。'))
+            self.reading_table = QTableWidget(0, 2)
+            self.reading_table.setHorizontalHeaderLabels(['表記', '読み'])
+            self.configure_editor_table(self.reading_table)
+            self.reading_table.itemSelectionChanged.connect(self.show_reading_rule)
+            reading.addRow('登録済みの読み', self.reading_table)
             self.reading_word = QLineEdit()
             self.reading_value = QLineEdit()
-            speech.addRow('Name reading: written form', self.reading_word)
-            speech.addRow('Name reading: pronunciation', self.reading_value)
-            self.btn_reading = QPushButton('Save name reading')
+            reading.addRow('表記', self.reading_word)
+            reading.addRow('読み仮名', self.reading_value)
+            row = QHBoxLayout()
+            self.btn_reading = QPushButton('読みを追加・変更')
             self.btn_reading.clicked.connect(self.add_reading)
-            speech.addRow(self.btn_reading)
-            self.reading_choice = QComboBox()
-            speech.addRow('Saved name readings', self.reading_choice)
-            self.btn_reading_remove = QPushButton('Remove selected name reading')
+            row.addWidget(self.btn_reading)
+            self.btn_reading_new = QPushButton('新規作成')
+            self.btn_reading_new.clicked.connect(self.clear_reading_editor)
+            row.addWidget(self.btn_reading_new)
+            self.btn_reading_remove = QPushButton('選択した読みを削除')
             self.btn_reading_remove.clicked.connect(self.remove_reading)
-            speech.addRow(self.btn_reading_remove)
-            self.audition_text = QLineEdit('音声の試聴です。')
-            speech.addRow('Irodori sample text', self.audition_text)
-            self.btn_audition = QPushButton('Play selected Voice sample')
-            self.btn_audition.clicked.connect(self.audition_voice)
-            speech.addRow(self.btn_audition)
-            self.btn_stop_audition = QPushButton('Stop Voice sample')
-            self.btn_stop_audition.clicked.connect(self.preview_jobs.cancel)
-            speech.addRow(self.btn_stop_audition)
-            self.btn_assign = QPushButton('Save speaker routing')
-            self.btn_assign.clicked.connect(self.assign_speaker)
-            speech.addRow(self.btn_assign)
-            self.reading_ms = QSpinBox()
-            self.reading_ms.setRange(1, 600000)
-            self.reading_ms.setValue(700)
-            # Timing controls are in the separate advance settings section below.
+            row.addWidget(self.btn_reading_remove)
+            reading.addRow(row)
+
+            advanced = group('取得・音声・入力の詳細設定（通常は変更不要）', page='settings')
             self.hook_flush = QSpinBox()
             self.hook_flush.setRange(0, 10000)
-            speech.addRow('Luna HOOK flush delay (ms)', self.hook_flush)
+            advanced.addRow('Luna HOOK出力までの待機（ms）', self.hook_flush)
             self.hook_codepage = QSpinBox()
             self.hook_codepage.setRange(1, 65535)
-            speech.addRow('Luna HOOK codepage', self.hook_codepage)
+            advanced.addRow('Luna文字コードページ', self.hook_codepage)
             self.hook_buffer = QSpinBox()
             self.hook_buffer.setRange(1, 1000000)
-            speech.addRow('Luna HOOK max buffer (characters)', self.hook_buffer)
+            advanced.addRow('Luna文字バッファの上限', self.hook_buffer)
             self.input_key = QSpinBox()
             self.input_key.setRange(1, 254)
-            speech.addRow('Advance virtual key code', self.input_key)
+            advanced.addRow('送信する仮想キーコード', self.input_key)
             self.native_helper = QLineEdit()
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
-            speech.addRow('Process audio helper DLL (音声判断用)', self.native_helper)
-            speech.addRow('Japanese ASR model (音声判断用)', self.asr_model)
-            speech.addRow('ASR tokens', self.asr_tokens)
+            advanced.addRow('音声捕捉ヘルパーDLL（音声判断のみ）', self.native_helper)
+            advanced.addRow('日本語ASRモデル（音声判断のみ）', self.asr_model)
+            advanced.addRow('ASR語彙ファイル', self.asr_tokens)
             self.next_line_timeout = QSpinBox()
             self.next_line_timeout.setRange(1000, 120000)
-            speech.addRow('Next line wait limit (ms)', self.next_line_timeout)
+            advanced.addRow('次の台詞を待つ時間（ms）', self.next_line_timeout)
             self.repeat = QComboBox()
-            self.repeat.addItems(['distinct_only', 'each_after_input'])
-            speech.addRow('HOOK repeated-line behavior', self.repeat)
+            self.repeat.addItem('連続した同文を重複として扱う', 'distinct_only')
+            self.repeat.addItem('送り後の同文は別台詞として扱う', 'each_after_input')
+            advanced.addRow('同一本文の連続取得', self.repeat)
             self.inherit_controls = {}
             for key in COMMON_FIELDS:
-                control = QCheckBox('Inherit common setting: ' + key.replace('_', ' '))
+                control = QCheckBox('共通設定を継承: ' + key.replace('_', ' '))
                 self.inherit_controls[key] = control
-                speech.addRow(control)
-            self.btn_save = QPushButton('Apply and save profile')
+                advanced.addRow(control)
+            self.btn_save = QPushButton('この作品の設定を保存')
             self.btn_save.clicked.connect(self.save_profile)
-            speech.addRow(self.btn_save)
+            advanced.addRow(self.btn_save)
             self.preview = QPlainTextEdit()
             self.preview.setReadOnly(True)
             self.preview.setMaximumHeight(125)
-            speech.addRow('Raw / speaker / reading / voice', self.preview)
+            pages['home'].addWidget(self.preview)
 
+            for w in (self.structure_pattern, self.structure_condition, self.replace_pattern,
+                      self.replace_value, self.reading_word, self.reading_value, self.speaker_name):
+                w.textChanged.connect(lambda _=None, control=w: self.preview_from_control(control))
+            for w in (self.structure_enabled, self.replace_regex, self.replace_enabled,
+                      self.speaker_tts, self.default_tts):
+                w.toggled.connect(lambda _=None, control=w: self.preview_from_control(control))
+            for w in (self.replace_target, self.default_voice, self.speaker_voice):
+                w.currentTextChanged.connect(lambda _=None, control=w: self.preview_from_control(control))
             advance = group('自動進行（TTS使用設定とは独立）')
             self.advance_mode = QComboBox()
             self.advance_mode.addItem('文字のみ判断', AdvanceMode.TEXT.value)
@@ -490,8 +631,8 @@ def run_gui(session_driver=None) -> int:
             advance.addRow('現在台詞の計数と確定時間', self.wait_preview)
             advance.addRow(QLabel('文字のみ判断は原音を途中で送る場合があります。音声判断で確証がなければ停止します。'))
             row = QHBoxLayout()
-            self.btn_permit = QPushButton('Authorize automatic advance')
-            self.btn_pause = QPushButton('Pause automatic advance')
+            self.btn_permit = QPushButton('自動送りを許可')
+            self.btn_pause = QPushButton('自動送りを停止')
             row.addWidget(self.btn_permit)
             row.addWidget(self.btn_pause)
             self.btn_permit.clicked.connect(self.permit)
@@ -611,7 +752,14 @@ def run_gui(session_driver=None) -> int:
             self.profile_id = self.profile_choice.currentData() or ''
             profile = self.current_profile()
             if not profile:
+                self.context_banner.setText('編集対象: 作品とプロファイルを選択してください')
+                for table in (self.speaker_table, self.structure_table,
+                              self.replacement_table, self.reading_table):
+                    table.setRowCount(0)
+                self.refresh_rule_preview()
                 return
+            game = self.catalog.games[self.game_id]
+            self.context_banner.setText(f'編集対象: {game.name} / {profile.name}  ―  この作品の設定を編集中')
             effective = self.catalog.effective_profile(profile)
             for key, widget in self.inherit_controls.items():
                 widget.setChecked(key in profile.inherit_common)
@@ -625,7 +773,7 @@ def run_gui(session_driver=None) -> int:
             self.hook_codepage.setValue(profile.hook_codepage)
             self.hook_buffer.setValue(profile.hook_max_buffer)
             self.input_key.setValue(effective.input_key)
-            self.repeat.setCurrentText(profile.repeat_rule)
+            self.repeat.setCurrentIndex(self.repeat.findData(profile.repeat_rule))
             self.source_mode.setCurrentText(profile.source)
             self.ocr_exe.setText(profile.ocr.executable)
             self.ocr_lang.setText(profile.ocr.language)
@@ -639,6 +787,14 @@ def run_gui(session_driver=None) -> int:
             self.refresh_selected_hooks()
             self.refresh_speaker_choices()
             self.refresh_hook_pairs()
+            # Editors must never carry the previous game's unsaved draft.
+            self.clear_structure_editor()
+            self.clear_replacement_editor()
+            self.clear_reading_editor()
+            self.clear_speaker_editor()
+            self._preview_edit_kind = None
+            self.refresh_rule_preview()
+            self.refresh_rule_preview()
 
         def add_game(self):
             try:
@@ -686,7 +842,7 @@ def run_gui(session_driver=None) -> int:
                 updated.hook_codepage = self.hook_codepage.value()
                 updated.hook_max_buffer = self.hook_buffer.value()
                 updated.input_key = self.input_key.value()
-                updated.repeat_rule = self.repeat.currentText()
+                updated.repeat_rule = self.repeat.currentData()
                 updated.inherit_common = [key for key, widget in self.inherit_controls.items() if widget.isChecked()]
                 updated.validate()
                 game = self.catalog.games[self.game_id]
@@ -701,46 +857,180 @@ def run_gui(session_driver=None) -> int:
                 self.note('Profile not saved: ' + str(exc))
                 return False
 
+        @staticmethod
+        def configure_editor_table(table):
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.setAlternatingRowColors(True)
+            table.setMinimumHeight(155)
+            table.horizontalHeader().setStretchLastSection(True)
+            table.verticalHeader().setVisible(False)
+
+        @staticmethod
+        def selected_editor_row(table):
+            selection = table.selectionModel()
+            rows = selection.selectedRows() if selection else []
+            return rows[0].row() if rows else -1
+
+        @staticmethod
+        def fill_editor_table(table, records, selected=-1):
+            table.blockSignals(True)
+            table.setRowCount(len(records))
+            for row, fields in enumerate(records):
+                for column, value in enumerate(fields):
+                    table.setItem(row, column, QTableWidgetItem(str(value)))
+            table.clearSelection()
+            table.blockSignals(False)
+            if 0 <= selected < len(records):
+                table.selectRow(selected)
+
+        def commit_rule_edit(self, change, message):
+            original = self.current_profile()
+            if original is None:
+                self.note('作品を選択してください')
+                return False
+            try:
+                updated = copy.deepcopy(original)
+                change(updated)
+                updated.validate()
+                self.catalog.games[self.game_id].profiles[updated.id] = updated
+                try:
+                    self.persist()
+                except Exception:
+                    self.catalog.games[self.game_id].profiles[original.id] = original
+                    raise
+                self.note(message + '。監視中の台詞は変更しません。再監視時に新しい設定を適用します。')
+                return True
+            except Exception as exc:
+                self.note('設定を保存できません: ' + str(exc))
+                return False
+
+        def save_speaker_defaults(self):
+            def change(p):
+                p.default_tts = self.default_tts.isChecked()
+                p.default_voice = self.default_voice.currentText().strip()
+                p.inherit_common = [key for key in p.inherit_common
+                                    if key not in ('default_tts', 'default_voice')]
+            if self.commit_rule_edit(change, '作品の既定TTS設定を保存しました'):
+                self.inherit_controls['default_tts'].setChecked(False)
+                self.inherit_controls['default_voice'].setChecked(False)
+                self.refresh_speaker_choices()
+                self.refresh_rule_preview()
+
         def assign_speaker(self):
-            p = self.current_profile()
-            if not p:
-                return
             name = self.speaker_name.text().strip()
             if not name:
-                self.note('A speaker name is required for an override')
+                self.note('話者名を入力してください')
                 return
-            p.speaker_tts[name] = self.speaker_tts.isChecked()
-            p.speaker_voices[name] = self.speaker_voice.currentText().strip()
-            self.persist()
-            self.refresh_speaker_choices()
-            self.note('Saved speaker: ' + name)
+            row = self.selected_editor_row(self.speaker_table)
+            old = self.speaker_table.item(row, 0).text() if row >= 0 else None
+            exists = {self.speaker_table.item(i, 0).text() for i in range(self.speaker_table.rowCount())}
+            if name in exists and name != old:
+                self.note('同名の話者が存在します。一覧から選択して変更してください')
+                return
+            def change(p):
+                if old and old != name:
+                    p.speaker_tts.pop(old, None)
+                    p.speaker_voices.pop(old, None)
+                p.speaker_tts[name] = self.speaker_tts.isChecked()
+                p.speaker_voices[name] = self.speaker_voice.currentText().strip()
+            if self.commit_rule_edit(change, '話者設定を保存しました'):
+                self.refresh_speaker_choices(name)
 
-        def refresh_rules(self):
+        def clear_speaker_editor(self):
+            self.speaker_table.clearSelection()
+            self.speaker_name.clear()
+            self.speaker_tts.setChecked(self.default_tts.isChecked())
+            self.speaker_voice.setEditText('')
+            self._preview_edit_kind = 'speaker'
+            self.refresh_rule_preview()
+
+        def refresh_speaker_choices(self, selected=None):
+            p = self.current_profile()
+            names = sorted(set(p.speaker_tts) | set(p.speaker_voices)) if p else []
+            effective = self.catalog.effective_profile(p) if p else None
+            rows = [(name, '使う' if p.speaker_tts.get(name, effective.default_tts) else '使わない',
+                     p.speaker_voices.get(name, '') or '（作品既定）') for name in names]
+            self.fill_editor_table(self.speaker_table, rows,
+                                   names.index(selected) if selected in names else -1)
+            self.refresh_rule_preview()
+
+        def show_speaker_override(self):
+            row = self.selected_editor_row(self.speaker_table)
+            p = self.current_profile()
+            if row >= 0 and p:
+                name = self.speaker_table.item(row, 0).text()
+                self.speaker_name.setText(name)
+                self.speaker_tts.setChecked(p.speaker_tts.get(name, p.default_tts))
+                self.speaker_voice.setEditText(p.speaker_voices.get(name, ''))
+                self._preview_edit_kind = 'speaker'
+                self.refresh_rule_preview()
+
+        def remove_speaker(self):
+            row = self.selected_editor_row(self.speaker_table)
+            if row < 0:
+                self.note('削除する話者を一覧から選んでください')
+                return
+            name = self.speaker_table.item(row, 0).text()
+            def change(p):
+                p.speaker_tts.pop(name, None)
+                p.speaker_voices.pop(name, None)
+            if self.commit_rule_edit(change, '話者を削除しました'):
+                self.refresh_speaker_choices()
+                self.clear_speaker_editor()
+
+        def refresh_rules(self, focus=None, row=-1):
             p = self.current_profile()
             if not p:
                 return
-            self.rules_display.setPlainText('\n'.join(r.pattern for r in p.structure_rules))
-            self.structure_choice.clear()
-            for i, rule in enumerate(p.structure_rules):
-                self.structure_choice.addItem(rule.pattern, i)
-            self.replacement_choice.clear()
-            for i, rule in enumerate(p.replacements):
-                self.replacement_choice.addItem(f'{rule.target}: {rule.pattern} → {rule.replacement}', i)
-            self.reading_choice.clear()
-            for word, reading in p.name_readings.items():
-                self.reading_choice.addItem(f'{word} → {reading}', word)
+            self.fill_editor_table(self.structure_table, [
+                (str(i + 1), '有効' if rule.enabled else '無効', rule.condition or '（常時）', rule.pattern)
+                for i, rule in enumerate(p.structure_rules)], row if focus == 'structure' else -1)
+            self.fill_editor_table(self.replacement_table, [
+                ('有効' if rule.enabled else '無効', rule.pattern, rule.replacement,
+                 {'tts': 'TTS', 'asr': 'ASR', 'both': '両方'}[rule.target],
+                 '正規表現' if rule.regex else '通常文字列')
+                for rule in p.replacements], row if focus == 'replacement' else -1)
+            words = list(p.name_readings)
+            self.fill_editor_table(self.reading_table, [(word, p.name_readings[word]) for word in words],
+                                   row if focus == 'reading' else -1)
+            self.refresh_rule_preview()
+
+        def show_structure_rule(self):
+            row = self.selected_editor_row(self.structure_table)
+            p = self.current_profile()
+            if row >= 0 and p and row < len(p.structure_rules):
+                rule = p.structure_rules[row]
+                self.structure_pattern.setText(rule.pattern)
+                self.structure_condition.setText(rule.condition)
+                self.structure_enabled.setChecked(rule.enabled)
+                self._preview_edit_kind = 'structure'
+                self.refresh_rule_preview()
+
+        def use_structure_template(self):
+            template = self.structure_template.currentData()
+            if template:
+                self.structure_pattern.setText(template)
+
+        def clear_structure_editor(self):
+            self.structure_table.clearSelection()
+            self.structure_pattern.clear()
+            self.structure_condition.clear()
+            self.structure_enabled.setChecked(True)
+            self._preview_edit_kind = 'structure'
+            self.refresh_rule_preview()
 
         def move_structure_rule(self, movement):
+            row = self.selected_editor_row(self.structure_table)
             p = self.current_profile()
-            if p is None:
+            if p is None or row < 0 or not 0 <= row + movement < len(p.structure_rules):
                 return
-            i = self.structure_choice.currentData()
-            if i is None or not 0 <= i + movement < len(p.structure_rules):
-                return
-            p.structure_rules[i], p.structure_rules[i + movement] = p.structure_rules[i + movement], p.structure_rules[i]
-            self.persist()
-            self.refresh_rules()
-            self.structure_choice.setCurrentIndex(i + movement)
+            def change(profile):
+                profile.structure_rules[row], profile.structure_rules[row + movement] = (
+                    profile.structure_rules[row + movement], profile.structure_rules[row])
+            if self.commit_rule_edit(change, '抽出規則の優先順位を変更しました'):
+                self.refresh_rules('structure', row + movement)
 
         def raise_structure_rule(self):
             self.move_structure_rule(-1)
@@ -748,99 +1038,247 @@ def run_gui(session_driver=None) -> int:
         def lower_structure_rule(self):
             self.move_structure_rule(1)
 
+        def add_structure_rule(self):
+            row = self.selected_editor_row(self.structure_table)
+            try:
+                rule = StructureRule(self.structure_pattern.text().strip(),
+                                     self.structure_condition.text().strip(),
+                                     self.structure_enabled.isChecked())
+            except Exception as exc:
+                self.note('抽出規則を確認してください: ' + str(exc))
+                self.refresh_rule_preview()
+                return
+            def change(p):
+                if row >= 0:
+                    p.structure_rules[row] = rule
+                else:
+                    p.structure_rules.insert(0, rule)
+            if self.commit_rule_edit(change, '抽出規則を保存しました'):
+                self.refresh_rules('structure', row if row >= 0 else 0)
+
         def remove_structure_rule(self):
-            p = self.current_profile()
-            i = self.structure_choice.currentData()
-            if p is not None and i is not None:
-                del p.structure_rules[i]
-                self.persist()
+            row = self.selected_editor_row(self.structure_table)
+            if row < 0:
+                self.note('削除する抽出規則を一覧から選んでください')
+                return
+            if self.commit_rule_edit(lambda p: p.structure_rules.pop(row), '抽出規則を削除しました'):
                 self.refresh_rules()
+                self.clear_structure_editor()
+
+        def show_replacement_rule(self):
+            row = self.selected_editor_row(self.replacement_table)
+            p = self.current_profile()
+            if row >= 0 and p and row < len(p.replacements):
+                rule = p.replacements[row]
+                self.replace_pattern.setText(rule.pattern)
+                self.replace_value.setText(rule.replacement)
+                self.replace_target.setCurrentIndex(self.replace_target.findData(rule.target))
+                self.replace_regex.setChecked(rule.regex)
+                self.replace_enabled.setChecked(rule.enabled)
+                self._preview_edit_kind = 'replacement'
+                self.refresh_rule_preview()
+
+        def clear_replacement_editor(self):
+            self.replacement_table.clearSelection()
+            self.replace_pattern.clear()
+            self.replace_value.clear()
+            self.replace_regex.setChecked(False)
+            self.replace_target.setCurrentIndex(0)
+            self.replace_enabled.setChecked(True)
+            self._preview_edit_kind = 'replacement'
+            self.refresh_rule_preview()
+
+        def add_replacement(self):
+            row = self.selected_editor_row(self.replacement_table)
+            try:
+                rule = ReplacementRule(self.replace_pattern.text(), self.replace_value.text(),
+                    self.replace_regex.isChecked(), self.replace_target.currentData(),
+                    self.replace_enabled.isChecked())
+            except Exception as exc:
+                self.note('置換規則を確認してください: ' + str(exc))
+                self.refresh_rule_preview()
+                return
+            def change(p):
+                if row >= 0:
+                    p.replacements[row] = rule
+                else:
+                    p.replacements.append(rule)
+            if self.commit_rule_edit(change, '置換規則を保存しました'):
+                self.refresh_rules('replacement', row if row >= 0 else self.replacement_table.rowCount())
+
+        def move_replacement_rule(self, movement):
+            row = self.selected_editor_row(self.replacement_table)
+            p = self.current_profile()
+            if p is None or row < 0 or not 0 <= row + movement < len(p.replacements):
+                return
+            def change(profile):
+                profile.replacements[row], profile.replacements[row + movement] = (
+                    profile.replacements[row + movement], profile.replacements[row])
+            if self.commit_rule_edit(change, '置換の適用順を変更しました'):
+                self.refresh_rules('replacement', row + movement)
 
         def remove_replacement(self):
-            p = self.current_profile()
-            i = self.replacement_choice.currentData()
-            if p is not None and i is not None:
-                del p.replacements[i]
-                self.persist()
+            row = self.selected_editor_row(self.replacement_table)
+            if row < 0:
+                self.note('削除する置換規則を一覧から選んでください')
+                return
+            if self.commit_rule_edit(lambda p: p.replacements.pop(row), '置換規則を削除しました'):
                 self.refresh_rules()
+                self.clear_replacement_editor()
+
+        def show_reading_rule(self):
+            row = self.selected_editor_row(self.reading_table)
+            p = self.current_profile()
+            if row >= 0 and p:
+                name = self.reading_table.item(row, 0).text()
+                self.reading_word.setText(name)
+                self.reading_value.setText(p.name_readings[name])
+                self._preview_edit_kind = 'reading'
+                self.refresh_rule_preview()
+
+        def clear_reading_editor(self):
+            self.reading_table.clearSelection()
+            self.reading_word.clear()
+            self.reading_value.clear()
+            self._preview_edit_kind = 'reading'
+            self.refresh_rule_preview()
+
+        def add_reading(self):
+            word = self.reading_word.text().strip()
+            reading = self.reading_value.text().strip()
+            if not word or not reading:
+                self.note('表記と読みの両方を入力してください')
+                return
+            row = self.selected_editor_row(self.reading_table)
+            old = self.reading_table.item(row, 0).text() if row >= 0 else None
+            p = self.current_profile()
+            if p and word in p.name_readings and old != word:
+                self.note('同じ表記が既にあります。一覧で選択して変更してください')
+                return
+            def change(profile):
+                if old and old != word:
+                    profile.name_readings.pop(old, None)
+                profile.name_readings[word] = reading
+            if self.commit_rule_edit(change, '読みを保存しました'):
+                self.refresh_rules('reading', list(self.current_profile().name_readings).index(word))
 
         def remove_reading(self):
-            p = self.current_profile()
-            word = self.reading_choice.currentData()
-            if p is not None and word:
-                p.name_readings.pop(word, None)
-                self.persist()
+            row = self.selected_editor_row(self.reading_table)
+            if row < 0:
+                self.note('削除する読みを一覧から選んでください')
+                return
+            word = self.reading_table.item(row, 0).text()
+            if self.commit_rule_edit(lambda p: p.name_readings.pop(word), '読みを削除しました'):
                 self.refresh_rules()
-
-        def refresh_speaker_choices(self):
-            p = self.current_profile()
-            self.speaker_overrides.clear()
-            if p:
-                for name in sorted(set(p.speaker_tts) | set(p.speaker_voices)):
-                    self.speaker_overrides.addItem(name, name)
-            self.refresh_rules()
-
-        def show_speaker_override(self, *_):
-            p = self.current_profile()
-            name = self.speaker_overrides.currentData()
-            if p and name:
-                self.speaker_name.setText(name)
-                self.speaker_tts.setChecked(p.speaker_tts.get(name, p.default_tts))
-                self.speaker_voice.setEditText(p.speaker_voices.get(name, ''))
-
-        def remove_speaker(self):
-            p = self.current_profile()
-            name = self.speaker_overrides.currentData()
-            if p and name:
-                p.speaker_tts.pop(name, None)
-                p.speaker_voices.pop(name, None)
-                self.persist()
-                self.refresh_speaker_choices()
+                self.clear_reading_editor()
 
         def audition_voice(self):
             voice = self.speaker_voice.currentText().strip() or self.default_voice.currentText().strip()
             try:
                 if not voice:
-                    raise ValueError('choose a Voice ID first')
+                    raise ValueError('Voice IDを選択してください')
                 self.preview_jobs.start(Token(-1, -1), self.catalog.irodori_url,
                                         self.audition_text.text(), voice)
             except Exception as exc:
-                self.note('Voice sample unavailable: ' + str(exc))
+                self.note('試聴できません: ' + str(exc))
 
         def on_preview(self, success, reason):
-            self.note('Voice sample finished' if success else 'Voice sample: ' + reason)
+            self.note('試聴が終了しました' if success else '試聴: ' + reason)
 
-        def add_structure_rule(self):
-            p = self.current_profile()
-            if p:
-                try:
-                    rule = StructureRule(self.structure_pattern.text().strip())
-                    p.structure_rules.insert(0, rule)
-                    self.persist()
-                    self.refresh_rules()
-                except Exception as exc:
-                    self.note(str(exc))
+        def sync_example(self, source, destination):
+            if destination.toPlainText() != source.toPlainText():
+                destination.blockSignals(True)
+                destination.setPlainText(source.toPlainText())
+                destination.blockSignals(False)
+            self.refresh_rule_preview()
 
-        def add_replacement(self):
-            p = self.current_profile()
-            if p:
-                try:
-                    p.replacements.append(ReplacementRule(self.replace_pattern.text(),
-                        self.replace_value.text(), self.replace_regex.isChecked(),
-                        self.replace_target.currentText()))
-                    self.persist()
-                    self.refresh_rules()
-                    self.note('Text replacement saved')
-                except Exception as exc:
-                    self.note(str(exc))
+        def preview_from_control(self, control):
+            if control in (self.structure_pattern, self.structure_condition, self.structure_enabled):
+                self._preview_edit_kind = 'structure'
+            elif control in (self.replace_pattern, self.replace_value, self.replace_target,
+                             self.replace_regex, self.replace_enabled):
+                self._preview_edit_kind = 'replacement'
+            elif control in (self.reading_word, self.reading_value):
+                self._preview_edit_kind = 'reading'
+            elif control in (self.speaker_name, self.speaker_voice, self.speaker_tts):
+                self._preview_edit_kind = 'speaker'
+            self.refresh_rule_preview()
 
-        def add_reading(self):
+        def refresh_rule_preview(self, *_):
+            if not hasattr(self, 'example_raw') or not hasattr(self, 'editor_preview'):
+                return
             p = self.current_profile()
-            if p and self.reading_word.text().strip() and self.reading_value.text().strip():
-                p.name_readings[self.reading_word.text().strip()] = self.reading_value.text().strip()
-                self.persist()
-                self.refresh_rules()
-                self.note('Name reading saved')
+            if p is None:
+                self.editor_preview.setPlainText('作品を選択してください。')
+                self.speaker_preview.setPlainText('作品を選択してください。')
+                return
+            draft = copy.deepcopy(self.catalog.effective_profile(p))
+            draft.default_tts = self.default_tts.isChecked()
+            draft.default_voice = self.default_voice.currentText().strip()
+            kind = getattr(self, '_preview_edit_kind', None)
+            row = -1
+            try:
+                if kind == 'structure' and self.structure_pattern.text().strip():
+                    rule = StructureRule(self.structure_pattern.text().strip(),
+                        self.structure_condition.text().strip(), self.structure_enabled.isChecked())
+                    row = self.selected_editor_row(self.structure_table)
+                    if row >= 0:
+                        draft.structure_rules[row] = rule
+                    else:
+                        draft.structure_rules.insert(0, rule)
+                elif kind == 'replacement' and self.replace_pattern.text():
+                    rule = ReplacementRule(self.replace_pattern.text(), self.replace_value.text(),
+                        self.replace_regex.isChecked(), self.replace_target.currentData(),
+                        self.replace_enabled.isChecked())
+                    row = self.selected_editor_row(self.replacement_table)
+                    if row >= 0:
+                        draft.replacements[row] = rule
+                    else:
+                        draft.replacements.append(rule)
+                elif kind == 'reading' and self.reading_word.text().strip() and self.reading_value.text().strip():
+                    row = self.selected_editor_row(self.reading_table)
+                    if row >= 0:
+                        draft.name_readings.pop(self.reading_table.item(row, 0).text(), None)
+                    draft.name_readings[self.reading_word.text().strip()] = self.reading_value.text().strip()
+                elif kind == 'speaker' and self.speaker_name.text().strip():
+                    row = self.selected_editor_row(self.speaker_table)
+                    if row >= 0:
+                        old = self.speaker_table.item(row, 0).text()
+                        draft.speaker_tts.pop(old, None)
+                        draft.speaker_voices.pop(old, None)
+                    draft.speaker_tts[self.speaker_name.text().strip()] = self.speaker_tts.isChecked()
+                    draft.speaker_voices[self.speaker_name.text().strip()] = self.speaker_voice.currentText().strip()
+                raw = self.example_raw.toPlainText()
+                trace = []
+                u = interpret(raw, draft, session=0, line=0, source='preview', sequence=0, trace=trace)
+                _, matched = matching_structure_rule(raw, draft)
+                rule_name = f'優先順位 {matched + 1} の抽出規則が一致' if matched is not None else '抽出規則に一致せず：原文を本文として使用'
+                self.editor_preview.setPlainText(
+                    f'話者: {u.speaker or "（未判別）"}\n'
+                    f'表示本文: {u.text}\n'
+                    f'TTS読み上げ文: {u.reading}\n'
+                    f'ASR照合文: {u.match_text}\n'
+                    f'適用した抽出規則: {rule_name}\n'
+                    f'設定: TTS {"使用" if u.use_tts else "不使用"} / Voice {u.voice or "（未指定）"}\n'
+                    f'計数: {u.character_count}文字 / 文字待機: {u.text_wait_ms}ms\n'
+                    f'適用履歴: {" / ".join(trace)}')
+                editing_name = self.speaker_name.text().strip()
+                editing_line = (
+                    f'編集中の話者「{editing_name}」: '
+                    f'TTS {"使用" if draft.speaker_tts.get(editing_name, draft.default_tts) else "不使用"} / '
+                    f'Voice {draft.speaker_voices.get(editing_name, draft.default_voice) or "（未指定）"}\n'
+                    if editing_name else '編集中の話者: 未選択\n')
+                self.speaker_preview.setPlainText(
+                    editing_line +
+                    f'例文から判別した話者: {u.speaker or "（未判別）"}\n'
+                    f'例文の設定: TTS {"使用" if u.use_tts else "不使用"} / '
+                    f'Voice {u.voice or "（未指定）"}\n'
+                    f'例文に適用した設定: {"話者別" if u.speaker in draft.speaker_tts or u.speaker in draft.speaker_voices else "作品既定"}')
+                self.preview_state.setText('保存済み設定の結果' if kind is None else
+                    '編集中の入力値を仮適用しています。変更は「追加・変更」から保存してください。')
+            except (ValueError, re.error, IndexError) as exc:
+                self.editor_preview.setPlainText('編集中の規則は適用できません: ' + str(exc))
+                self.preview_state.setText('設定を修正するまで保存できません。')
 
         def duplicate_profile(self):
             if self.current_profile():
@@ -860,7 +1298,7 @@ def run_gui(session_driver=None) -> int:
                     self.note(str(exc))
 
         def delete_profile(self):
-            if self.current_profile() and QMessageBox.question(self, 'Delete profile',
+            if self.current_profile() and QMessageBox.question(self, 'プロファイルを削除',
                     'Delete this profile and its settings?') == QMessageBox.StandardButton.Yes:
                 try:
                     self.catalog.delete_profile(self.game_id, self.profile_id)
@@ -1456,6 +1894,15 @@ def run_gui(session_driver=None) -> int:
             history = self.source_samples.get(source.identity, ()) if source else ()
             self.hook_preview.setPlainText('\n── Previous output ──\n'.join(reversed(history)))
 
+
+        def use_selected_hook_as_example(self):
+            source = self.chosen_source()
+            samples = self.source_samples.get(source.identity, ()) if source else ()
+            if not samples:
+                self.note('台詞が取得されているHOOK候補を選択してください')
+                return
+            self.example_raw.setPlainText(samples[-1])
+            self.tabs.setCurrentIndex(self.text_tab_index)
 
         def begin_monitor(self):
             try:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from autoadv.conversation import Controller, Target
 from autoadv.model import (AdvanceMode, Profile, HookSelection, ReplacementRule,
-                           count_reading_characters, interpret)
+                           count_reading_characters, interpret, matching_structure_rule, StructureRule)
 from autoadv.storage import Catalog, CommonSettings, load, save
 
 
@@ -54,6 +54,28 @@ class ReadingCharacters(unittest.TestCase):
         explicit = interpret('京：おはようございます。', profile,
                              session=1, line=1, source='hook', sequence=1)
         self.assertEqual((explicit.speaker, explicit.text), ('京', 'おはようございます。'))
+
+    def test_rule_preview_trace_is_the_actual_interpretation_path(self):
+        p = make_profile(tts=True)
+        p.structure_rules.insert(0, StructureRule(r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」$'))
+        p.structure_rules.insert(0, StructureRule(r'(?P<body>notmatched)', enabled=False))
+        p.name_readings['京'] = 'みやこ'
+        p.replacements = [ReplacementRule('みやこ', 'ミヤコ', target='tts'),
+                          ReplacementRule('京', '京都', target='asr')]
+        p.speaker_tts['大和'] = False
+        p.speaker_voices['大和'] = 'v2'
+        raw = '大和「京さん」'
+        match, index = matching_structure_rule(raw, p)
+        self.assertIsNotNone(match)
+        self.assertEqual(index, 1)
+        trace = []
+        u = interpret(raw, p, session=1, line=1, source='hook', sequence=1, trace=trace)
+        without_trace = interpret(raw, p, session=1, line=1, source='hook', sequence=1)
+        self.assertEqual(u, without_trace)
+        self.assertEqual((u.speaker, u.text, u.reading, u.match_text, u.use_tts, u.voice),
+                         ('大和', '京さん', 'ミヤコさん', '京都さん', False, 'v2'))
+        self.assertEqual(trace, ['抽出: 優先順位 2', '読み: 京 → みやこ',
+                                 '置換 1: TTS文を変更', '置換 2: ASR文を変更'])
 
     def test_speaker_tts_independent_of_advance_mode(self):
         p = make_profile(AdvanceMode.AUDIO, True, True)
