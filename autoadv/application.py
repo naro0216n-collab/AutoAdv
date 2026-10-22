@@ -21,7 +21,11 @@ from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
 from .model import HookSelection, Profile, Utterance, interpret
+from .native_audio import NativeAudio
+from .ocr import OCRWorker, TesseractOCR
+from .screen import WindowsClientCapture
 from .storage import Catalog
+from .voice import VoiceJobs
 
 
 @dataclass(frozen=True)
@@ -400,6 +404,12 @@ class AutoAdvApplication:
         self._host_epoch = 0
         self._irodori_server: IrodoriServer | None = None
         self._irodori_epoch = 0
+        self._native_audio: NativeAudio | None = None
+        self._native_audio_epoch = 0
+        self._ocr_worker: OCRWorker | None = None
+        self._ocr_epoch = 0
+        self._voice_jobs: VoiceJobs | None = None
+        self._preview_jobs: VoiceJobs | None = None
 
     def runtime_state(self) -> RuntimeState:
         c = self.controller
@@ -447,6 +457,201 @@ class AutoAdvApplication:
 
     def close_runtime(self, reason: str = 'stopped') -> None:
         self.controller.close(reason)
+
+    @property
+    def native_audio_available(self) -> bool:
+        return self._native_audio is not None
+
+    @property
+    def native_audio_pid(self) -> int:
+        return self._native_audio.pid if self._native_audio is not None else 0
+
+    def start_native_audio(self, profile: Profile, *, on_ready: Callable[[int, bool, str], None],
+                           on_event: Callable[[Token | None, str, str], None],
+                           on_pcm: Callable[[Token, int], None] | None = None,
+                           on_inference: Callable[[Token, dict], None] | None = None,
+                           on_voice_end: Callable[[Token, dict], None] | None = None) -> bool:
+        """Own process audio capture for the active runtime session.
+
+        Loading is asynchronous because ASR model construction can be slow.  A
+        later session/close invalidates the worker by epoch, so a late helper can
+        never become the active audio source for another game or utterance.
+        """
+        self.close_native_audio()
+        if (profile.advance_mode.value != 'audio' or not profile.native_helper or
+                not profile.asr_model or not profile.asr_tokens):
+            return False
+        state = self.runtime_state()
+        if state.target is None:
+            return False
+        self._native_audio_epoch += 1
+        epoch = self._native_audio_epoch
+        session = state.session
+        pid = state.target.audio_pid or state.target.pid
+
+        def current() -> bool:
+            now = self.runtime_state()
+            return (epoch == self._native_audio_epoch and now.session == session and
+                    now.target is not None and (now.target.audio_pid or now.target.pid) == pid)
+
+        def publish_event(token: Token | None, event: str, detail: str) -> None:
+            if current():
+                on_event(token, event, detail)
+
+        def publish_pcm(token: Token, frames: int) -> None:
+            if current() and on_pcm is not None:
+                on_pcm(token, frames)
+
+        def publish_inference(token: Token, metrics: dict) -> None:
+            if current() and on_inference is not None:
+                on_inference(token, metrics)
+
+        def publish_voice_end(token: Token, metrics: dict) -> None:
+            if current() and on_voice_end is not None:
+                on_voice_end(token, metrics)
+
+        def load_native() -> None:
+            native = None
+            try:
+                native = NativeAudio(
+                    pid, Path(profile.native_helper), Path(profile.asr_model), Path(profile.asr_tokens),
+                    publish_event, on_pcm=publish_pcm if on_pcm is not None else None,
+                    on_inference=publish_inference if on_inference is not None else None,
+                    on_voice_end=publish_voice_end if on_voice_end is not None else None)
+                native.start()
+                if not current():
+                    native.close()
+                    return
+                self._native_audio = native
+                on_ready(session, True, '')
+            except Exception as exc:
+                if native is not None:
+                    native.close()
+                if current():
+                    state = self.runtime_state()
+                    utterance = state.utterance
+                    if (utterance is not None and utterance.advance_mode.value == 'audio' and
+                            not utterance.use_tts and not utterance.uncertain_text_fallback):
+                        self.controller.pause('native_audio_unavailable_hold')
+                    on_ready(session, False, str(exc))
+
+        threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
+        return True
+
+    def close_native_audio(self) -> None:
+        self._native_audio_epoch += 1
+        native, self._native_audio = self._native_audio, None
+        if native is not None:
+            threading.Thread(target=native.close, daemon=True, name='autoadv-close-native').start()
+
+    def cancel_native_audio(self) -> None:
+        if self._native_audio is not None:
+            self._native_audio.cancel()
+
+    def begin_native_audio(self, token: Token, match_text: str, *, replay_from_ms: int | None = None) -> bool:
+        if self._native_audio is None:
+            return False
+        self._native_audio.begin(token, match_text, replay_from_ms=replay_from_ms)
+        return True
+
+    def native_audio_holds_deadline(self, token: Token) -> bool:
+        return bool(self._native_audio and self._native_audio.holds_deadline(token))
+
+    def native_audio_boundary(self) -> None:
+        if self._native_audio is not None:
+            self._native_audio.boundary()
+
+    def native_audio_capture_status(self) -> dict:
+        return self._native_audio.capture_status() if self._native_audio is not None else {}
+
+    def handle_native_event(self, token: Token | None, event: str, detail: str = '') -> bool:
+        """Apply native evidence to Controller and report presentation completion."""
+        state = self.runtime_state()
+        if token is None or token != state.token or state.utterance is None:
+            return False
+        utterance = state.utterance
+        if utterance.advance_mode.value != 'audio' or utterance.use_tts:
+            return False
+        if event == 'error':
+            if not utterance.uncertain_text_fallback:
+                self.controller.pause('native_audio_failure')
+            return False
+        mapping = {'started': 'native_started', 'quiet': 'native_quiet', 'completed': 'native_finished'}
+        presentation = mapping.get(event)
+        return bool(presentation and self.controller.presentation_event(token, presentation))
+
+    @property
+    def ocr_running(self) -> bool:
+        return self._ocr_worker is not None
+
+    def start_ocr(self, profile: Profile, *, on_text: Callable[[int, int, int, str], None],
+                  on_error: Callable[[str], None]) -> bool:
+        """Own the optional OCR acquisition worker for the active runtime."""
+        self.close_ocr()
+        if profile.source != 'ocr':
+            return False
+        state = self.runtime_state()
+        if state.target is None:
+            raise RuntimeError('runtime target required before OCR starts')
+        self._ocr_epoch += 1
+        epoch = self._ocr_epoch
+        session = state.session
+        pid = state.target.pid
+
+        def current() -> bool:
+            now = self.runtime_state()
+            return (epoch == self._ocr_epoch and now.session == session and
+                    now.target is not None and now.target.pid == pid)
+
+        def publish_text(sequence: int, text: str) -> None:
+            if current():
+                on_text(session, pid, sequence, text)
+
+        def publish_error(reason: str) -> None:
+            if current():
+                self.controller.pause('ocr_failure')
+                on_error(reason)
+
+        reader = TesseractOCR(profile.ocr, WindowsClientCapture(state.target.hwnd, pid))
+        worker = OCRWorker(reader, publish_text, publish_error)
+        self._ocr_worker = worker
+        worker.start()
+        return True
+
+    def close_ocr(self) -> None:
+        self._ocr_epoch += 1
+        worker, self._ocr_worker = self._ocr_worker, None
+        if worker is not None:
+            threading.Thread(target=worker.close, daemon=True, name='autoadv-close-ocr').start()
+
+    def configure_voice_jobs(self, *, on_result: Callable[[Token, bool, str], None],
+                             on_preview: Callable[[bool, str], None],
+                             on_timing: Callable[[Token, str, float, float], None] | None = None) -> None:
+        """Bind presentation callbacks while retaining playback ownership here."""
+        if self._voice_jobs is not None:
+            self._voice_jobs.cancel()
+        if self._preview_jobs is not None:
+            self._preview_jobs.cancel()
+        self._voice_jobs = VoiceJobs(on_result, on_timing=on_timing)
+        self._preview_jobs = VoiceJobs(lambda _token, done, reason: on_preview(done, reason))
+
+    def start_voice(self, token: Token, reading: str, voice: str) -> None:
+        if self._voice_jobs is None:
+            raise RuntimeError('voice jobs are not configured')
+        self._voice_jobs.start(token, self.catalog.irodori_url, reading, voice)
+
+    def cancel_voice(self) -> None:
+        if self._voice_jobs is not None:
+            self._voice_jobs.cancel()
+
+    def start_voice_preview(self, reading: str, voice: str) -> None:
+        if self._preview_jobs is None:
+            raise RuntimeError('voice preview is not configured')
+        self._preview_jobs.start(Token(-1, -1), self.catalog.irodori_url, reading, voice)
+
+    def cancel_voice_preview(self) -> None:
+        if self._preview_jobs is not None:
+            self._preview_jobs.cancel()
 
     @property
     def host_epoch(self) -> int:

@@ -46,8 +46,9 @@ class TwoModeGuiTests(unittest.TestCase):
                 app.set_auto_advance(True)
                 token = app.observe_runtime_ocr(sequence=1, text='「こんにちは！」', pid=100, session=app.runtime_state().session)
                 requests = []
-                window.jobs.start = lambda *args: requests.append(args)
-                window.native_audio = native
+                window.application.start_voice = lambda token, reading, voice: requests.append((token, reading, voice))
+                if native is not None:
+                    window.application._native_audio = native
                 window.display_utterance(token)
                 self.assertEqual(c.utterance.character_count, 5)
                 self.assertIn('500 ms', window.wait_preview.text())
@@ -55,7 +56,7 @@ class TwoModeGuiTests(unittest.TestCase):
                 self.assertEqual(window.advance_authorization.text(), '自動送り ON')
                 self.assertFalse(window.play_issue.isVisible())
                 check(window, c, token, requests, sent)
-                window.native_audio = None
+                window.application._native_audio = None
             finally:
                 window.close()
             return 0
@@ -67,7 +68,7 @@ class TwoModeGuiTests(unittest.TestCase):
     def test_text_mode_tts_requires_both_conditions(self):
         def check(window, c, token, requests, sent):
             self.assertEqual(len(requests), 1)
-            self.assertEqual(requests[0][3], 'speaker-voice')
+            self.assertEqual(requests[0][2], 'speaker-voice')
             window.presentation_event(token, 'text_elapsed')
             self.assertFalse(c.completed)
             window.on_voice(token, True, '')
@@ -80,7 +81,7 @@ class TwoModeGuiTests(unittest.TestCase):
     def test_audio_mode_tts_only_waits_for_playback(self):
         def check(window, c, token, requests, sent):
             self.assertEqual(len(requests), 1)
-            self.assertIsNone(window.native_audio)
+            self.assertFalse(window.application.native_audio_available)
             window.fallback_due(token)
             self.assertEqual(sent, [])
             window.on_voice(token, True, '')

@@ -1,5 +1,7 @@
 from autoadv.application import AutoAdvApplication
+from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
+from autoadv.model import AdvanceMode
 from autoadv.storage import Catalog
 
 
@@ -252,6 +254,170 @@ def test_replacing_catalog_invalidates_old_profile_and_capture_state():
     assert app.capture is None
     selected = app.select_profile(game.id, game.default_profile)
     assert selected is replacement.games[game.id].profiles[game.default_profile]
+
+
+def test_application_owns_native_audio_lifecycle_and_runtime_evidence(monkeypatch):
+    import autoadv.application as application_module
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+        def start(self):
+            self.target()
+
+    class FakeNative:
+        instances = []
+        def __init__(self, pid, helper, model, tokens, notify, **callbacks):
+            self.pid = pid
+            self.notify = notify
+            self.callbacks = callbacks
+            self.started = False
+            self.closed = False
+            self.begun = []
+            self.boundaries = 0
+            self.cancelled = 0
+            FakeNative.instances.append(self)
+        def start(self):
+            self.started = True
+        def begin(self, token, match_text, *, replay_from_ms=None):
+            self.begun.append((token, match_text, replay_from_ms))
+        def boundary(self):
+            self.boundaries += 1
+        def cancel(self):
+            self.cancelled += 1
+        def holds_deadline(self, token):
+            return True
+        def capture_status(self):
+            return {'packets': 3}
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(application_module.threading, 'Thread', ImmediateThread)
+    monkeypatch.setattr(application_module, 'NativeAudio', FakeNative)
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    profile.source = 'ocr'
+    profile.advance_mode = AdvanceMode.AUDIO
+    profile.native_helper = 'helper.dll'
+    profile.asr_model = 'model.onnx'
+    profile.asr_tokens = 'tokens.txt'
+    app.begin_runtime(profile, Target(101, 500, audio_pid=202), 'ocr', 1)
+    ready = []
+    assert app.start_native_audio(
+        profile, on_ready=lambda *args: ready.append(args),
+        on_event=lambda *_: None)
+    native = FakeNative.instances[-1]
+    assert native.started
+    assert app.native_audio_available
+    assert app.native_audio_pid == 202
+    assert ready == [(app.runtime_state().session, True, '')]
+
+    token = app.observe_runtime_ocr(
+        sequence=1, text='「声」', pid=101, session=app.runtime_state().session)
+    assert token is not None
+    assert app.begin_native_audio(token, app.runtime_state().utterance.match_text, replay_from_ms=12)
+    assert native.begun[-1] == (token, app.runtime_state().utterance.match_text, 12)
+    assert app.native_audio_holds_deadline(token)
+    app.native_audio_boundary()
+    app.cancel_native_audio()
+    assert native.boundaries == 1
+    assert native.cancelled == 1
+    assert app.native_audio_capture_status() == {'packets': 3}
+    assert app.handle_native_event(token, 'completed')
+    assert app.runtime_state().presentation_reason == 'native'
+
+    app.close_native_audio()
+    assert native.closed
+    assert not app.native_audio_available
+
+
+def test_application_owns_ocr_worker_and_turns_failure_into_runtime_hold(monkeypatch):
+    import autoadv.application as application_module
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+        def start(self):
+            self.target()
+
+    class FakeCapture:
+        def __init__(self, hwnd, pid):
+            self.hwnd, self.pid = hwnd, pid
+
+    class FakeReader:
+        def __init__(self, config, capture):
+            self.config, self.capture = config, capture
+
+    class FakeWorker:
+        instances = []
+        def __init__(self, reader, on_text, on_error):
+            self.reader, self.on_text, self.on_error = reader, on_text, on_error
+            self.started = False
+            self.closed = False
+            FakeWorker.instances.append(self)
+        def start(self):
+            self.started = True
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(application_module.threading, 'Thread', ImmediateThread)
+    monkeypatch.setattr(application_module, 'WindowsClientCapture', FakeCapture)
+    monkeypatch.setattr(application_module, 'TesseractOCR', FakeReader)
+    monkeypatch.setattr(application_module, 'OCRWorker', FakeWorker)
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    profile.source = 'ocr'
+    app.begin_runtime(profile, Target(101, 500), 'ocr', 1)
+    lines, errors = [], []
+    assert app.start_ocr(profile, on_text=lambda *args: lines.append(args), on_error=errors.append)
+    worker = FakeWorker.instances[-1]
+    assert worker.started and app.ocr_running
+    worker.on_text(3, '台詞')
+    assert lines == [(app.runtime_state().session, 101, 3, '台詞')]
+    worker.on_error('capture failed')
+    assert errors == ['capture failed']
+    assert app.runtime_state().pause_reason == 'ocr_failure'
+    app.close_ocr()
+    assert worker.closed
+    assert not app.ocr_running
+
+
+def test_application_owns_tts_and_preview_jobs(monkeypatch):
+    import autoadv.application as application_module
+
+    class FakeJobs:
+        instances = []
+        def __init__(self, report, on_timing=None):
+            self.report = report
+            self.on_timing = on_timing
+            self.starts = []
+            self.cancelled = 0
+            FakeJobs.instances.append(self)
+        def start(self, token, url, reading, voice):
+            self.starts.append((token, url, reading, voice))
+        def cancel(self):
+            self.cancelled += 1
+
+    monkeypatch.setattr(application_module, 'VoiceJobs', FakeJobs)
+    app, _ = app_with_game()
+    results, previews = [], []
+    app.configure_voice_jobs(
+        on_result=lambda *args: results.append(args),
+        on_preview=lambda *args: previews.append(args))
+    voice_jobs, preview_jobs = FakeJobs.instances
+    token = Token(1, 2)
+    app.start_voice(token, '読み', 'voice-1')
+    app.start_voice_preview('試聴', 'voice-2')
+    assert voice_jobs.starts == [(token, app.catalog.irodori_url, '読み', 'voice-1')]
+    assert preview_jobs.starts[0][1:] == (app.catalog.irodori_url, '試聴', 'voice-2')
+    voice_jobs.report(token, True, '')
+    preview_jobs.report(preview_jobs.starts[0][0], False, 'cancelled')
+    assert results == [(token, True, '')]
+    assert previews == [(False, 'cancelled')]
+    app.cancel_voice()
+    app.cancel_voice_preview()
+    assert voice_jobs.cancelled == 1
+    assert preview_jobs.cancelled == 1
 
 
 

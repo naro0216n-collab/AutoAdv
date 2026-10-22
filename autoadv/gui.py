@@ -15,10 +15,6 @@ from .conversation import Target, Token
 from .hook_protocol import HookEvent, ThreadSource
 from .model import AdvanceMode, Profile, StructureRule, ReplacementRule, COMMON_FIELDS, interpret
 from .storage import load, save
-from .voice import VoiceJobs
-from .native_audio import NativeAudio
-from .ocr import OCRWorker, TesseractOCR
-from .screen import WindowsClientCapture
 from .import_luna import inspect_luna, add_luna_games
 from .import_legacy import inspect_legacy, add_legacy_games
 from .game_windows import find_game_windows, find_game_processes, WindowCandidate
@@ -45,7 +41,7 @@ def run_gui(session_driver=None) -> int:
         ocr = Signal(int, int, int, str)
         ocr_error = Signal(str)
         native = Signal(object, str, str)
-        native_ready = Signal(int, object, str)
+        native_ready = Signal(int, bool, str)
         native_pcm = Signal(object, int)
         preview = Signal(bool, str)
 
@@ -70,13 +66,13 @@ def run_gui(session_driver=None) -> int:
             self.bridge.native_pcm.connect(self.on_native_pcm)
             self.bridge.preview.connect(self.on_preview)
             self.validation_trace = ValidationTrace()
-            self.jobs = VoiceJobs(
-                lambda token, done, reason: self.bridge.voice.emit(token, done, reason),
+            self.application.configure_voice_jobs(
+                on_result=lambda token, done, reason: self.bridge.voice.emit(token, done, reason),
+                on_preview=lambda done, reason: self.bridge.preview.emit(done, reason),
                 on_timing=(lambda token, stage, duration_ms, audio_ms:
                     self.validation_trace.emit('tts_timing', session=token.session,
                         line=token.line, stage=stage, duration_ms=duration_ms, audio_ms=audio_ms))
                 if os.environ.get('AUTOADV_VALIDATION_TRACE') else None)
-            self.preview_jobs = VoiceJobs(lambda token, done, reason: self.bridge.preview.emit(done, reason))
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
@@ -92,10 +88,6 @@ def run_gui(session_driver=None) -> int:
             self._connecting_pid = 0
             self.game_id = ''
             self.profile_id = ''
-            self.ocr_worker: OCRWorker | None = None
-            self.native_audio: NativeAudio | None = None
-            self.native_audio_setup_error: str | None = None
-            self.native_token: Token | None = None
             self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
             self._output_group: list[HookEvent] = []
             self._output_timer = QTimer(self)
@@ -381,7 +373,7 @@ def run_gui(session_driver=None) -> int:
             speech.addRow(add_speaker)
             self.audition_text = QLineEdit('音声の試聴です。')
             self.btn_audition = QPushButton('試聴'); self.btn_audition.clicked.connect(self.audition_voice)
-            self.btn_stop_audition = QPushButton('停止'); self.btn_stop_audition.clicked.connect(self.preview_jobs.cancel)
+            self.btn_stop_audition = QPushButton('停止'); self.btn_stop_audition.clicked.connect(self.application.cancel_voice_preview)
             audition_row=QWidget(); audition_layout=QHBoxLayout(audition_row); audition_layout.setContentsMargins(0,0,0,0); audition_layout.addWidget(self.audition_text,1); audition_layout.addWidget(self.btn_audition); audition_layout.addWidget(self.btn_stop_audition)
             speech.addRow(audition_row)
 
@@ -1066,8 +1058,7 @@ def run_gui(session_driver=None) -> int:
             try:
                 if not voice:
                     raise ValueError('Voice IDを選択してください')
-                self.preview_jobs.start(Token(-1, -1), self.catalog.irodori_url,
-                                        self.audition_text.text(), voice)
+                self.application.start_voice_preview(self.audition_text.text(), voice)
             except Exception as exc:
                 self.note('試聴できません: ' + str(exc))
 
@@ -1787,7 +1778,10 @@ def run_gui(session_driver=None) -> int:
                     not all(any(h.matches(src) for src in self.sources.values()) for h in profile.hooks)):
                 return
             self._resume_monitor_requested = False
-            QTimer.singleShot(0, lambda: self.begin_monitor(save_draft=False))
+            # The output that proves a saved source is available may itself be
+            # the first dialogue line. Start now so this same HookEvent can
+            # continue through on_hook and enter the new runtime session.
+            self.begin_monitor(save_draft=False)
 
         def connect_game(self):
             if not self.pid.value():
@@ -2315,15 +2309,15 @@ def run_gui(session_driver=None) -> int:
                 if not p:
                     raise ValueError('作品とプロファイルを選択してください')
                 p = self.catalog.effective_profile(p)
-                self.jobs.cancel()
+                self.application.cancel_voice()
                 self.stop_session()
                 if p.source == 'ocr':
-                    session = self.application.begin_runtime(p, target, 'ocr', 1)
-                    reader = TesseractOCR(p.ocr, WindowsClientCapture(target.hwnd, target.pid))
-                    self.ocr_worker = OCRWorker(reader,
-                        lambda seq, txt, ss=session, pid=target.pid: self.bridge.ocr.emit(ss, pid, seq, txt),
-                        self.bridge.ocr_error.emit)
-                    self.ocr_worker.start()
+                    self.application.begin_runtime(p, target, 'ocr', 1)
+                    self.application.start_ocr(
+                        p,
+                        on_text=lambda session, pid, sequence, text:
+                            self.bridge.ocr.emit(session, pid, sequence, text),
+                        on_error=self.bridge.ocr_error.emit)
                 else:
                     if any(h.identity in self.ambiguous_sources for h in p.hooks):
                         raise ValueError('選択したHOOKの識別子が衝突しています。再接続するか別の取得元を選択してください')
@@ -2401,8 +2395,8 @@ def run_gui(session_driver=None) -> int:
                 self.refresh_status()
 
         def start_native_audio_if_needed(self, profile: Profile):
-            self.native_audio_setup_error = None
             if profile.advance_mode != AdvanceMode.AUDIO:
+                self.application.close_native_audio()
                 return
             has_asr = bool(profile.asr_model and profile.asr_tokens)
             if not profile.native_helper or not has_asr:
@@ -2411,82 +2405,59 @@ def run_gui(session_driver=None) -> int:
                 # A non-TTS line enters the normal uncertain-audio fallback
                 # or manual-handoff decision when its text deadline arrives.
                 self.note('非TTSの音声判断にはProcess LoopbackとASRモデル・tokensが必要です。根拠不足では設定に従います。')
+                self.application.close_native_audio()
                 return
-            target = self.application.runtime_state().target
-            if not target:
-                return
-            session = self.application.runtime_state().session
-            def load_native():
-                native = None
-                try:
-                    native = NativeAudio(target.audio_pid or target.pid, Path(profile.native_helper),
-                        Path(profile.asr_model), Path(profile.asr_tokens),
-                        lambda token, event, detail: self.bridge.native.emit(token, event, detail),
-                        on_pcm=(lambda token, frames: self.bridge.native_pcm.emit(token, frames))
-                        if self.validation_trace.path else None,
-                        on_inference=(lambda token, metrics:
-                            self.validation_trace.emit('asr_inference', session=token.session,
-                                line=token.line, **metrics))
-                        if self.validation_trace.path else None,
-                        on_voice_end=(lambda token, metrics:
-                            self.validation_trace.emit('native_voice_end_estimate',
-                                session=token.session, line=token.line,
-                                estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
-                                onset_estimated_at_ns=metrics['estimated_onset_ms'] * 1_000_000,
-                                evidence=metrics['source']))
-                        if self.validation_trace.path else None)
-                    native.start()
-                    self.bridge.native_ready.emit(session, native, '')
-                except Exception as exc:
-                    if native:
-                        native.close()
-                    self.bridge.native_ready.emit(session, None, str(exc))
             self.note('Loading native audio capture without blocking game UI')
-            threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
+            self.application.start_native_audio(
+                profile,
+                on_ready=lambda session, ready, reason:
+                    self.bridge.native_ready.emit(session, ready, reason),
+                on_event=lambda token, event, detail:
+                    self.bridge.native.emit(token, event, detail),
+                on_pcm=(lambda token, frames: self.bridge.native_pcm.emit(token, frames))
+                    if self.validation_trace.path else None,
+                on_inference=(lambda token, metrics:
+                    self.validation_trace.emit('asr_inference', session=token.session,
+                        line=token.line, **metrics))
+                    if self.validation_trace.path else None,
+                on_voice_end=(lambda token, metrics:
+                    self.validation_trace.emit('native_voice_end_estimate',
+                        session=token.session, line=token.line,
+                        estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
+                        onset_estimated_at_ns=metrics['estimated_onset_ms'] * 1_000_000,
+                        evidence=metrics['source']))
+                    if self.validation_trace.path else None)
 
-        def on_native_ready(self, session, native, reason):
+        def on_native_ready(self, session, ready, reason):
             if session != self.application.runtime_state().session or not self.application.runtime_state().target:
-                if native:
-                    threading.Thread(target=native.close, daemon=True).start()
                 return
-            if reason:
-                self.native_audio_setup_error = reason
+            if not ready:
                 self.note('Native audio unavailable: ' + reason)
-                u = self.application.runtime_state().utterance
-                if u and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts and not u.uncertain_text_fallback:
-                    self.application.hold_runtime('native_audio_unavailable_hold')
                 self.refresh_status()
                 return
-            self.native_audio = native
-            self.validation_trace.emit('native_ready', session=session, audio_pid=native.pid)
+            self.validation_trace.emit('native_ready', session=session, audio_pid=self.application.native_audio_pid)
             self.note('Process audio helper started; waiting for actual captured PCM')
             token, u = self.application.runtime_state().token, self.application.runtime_state().utterance
             if token and u and not self.application.runtime_state().sent and not self.application.runtime_state().completed and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts:
-                native.begin(token, u.match_text)
+                self.application.begin_native_audio(token, u.match_text)
 
         def on_native_pcm(self, token, frames):
             if token is not None and token == self.application.runtime_state().token:
                 self.validation_trace.emit('native_pcm', session=token.session, line=token.line,
-                    frames=frames, audio_pid=getattr(self.native_audio, 'pid', 0))
+                    frames=frames, audio_pid=self.application.native_audio_pid)
 
         def on_native(self, token, event, detail):
             if token != self.application.runtime_state().token or token is None:
                 return
             self.validation_trace.emit('native_event', session=token.session, line=token.line,
                 status=event, method='asr')
-            u = self.application.runtime_state().utterance
-            if not u or u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
-                return
             if event == 'error':
                 self.note('Native audio: ' + detail)
-                if not u.uncertain_text_fallback:
-                    self.application.hold_runtime('native_audio_failure')
-            elif event == 'started':
-                self.presentation_event(token, 'native_started')
-            elif event == 'quiet':
-                self.presentation_event(token, 'native_quiet')
-            elif event == 'completed':
-                self.presentation_event(token, 'native_finished')
+            if self.application.handle_native_event(token, event, detail):
+                self.validation_trace.emit('presentation_complete', session=token.session,
+                    line=token.line, success=True,
+                    reason=self.application.runtime_state().presentation_reason)
+                self.advance_if_ready()
             self.refresh_status()
 
         def display_utterance(self, token: Token):
@@ -2516,9 +2487,8 @@ def run_gui(session_driver=None) -> int:
             u = self.application.runtime_state().utterance
             if not u or token != self.application.runtime_state().token:
                 return
-            self.jobs.cancel()
-            if self.native_audio:
-                self.native_audio.cancel()
+            self.application.cancel_voice()
+            self.application.cancel_native_audio()
             external_ns = self.application.take_external_transition(token)
             if external_ns:
                 self.validation_trace.emit('external_hook_transition', session=token.session,
@@ -2526,7 +2496,7 @@ def run_gui(session_driver=None) -> int:
             if u.advance_mode == AdvanceMode.TEXT:
                 QTimer.singleShot(u.text_wait_ms, lambda t=token: self.presentation_event(t, 'text_elapsed'))
             elif not u.use_tts:
-                if self.native_audio:
+                if self.application.native_audio_available:
                     replay_from_ms = None
                     if external_ns:
                         # Luna may flush after the game already started voice.
@@ -2534,7 +2504,7 @@ def run_gui(session_driver=None) -> int:
                         # still must match the new text before the PCM is owned.
                         lookback_ms = max(100, self.application.runtime_state().profile.hook_flush_ms + 100)
                         replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
-                    self.native_audio.begin(token, u.match_text, replay_from_ms=replay_from_ms)
+                    self.application.begin_native_audio(token, u.match_text, replay_from_ms=replay_from_ms)
                 else:
                     self.note('Native observation unavailable; uncertain audio cannot be certified')
                 # The same reading deadline governs opt-in continuation and
@@ -2545,14 +2515,14 @@ def run_gui(session_driver=None) -> int:
                     self.presentation_event(token, 'tts_finished', success=False)
                     self.note('TTS requires a configured Voice')
                 else:
-                    self.jobs.start(token, self.catalog.irodori_url, u.reading, u.voice)
+                    self.application.start_voice(token, u.reading, u.voice)
 
         def fallback_due(self, token):
             u = self.application.runtime_state().utterance
             if (token != self.application.runtime_state().token or not u or u.use_tts or
                     u.advance_mode != AdvanceMode.AUDIO or self.application.runtime_state().completed or self.application.runtime_state().sent):
                 return
-            if self.native_audio and self.native_audio.holds_deadline(token):
+            if self.application.native_audio_holds_deadline(token):
                 # A correlated voice is active, or a bounded real ASR analysis
                 # of captured speech is pending. Neither grants completion.
                 QTimer.singleShot(200, lambda t=token: self.fallback_due(t))
@@ -2590,7 +2560,6 @@ def run_gui(session_driver=None) -> int:
 
         def on_ocr_error(self, reason):
             self.note('OCR stopped: ' + reason)
-            self.application.hold_runtime('ocr_failure')
             self.refresh_status()
 
         def preflight(self, target: Target) -> bool:
@@ -2610,8 +2579,8 @@ def run_gui(session_driver=None) -> int:
                     line=token.line)
             # Start next-line observation at the input operation, before the
             # game can render/play ahead of Luna's delayed HOOK flush.
-            if self.native_audio:
-                self.native_audio.boundary()
+            if self.application.native_audio_available:
+                self.application.native_audio_boundary()
                 if token:
                     self.validation_trace.emit('audio_observation_boundary',
                         session=token.session, after_line=token.line)
@@ -2655,12 +2624,12 @@ def run_gui(session_driver=None) -> int:
                     self.validation_trace.emit('controller_handoff', session=token.session,
                         line=token.line, reason=c.pause_reason)
                     u = c.utterance
-                    if (self.native_audio and u and
+                    if (self.application.native_audio_available and u and
                             u.advance_mode == AdvanceMode.AUDIO and not u.use_tts):
                         self.validation_trace.emit('native_capture_summary',
                             session=token.session, line=token.line,
-                            audio_pid=self.native_audio.pid,
-                            **self.native_audio.capture_status())
+                            audio_pid=self.application.native_audio_pid,
+                            **self.application.native_audio_capture_status())
                     self._last_validation_handoff = marker
             view = self.application.play_view()
             previous = self.advance_authorization.blockSignals(True)
@@ -2703,15 +2672,10 @@ def run_gui(session_driver=None) -> int:
                 self._capture_output_group.clear()
             if hasattr(self, '_synced_sources') and self._synced_sources:
                 self.sync_hook_threads(clear=True)
-            if self.native_audio:
-                native, self.native_audio = self.native_audio, None
-                threading.Thread(target=native.close, daemon=True).start()
-            self.native_token = None
-            if self.ocr_worker:
-                worker, self.ocr_worker = self.ocr_worker, None
-                threading.Thread(target=worker.close, daemon=True).start()
-            self.jobs.cancel()
-            self.preview_jobs.cancel()
+            self.application.close_native_audio()
+            self.application.close_ocr()
+            self.application.cancel_voice()
+            self.application.cancel_voice_preview()
             self.application.close_runtime('session_changed')
             if hasattr(self, 'preview'):
                 self.preview.clear()
