@@ -265,17 +265,17 @@ def run_gui(session_driver=None) -> int:
                     control = QWidget()
                     layout = QHBoxLayout(control)
                     layout.setContentsMargins(0, 0, 0, 0)
-                    group = QButtonGroup(self)
-                    group.setExclusive(True)
+                    mode_group = QButtonGroup(self)
+                    mode_group.setExclusive(True)
                     text_button = QPushButton('文字のみ判断')
                     audio_button = QPushButton('音声判断')
                     for button, mode in ((text_button, AdvanceMode.TEXT), (audio_button, AdvanceMode.AUDIO)):
                         button.setCheckable(True)
                         button.setProperty('advanceMode', mode.value)
-                        group.addButton(button)
+                        mode_group.addButton(button)
                         layout.addWidget(button, 1)
                     (audio_button if value == AdvanceMode.AUDIO else text_button).setChecked(True)
-                    self.common_advance_mode_group = group
+                    self.common_advance_mode_group = mode_group
                     self.common_advance_text_button = text_button
                     self.common_advance_audio_button = audio_button
                 elif isinstance(value, bool):
