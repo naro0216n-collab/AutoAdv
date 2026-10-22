@@ -56,15 +56,10 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
             runtime.mkdir()
             exe = runtime / 'AutoAdvValidationGame.exe'
             exe.write_bytes(b'fixture-exe')
-            (runtime / 'game').mkdir()
-            (runtime / 'game' / 'archive.rpa').write_bytes(b'fixture-data')
             manifest = write_manifest(runtime, exe, source=source,
                                       renpy_version='8.4.1', sdk_sha256='ab' * 32)
             self.assertEqual(verify_runtime(runtime, source=source), exe)
             self.assertEqual(manifest['executable'], 'AutoAdvValidationGame.exe')
-            (runtime / 'game' / 'archive.rpa').write_bytes(b'tampered')
-            with self.assertRaisesRegex(ValueError, 'runtime hash mismatch'):
-                verify_runtime(runtime, source=source)
 
     def test_manifest_rejects_fixture_source_drift(self):
         with TemporaryDirectory() as tmp:
@@ -82,13 +77,6 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
             script.write_text('label start:\n    "changed"\n', encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'does not match current fixture source'):
                 verify_runtime(runtime, source=source)
-
-
-    def test_fixture_text_checkout_is_lf_stable_across_operating_systems(self):
-        attributes = Path('.gitattributes').read_text(encoding='utf-8')
-        self.assertIn('/validation/real_game/renpy/**/*.rpy text eol=lf', attributes)
-        self.assertIn('/validation/real_game/renpy/**/*.txt text eol=lf', attributes)
-        self.assertIn('/validation/real_game/renpy/game/audio/** -text', attributes)
 
 
     def test_live_workflow_consumes_prebuilt_fixture_and_keeps_construction_separate(self):

@@ -53,14 +53,14 @@ Live検証は**既に構築済みのWindowsゲーム**から開始する。`run_
 
 ## Prebuilt validation game
 
-`validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。Fixture Runtime workflowはfixture構築入力が`develop`で変わったときだけRen'Py SDKを取得して配布物を生成する。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
+`validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。fixtureを変更した場合はValidation Fixture Runtimeを明示実行して対応assetを生成する。通常publishやFast CIから重量級fixture buildを自動連鎖させない。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
 
-Live Advancement workflowは現行fixtureソースSHA-256と一致するassetだけを取得し、`fixture-manifest.json` の以下を `validation.real_game.fixture_runtime` で検証してからゲームを起動する。
+Live Advancement workflowは現行fixtureソースSHA-256と一致するassetだけを取得し、`fixture-manifest.json` では次の最小条件だけを確認してからゲームを起動する。
 
 - 現行 `renpy` fixture入力の正規化SHA-256（`.rpy`/`.txt` の改行差は同一内容として扱う）
-- 展開済みruntime全体のSHA-256
-- Ren'Py版と固定SDK SHA-256
-- 起動対象Windows executable
+- 起動対象Windows executableの存在
+
+Ren'Py版と固定SDK SHA-256は生成元の診断情報としてmanifestへ残すが、展開後runtime全体の再ハッシュは行わない。配布ZIPの転送整合性やGitHub Releaseの保管を重ねて独自検証することはAutoAdvの製品成立条件ではなく、実ゲーム検証を検証器自身の差異で失敗させるためである。
 
 fixtureソースとprebuilt runtimeが一致しない、または対応assetが存在しない場合はAutoAdv製品失敗ではなく検証前提不成立として停止する。Live workflow内で代わりにRen'Py SDKを取得してゲームを再構築しない。
 

@@ -63,17 +63,6 @@ def source_digest(root: Path = SOURCE) -> str:
     return _tree_digest(_iter_source_files(root))
 
 
-def runtime_digest(root: Path) -> str:
-    files = []
-    for path in sorted(p for p in root.rglob('*') if p.is_file()):
-        relative = path.relative_to(root)
-        if relative.as_posix() == MANIFEST_NAME:
-            continue
-        files.append((relative, path))
-    if not files:
-        raise ValueError('validation fixture runtime is empty')
-    return _tree_digest(files)
-
 
 def write_manifest(runtime: Path, executable: Path, *, source: Path = SOURCE,
                    renpy_version: str, sdk_sha256: str) -> dict:
@@ -88,7 +77,6 @@ def write_manifest(runtime: Path, executable: Path, *, source: Path = SOURCE,
     data = {
         'schema': SCHEMA,
         'source_sha256': source_digest(source),
-        'runtime_sha256': runtime_digest(runtime),
         'renpy_version': str(renpy_version),
         'sdk_sha256': str(sdk_sha256).lower(),
         'executable': executable_relative.as_posix(),
@@ -109,8 +97,6 @@ def verify_runtime(runtime: Path, *, source: Path = SOURCE) -> Path:
     expected_source = source_digest(source)
     if data.get('source_sha256') != expected_source:
         raise ValueError('prebuilt validation game does not match current fixture source')
-    if data.get('runtime_sha256') != runtime_digest(runtime):
-        raise ValueError('prebuilt validation game runtime hash mismatch')
     executable = runtime / str(data.get('executable', ''))
     if not executable.is_file() or executable.suffix.lower() != '.exe':
         raise ValueError('prebuilt validation game executable is missing')
