@@ -6,6 +6,7 @@ import sys
 import subprocess
 import threading
 import copy
+import ntpath
 from collections import deque
 from pathlib import Path
 
@@ -23,7 +24,8 @@ from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .import_luna import inspect_luna, add_luna_games
 from .import_legacy import inspect_legacy, add_legacy_games
-from .game_windows import find_game_windows, find_game_processes
+from .game_windows import find_game_windows, find_game_processes, WindowCandidate
+from .running_target_dialog import choose_running_target
 from .windows_input import WindowsAdvancementInput
 from .validation_trace import ValidationTrace, text_digest
 
@@ -34,7 +36,7 @@ def run_gui(session_driver=None) -> int:
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
                                    QLabel, QPushButton, QComboBox, QFileDialog,
                                    QSpinBox, QGroupBox, QMessageBox, QCheckBox, QScrollArea, QInputDialog,
-                                   QTableWidget, QTableWidgetItem, QAbstractItemView)
+                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView)
 
     class SignalBridge(QObject):
         hook = Signal(object)
@@ -96,19 +98,28 @@ def run_gui(session_driver=None) -> int:
             self._output_timer = QTimer(self)
             self._output_timer.setSingleShot(True)
             self._output_timer.timeout.connect(self.flush_selected_outputs)
-            scroller = QScrollArea()
-            scroller.setWidgetResizable(True)
-            self.setCentralWidget(scroller)
-            panel = QWidget()
-            scroller.setWidget(panel)
-            body = QVBoxLayout(panel)
+            # The normal first-run workflow is foremost; specialist settings have
+            # their own tabs, rather than filling the first screen with ABI fields.
+            tabs = QTabWidget()
+            self.setCentralWidget(tabs)
+            pages = {}
+            for key, name in (('home', 'ゲーム・自動進行'), ('hook', 'HOOK候補'),
+                              ('voice', '音声・本文整形'), ('settings', '詳細・共通設定')):
+                scroller = QScrollArea()
+                scroller.setWidgetResizable(True)
+                panel = QWidget()
+                scroller.setWidget(panel)
+                layout = QVBoxLayout(panel)
+                tabs.addTab(scroller, name)
+                pages[key] = layout
+            self.tabs = tabs
 
-            def group(title):
+            def group(title, *, page='home'):
                 widget = QGroupBox(title)
                 form = QFormLayout(widget)
-                body.addWidget(widget)
+                pages[page].addWidget(widget)
                 return form
-            environment = group('Common environment')
+            environment = group('Common environment', page='settings')
             self.irodori_path = QLineEdit(self.catalog.irodori_root)
             self.luna_runtime_status = QLabel(f'{RELEASE}: {runtime_dir()}')
             self.irodori_url = QLineEdit(self.catalog.irodori_url)
@@ -154,41 +165,45 @@ def run_gui(session_driver=None) -> int:
             environment.addRow(self.btn_save_common)
             self.server_status = QLabel('Irodori: not connected')
             environment.addRow(self.server_status)
-            self.btn_host = QPushButton('Start LunaHook Host')
+            self.btn_host = QPushButton('LunaHook Hostを単独起動（通常は接続時に自動起動）')
             environment.addRow(self.btn_host)
             self.btn_host.clicked.connect(self.start_host)
             self.host_status = QLabel('LunaHook: disconnected')
-            environment.addRow(self.host_status)
 
-            games = group('Game and profiles')
+            games = group('ゲームを選ぶ')
+            game_details = group('作品・プロファイルの詳細登録', page='settings')
             self.game_choice = QComboBox()
             self.game_choice.currentIndexChanged.connect(self.choose_game)
             games.addRow('Game', self.game_choice)
+            self.btn_pick_running = QPushButton('実行中のゲーム・プロセスから選択して登録')
+            self.btn_pick_running.clicked.connect(self.pick_running_game)
+            games.addRow(self.btn_pick_running)
+            games.addRow(QLabel('初回は上のボタンから選択。PIDやHOOKコードの入力は不要です。'))
             self.new_game = QLineEdit()
             self.new_game.setPlaceholderText('Game display name')
             self.btn_game = QPushButton('Register game')
             row = QHBoxLayout()
             row.addWidget(self.new_game)
             row.addWidget(self.btn_game)
-            games.addRow(row)
+            game_details.addRow(row)
             self.btn_game.clicked.connect(self.add_game)
             self.game_exe = QLineEdit()
             self.game_exe.setPlaceholderText('Optional game executable path for future sessions')
-            games.addRow('Game executable', self.game_exe)
+            game_details.addRow('Game executable', self.game_exe)
             self.audio_exe = QLineEdit()
             self.audio_exe.setPlaceholderText('Optional: separate audio process executable')
-            games.addRow('Audio process executable', self.audio_exe)
+            game_details.addRow('Audio process executable', self.audio_exe)
             self.input_exe = QLineEdit()
             self.input_exe.setPlaceholderText('Optional: separate input window executable')
-            games.addRow('Input process executable', self.input_exe)
+            game_details.addRow('Input process executable', self.input_exe)
             self.btn_launch = QPushButton('Launch registered game')
             self.btn_launch.clicked.connect(self.launch_game)
             games.addRow(self.btn_launch)
             self.btn_import = QPushButton('Import existing Luna game settings (preview and confirm)')
-            games.addRow(self.btn_import)
+            game_details.addRow(self.btn_import)
             self.btn_import.clicked.connect(self.import_luna)
             self.btn_import_legacy = QPushButton('Import previous AutoAdv v2 settings (preview and confirm)')
-            games.addRow(self.btn_import_legacy)
+            game_details.addRow(self.btn_import_legacy)
             self.btn_import_legacy.clicked.connect(self.import_legacy)
             self.profile_choice = QComboBox()
             self.profile_choice.currentIndexChanged.connect(self.choose_profile)
@@ -199,7 +214,7 @@ def run_gui(session_driver=None) -> int:
             row = QHBoxLayout()
             row.addWidget(self.new_profile)
             row.addWidget(self.btn_profile)
-            games.addRow(row)
+            game_details.addRow(row)
             self.btn_profile.clicked.connect(self.add_profile)
             self.btn_dup = QPushButton('Duplicate profile')
             self.btn_rename = QPushButton('Rename profile')
@@ -209,48 +224,88 @@ def run_gui(session_driver=None) -> int:
                                     (self.btn_rename, self.rename_profile),
                                     (self.btn_delete, self.delete_profile),
                                     (self.btn_default, self.set_default_profile)):
-                games.addRow(button)
+                game_details.addRow(button)
                 button.clicked.connect(handler)
 
-            capture = group('Live game and HOOK selection')
+            capture = group('HOOKを選び、本文を確認', page='hook')
+            hook_details = group('HOOKと入力対象の詳細指定', page='settings')
+            self.hook_target = QLabel('まず「ゲーム・自動進行」で実行中のゲームを選択してください')
+            capture.addRow(self.hook_target)
             self.pid = QSpinBox()
             self.pid.setRange(0, 2147483647)
             self.hwnd = QLineEdit()
             self.hwnd.setPlaceholderText('HWND e.g. 0x12345')
-            capture.addRow('HOOK process PID (current run)', self.pid)
+            hook_details.addRow('HOOK process PID (current run)', self.pid)
             self.audio_pid = QSpinBox()
             self.audio_pid.setRange(0, 2147483647)
             self.audio_pid.setSpecialValueText('Use HOOK PID')
             self.input_pid = QSpinBox()
             self.input_pid.setRange(0, 2147483647)
             self.input_pid.setSpecialValueText('Use HOOK PID')
-            capture.addRow('Audio process PID (0 = HOOK)', self.audio_pid)
-            capture.addRow('Input window PID (0 = HOOK)', self.input_pid)
-            capture.addRow('Game HWND (current run)', self.hwnd)
-            self.attach = QPushButton('Attach to game PID')
+            hook_details.addRow('Audio process PID (0 = HOOK)', self.audio_pid)
+            hook_details.addRow('Input window PID (0 = HOOK)', self.input_pid)
+            hook_details.addRow('Game HWND (current run)', self.hwnd)
+            self.attach = QPushButton('選択したゲームにLunaHookを接続')
             self.attach.clicked.connect(self.connect_game)
             capture.addRow(self.attach)
+            capture.addRow(self.host_status)
             self.btn_discover = QPushButton('Find windows matching registered game executable')
             self.btn_discover.clicked.connect(self.detect_game)
-            capture.addRow(self.btn_discover)
+            hook_details.addRow(self.btn_discover)
             self.btn_discover_all = QPushButton('Identify a running game from all registered executables')
             self.btn_discover_all.clicked.connect(self.detect_registered_game)
-            capture.addRow(self.btn_discover_all)
+            hook_details.addRow(self.btn_discover_all)
             self.btn_audio_target = QPushButton('Find audio process by saved executable')
             self.btn_input_target = QPushButton('Find input window by saved executable')
             self.btn_audio_target.clicked.connect(lambda: self.detect_associated_target('audio'))
             self.btn_input_target.clicked.connect(lambda: self.detect_associated_target('input'))
-            capture.addRow(self.btn_audio_target)
-            capture.addRow(self.btn_input_target)
-            self.btn_find = QPushButton('Find HOOK candidates')
+            hook_details.addRow(self.btn_audio_target)
+            hook_details.addRow(self.btn_input_target)
+            self.source_mode = QComboBox()
+            self.source_mode.addItems(['hook', 'ocr'])
+            capture.addRow('Text source', self.source_mode)
+            self.ocr_exe = QLineEdit('tesseract')
+            self.ocr_lang = QLineEdit('jpn')
+            self.ocr_region = QLineEdit('0,0,640,180')
+            hook_details.addRow('Installed Tesseract executable', self.ocr_exe)
+            hook_details.addRow('OCR language', self.ocr_lang)
+            hook_details.addRow('OCR region x,y,width,height', self.ocr_region)
+            self.ocr_stability = QSpinBox()
+            self.ocr_stability.setRange(1, 10)
+            hook_details.addRow('OCR repeated stable captures', self.ocr_stability)
+            self.source_table = QTableWidget(0, 6)
+            self.source_table.setHorizontalHeaderLabels(['取得した本文', '用途', 'HOOK名', 'PID', 'Context', 'Thread'])
+            self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.source_table.setMinimumHeight(205)
+            self.source_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.source_table.setColumnWidth(1, 120)
+            self.source_table.setColumnWidth(2, 160)
+            self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
+            capture.addRow('取得中のHOOKと実際の本文（行を選択）', self.source_table)
+            self.hook_preview = QPlainTextEdit()
+            self.hook_preview.setReadOnly(True)
+            self.hook_preview.setMaximumHeight(130)
+            capture.addRow('選択した候補の原文プレビュー', self.hook_preview)
+            row = QHBoxLayout()
+            self.text_hook = QPushButton('この候補を本文に使用')
+            self.speaker_hook = QPushButton('この候補を話者に使用')
+            self.text_hook.clicked.connect(lambda: self.select_hook('text'))
+            self.speaker_hook.clicked.connect(lambda: self.select_hook('speaker'))
+            row.addWidget(self.text_hook)
+            row.addWidget(self.speaker_hook)
+            capture.addRow(row)
+            self.btn_find = QPushButton('HOOK候補を追加探索')
             self.btn_find.clicked.connect(self.find_hooks)
             capture.addRow(self.btn_find)
+            capture.addRow(QLabel('接続後にゲームで台詞を表示すると、取得できた原文が一覧に並びます。'))
             self.manual_hook = QLineEdit()
             self.manual_hook.setPlaceholderText('Manual Luna HOOK code')
-            capture.addRow('Manual HOOK code', self.manual_hook)
-            self.btn_insert = QPushButton('Insert and save manual HOOK')
+            hook_details.addRow('手動HOOKコード（通常は不要）', self.manual_hook)
+            self.btn_insert = QPushButton('詳細操作: HOOKコードを手動追加')
             self.btn_insert.clicked.connect(self.insert_hook)
-            capture.addRow(self.btn_insert)
+            hook_details.addRow(self.btn_insert)
             self.found_hooks = QTableWidget(0, 2)
             self.found_hooks.setHorizontalHeaderLabels(['HOOK code', 'Search sample'])
             self.found_hooks.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -258,50 +313,17 @@ def run_gui(session_driver=None) -> int:
             self.found_hooks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.found_hooks.setMinimumHeight(110)
             self.found_hooks.horizontalHeader().setStretchLastSection(True)
-            capture.addRow('Search results', self.found_hooks)
+            capture.addRow('追加探索で見つかった候補', self.found_hooks)
             self.btn_found = QPushButton('Insert selected search result')
             self.btn_found.clicked.connect(self.insert_found)
             capture.addRow(self.btn_found)
-            self.source_mode = QComboBox()
-            self.source_mode.addItems(['hook', 'ocr'])
-            capture.addRow('Text source', self.source_mode)
-            self.ocr_exe = QLineEdit('tesseract')
-            self.ocr_lang = QLineEdit('jpn')
-            self.ocr_region = QLineEdit('0,0,640,180')
-            capture.addRow('Installed Tesseract executable', self.ocr_exe)
-            capture.addRow('OCR language', self.ocr_lang)
-            capture.addRow('OCR region x,y,width,height', self.ocr_region)
-            self.ocr_stability = QSpinBox()
-            self.ocr_stability.setRange(1, 10)
-            capture.addRow('OCR repeated stable captures', self.ocr_stability)
-            self.source_table = QTableWidget(0, 6)
-            self.source_table.setHorizontalHeaderLabels(['Role / priority', 'HOOK code / name', 'PID', 'Context', 'Thread address', 'Latest raw text'])
-            self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-            self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.source_table.setMinimumHeight(205)
-            self.source_table.horizontalHeader().setStretchLastSection(True)
-            self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
-            capture.addRow('Live HOOK candidates (select a row)', self.source_table)
-            self.hook_preview = QPlainTextEdit()
-            self.hook_preview.setReadOnly(True)
-            self.hook_preview.setMaximumHeight(130)
-            capture.addRow('Raw text from selected HOOK (before choosing)', self.hook_preview)
-            row = QHBoxLayout()
-            self.text_hook = QPushButton('Use as dialogue HOOK')
-            self.speaker_hook = QPushButton('Use as speaker HOOK')
-            self.text_hook.clicked.connect(lambda: self.select_hook('text'))
-            self.speaker_hook.clicked.connect(lambda: self.select_hook('speaker'))
-            row.addWidget(self.text_hook)
-            row.addWidget(self.speaker_hook)
-            capture.addRow(row)
             self.btn_unselect_hook = QPushButton('Remove saved HOOK role')
             self.btn_unselect_hook.clicked.connect(self.unselect_hook)
-            capture.addRow(self.btn_unselect_hook)
+            hook_details.addRow(self.btn_unselect_hook)
             self.selected_hooks = QLabel('Selected HOOKs: none')
             capture.addRow(self.selected_hooks)
             self.saved_hook_choice = QComboBox()
-            capture.addRow('Saved HOOK priority (first dialogue HOOK is preferred)', self.saved_hook_choice)
+            hook_details.addRow('Saved HOOK priority (first dialogue HOOK is preferred)', self.saved_hook_choice)
             row = QHBoxLayout()
             self.btn_hook_up = QPushButton('Move saved HOOK up')
             self.btn_hook_down = QPushButton('Move saved HOOK down')
@@ -309,7 +331,7 @@ def run_gui(session_driver=None) -> int:
             self.btn_hook_down.clicked.connect(lambda: self.move_saved_hook(1))
             row.addWidget(self.btn_hook_up)
             row.addWidget(self.btn_hook_down)
-            capture.addRow(row)
+            hook_details.addRow(row)
             self.hook_reconnect = QLabel('Saved HOOKs: not connected')
             capture.addRow(self.hook_reconnect)
             self.active_hook_status = QLabel('Active dialogue HOOK: not monitoring')
@@ -321,11 +343,11 @@ def run_gui(session_driver=None) -> int:
             self.btn_pair = QPushButton('Assign speaker HOOK to dialogue HOOK')
             self.btn_pair.clicked.connect(self.pair_hooks)
             capture.addRow(self.btn_pair)
-            self.btn_monitor = QPushButton('Start monitoring selected HOOK')
+            self.btn_monitor = QPushButton('選択したHOOKで監視開始')
             self.btn_monitor.clicked.connect(self.begin_monitor)
             capture.addRow(self.btn_monitor)
 
-            speech = group('Dialogue and voice routing')
+            speech = group('Dialogue and voice routing', page='voice')
             self.default_tts = QCheckBox('未知話者にTTSを使用（進行モードと独立）')
             speech.addRow('Unknown speaker TTS', self.default_tts)
             self.default_voice = QComboBox()
@@ -473,7 +495,7 @@ def run_gui(session_driver=None) -> int:
             self.log = QPlainTextEdit()
             self.log.setReadOnly(True)
             self.log.setMaximumHeight(120)
-            body.addWidget(self.log)
+            pages['home'].addWidget(self.log)
             self.intervention_timer = QTimer(self)
             self.intervention_timer.setInterval(150)
             self.intervention_timer.timeout.connect(self.check_intervention)
@@ -485,6 +507,7 @@ def run_gui(session_driver=None) -> int:
 
         def note(self, message):
             self.log.appendPlainText(message)
+            self.statusBar().showMessage(message, 12000)
 
         def confirm_migration_if_needed(self):
             review = getattr(self.catalog, 'migration_review', ())
@@ -556,6 +579,7 @@ def run_gui(session_driver=None) -> int:
             self.audio_pid.setValue(0)
             self.input_pid.setValue(0)
             self.hwnd.clear()
+            self.hook_target.setText('まず実行中のゲーム・プロセスを選択してください')
             self.game_id = self.game_choice.currentData() or ''
             self.profile_choice.blockSignals(True)
             self.profile_choice.clear()
@@ -962,6 +986,7 @@ def run_gui(session_driver=None) -> int:
                 self.hook_host.start()
                 self.host_status.setText('LunaHook Host: launched')
             except Exception as exc:
+                self.hook_host = None
                 self.host_status.setText(f'LunaHook Host: {exc}')
 
         def launch_game(self):
@@ -977,6 +1002,44 @@ def run_gui(session_driver=None) -> int:
                 self.note('Game launch requested; choose its window after startup')
             except Exception as exc:
                 self.note('Game launch failed: ' + str(exc))
+
+        def pick_running_game(self):
+            """A first-use flow independent of saved EXE, PID or known HOOK code."""
+            target = choose_running_target(self)
+            if target is None:
+                return
+            self.use_running_target(target)
+
+        def use_running_target(self, target: WindowCandidate):
+            if not target.executable or target.pid <= 0:
+                raise ValueError('A readable executable and PID are required')
+            matching = [(gid, game) for gid, game in self.catalog.games.items()
+                        if ntpath.normcase(ntpath.normpath(game.executable)) ==
+                        ntpath.normcase(ntpath.normpath(target.executable))]
+            if len(matching) > 1:
+                choices = [f'{game.name} ({gid[:8]})' for gid, game in matching]
+                selected, ok = QInputDialog.getItem(self, '既存の作品設定を選択',
+                    'この実行ファイルには複数の作品設定があります', choices, 0, False)
+                if not ok:
+                    return
+                game_id = matching[choices.index(selected)][0]
+            elif matching:
+                game_id = matching[0][0]
+            else:
+                title = ntpath.splitext(ntpath.basename(target.executable))[0]
+                game = self.catalog.create_game(title, target.executable)
+                game_id = game.id
+                self.persist()
+                self.fill_games()
+            self.game_choice.setCurrentIndex(self.game_choice.findData(game_id))
+            self.pid.setValue(target.pid)
+            self.hwnd.setText(hex(target.hwnd) if target.hwnd else '')
+            self.hook_target.setText(f'{target.title or "(ウィンドウなし)"} — PID {target.pid} / {target.executable}')
+            if target.hwnd:
+                self.note(f'対象選択: {target.title} / PID {target.pid}。HOOKタブで接続してください。')
+            else:
+                self.note(f'PID {target.pid} をHOOK対象に選択。自動送りには別途ゲームウィンドウの選択が必要です。')
+            self.tabs.setCurrentIndex(1)
 
         def detect_game(self):
             game = self.catalog.games.get(self.game_id)
@@ -1000,6 +1063,7 @@ def run_gui(session_driver=None) -> int:
                 self.stop_session()
                 self.pid.setValue(windows[index].pid)
                 self.hwnd.setText(hex(windows[index].hwnd))
+                self.hook_target.setText(options[index])
                 self.note('Selected game window: ' + options[index])
             except Exception as exc:
                 self.note('Game identification failed: ' + str(exc))
@@ -1033,6 +1097,7 @@ def run_gui(session_driver=None) -> int:
                 self.game_choice.setCurrentIndex(self.game_choice.findData(gid))
                 self.pid.setValue(window.pid)
                 self.hwnd.setText(hex(window.hwnd))
+                self.hook_target.setText(labels[index])
                 self.note('Selected registered game: ' + labels[index])
             except Exception as exc:
                 self.note('Registered-game discovery failed: ' + str(exc))
@@ -1081,8 +1146,16 @@ def run_gui(session_driver=None) -> int:
                           hook_pid=hook_pid, audio_pid=self.audio_pid.value() or hook_pid)
 
         def connect_game(self):
-            if not self.hook_host:
-                self.note('Start LunaHook Host first')
+            if not self.pid.value():
+                self.note('実行中のゲーム・プロセスを選択してください')
+                return
+            if not self.current_profile():
+                self.note('作品を登録してください')
+                return
+            if not self.hook_host or self.hook_host.child is None or self.hook_host.child.poll() is not None:
+                self.start_host()
+            if not self.hook_host or self.hook_host.child is None:
+                self.note('LunaHook Hostの起動に失敗しました')
                 return
             try:
                 p = self.current_profile()
@@ -1108,7 +1181,7 @@ def run_gui(session_driver=None) -> int:
             row = self.source_table.currentRow()
             if row < 0:
                 return None
-            item = self.source_table.item(row, 1)
+            item = self.source_table.item(row, 2)
             if item is None:
                 return None
             key, address = item.data(256) or ('', -1)
@@ -1145,7 +1218,7 @@ def run_gui(session_driver=None) -> int:
                     item = QTableWidgetItem()
                     self.source_table.setItem(row, col, item)
                 item.setText(value)
-                if col == 1:
+                if col == 2:
                     item.setData(256, key)
             if self.source_table.currentRow() == row:
                 self.show_hook_preview()

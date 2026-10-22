@@ -4,24 +4,27 @@ AutoAdv is a personal Windows GUI application for LunaHook dialogue acquisition,
 
 The rebuilt `develop` application uses one `Controller` for dialogue identity, presentation completion and game-input authority. Selectively reused Luna native Host/ABI, Irodori and Windows input adapters are attached to that single runtime contract. Salvaged Windows Process Loopback, Japanese ASR/VAD, Tesseract OCR, manual input monitoring, Luna settings import and text-rule interpretation have also been integrated. Previous controllers, simulators and diagnostic CLI are not alternative execution paths.
 
-## Install and operate
+## Windowsでの起動と基本操作
+
+初回のみPython 3.11の環境へ必要な依存物をインストールする。
 
 ```powershell
 py -3.11 -m pip install -e ".[gui,audio,ocr,native]"
-py -3.11 -m autoadv
 ```
 
-Use the pinned LunaTranslator v12.1.2.12 runtime shipped in `autoadv/luna_assets`, an existing Irodori-TTS-Server directory and configured Irodori Voices. This runtime is adopted from the upstream release once, not fetched or rebuilt during ordinary CI or app startup. Only native/AUTO sessions require a built Windows loopback helper, a SenseVoice-compatible sherpa-onnx model and tokens. Only OCR sessions require an installed Tesseract CLI. Installing models, the .NET runtime, and other upstream environments requires deliberate user action; AutoAdv does not alter those installations.
+以後はリポジトリ内の **`AutoAdv.cmd` をダブルクリック**してGUIを起動できる。ショートカットはこのファイルから通常のWindowsの操作で作成できる。GUIは別のコンソールを必要とせず、起動に失敗した場合はエラーダイアログと`%LOCALAPPDATA%\AutoAdv\startup-error.log`に内容を表示・記録する。`.pyw`のPython関連付けが設定済みなら`AutoAdv.pyw`も直接起動できる。従来どおり`py -3.11 -m autoadv`も使用可能。
 
-For the optional process-scoped audio adapter, build the preserved helper on Windows with .NET 9:
+1. ゲームを起動し、AutoAdvの「ゲーム・自動進行」→「実行中のゲーム・プロセスから選択して登録」を開く。登録済みの実行ファイルがなくても実行中のウィンドウを検索・選択でき、選択した実行ファイルを作品として保存する。ウィンドウのないプロセスも明示的に一覧へ表示できるが、この場合、入力先ウィンドウは別途設定する。
+2. 「HOOK候補」タブの「選択したゲームにLunaHookを接続」を押す。Hostは必要に応じて起動される。ゲームで台詞を表示し、取得した本文を先頭列に持つ候補一覧から一件選ぶ。自動候補がない場合には「HOOK候補を追加探索」を使用する。
+3. 本文HOOKを選択し「選択したHOOKで監視開始」を押す。作品ごとのHOOK・補正・話者別音声はプロファイルに保存・再利用する。監視開始と自動送りの許可は別操作である。PID/HWND、HOOKコード、OCR設定などの手入力は「詳細・共通設定」タブにある。
+
+LunaTranslator v12.1.2.12の固定Native/Host資産は`autoadv/luna_assets`に同梱される。起動時の再取得・再ビルドは行わない。Irodori TTSは既存サーバーや指定された環境を利用する。音声判断で原音を観測する場合のみ、Windows Process Loopback helperと対応するASRモデルが必要となる。OCRの利用時のみTesseractが必要である。
+
+.NET 9導入済みWindowsで任意にProcess Loopback helperをビルドする場合：
 
 ```powershell
 dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
 ```
-
-In the GUI, register a game and executable path, select a matching visible game window or enter its PID/HWND, start the bundled LunaHost and attach. Search/insert HOOK codes or select observed text/speaker HOOKs, save rules and voice assignments, and start monitoring. For OCR, select the explicit OCR acquisition option and set the client-relative region. Monitoring and automatic advancement are separate actions: **game input is not authorized until requested**.
-
-Voice modes are **native** (ASR-attributed original speech completion), **tts** (Irodori playback completion), **auto** (original speech evidence or a configured TTS fallback), and **reading** (configured viewing duration). The AUTO wait is an explicit fallback policy, not proof that original speech is absent. The Controller verifies the foreground PID/HWND and manual-intervention state before each game input and never blindly retries an uncertain send. See [OPERATING.md](OPERATING.md) for details.
 
 ## Validation scope
 
