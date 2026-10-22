@@ -11,7 +11,9 @@ def app_with_game():
     catalog = Catalog()
     game = catalog.create_game('Game')
     calls = []
-    app = AutoAdvApplication(catalog, lambda: calls.append('save'))
+    app = AutoAdvApplication(
+        catalog, lambda: calls.append('save'),
+        input_send=lambda *_: None, preflight=lambda *_: True)
     app.select_profile(game.id, game.default_profile)
     return app, calls
 
@@ -145,3 +147,156 @@ def test_common_setting_is_persisted_by_application_without_form_reconstruction(
     app.set_common_setting('reading_ms', 880)
     assert app.catalog.common.reading_ms == 880
     assert calls == ['save']
+
+
+def test_capture_runtime_problem_is_semantic_and_recovery_action_is_explicit():
+    app, _ = app_with_game()
+    app.report_capture_problem('台詞取得に失敗しました')
+    view = app.capture_view()
+    assert view.problem is not None
+    assert view.problem.message == '台詞取得に失敗しました'
+    assert view.problem.action == 'open_capture_recovery'
+    app.clear_capture_problem()
+    assert app.capture_view().problem is None
+
+
+def test_play_view_hides_normal_internal_state_and_surfaces_only_actionable_hold():
+    app, _ = app_with_game()
+    app.controller.authorized = True
+    app.controller.pause_reason = None
+    view = app.play_view()
+    assert view.advance_authorized
+    assert view.issue is None
+    app.controller.pause_reason = 'native_inconclusive_hold'
+    view = app.play_view()
+    assert view.issue is not None
+    assert '原音の終了' in view.issue.message
+    assert view.issue.action == 'open_audio_policy'
+    app.controller.pause_reason = 'ocr_failure'
+    view = app.play_view()
+    assert view.issue is not None
+    assert view.issue.action == 'open_capture'
+    app.controller.pause_reason = 'presenting'
+    assert app.play_view().issue is None
+
+
+
+def test_application_owns_hook_host_lifecycle_and_discards_stale_callbacks(monkeypatch):
+    from types import SimpleNamespace
+    import autoadv.application as application_module
+
+    class Child:
+        def poll(self):
+            return None
+
+    class FakeHost:
+        instances = []
+
+        def __init__(self, path, on_event, on_closed, on_error):
+            self.path = path
+            self.on_event = on_event
+            self.on_closed = on_closed
+            self.on_error = on_error
+            self.child = None
+            self.closed = False
+            self.commands = []
+            FakeHost.instances.append(self)
+
+        def start(self):
+            self.child = Child()
+
+        def close(self):
+            self.closed = True
+
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    monkeypatch.setattr(application_module, 'HookHost', FakeHost)
+    monkeypatch.setattr(application_module, 'adopted_runtime', lambda: SimpleNamespace(host='host.exe'))
+    app, _ = app_with_game()
+    events = []
+    closed = []
+    errors = []
+
+    app.start_hook_host(on_event=events.append, on_closed=closed.append, on_error=errors.append)
+    first = FakeHost.instances[-1]
+    assert app.hook_host_running
+    app.hook_command('connect', pid=101)
+    assert first.commands == [('connect', {'pid': 101})]
+    first.on_event('first')
+    assert events == ['first']
+
+    app.start_hook_host(on_event=events.append, on_closed=closed.append, on_error=errors.append)
+    second = FakeHost.instances[-1]
+    assert first.closed
+    first.on_event('stale')
+    first.on_error('stale error')
+    second.on_event('second')
+    assert events == ['first', 'second']
+    assert errors == []
+
+    app.close_hook_host()
+    assert second.closed
+    assert not app.hook_host_running
+
+
+def test_replacing_catalog_invalidates_old_profile_and_capture_state():
+    app, _ = app_with_game()
+    old_profile = app.current_profile()
+    assert old_profile is not None
+    replacement = Catalog()
+    game = replacement.create_game('Imported')
+    app.replace_catalog(replacement)
+    assert app.catalog is replacement
+    assert app.current_profile() is None
+    assert app.capture is None
+    selected = app.select_profile(game.id, game.default_profile)
+    assert selected is replacement.games[game.id].profiles[game.default_profile]
+
+
+
+def test_application_owns_irodori_lifecycle_and_ignores_stale_results(monkeypatch):
+    from types import SimpleNamespace
+    import autoadv.application as application_module
+
+    class DeferredThread:
+        pending = []
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+        def start(self):
+            self.pending.append(self.target)
+
+    class FakeServer:
+        instances = []
+        def __init__(self, root, *, url):
+            self.root = root
+            self.url = url
+            self.closed = False
+            self.result = SimpleNamespace(status='connected', voices=('voice-a',), message='')
+            FakeServer.instances.append(self)
+        def connect_or_start(self):
+            return self.result
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(application_module.threading, 'Thread', DeferredThread)
+    monkeypatch.setattr(application_module, 'IrodoriServer', FakeServer)
+    app, _ = app_with_game()
+    received = []
+
+    app.start_irodori(received.append)
+    first = FakeServer.instances[-1]
+    first_work = DeferredThread.pending.pop(0)
+    app.start_irodori(received.append)
+    second = FakeServer.instances[-1]
+    second_work = DeferredThread.pending.pop(0)
+    assert first.closed
+
+    first_work()
+    assert received == []
+    second_work()
+    assert received[-1].voices == ('voice-a',)
+    assert received[-1].issue == ''
+
+    app.close_irodori()
+    assert second.closed

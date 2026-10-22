@@ -11,11 +11,8 @@ from collections import deque
 from pathlib import Path
 import re
 
-from .conversation import Controller, Target, Token
-from .hook_host import HookHost
-from .luna_runtime import adopted_runtime
+from .conversation import Target, Token
 from .hook_protocol import HookEvent, ThreadSource
-from .irodori_server import IrodoriServer
 from .model import AdvanceMode, Profile, StructureRule, ReplacementRule, COMMON_FIELDS, interpret
 from .storage import load, save
 from .voice import VoiceJobs
@@ -40,9 +37,9 @@ def run_gui(session_driver=None) -> int:
                                    QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu, QButtonGroup)
 
     class SignalBridge(QObject):
-        hook = Signal(int, object)
-        closed = Signal(int, str)
-        host_error = Signal(int, str)
+        hook = Signal(object)
+        closed = Signal(str)
+        host_error = Signal(str)
         voice = Signal(object, bool, str)
         server = Signal(object)
         ocr = Signal(int, int, int, str)
@@ -58,7 +55,8 @@ def run_gui(session_driver=None) -> int:
             self.setWindowTitle('AutoAdv')
             self.resize(1180, 900)
             self.catalog = load()
-            self.application = AutoAdvApplication(self.catalog, self.persist)
+            self.application = AutoAdvApplication(
+                self.catalog, self.persist, input_send=self.send_input, preflight=self.preflight)
             self.bridge = SignalBridge()
             self.bridge.hook.connect(self.on_host_hook)
             self.bridge.closed.connect(self.on_host_closed)
@@ -79,9 +77,6 @@ def run_gui(session_driver=None) -> int:
                         line=token.line, stage=stage, duration_ms=duration_ms, audio_ms=audio_ms))
                 if os.environ.get('AUTOADV_VALIDATION_TRACE') else None)
             self.preview_jobs = VoiceJobs(lambda token, done, reason: self.bridge.preview.emit(done, reason))
-            self.controller = Controller(self.send_input, self.preflight)
-            self.hook_host: HookHost | None = None
-            self._host_epoch = 0
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
@@ -97,7 +92,6 @@ def run_gui(session_driver=None) -> int:
             self._connecting_pid = 0
             self.game_id = ''
             self.profile_id = ''
-            self.server: IrodoriServer | None = None
             self.ocr_worker: OCRWorker | None = None
             self.native_audio: NativeAudio | None = None
             self.native_audio_setup_error: str | None = None
@@ -113,7 +107,6 @@ def run_gui(session_driver=None) -> int:
             self._capture_output_timer.timeout.connect(self.flush_capture_outputs)
             self._capture_role_buttons = {}
             self.profile_reset_buttons = {}
-            self._runtime_capture_problem = ''
 
             root = QWidget()
             root_layout = QVBoxLayout(root)
@@ -220,6 +213,11 @@ def run_gui(session_driver=None) -> int:
             self.play_issue.setProperty('problem', True)
             self.play_issue.hide()
             live_dialogue.addRow(self.play_issue)
+            self.play_issue_action = QPushButton('')
+            self.play_issue_action.clicked.connect(self.open_play_issue_action)
+            self.play_issue_action.hide()
+            live_dialogue.addRow(self.play_issue_action)
+            self._play_issue_action = None
             self.status = self.play_issue
             self.btn_edit_current = QPushButton('この会話の設定を調整')
             self.btn_edit_current.clicked.connect(self.edit_current_dialogue)
@@ -254,8 +252,8 @@ def run_gui(session_driver=None) -> int:
             capture_outer.addWidget(self.capture_hint)
             split = QHBoxLayout()
             left = QVBoxLayout()
-            self.source_table = QTableWidget(0, 3)
-            self.source_table.setHorizontalHeaderLabels(['用途', '取得されたテキスト', '取得元'])
+            self.source_table = QTableWidget(0, 2)
+            self.source_table.setHorizontalHeaderLabels(['用途', '取得されたテキスト'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -263,7 +261,6 @@ def run_gui(session_driver=None) -> int:
             self.source_table.verticalHeader().setVisible(False)
             self.source_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             self.source_table.setColumnWidth(0, 180)
-            self.source_table.setColumnWidth(2, 150)
             self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
             left.addWidget(self.source_table)
             split.addLayout(left, 3)
@@ -578,10 +575,10 @@ def run_gui(session_driver=None) -> int:
                 profile = self.current_profile()
                 if profile and key in profile.inherit_common:
                     self.refresh_inherited_control(key)
-                    if self.controller.profile and self.controller.profile.id == profile.id:
+                    if self.application.runtime_state().profile and self.application.runtime_state().profile.id == profile.id:
                         effective = self.catalog.effective_profile(profile)
                         if self.runtime_capture_matches(effective):
-                            self.controller.stage_profile(effective)
+                            self.application.stage_runtime_profile(effective)
                         else:
                             self.defer_capture_transition()
                 self.refresh_capture_workspace()
@@ -604,7 +601,7 @@ def run_gui(session_driver=None) -> int:
 
         def runtime_capture_matches(self, profile: Profile) -> bool:
             """Whether profile edits can be staged without rebuilding capture."""
-            active = self.controller.profile
+            active = self.application.runtime_state().profile
             if not active or active.id != profile.id:
                 return False
             if not (active.source == profile.source and active.hooks == profile.hooks and
@@ -620,10 +617,10 @@ def run_gui(session_driver=None) -> int:
 
         def defer_capture_transition(self):
             """Keep the current Utterance intact and replace capture at a proven boundary."""
-            self.controller.pause('settings_changed')
+            self.application.hold_runtime('settings_changed')
             self._pending_monitor_apply = True
             self.refresh_status()
-            if self.controller.utterance is None or self.controller.sent:
+            if self.application.runtime_state().utterance is None or self.application.runtime_state().sent:
                 QTimer.singleShot(0, self.apply_pending_monitor_transition)
 
         def pending_hook_boundary(self, event: HookEvent, profile: Profile | None) -> bool:
@@ -635,16 +632,13 @@ def run_gui(session_driver=None) -> int:
             selected = next((h for h in profile.hooks if h.role == 'text' and h.matches(event.source)), None)
             if selected is None:
                 return False
-            current = self.controller.utterance
-            return current is None or self.controller.sent or event.text != current.raw
+            current = self.application.runtime_state().utterance
+            return current is None or self.application.runtime_state().sent or event.text != current.raw
 
         def choose_game(self, *_):
             self._resume_monitor_requested = False
             self.stop_session()
-            self._host_epoch += 1
-            if self.hook_host:
-                self.hook_host.close()
-                self.hook_host = None
+            self.application.close_hook_host()
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
@@ -675,6 +669,15 @@ def run_gui(session_driver=None) -> int:
             self.profile_choice.blockSignals(False)
             self.choose_profile()
 
+        def choose_window_candidate(self, windows, *, title: str, message: str):
+            if not windows:
+                return None
+            if len(windows) == 1:
+                return windows[0]
+            choices = [f'{w.title or "(タイトルなし)"} — PID {w.pid}' for w in windows]
+            choice, ok = QInputDialog.getItem(self, title, message, choices, 0, False)
+            return windows[choices.index(choice)] if ok else None
+
         def auto_attach_selected_game(self):
             if sys.platform != 'win32' or self.attached_pid or self._connecting_pid:
                 return
@@ -685,8 +688,11 @@ def run_gui(session_driver=None) -> int:
                 windows = find_game_windows(game.executable)
             except OSError:
                 return
-            if len(windows) == 1:
-                self.use_running_target(windows[0])
+            chosen = self.choose_window_candidate(
+                windows, title='ゲームウィンドウを選択',
+                message='この作品に一致する実行中ウィンドウが複数あります')
+            if chosen is not None:
+                self.use_running_target(chosen)
 
         def current_source_mode(self) -> str:
             return 'ocr' if self.source_ocr_button.isChecked() else 'hook'
@@ -721,19 +727,19 @@ def run_gui(session_driver=None) -> int:
         def _after_profile_update(self, previous: Profile, updated: Profile) -> None:
             """Apply a persisted user setting to the running session at a safe boundary."""
             effective = self.catalog.effective_profile(updated)
-            if (self.attached_pid and self.host_generation and self.hook_host and
+            if (self.attached_pid and self.host_generation and self.application.hook_host_running and
                     updated.source == 'hook' and
                     (updated.hook_flush_ms, updated.hook_codepage, updated.hook_max_buffer, updated.hook_max_history) !=
                     (previous.hook_flush_ms, previous.hook_codepage, previous.hook_max_buffer, previous.hook_max_history)):
                 try:
-                    self.hook_host.command('settings', flush_ms=updated.hook_flush_ms,
+                    self.application.hook_command('settings', flush_ms=updated.hook_flush_ms,
                         codepage=updated.hook_codepage, max_buffer=updated.hook_max_buffer,
                         max_history=updated.hook_max_history)
                 except Exception as exc:
                     self.note('取得条件を現在のゲームへ反映できません: ' + str(exc))
-            if self.controller.profile and self.controller.profile.id == updated.id:
+            if self.application.runtime_state().profile and self.application.runtime_state().profile.id == updated.id:
                 if self.runtime_capture_matches(effective):
-                    self.controller.stage_profile(effective)
+                    self.application.stage_runtime_profile(effective)
                 else:
                     self.defer_capture_transition()
             self.refresh_capture_workspace()
@@ -1391,9 +1397,11 @@ def run_gui(session_driver=None) -> int:
                 raw = self.example_raw.toPlainText()
                 trace = []
                 u = interpret(raw, draft, session=0, line=0, source='preview', sequence=0, trace=trace)
+                tts_result = (f'TTS: Voice {u.voice or "未設定"}' if u.use_tts else 'TTS: 使用しない')
                 self.editor_preview.setPlainText(
                     f'話者: {u.speaker or "（未判別）"}\n'
                     f'表示本文: {u.text}\n'
+                    f'{tts_result}\n'
                     f'TTS読み上げ: {u.reading}\n'
                     f'原音照合: {u.match_text}')
                 self._preview_utterance = u
@@ -1418,6 +1426,17 @@ def run_gui(session_driver=None) -> int:
 
         def show_task_section(self, section: str):
             self.reveal_section(section, 'game')
+
+        def open_play_issue_action(self):
+            action = self._play_issue_action
+            if action == 'open_capture':
+                self.reveal_section('capture', 'game')
+            elif action == 'open_capture_recovery':
+                self.reveal_section('hook_details', 'game')
+            elif action == 'open_audio_policy':
+                self.reveal_section('audio_details', 'game')
+            elif action == 'open_voice':
+                self.reveal_section('speakers', 'game')
 
         def edit_detected_speaker(self):
             u = getattr(self, '_preview_utterance', None)
@@ -1447,7 +1466,7 @@ def run_gui(session_driver=None) -> int:
 
 
         def edit_current_dialogue(self):
-            u = self.controller.utterance
+            u = self.application.runtime_state().utterance
             if not u:
                 self.note('台詞を取得してから編集を始めてください')
                 return
@@ -1504,6 +1523,7 @@ def run_gui(session_driver=None) -> int:
                     return
                 self.stop_session()
                 self.catalog = proposed
+                self.application.replace_catalog(proposed)
                 self.persist()
                 self.fill_games()
                 self.note(f'Imported {len(entries)} games')
@@ -1526,6 +1546,7 @@ def run_gui(session_driver=None) -> int:
                     return
                 self.stop_session()
                 self.catalog = proposed
+                self.application.replace_catalog(proposed)
                 self.persist()
                 self.fill_games()
                 self.note(f'Imported {len(entries)} previous AutoAdv games; review unmapped fields')
@@ -1533,7 +1554,7 @@ def run_gui(session_driver=None) -> int:
                 self.note('Previous AutoAdv import not applied: ' + str(exc))
 
         def start_recovery_hook_search(self):
-            if (not self.hook_host or self.attached_pid != self.pid.value()
+            if (not self.application.hook_host_running or self.attached_pid != self.pid.value()
                     or not self.host_generation):
                 self.note('接続が完了していません。接続状態と診断を確認してください。')
                 return
@@ -1543,7 +1564,7 @@ def run_gui(session_driver=None) -> int:
                 # Search is an alternate way to *acquire the same dialogue*, not
                 # another UI category. Limit upstream records so automatic trials
                 # cannot flood the target with unlimited inserts.
-                self.hook_host.command('find_hooks', pid=self.pid.value(), boundary_module=module,
+                self.application.hook_command('find_hooks', pid=self.pid.value(), boundary_module=module,
                                        parameters={'maxRecords': 64})
                 self.note('追加の取得元を探索しています。台詞を表示すると、取得できた本文が同じ一覧に現れます。')
             except Exception as exc:
@@ -1551,10 +1572,10 @@ def run_gui(session_driver=None) -> int:
 
         def insert_pc_hooks(self):
             try:
-                if not (self.host_generation and self.connection_generation and self.hook_host
+                if not (self.host_generation and self.connection_generation and self.application.hook_host_running
                         and self.attached_pid == self.pid.value()):
                     raise RuntimeError('先にゲームへLunaHookを接続してください')
-                self.hook_host.command('insert_pc_hooks', pid=self.pid.value())
+                self.application.hook_command('insert_pc_hooks', pid=self.pid.value())
                 self.note('本家Lunaの標準文字API用HOOK追加を要求しました。ゲームで台詞を表示してください。')
             except (OSError, RuntimeError, ValueError) as exc:
                 self.note('PC用HOOK追加に失敗: ' + str(exc))
@@ -1564,10 +1585,10 @@ def run_gui(session_driver=None) -> int:
             if not p or not code:
                 return
             try:
-                if (not self.hook_host or not self.host_generation or
+                if (not self.application.hook_host_running or not self.host_generation or
                         self.attached_pid != self.pid.value()):
                     raise RuntimeError('先にゲームへLunaHookを接続してください')
-                self.hook_host.command('insert_hook', pid=self.pid.value(), code=code)
+                self.application.hook_command('insert_hook', pid=self.pid.value(), code=code)
                 self._trial_hook_codes.add(code)
             except Exception as exc:
                 self.note('HOOKの追加に失敗: ' + str(exc))
@@ -1578,70 +1599,46 @@ def run_gui(session_driver=None) -> int:
         def start_server(self):
             try:
                 self.application.set_irodori_environment(self.irodori_path.text(), self.irodori_url.text())
+                self.server_status.clear()
+                self.btn_server.hide()
+                self.application.start_irodori(self.bridge.server.emit)
             except Exception as exc:
                 self.server_status.setText('Irodori設定を保存できません: ' + str(exc))
                 self.btn_server.show()
+
+        def on_server(self, view):
+            if view.issue:
+                self.server_status.setText(view.issue)
+                self.btn_server.show()
                 return
-            if self.server:
-                self.server.close()
-            self.server = IrodoriServer(Path(self.catalog.irodori_root) if self.catalog.irodori_root else None,
-                                        url=self.catalog.irodori_url)
-            server = self.server
             self.server_status.clear()
             self.btn_server.hide()
-            def work():
+            for control in (self.default_voice, self.new_speaker_voice):
+                existing = control.currentText()
+                blocked = control.blockSignals(True)
                 try:
-                    self.bridge.server.emit(server.connect_or_start())
-                except Exception as exc:
-                    self.bridge.server.emit(str(exc))
-            threading.Thread(target=work, daemon=True).start()
-
-        def on_server(self, result):
-            if isinstance(result, str):
-                self.server_status.setText('Irodoriへ接続できません: ' + result)
-                self.btn_server.show()
-                return
-            if result.status == 'connected':
-                self.server_status.clear()
-                self.btn_server.hide()
-                for control in (self.default_voice, self.new_speaker_voice):
-                    existing = control.currentText()
-                    blocked = control.blockSignals(True)
-                    try:
-                        control.clear()
-                        control.addItems(list(result.voices))
-                        control.setEditText(existing)
-                    finally:
-                        control.blockSignals(blocked)
-                self.refresh_speaker_choices()
-            else:
-                self.server_status.setText('Irodoriを利用できません: ' + result.message)
-                self.btn_server.show()
+                    control.clear()
+                    control.addItems(list(view.voices))
+                    control.setEditText(existing)
+                finally:
+                    control.blockSignals(blocked)
+            self.refresh_speaker_choices()
 
         def start_host(self):
             self.stop_session()
-            self.persist()
-            # Signals from the old Host can arrive after a new process was
-            # selected. They must not reset or populate the current session.
-            self._host_epoch += 1
-            epoch = self._host_epoch
-            if self.hook_host:
-                self.hook_host.close()
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
             self._connecting_pid = 0
             self.clear_hook_observations()
             try:
-                runtime = adopted_runtime()
-                self.hook_host = HookHost(runtime.host,
-                    lambda event: self.bridge.hook.emit(epoch, event),
-                    lambda reason: self.bridge.closed.emit(epoch, reason),
-                    lambda message: self.bridge.host_error.emit(epoch, message))
-                self.hook_host.start()
+                self.application.start_hook_host(
+                    on_event=self.bridge.hook.emit,
+                    on_closed=self.bridge.closed.emit,
+                    on_error=self.bridge.host_error.emit)
                 self.host_status.setText('LunaHook Host: 起動済み')
             except Exception as exc:
-                self.hook_host = None
+                self.application.close_hook_host()
                 self.host_status.setText(f'LunaHook Host: {exc}')
 
         def launch_game(self):
@@ -1686,10 +1683,13 @@ def run_gui(session_driver=None) -> int:
                 return
             if self._launch_watch_attempts >= 50:
                 self._launch_watch_timer.stop()
-                if windows:
-                    self.note('起動した作品に複数の候補があります。実行中ゲーム一覧から対象を選択してください。')
-                else:
-                    self.note('起動したゲームのウィンドウを自動識別できませんでした。実行中ゲーム一覧から選択してください。')
+                chosen = self.choose_window_candidate(
+                    windows, title='起動したゲームを選択',
+                    message='起動した作品に一致するウィンドウが複数あります')
+                if chosen is not None:
+                    self.use_running_target(chosen)
+                elif not windows:
+                    self.note('起動したゲームのウィンドウを自動識別できませんでした。')
 
 
         def pick_running_game(self):
@@ -1803,20 +1803,19 @@ def run_gui(session_driver=None) -> int:
                 if self.hwnd.text().strip():
                     QTimer.singleShot(0, lambda: self.begin_monitor(save_draft=False))
                 return
-            if (self.hook_host and self.hook_host.child is not None and
-                    self.hook_host.child.poll() is None and
+            if (self.application.hook_host_running and
                     (self.attached_pid == self.pid.value() and self.host_generation or
                      self._connecting_pid == self.pid.value())):
                 if self.attached_pid == self.pid.value() and self.host_generation:
                     self.start_saved_monitor_when_ready()
                 return
-            if (not self.hook_host or self.hook_host.child is None or
-                    self.hook_host.child.poll() is not None or
+            if (not self.application.hook_host_running or
                     (self.attached_pid and self.attached_pid != self.pid.value()) or
                     (self._connecting_pid and self._connecting_pid != self.pid.value())):
                 self.start_host()
-            if not self.hook_host or self.hook_host.child is None:
-                self.set_runtime_capture_problem('ゲームから台詞を取得するためのLunaHookを起動できません。')
+            if not self.application.hook_host_running:
+                self.application.report_capture_problem('ゲームから台詞を取得するためのLunaHookを起動できません。')
+                self.refresh_capture_workspace()
                 self.note('LunaHook Hostの起動に失敗しました')
                 return
             try:
@@ -1829,15 +1828,16 @@ def run_gui(session_driver=None) -> int:
                 self.attached_pid = 0
                 self.host_generation = ''
                 self.connection_generation = 0
-                self.hook_host.command('settings', flush_ms=p.hook_flush_ms,
+                self.application.hook_command('settings', flush_ms=p.hook_flush_ms,
                     codepage=p.hook_codepage, max_buffer=p.hook_max_buffer, max_history=p.hook_max_history)
-                self.hook_host.command('connect', pid=self.pid.value())
+                self.application.hook_command('connect', pid=self.pid.value())
                 self._connecting_pid = self.pid.value()
                 self.host_status.setText('LunaHook: 接続中…')
                 self.note('ゲームを選択しました。LunaHook接続を開始しています。')
             except Exception as exc:
                 self._connecting_pid = 0
-                self.set_runtime_capture_problem('ゲームへLunaHookを接続できません。')
+                self.application.report_capture_problem('ゲームへLunaHookを接続できません。')
+                self.refresh_capture_workspace()
                 self.note('LunaHook接続失敗: ' + str(exc))
 
         def clear_hook_observations(self):
@@ -1887,11 +1887,11 @@ def run_gui(session_driver=None) -> int:
             self._searched_codes.add(code)
             if any(src.hook_code == code for src in self.sources.values()):
                 return
-            if (not self.hook_host or not self.host_generation or
+            if (not self.application.hook_host_running or not self.host_generation or
                     self.attached_pid != self.pid.value()):
                 return
             try:
-                self.hook_host.command('insert_hook', pid=self.attached_pid, code=code)
+                self.application.hook_command('insert_hook', pid=self.attached_pid, code=code)
                 self._trial_hook_codes.add(code)
             except (RuntimeError, OSError, ValueError) as exc:
                 self.note('探索したHOOKを試用できません: ' + str(exc))
@@ -1940,10 +1940,6 @@ def run_gui(session_driver=None) -> int:
                 self.note('会話取得を変更できません: ' + str(exc))
                 self.refresh_capture_workspace()
 
-        def set_runtime_capture_problem(self, message: str = '') -> None:
-            self._runtime_capture_problem = message.strip()
-            self.refresh_capture_workspace()
-
         def refresh_capture_workspace(self):
             view = self.application.capture_view()
             self._refreshing_hook_rows = True
@@ -1980,8 +1976,6 @@ def run_gui(session_driver=None) -> int:
                     if candidate.ambiguous:
                         sample.setToolTip('同じ識別子を持つ複数の取得元があり、この候補は使用できません')
                     self.source_table.setItem(row, 1, sample)
-                    source_item = QTableWidgetItem(candidate.source_name)
-                    self.source_table.setItem(row, 2, source_item)
             finally:
                 self.source_table.blockSignals(False)
                 self._refreshing_hook_rows = False
@@ -1993,14 +1987,14 @@ def run_gui(session_driver=None) -> int:
                 lines.append(preview.text)
                 lines.append('')
             self.capture_dialogue_preview.setPlainText('\n'.join(lines).rstrip())
-            problem = view.problem.message if view.problem else self._runtime_capture_problem
-            if problem:
-                self.capture_problem.setText(problem)
+            if view.problem:
+                self.capture_problem.setText(view.problem.message)
                 self.capture_problem.show()
             else:
                 self.capture_problem.clear()
                 self.capture_problem.hide()
-            self.capture_recovery_action.setVisible(bool(self._runtime_capture_problem))
+            self.capture_recovery_action.setVisible(
+                bool(view.problem and view.problem.action == 'open_capture_recovery'))
             self.btn_commit_capture.setEnabled(view.dirty and view.can_commit)
             self.refresh_capture_routes()
             self.refresh_capture_status()
@@ -2096,7 +2090,7 @@ def run_gui(session_driver=None) -> int:
                 return
             try:
                 updated = self.application.commit_capture()
-                active = self.controller.profile and self.controller.profile.id == updated.id
+                active = self.application.runtime_state().profile and self.application.runtime_state().profile.id == updated.id
                 if active:
                     self.defer_capture_transition()
                 elif any(h.role == 'text' for h in updated.hooks) and self.attached_pid and self.host_generation:
@@ -2128,9 +2122,8 @@ def run_gui(session_driver=None) -> int:
                 f'保存ソース {len(ready)}/{len(profile.hooks)}確認' +
                 (f' / 識別衝突 {len(ambiguous)}' if ambiguous else ''))
 
-        def on_host_hook(self, epoch: int, event: HookEvent):
-            if epoch == self._host_epoch:
-                self.on_hook(event)
+        def on_host_hook(self, event: HookEvent):
+            self.on_hook(event)
 
         def on_hook(self, event: HookEvent):
             if (event.kind == 'hook_found' and event.process_id == self.attached_pid
@@ -2146,7 +2139,8 @@ def run_gui(session_driver=None) -> int:
                 self.host_generation = event.host_generation
                 self.connection_generation = event.connection_generation
                 self.attached_pid = event.process_id
-                self._runtime_capture_problem = ''
+                self.application.clear_capture_problem()
+                self.refresh_capture_workspace()
                 self.validation_trace.emit('hook_connected', pid=event.process_id,
                     generation=event.host_generation, connection=event.connection_generation)
                 self.host_status.setText(f'LunaHook: 接続済み PID {event.process_id}')
@@ -2155,9 +2149,9 @@ def run_gui(session_driver=None) -> int:
                 p = self.current_profile()
                 if p and p.source == 'hook':
                     if p.insert_pc_hooks:
-                        self.hook_host.command('insert_pc_hooks', pid=event.process_id)
+                        self.application.hook_command('insert_pc_hooks', pid=event.process_id)
                     for code in p.inserted_hooks:
-                        self.hook_host.command('insert_hook', pid=event.process_id, code=code)
+                        self.application.hook_command('insert_hook', pid=event.process_id, code=code)
             elif event.kind == 'disconnected' and event.process_id == self.pid.value():
                 self.stop_session()
                 self.attached_pid = 0
@@ -2167,7 +2161,8 @@ def run_gui(session_driver=None) -> int:
                 self.clear_hook_observations()
                 self.host_status.setText('LunaHook: 切断されました')
                 self._resume_monitor_requested = False
-                self.set_runtime_capture_problem('ゲームからの台詞取得が切断されました。')
+                self.application.report_capture_problem('ゲームからの台詞取得が切断されました。')
+                self.refresh_capture_workspace()
             if (event.kind == 'removed' and event.source and event.process_id == self.pid.value()
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation):
@@ -2175,7 +2170,7 @@ def run_gui(session_driver=None) -> int:
                 self.application.remove_capture_source(key, event.source.address)
                 if self.sources.get(key) and self.sources[key].address == event.source.address:
                     self.sources.pop(key, None)
-                if self.controller.active_text_source == key:
+                if self.application.runtime_state().active_text_source == key:
                     self.stop_session()
                     self.note('監視中の本文HOOKが消失しました。取得候補を確認してください。')
                 row = self.source_rows.get((key, event.source.address))
@@ -2192,7 +2187,7 @@ def run_gui(session_driver=None) -> int:
                 current = self.sources.get(key)
                 if current and (current.process_id, current.address) != (source.process_id, source.address):
                     self.ambiguous_sources.add(key)
-                    if self.controller.profile:
+                    if self.application.runtime_state().profile:
                         self.stop_session()
                     self.note('同一識別子のHOOKが複数検出されました。衝突していない取得元を選択してください。')
                     self.update_candidate(current, None, sequence=event.sequence)
@@ -2234,12 +2229,12 @@ def run_gui(session_driver=None) -> int:
                     # source is the boundary. Rebuild the monitor first, then let
                     # this same output enter the new Controller session below.
                     self.apply_pending_monitor_transition()
-                if (self.controller.profile and self.controller.profile.source == 'hook'
-                        and event.process_id == (self.controller.target.hook_pid or self.controller.target.pid)
-                        and event.host_generation == self.controller.source_generation
-                        and event.connection_generation == self.controller.connection_generation
-                        and any(h.matches(event.source) for h in self.controller.profile.hooks)):
-                    self.validation_trace.emit('hook_output', session=self.controller.session,
+                if (self.application.runtime_state().profile and self.application.runtime_state().profile.source == 'hook'
+                        and event.process_id == (self.application.runtime_state().target.hook_pid or self.application.runtime_state().target.pid)
+                        and event.host_generation == self.application.runtime_state().source_generation
+                        and event.connection_generation == self.application.runtime_state().connection_generation
+                        and any(h.matches(event.source) for h in self.application.runtime_state().profile.hooks)):
+                    self.validation_trace.emit('hook_output', session=self.application.runtime_state().session,
                         generation=event.host_generation, connection=event.connection_generation,
                         hook_sequence=event.sequence, source=event.source.identity,
                         received_ns=event.received_ns, pid=event.process_id, address=event.source.address,
@@ -2248,7 +2243,7 @@ def run_gui(session_driver=None) -> int:
                 if (event.process_id == self.pid.value() and event.source.identity not in self.ambiguous_sources
                         and event.host_generation == self.host_generation
                         and event.connection_generation == self.connection_generation):
-                    selected = self.controller.profile.hooks if self.controller.profile else ()
+                    selected = self.application.runtime_state().profile.hooks if self.application.runtime_state().profile else ()
                     if len(selected) > 1 and any(h.matches(event.source) for h in selected):
                         # Luna's Python multi-HOOK collector groups already-flushed
                         # outputs; it does not re-flush or reconstruct raw bytes.
@@ -2257,13 +2252,13 @@ def run_gui(session_driver=None) -> int:
                             self._output_timer.stop()
                             self.flush_selected_outputs()
                         else:
-                            self._output_timer.start(max(10, min(100, self.controller.profile.hook_flush_ms)))
+                            self._output_timer.start(max(10, min(100, self.application.runtime_state().profile.hook_flush_ms)))
                     else:
-                        result = self.controller.observe(generation=event.host_generation,
+                        result = self.application.observe_runtime_hook(generation=event.host_generation,
                             connection=event.connection_generation, sequence=event.sequence,
                             source=event.source, text=event.text, pid=event.process_id or 0,
                             received_ns=event.received_ns)
-                        if result and self.controller.utterance:
+                        if result and self.application.runtime_state().utterance:
                             self.display_utterance(result)
             if event.kind == 'inserted' and event.process_id == self.pid.value():
                 self.note(f'LunaによるHOOK挿入: {event.detail} {event.source.hook_code if event.source else ""}'.strip())
@@ -2282,10 +2277,12 @@ def run_gui(session_driver=None) -> int:
                         self._connecting_pid = 0
                 if event.detail == 'existing_luna_injection_detected':
                     self.host_status.setText('対象には既にLunaHookが注入されています。ゲームを再起動して再接続してください。')
-                    self.set_runtime_capture_problem('対象には既にLunaHookが注入されています。ゲームを再起動してから選び直してください。')
+                    self.application.report_capture_problem('対象には既にLunaHookが注入されています。ゲームを再起動してから選び直してください。')
+                    self.refresh_capture_workspace()
                 elif event.detail == 'cannot_attach_to_host_process':
                     self.host_status.setText('LunaHost自身には接続できません。ゲームを選択してください。')
-                    self.set_runtime_capture_problem('ゲームではないLunaHostプロセスが選択されています。実行中のゲームを選び直してください。')
+                    self.application.report_capture_problem('ゲームではないLunaHostプロセスが選択されています。実行中のゲームを選び直してください。')
+                    self.refresh_capture_workspace()
                 self.note('LunaHost: ' + event.detail)
 
 
@@ -2321,7 +2318,7 @@ def run_gui(session_driver=None) -> int:
                 self.jobs.cancel()
                 self.stop_session()
                 if p.source == 'ocr':
-                    session = self.controller.begin(p, target, 'ocr', 1)
+                    session = self.application.begin_runtime(p, target, 'ocr', 1)
                     reader = TesseractOCR(p.ocr, WindowsClientCapture(target.hwnd, target.pid))
                     self.ocr_worker = OCRWorker(reader,
                         lambda seq, txt, ss=session, pid=target.pid: self.bridge.ocr.emit(ss, pid, seq, txt),
@@ -2330,17 +2327,17 @@ def run_gui(session_driver=None) -> int:
                 else:
                     if any(h.identity in self.ambiguous_sources for h in p.hooks):
                         raise ValueError('選択したHOOKの識別子が衝突しています。再接続するか別の取得元を選択してください')
-                    self.controller.begin(p, target,
+                    self.application.begin_runtime(p, target,
                                           self.host_generation, self.connection_generation,
                                           tuple(self.sources))
                     self.sync_hook_threads()
                 self.start_native_audio_if_needed(p)
-                self.validation_trace.emit('monitor_started', session=self.controller.session,
+                self.validation_trace.emit('monitor_started', session=self.application.runtime_state().session,
                     source=p.source, game_id=self.game_id, profile_id=self.profile_id,
                     hook_pid=target.hook_pid or target.pid, audio_pid=target.audio_pid or target.pid,
-                    input_pid=target.pid, generation=self.controller.source_generation,
-                    connection=self.controller.connection_generation)
-                self.note('監視を開始しました。自動送りは' + ('ONです。' if self.controller.authorized else 'OFFです。'))
+                    input_pid=target.pid, generation=self.application.runtime_state().source_generation,
+                    connection=self.application.runtime_state().connection_generation)
+                self.note('監視を開始しました。自動送りは' + ('ONです。' if self.application.runtime_state().authorized else 'OFFです。'))
             except Exception as exc:
                 self.stop_session()
                 self.note(f'監視を開始できません: {exc}')
@@ -2351,8 +2348,8 @@ def run_gui(session_driver=None) -> int:
             selected = []
             if not clear:
                 profiles = []
-                if self.controller.profile and self.controller.profile.source == 'hook':
-                    profiles.append(self.controller.profile)
+                if self.application.runtime_state().profile and self.application.runtime_state().profile.source == 'hook':
+                    profiles.append(self.application.runtime_state().profile)
                 if self.application.capture and self.application.capture.profile.source == 'hook':
                     profiles.append(self.application.capture.profile)
                 seen = set()
@@ -2372,16 +2369,16 @@ def run_gui(session_driver=None) -> int:
             for key, source in tuple(self._synced_sources.items()):
                 if key not in desired:
                     try:
-                        if self.hook_host:
-                            self.hook_host.command('sync_thread', source=source.__dict__, enabled=False)
+                        if self.application.hook_host_running:
+                            self.application.hook_command('sync_thread', source=source.__dict__, enabled=False)
                     except (RuntimeError, OSError, ValueError):
                         pass
                     self._synced_sources.pop(key, None)
-            if self.hook_host:
+            if self.application.hook_host_running:
                 for key, source in desired.items():
                     if key not in self._synced_sources:
                         try:
-                            self.hook_host.command('sync_thread', source=source.__dict__, enabled=True)
+                            self.application.hook_command('sync_thread', source=source.__dict__, enabled=True)
                             self._synced_sources[key] = source
                         except (RuntimeError, OSError, ValueError) as exc:
                             self.note('Luna selected-HOOK sync unavailable: ' + str(exc))
@@ -2395,10 +2392,10 @@ def run_gui(session_driver=None) -> int:
 
         def flush_selected_outputs(self):
             group, self._output_group = self._output_group, []
-            if not group or not self.controller.profile:
+            if not group or not self.application.runtime_state().profile:
                 return
-            result = self.controller.observe_group(group)
-            if result and self.controller.utterance:
+            result = self.application.observe_runtime_group(group)
+            if result and self.application.runtime_state().utterance:
                 self.display_utterance(result)
             else:
                 self.refresh_status()
@@ -2415,10 +2412,10 @@ def run_gui(session_driver=None) -> int:
                 # or manual-handoff decision when its text deadline arrives.
                 self.note('非TTSの音声判断にはProcess LoopbackとASRモデル・tokensが必要です。根拠不足では設定に従います。')
                 return
-            target = self.controller.target
+            target = self.application.runtime_state().target
             if not target:
                 return
-            session = self.controller.session
+            session = self.application.runtime_state().session
             def load_native():
                 native = None
                 try:
@@ -2448,42 +2445,42 @@ def run_gui(session_driver=None) -> int:
             threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
 
         def on_native_ready(self, session, native, reason):
-            if session != self.controller.session or not self.controller.target:
+            if session != self.application.runtime_state().session or not self.application.runtime_state().target:
                 if native:
                     threading.Thread(target=native.close, daemon=True).start()
                 return
             if reason:
                 self.native_audio_setup_error = reason
                 self.note('Native audio unavailable: ' + reason)
-                u = self.controller.utterance
+                u = self.application.runtime_state().utterance
                 if u and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts and not u.uncertain_text_fallback:
-                    self.controller.pause('native_audio_unavailable_hold')
+                    self.application.hold_runtime('native_audio_unavailable_hold')
                 self.refresh_status()
                 return
             self.native_audio = native
             self.validation_trace.emit('native_ready', session=session, audio_pid=native.pid)
             self.note('Process audio helper started; waiting for actual captured PCM')
-            token, u = self.controller.token, self.controller.utterance
-            if token and u and not self.controller.sent and not self.controller.completed and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts:
+            token, u = self.application.runtime_state().token, self.application.runtime_state().utterance
+            if token and u and not self.application.runtime_state().sent and not self.application.runtime_state().completed and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts:
                 native.begin(token, u.match_text)
 
         def on_native_pcm(self, token, frames):
-            if token is not None and token == self.controller.token:
+            if token is not None and token == self.application.runtime_state().token:
                 self.validation_trace.emit('native_pcm', session=token.session, line=token.line,
                     frames=frames, audio_pid=getattr(self.native_audio, 'pid', 0))
 
         def on_native(self, token, event, detail):
-            if token != self.controller.token or token is None:
+            if token != self.application.runtime_state().token or token is None:
                 return
             self.validation_trace.emit('native_event', session=token.session, line=token.line,
                 status=event, method='asr')
-            u = self.controller.utterance
+            u = self.application.runtime_state().utterance
             if not u or u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return
             if event == 'error':
                 self.note('Native audio: ' + detail)
                 if not u.uncertain_text_fallback:
-                    self.controller.pause('native_audio_failure')
+                    self.application.hold_runtime('native_audio_failure')
             elif event == 'started':
                 self.presentation_event(token, 'native_started')
             elif event == 'quiet':
@@ -2493,12 +2490,12 @@ def run_gui(session_driver=None) -> int:
             self.refresh_status()
 
         def display_utterance(self, token: Token):
-            u = self.controller.utterance
+            u = self.application.runtime_state().utterance
             if not u:
                 return
             conversation = (f'{u.speaker}\n' if u.speaker else '') + u.text
             self.preview.setPlainText(conversation)
-            profile = self.controller.profile
+            profile = self.application.runtime_state().profile
             if profile:
                 self.wait_preview.setText(
                     f'{u.character_count}文字 / {u.text_wait_ms} ms')
@@ -2516,13 +2513,13 @@ def run_gui(session_driver=None) -> int:
             self.refresh_status()
 
         def present(self, token: Token):
-            u = self.controller.utterance
-            if not u or token != self.controller.token:
+            u = self.application.runtime_state().utterance
+            if not u or token != self.application.runtime_state().token:
                 return
             self.jobs.cancel()
             if self.native_audio:
                 self.native_audio.cancel()
-            external_ns = self.controller.take_external_transition(token)
+            external_ns = self.application.take_external_transition(token)
             if external_ns:
                 self.validation_trace.emit('external_hook_transition', session=token.session,
                     line=token.line, received_ns=external_ns)
@@ -2535,7 +2532,7 @@ def run_gui(session_driver=None) -> int:
                         # Luna may flush after the game already started voice.
                         # Replay only the bounded acquisition-delay window; ASR
                         # still must match the new text before the PCM is owned.
-                        lookback_ms = max(100, self.controller.profile.hook_flush_ms + 100)
+                        lookback_ms = max(100, self.application.runtime_state().profile.hook_flush_ms + 100)
                         replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
                     self.native_audio.begin(token, u.match_text, replay_from_ms=replay_from_ms)
                 else:
@@ -2551,49 +2548,49 @@ def run_gui(session_driver=None) -> int:
                     self.jobs.start(token, self.catalog.irodori_url, u.reading, u.voice)
 
         def fallback_due(self, token):
-            u = self.controller.utterance
-            if (token != self.controller.token or not u or u.use_tts or
-                    u.advance_mode != AdvanceMode.AUDIO or self.controller.completed or self.controller.sent):
+            u = self.application.runtime_state().utterance
+            if (token != self.application.runtime_state().token or not u or u.use_tts or
+                    u.advance_mode != AdvanceMode.AUDIO or self.application.runtime_state().completed or self.application.runtime_state().sent):
                 return
             if self.native_audio and self.native_audio.holds_deadline(token):
                 # A correlated voice is active, or a bounded real ASR analysis
                 # of captured speech is pending. Neither grants completion.
                 QTimer.singleShot(200, lambda t=token: self.fallback_due(t))
                 return
-            if self.controller.native_playing:
+            if self.application.runtime_state().native_playing:
                 self.presentation_event(token, 'native_evidence_stale')
             self.presentation_event(token, 'fallback_elapsed')
 
         def on_voice(self, token, success, reason):
-            if token == self.controller.token and token is not None:
+            if token == self.application.runtime_state().token and token is not None:
                 self.validation_trace.emit('tts_result', session=token.session,
                     line=token.line, success=bool(success))
             self.presentation_event(token, 'tts_finished', success=success)
-            if reason and not success and token == self.controller.token:
+            if reason and not success and token == self.application.runtime_state().token:
                 self.note(reason)
 
         def presentation_event(self, token, event, *, success=True):
-            if self.controller.presentation_event(token, event, success=success):
+            if self.application.runtime_presentation_event(token, event, success=success):
                 self.validation_trace.emit('presentation_complete', session=token.session,
-                    line=token.line, success=True, reason=self.controller.presentation_reason)
+                    line=token.line, success=True, reason=self.application.runtime_state().presentation_reason)
                 self.advance_if_ready()
             self.refresh_status()
 
         def on_ocr(self, session, pid, sequence, text):
             if self._pending_monitor_apply and text.strip():
-                current = self.controller.utterance
-                if current is None or self.controller.sent or self.controller.ocr_blank:
+                current = self.application.runtime_state().utterance
+                if current is None or self.application.runtime_state().sent or self.application.runtime_state().ocr_blank:
                     # A blank interval is OCR's verified dialogue boundary. The
                     # newly started OCR worker will re-observe the visible line.
                     self.apply_pending_monitor_transition()
                     return
-            token = self.controller.observe_ocr(session=session, pid=pid, sequence=sequence, text=text)
+            token = self.application.observe_runtime_ocr(session=session, pid=pid, sequence=sequence, text=text)
             if token:
                 self.display_utterance(token)
 
         def on_ocr_error(self, reason):
             self.note('OCR stopped: ' + reason)
-            self.controller.pause('ocr_failure')
+            self.application.hold_runtime('ocr_failure')
             self.refresh_status()
 
         def preflight(self, target: Target) -> bool:
@@ -2607,7 +2604,7 @@ def run_gui(session_driver=None) -> int:
             return focus == target.hwnd and pid.value == target.pid
 
         def send_input(self, target: Target, virtual_key: int):
-            token = self.controller.token
+            token = self.application.runtime_state().token
             if token:
                 self.validation_trace.emit('advance_attempt', session=token.session,
                     line=token.line)
@@ -2626,50 +2623,31 @@ def run_gui(session_driver=None) -> int:
                     line=token.line)
 
         def advance_if_ready(self):
-            if not self.controller.try_advance():
+            if not self.application.try_advance():
                 return
-            token = self.controller.token
-            timeout = self.controller.profile.next_line_timeout_ms
+            token = self.application.runtime_state().token
+            timeout = self.application.runtime_state().profile.next_line_timeout_ms
             QTimer.singleShot(timeout, lambda t=token: self.expire_next_line(t))
 
         def expire_next_line(self, token):
-            if self.controller.expire_next_line(token):
+            if self.application.expire_next_line(token):
                 self.validation_trace.emit('next_line_timeout', session=token.session, line=token.line)
                 self.note('送り後に次の台詞を取得できません。自動送りはONのまま入力を保留します。')
                 self.refresh_status()
 
         def permit(self):
-            self.validation_trace.emit('permit_requested', session=self.controller.session)
-            self.controller.permit(True)
+            self.validation_trace.emit('permit_requested', session=self.application.runtime_state().session)
+            self.application.set_auto_advance(True)
             self.advance_if_ready()
             self.refresh_status()
 
         def pause(self):
-            self.validation_trace.emit('pause_requested', session=self.controller.session)
-            self.controller.permit(False)
+            self.validation_trace.emit('pause_requested', session=self.application.runtime_state().session)
+            self.application.set_auto_advance(False)
             self.refresh_status()
 
-        @staticmethod
-        def status_reason_label(reason: str | None) -> str:
-            labels = {
-                'target_not_foreground': 'ゲームが前面にないため、この台詞の自動送りを保留しています。',
-                'next_line_timeout': '送り後に次の台詞を取得できません。会話取得を確認してください。',
-                'ambiguous_identical_line': '同じ本文が続き、次の台詞か判断できないため自動送りを保留しています。',
-                'ambiguous_multihook_lines': '複数の台詞ソースの対応を確定できないため自動送りを保留しています。',
-                'ambiguous_multihook_speakers': '複数の話者ソースの対応を確定できないため自動送りを保留しています。',
-                'unpaired_speaker_output': '話者ソースに対応する台詞を確定できないため自動送りを保留しています。',
-                'ocr_unverified_change': 'OCRの変化を次の台詞と確認できないため自動送りを保留しています。',
-                'native_inconclusive_hold': '原音の終了を確認できないため、この台詞の自動送りを保留しています。',
-                'native_audio_failure': 'ゲーム音声を確認できないため、この台詞の自動送りを保留しています。',
-                'native_audio_unavailable_hold': '音声判断を利用できないため、この台詞の自動送りを保留しています。',
-                'tts_playback_failed': 'TTS再生に失敗したため、この台詞の自動送りを保留しています。',
-                'host_changed': 'ゲームからの台詞取得が途切れたため、自動送りを保留しています。',
-                'input_failure_no_retry': 'ゲームへの送り操作に失敗しました。安全のため自動再試行していません。',
-            }
-            return labels.get(reason, '')
-
         def refresh_status(self):
-            c = self.controller
+            c = self.application.runtime_state()
             token = c.token
             if self.validation_trace.path and token is not None and c.pause_reason:
                 marker = (token, c.pause_reason)
@@ -2684,17 +2662,31 @@ def run_gui(session_driver=None) -> int:
                             audio_pid=self.native_audio.pid,
                             **self.native_audio.capture_status())
                     self._last_validation_handoff = marker
+            view = self.application.play_view()
             previous = self.advance_authorization.blockSignals(True)
-            self.advance_authorization.setChecked(bool(c.authorized))
-            self.advance_authorization.setText('自動送り ON' if c.authorized else '自動送り OFF')
+            self.advance_authorization.setChecked(view.advance_authorized)
+            self.advance_authorization.setText('自動送り ON' if view.advance_authorized else '自動送り OFF')
             self.advance_authorization.blockSignals(previous)
-            issue = self.status_reason_label(c.pause_reason) if c.authorized else ''
-            if issue:
-                self.play_issue.setText(issue)
+            if view.issue:
+                self.play_issue.setText(view.issue.message)
                 self.play_issue.show()
+                self._play_issue_action = view.issue.action
+                labels = {
+                    'open_capture': '会話取得を確認',
+                    'open_capture_recovery': '取得の復旧を開く',
+                    'open_audio_policy': '音声判断設定を開く',
+                    'open_voice': 'Voice設定を開く',
+                }
+                if view.issue.action in labels:
+                    self.play_issue_action.setText(labels[view.issue.action])
+                    self.play_issue_action.show()
+                else:
+                    self.play_issue_action.hide()
             else:
+                self._play_issue_action = None
                 self.play_issue.clear()
                 self.play_issue.hide()
+                self.play_issue_action.hide()
             # Low-level runtime identity remains available only in Diagnostics.
             if c.profile and c.profile.source == 'hook':
                 self.active_hook_status.setText('active text source: ' + (c.active_text_source or '(waiting)'))
@@ -2702,7 +2694,7 @@ def run_gui(session_driver=None) -> int:
                 self.active_hook_status.clear()
 
         def stop_session(self):
-            self.validation_trace.emit('monitor_ended', session=self.controller.session)
+            self.validation_trace.emit('monitor_ended', session=self.application.runtime_state().session)
             if hasattr(self, '_output_timer'):
                 self._output_timer.stop()
                 self._output_group.clear()
@@ -2720,23 +2712,22 @@ def run_gui(session_driver=None) -> int:
                 threading.Thread(target=worker.close, daemon=True).start()
             self.jobs.cancel()
             self.preview_jobs.cancel()
-            self.controller.close('session_changed')
+            self.application.close_runtime('session_changed')
             if hasattr(self, 'preview'):
                 self.preview.clear()
             if hasattr(self, 'status'):
                 self.refresh_status()
 
-        def on_host_error_from_host(self, epoch: int, message: str):
-            if epoch == self._host_epoch:
-                self.on_host_error(message)
+        def on_host_error_from_host(self, message: str):
+            self.on_host_error(message)
 
         def on_host_error(self, message):
-            self.set_runtime_capture_problem('ゲームから台詞を取得できません。取得の復旧を確認してください。')
+            self.application.report_capture_problem('ゲームから台詞を取得できません。取得の復旧を確認してください。')
+            self.refresh_capture_workspace()
             self.note('LunaHostネイティブエラー: ' + message)
 
-        def on_host_closed(self, epoch: int, reason: str):
-            if epoch == self._host_epoch:
-                self.on_closed(reason)
+        def on_host_closed(self, reason: str):
+            self.on_closed(reason)
 
         def on_closed(self, reason):
             self._resume_monitor_requested = False
@@ -2747,14 +2738,13 @@ def run_gui(session_driver=None) -> int:
             self.connection_generation = 0
             self.host_status.setText(f'LunaHook Host: 停止 ({reason})')
             if self.isVisible():
-                self.set_runtime_capture_problem('ゲームからの台詞取得が停止しました。')
+                self.application.report_capture_problem('ゲームからの台詞取得が停止しました。')
+                self.refresh_capture_workspace()
 
         def closeEvent(self, event):
             self.stop_session()
-            if self.hook_host:
-                self.hook_host.close()
-            if self.server:
-                self.server.close()
+            self.application.close_hook_host()
+            self.application.close_irodori()
             super().closeEvent(event)
 
     app = QApplication.instance() or QApplication(sys.argv)

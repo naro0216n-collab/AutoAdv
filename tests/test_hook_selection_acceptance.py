@@ -129,7 +129,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 self.assertFalse(hasattr(window, 'attach'))
                 window.pid.setValue(101)
                 commands = Mock()
-                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
+                window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 existing = source('A', 1)
                 window.on_hook(HookEvent('output', 'host', 7, 2, 200,
@@ -142,7 +142,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 commands.assert_any_call('find_hooks', pid=101, boundary_module='',
                                          parameters={'maxRecords': 64})
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
 
@@ -164,7 +164,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
             try:
                 window.pid.setValue(101)
                 commands = Mock()
-                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
+                window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 window.btn_recovery_search.click()
                 window.on_hook(HookEvent('hook_found', 'host', 7, 2, 200,
@@ -183,7 +183,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
                 self.assertEqual(window.current_profile().inserted_hooks, ['B'])
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
 
@@ -204,7 +204,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 window.pid.setValue(101)
-                window.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
+                window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
                 text_source = source('T', 1)
                 speaker_source = source('S', 5, address=0x200)
@@ -213,8 +213,10 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.on_hook(HookEvent('output', 'host', 3, 3, 220,
                                          process_id=101, source=speaker_source, text='京'))
                 window.flush_capture_outputs()
+                window.tabs.setCurrentIndex(1)
                 window._capture_role_buttons[(text_source.identity, text_source.address)]['text'].click()
                 window._capture_role_buttons[(speaker_source.identity, speaker_source.address)]['speaker'].click()
+                QApplication.processEvents()
                 self.assertFalse(window.route_table.isVisible())
                 self.assertIn('京', window.capture_dialogue_preview.toPlainText())
                 self.assertIn('本文', window.capture_dialogue_preview.toPlainText())
@@ -224,7 +226,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 speaker_hook = next(h for h in profile.hooks if h.role == 'speaker')
                 self.assertEqual(profile.speaker_links[text_hook.identity], speaker_hook.identity)
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
 
@@ -245,21 +247,23 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 window.pid.setValue(101)
-                window.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
+                window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                window.tabs.setCurrentIndex(1)
                 a, b = source('A', 1), source('B', 3, address=0x300)
                 window.on_hook(HookEvent('output', 'host', 7, 2, 200, process_id=101, source=a, text='A'))
                 window.on_hook(HookEvent('output', 'host', 7, 3, 300, process_id=101, source=b, text='B'))
                 window._capture_role_buttons[(a.identity, a.address)]['text'].click()
                 self.assertFalse(window.route_table.isVisible())
                 window._capture_role_buttons[(b.identity, b.address)]['text'].click()
+                QApplication.processEvents()
                 self.assertTrue(window.route_table.isVisible())
                 self.assertEqual(window.route_table.rowCount(), 2)
                 window.move_capture_route(b.identity, -1)
                 self.assertEqual([h.code for h in window.application.capture.profile.hooks if h.role == 'text'], ['B', 'A'])
                 self.assertEqual(window.current_profile().hooks, [])  # still a draft
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
 

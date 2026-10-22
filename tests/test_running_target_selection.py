@@ -66,7 +66,7 @@ class RunningTargetGuiTests(unittest.TestCase):
                     starts.append('host-start')
                     window._connecting_pid = 0
                     window.attached_pid = 0
-                    window.hook_host = SimpleNamespace(
+                    window.application.hook_host = SimpleNamespace(
                         command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.start_host = fake_host_start
                 window.use_running_target(candidate)
@@ -88,14 +88,10 @@ class RunningTargetGuiTests(unittest.TestCase):
                 self.assertEqual(len(starts), 2)
                 commands.assert_any_call('connect', pid=next_target.pid)
                 self.assertEqual(window._connecting_pid, next_target.pid)
-                self.assertFalse(window.controller.authorized)
-                # Delayed signals from an old worker must not change the new game.
-                window._host_epoch = 4
-                window.on_host_closed(3, 'old native Host exit')
-                self.assertEqual(window._connecting_pid, next_target.pid)
-                self.assertEqual(window.hook_host.child.poll(), None)
+                self.assertFalse(window.application.runtime_state().authorized)
+                self.assertTrue(window.application.hook_host_running)
             finally:
-                window.hook_host = None  # fake Host has no subprocess to close
+                window.application.hook_host = None  # fake Host has no subprocess to close
                 window.close()
             return 0
 
@@ -122,17 +118,18 @@ class RunningTargetGuiTests(unittest.TestCase):
                 self.assertFalse(hasattr(window, 'detect_registered_game'))
                 def fake_host_start():
                     starts.append('start')
-                    window.hook_host = SimpleNamespace(command=commands,
+                    window.application.hook_host = SimpleNamespace(command=commands,
                         child=SimpleNamespace(poll=lambda: None))
                 window.start_host = fake_host_start
-                with patch('autoadv.gui.find_game_windows', return_value=(target,)):
+                with patch('autoadv.gui.sys.platform', 'win32'), \
+                     patch('autoadv.gui.find_game_windows', return_value=(target,)):
                     window.auto_attach_selected_game()
                 commands.assert_any_call('connect', pid=137)
                 self.assertEqual(len(starts), 1)
                 self.assertEqual(window.pid.value(), 137)
                 self.assertEqual(window.hwnd.text(), hex(target.hwnd))
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):

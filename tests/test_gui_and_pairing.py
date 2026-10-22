@@ -55,6 +55,14 @@ class GuiSourceArchitectureTests(unittest.TestCase):
         self.assertNotIn('inherit_controls', source)
         self.assertNotIn("QPushButton('ほかの取得候補を探す')", source)
         self.assertIn("QPushButton('高度なHOOK探索を試す')", source)
+        self.assertNotIn('from .hook_host import HookHost', source)
+        self.assertNotIn('self.hook_host', source)
+        self.assertNotIn('from .irodori_server import IrodoriServer', source)
+        self.assertNotIn('self.server =', source)
+        self.assertNotIn('self.server:', source)
+        self.assertNotIn('status_reason_label', source)
+        self.assertNotIn('native_inconclusive_hold', source)
+        self.assertNotIn('application.controller', source)
         self.assertIn("('home', 'プレイ'), ('game', 'ゲーム'), ('settings', '設定')", source)
 
     def test_normal_hook_output_updates_capture_application_without_refresh_command(self):
@@ -74,7 +82,7 @@ class WindowsGuiInitialization(unittest.TestCase):
         catalog = Catalog()
         game = catalog.create_game('検査ゲーム')
         p = game.profiles[game.default_profile]
-        p.speaker_tts.update({'京': True, '大和': False})
+        p.speaker_tts.update({'京': True, '大和': True})
         p.speaker_voices.update({'京': 'v1', '大和': 'v2'})
 
         def inspect(*_):
@@ -86,12 +94,12 @@ class WindowsGuiInitialization(unittest.TestCase):
                 self.assertEqual(window.speaker_table.rowCount(), 2)
                 window.example_raw.setPlainText('大和「おはよう」')
                 self.assertIn('話者: 大和', window.editor_preview.toPlainText())
-                self.assertIn('Voice v2', window.editor_preview.toPlainText())
+                self.assertIn('TTS: Voice v2', window.editor_preview.toPlainText())
                 row = next(i for i in range(window.speaker_table.rowCount())
                            if window.speaker_table.item(i, 0).text() == '大和')
                 window.speaker_table.cellWidget(row, 2).setEditText('v3')
                 self.assertEqual(window.current_profile().speaker_voices['大和'], 'v3')
-                self.assertIn('Voice v3', window.editor_preview.toPlainText())
+                self.assertIn('TTS: Voice v3', window.editor_preview.toPlainText())
                 window.clear_structure_editor()
                 window.structure_pattern.setText(r'^(?P<speaker>[^「」]+)「(?P<body>.+)」$')
                 window.add_structure_rule()
@@ -121,15 +129,15 @@ class WindowsGuiInitialization(unittest.TestCase):
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 self.assertEqual(window.reading_ms.value(), 900)
-                self.assertFalse(window.profile_reset_buttons['reading_ms'].isVisible())
+                self.assertTrue(window.profile_reset_buttons['reading_ms'].isHidden())
                 window.reading_ms.setValue(1200)
                 self.assertEqual(window.current_profile().reading_ms, 1200)
                 self.assertNotIn('reading_ms', window.current_profile().inherit_common)
-                self.assertTrue(window.profile_reset_buttons['reading_ms'].isVisible())
+                self.assertFalse(window.profile_reset_buttons['reading_ms'].isHidden())
                 window.profile_reset_buttons['reading_ms'].click()
                 self.assertIn('reading_ms', window.current_profile().inherit_common)
                 self.assertEqual(window.reading_ms.value(), 900)
-                self.assertFalse(window.profile_reset_buttons['reading_ms'].isVisible())
+                self.assertTrue(window.profile_reset_buttons['reading_ms'].isHidden())
             finally:
                 window.close()
             return 0
@@ -156,14 +164,14 @@ class WindowsGuiInitialization(unittest.TestCase):
                 self.assertTrue(window.current_profile().insert_pc_hooks)
                 window.pid.setValue(31)
                 window.hwnd.setText('0x100')
-                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
+                window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.connect_game()
                 commands.assert_any_call('connect', pid=31)
                 commands.reset_mock()
                 window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=31))
                 commands.assert_any_call('insert_pc_hooks', pid=31)
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
 
@@ -198,26 +206,26 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 window.advance_authorization.click()
-                self.assertTrue(window.controller.authorized)
+                self.assertTrue(window.application.runtime_state().authorized)
                 self.assertEqual(window.advance_authorization.text(), '自動送り ON')
                 self.assertFalse(window.play_issue.isVisible())
                 window.pid.setValue(101)
                 window.hwnd.setText('0x1234')
                 commands = Mock()
-                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
+                window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.connect_game()
                 window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=101))
                 src = ThreadSource(101, 0x500, 1, 2, 'HOOK-1', 'HOOK-1')
                 window.on_hook(HookEvent('output', 'host', 1, 2, 200,
                                          process_id=101, source=src, text='京「おはよう」'))
                 QApplication.processEvents()
-                self.assertIsNotNone(window.controller.profile)
-                self.assertTrue(window.controller.authorized)
+                self.assertIsNotNone(window.application.runtime_state().profile)
+                self.assertTrue(window.application.runtime_state().authorized)
                 self.assertFalse(window.play_issue.isVisible())
                 self.assertIn('京', window.preview.toPlainText())
                 self.assertIn('おはよう', window.preview.toPlainText())
             finally:
-                window.hook_host = None
+                window.application.hook_host = None
                 window.close()
             return 0
 
@@ -243,7 +251,7 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 self.assertEqual(window.tabs.currentIndex(), 1)
                 window.btn_fix_extraction.click()
                 self.assertTrue(window.section_toggles['extraction'].isChecked())
-                self.assertFalse(window.controller.authorized)
+                self.assertFalse(window.application.runtime_state().authorized)
                 self.assertFalse(hasattr(window, 'btn_monitor'))
             finally:
                 window.close()

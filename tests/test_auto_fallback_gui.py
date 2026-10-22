@@ -38,18 +38,19 @@ class TwoModeGuiTests(unittest.TestCase):
                 self.assertTrue(window.advance_text_button.isVisible())
                 self.assertTrue(window.advance_audio_button.isVisible())
                 self.assertEqual(window.current_advance_mode(), mode)
-                c = window.controller
+                app = window.application
+                c = app.controller
                 c.input_send = lambda *_: sent.append('advance')
                 c.preflight = lambda *_: True
-                c.begin(profile, Target(100, 200), 'ocr', 1)
-                c.permit(True)
-                token = c.observe_ocr(sequence=1, text='「こんにちは！」', pid=100, session=c.session)
+                app.begin_runtime(profile, Target(100, 200), 'ocr', 1)
+                app.set_auto_advance(True)
+                token = app.observe_runtime_ocr(sequence=1, text='「こんにちは！」', pid=100, session=app.runtime_state().session)
                 requests = []
                 window.jobs.start = lambda *args: requests.append(args)
                 window.native_audio = native
                 window.display_utterance(token)
                 self.assertEqual(c.utterance.character_count, 5)
-                self.assertIn('500ms', window.wait_preview.text())
+                self.assertIn('500 ms', window.wait_preview.text())
                 self.assertIn('こんにちは', window.preview.toPlainText())
                 self.assertEqual(window.advance_authorization.text(), '自動送り ON')
                 self.assertFalse(window.play_issue.isVisible())
