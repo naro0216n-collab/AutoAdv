@@ -55,7 +55,7 @@ class MultiHookProductContract(unittest.TestCase):
         self.c.permit(True)
         self.assertIsNone(self.c.observe_group([msg(TEXT, 1, '台詞A'), msg(TEXT, 2, '台詞B')]))
         self.assertEqual(self.c.reason, 'ambiguous_multihook_lines')
-        self.assertFalse(self.c.authorized)
+        self.assertTrue(self.c.authorized)
         self.assertEqual(self.sent, [])
 
     def test_no_next_output_after_input_returns_control_without_retry(self):
@@ -67,13 +67,13 @@ class MultiHookProductContract(unittest.TestCase):
         self.assertFalse(self.c.expire_next_line(Token(self.c.session, 2)))
         self.assertTrue(self.c.expire_next_line(ticket))
         self.assertEqual(self.c.reason, 'next_line_timeout')
-        self.assertFalse(self.c.authorized)
+        self.assertTrue(self.c.authorized)
         self.assertFalse(self.c.try_advance())
         self.assertEqual(self.sent, [1])
         # A late dialogue line is displayed, without silently restoring input rights.
         late = self.c.observe_group([msg(TEXT, 2, '次の台詞')])
         self.assertIsNotNone(late)
-        self.assertFalse(self.c.authorized)
+        self.assertTrue(self.c.authorized)
 
     def test_timeout_of_old_ticket_cannot_pause_new_line(self):
         self.c.permit(True)

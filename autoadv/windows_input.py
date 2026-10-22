@@ -9,10 +9,6 @@ from ctypes import wintypes
 import sys
 import time
 
-# A source-identification tag, NOT permission to ignore foreign injected input.
-# Only this process's explicitly tagged, injected key/mouse events are automatic.
-AUTOADV_INPUT_MARK = 0x41564456
-
 
 def input_types():
     """ABI-complete Win32 INPUT union (40 bytes on 64-bit Windows)."""
@@ -77,12 +73,12 @@ class WindowsAdvancementInput:
                 raise RuntimeError('configured key has no Windows scancode')
             extended = 0x0001 if self.virtual_key in (0x21, 0x22, 0x23, 0x24, 0x25,
                 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x6F, 0x90, 0x91) else 0
-            press = INPUT(1, INPUTUNION(ki=KEYBDINPUT(0, scan, 0x0008 | extended, 0, AUTOADV_INPUT_MARK)))
-            release = INPUT(1, INPUTUNION(ki=KEYBDINPUT(0, scan, 0x0008 | 0x0002 | extended, 0, AUTOADV_INPUT_MARK)))
+            press = INPUT(1, INPUTUNION(ki=KEYBDINPUT(0, scan, 0x0008 | extended, 0, 0)))
+            release = INPUT(1, INPUTUNION(ki=KEYBDINPUT(0, scan, 0x0008 | 0x0002 | extended, 0, 0)))
         else:
             mouse_type = INPUTUNION._fields_[0][1]
-            press = INPUT(0, INPUTUNION(mi=mouse_type(0, 0, 0, 0x0002, 0, AUTOADV_INPUT_MARK)))
-            release = INPUT(0, INPUTUNION(mi=mouse_type(0, 0, 0, 0x0004, 0, AUTOADV_INPUT_MARK)))
+            press = INPUT(0, INPUTUNION(mi=mouse_type(0, 0, 0, 0x0002, 0, 0)))
+            release = INPUT(0, INPUTUNION(mi=mouse_type(0, 0, 0, 0x0004, 0, 0)))
         user32.SendInput.argtypes = (ctypes.c_uint32, ctypes.POINTER(INPUT), ctypes.c_int)
         user32.SendInput.restype = ctypes.c_uint32
         press_buffer = (INPUT * 1)(press)

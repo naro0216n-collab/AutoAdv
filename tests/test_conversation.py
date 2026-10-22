@@ -48,7 +48,7 @@ class DialogueContractTests(unittest.TestCase):
         self.controller.try_advance()
         self.assertIsNone(self.output('同じ台詞', 2))
         self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
-        self.assertFalse(self.controller.authorized)
+        self.assertTrue(self.controller.authorized)
         second = self.output('違う台詞', 3)
         self.assertNotEqual(second, first)
         self.controller.presentation_event(second, 'text_elapsed')
@@ -86,14 +86,16 @@ class DialogueContractTests(unittest.TestCase):
         self.assertFalse(self.controller.authorized)
         self.assertFalse(self.controller.try_advance())
 
-    def test_manual_intervention_preserves_monitoring_but_revokes_input(self):
+    def test_runtime_hold_preserves_auto_mode_and_next_line_resumes(self):
         token = self.output('まだ読む', 1)
         self.controller.permit(True)
-        self.controller.pause('manual_intervention')
+        self.controller.pause('native_inconclusive_hold')
         self.controller.presentation_event(token, 'text_elapsed')
         self.assertFalse(self.controller.try_advance())
+        self.assertTrue(self.controller.authorized)
         self.assertIsNotNone(self.output('次', 2))
-        self.assertIsNotNone(self.controller.profile)
+        self.assertTrue(self.controller.authorized)
+        self.assertEqual(self.controller.reason, 'presenting')
 
     def test_other_pid_and_stale_sequence_not_accepted(self):
         self.assertIsNone(self.output('他ゲーム', 1, pid=9, gen='host-b'))
@@ -102,11 +104,12 @@ class DialogueContractTests(unittest.TestCase):
         self.assertIsNone(self.output('stale', 1))
         self.assertEqual(self.controller.utterance.raw, 'OK')
 
-    def test_host_generation_change_revokes_authority(self):
+    def test_host_generation_change_holds_without_rewriting_user_mode(self):
         self.controller.permit(True)
         self.assertIsNone(self.output('wrong gen', 1, gen='host-b'))
         self.assertEqual(self.controller.reason, 'host_changed')
-        self.assertFalse(self.controller.authorized)
+        self.assertTrue(self.controller.authorized)
+        self.assertFalse(self.controller.try_advance())
 
     def test_foreground_check_and_failure_do_not_retry(self):
         self.controller.permit(True)
@@ -186,7 +189,7 @@ class HookBoundaryContractTests(unittest.TestCase):
         self.assertIsNone(self.out('同じ', 3))
         self.assertEqual(first, self.controller.token)
         self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
-        self.assertFalse(self.controller.authorized)
+        self.assertTrue(self.controller.authorized)
 
     def test_same_text_as_two_flushed_lines_when_configured(self):
         p = profile()
@@ -210,7 +213,7 @@ class HookBoundaryContractTests(unittest.TestCase):
                 source=other, text='', pid=101))
         self.assertIsNone(self.out('同じ', 3))
         self.assertEqual(self.controller.token, before)
-        self.assertFalse(self.controller.authorized)
+        self.assertTrue(self.controller.authorized)
 
     def test_old_session_clear_does_not_authorize_new_game(self):
         first = self.sent_line('同じ')

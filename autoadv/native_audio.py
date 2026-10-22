@@ -102,8 +102,7 @@ class NativeAudio:
     def boundary(self, at_ms: int | None = None):
         """An observed advance opens the next interval without restarting capture.
 
-        ``at_ms`` allows a physical-input observer to preserve the real manual
-        input time even if the GUI handles that event slightly later. The old
+        ``at_ms`` can preserve an already-known AutoAdv input boundary. The old
         token and pending ASR results lose ownership immediately; retained PCM
         is replayed only after a later HOOK establishes the new text.
         """
@@ -144,12 +143,14 @@ class NativeAudio:
         if hasattr(self.activity, 'reset'):
             self.activity.reset()
 
-    def begin(self, token: Token, match_text: str):
-        """Bind captured post-input PCM to a HOOK text, including early voice.
+    def begin(self, token: Token, match_text: str, *, replay_from_ms: int | None = None):
+        """Bind retained PCM to one HOOK-confirmed utterance.
 
-        Replay and live feeding are serialized with the VAD lock. An unbound
-        interval is never labelled as this dialogue until text is available.
-        If there was no preceding observed input, do not claim old PCM.
+        AutoAdv input establishes an exact boundary through ``boundary()``.
+        When the game advances externally, ``replay_from_ms`` may request a
+        bounded pre-HOOK replay from the continuous process history instead.
+        The ASR matcher still has to associate that audio with ``match_text``;
+        the replay window itself is not evidence that all PCM belongs to it.
         """
         with self._lock:
             self._generation += 1
@@ -158,8 +159,11 @@ class NativeAudio:
             self.token = token
             self.matcher = TargetMatcher(match_text)
             self.start_ms = self.clock()
-            self.window_start_ms = (self.boundary_ms if self._awaiting_hook
-                                    else self.start_ms)
+            if replay_from_ms is not None:
+                self.window_start_ms = max(0, int(replay_from_ms))
+            else:
+                self.window_start_ms = (self.boundary_ms if self._awaiting_hook
+                                        else self.start_ms)
             self._awaiting_hook = False
             self._last_processed_ms = -1
             self._last_processed_chunk = None

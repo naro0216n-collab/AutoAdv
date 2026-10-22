@@ -53,9 +53,7 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source: str | None = None
-        self.manual_advance_pending = False
-        self.manual_boundary_ns = 0
-        self.accepted_manual_boundary_ns = 0
+        self.external_transition_ns = 0
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
               available_sources: tuple[str, ...] = ()) -> int:
@@ -90,32 +88,11 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source = None
-        self.manual_advance_pending = False
-        self.manual_boundary_ns = 0
-        self.accepted_manual_boundary_ns = 0
+        self.external_transition_ns = 0
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.pause_reason = None
         self.reason = reason
-
-    def manual_advance(self, observed_ns: int) -> bool:
-        """Record a user advance candidate without inventing the next line.
-
-        The old presentation can no longer authorize input. A later selected
-        HOOK flush at or after this boundary is allowed to establish the next
-        Utterance, including an identical line.
-        """
-        if self.profile is None or observed_ns <= 0:
-            return False
-        self.manual_advance_pending = True
-        self.manual_boundary_ns = max(self.manual_boundary_ns, observed_ns)
-        self.accepted_manual_boundary_ns = 0
-        self.authorized = False
-        self.completed = False
-        self.presentation_reason = None
-        self.pause_reason = 'manual_intervention'
-        self.reason = 'manual_advance_waiting'
-        return True
 
     def stage_profile(self, profile: Profile) -> None:
         """Apply compatible setting edits at the next utterance boundary.
@@ -168,11 +145,6 @@ class Controller:
             # Once chosen, another source cannot silently replace the line owner.
             self.active_text_source = identity
         if identity != self.active_text_source:
-            return None
-        if (self.manual_advance_pending and received_ns > 0 and
-                received_ns < self.manual_boundary_ns):
-            # The Host had already received this output before the observed
-            # manual advance. It belongs to the state the user just dismissed.
             return None
         return self._accept_line(sequence=sequence, text=text, origin=identity,
                                  side_speaker=paired_speaker or '',
@@ -277,11 +249,11 @@ class Controller:
     def _accept_line(self, *, sequence: int, text: str, origin: str, side_speaker: str,
                      verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
         old = self.utterance
-        manual_boundary = bool(self.manual_advance_pending and received_ns > 0 and
-                               received_ns >= self.manual_boundary_ns)
-        if old and not self.sent and old.raw == text and not verified_boundary and not manual_boundary:
-            # A duplicate notification is still the same Utterance unless an
-            # observed manual advance precedes this new selected-HOOK flush.
+        external_transition = bool(old and not self.sent and text != old.raw and received_ns > 0)
+        if old and not self.sent and old.raw == text and not verified_boundary:
+            # Without observing user input, an identical flush cannot be
+            # distinguished from a duplicate notification. Do not invent a
+            # dialogue boundary from it.
             return None
         # Once the incoming output can establish a new boundary, settings staged
         # during the previous Utterance become the active profile before the new
@@ -290,17 +262,12 @@ class Controller:
         if self.pending_profile is not None:
             self.profile = self.pending_profile
             self.pending_profile = None
-        if old and self.sent and not verified_boundary and not manual_boundary:
+        if old and self.sent and not verified_boundary:
             if text == old.raw:
                 if self.profile.repeat_rule != 'each_after_input':
                     self.pause('ambiguous_identical_line')
                     return None
-        if manual_boundary:
-            self.accepted_manual_boundary_ns = self.manual_boundary_ns
-            self.manual_advance_pending = False
-            self.manual_boundary_ns = 0
-        else:
-            self.accepted_manual_boundary_ns = 0
+        self.external_transition_ns = received_ns if external_transition else 0
         self.line_no += 1
         self.utterance = interpret(text, self.profile, session=self.session,
                                    line=self.line_no, source=origin,
@@ -310,15 +277,24 @@ class Controller:
         self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.sent = False
         self.awaiting_next = False
-        self.reason = self.pause_reason or 'presenting'
+        if self.authorized:
+            self.pause_reason = None
+            self.reason = 'presenting'
+        else:
+            self.pause_reason = 'advance_not_authorized'
+            self.reason = 'advance_not_authorized'
         return Token(self.session, self.line_no)
 
-    def take_manual_audio_boundary(self, token: Token) -> int:
-        """Return a confirmed manual-input boundary for the accepted token once."""
-        if token != self.token or self.accepted_manual_boundary_ns <= 0:
+    def take_external_transition(self, token: Token) -> int:
+        """Return the HOOK arrival time that replaced an unsent line once.
+
+        The Controller intentionally does not infer whether the game advanced
+        because of a click, key, script, or the game's own auto mode.
+        """
+        if token != self.token or self.external_transition_ns <= 0:
             return 0
-        value = self.accepted_manual_boundary_ns
-        self.accepted_manual_boundary_ns = 0
+        value = self.external_transition_ns
+        self.external_transition_ns = 0
         return value
 
     def presentation_event(self, token: Token, event: str, *,
@@ -328,8 +304,7 @@ class Controller:
         A completion event returns True only on the first transition to ready.
         Events from another line/session or after input are inert.
         """
-        if (token != self.token or self.sent or self.completed or not self.utterance
-                or self.manual_advance_pending):
+        if token != self.token or self.sent or self.completed or not self.utterance:
             return False
         u = self.utterance
         if event == 'tts_finished':
@@ -372,7 +347,7 @@ class Controller:
             if self.fallback_elapsed:
                 if u.uncertain_text_fallback:
                     return self._presentation_done('uncertain_text_fallback')
-                self.pause('native_inconclusive_manual_handoff')
+                self.pause('native_inconclusive_hold')
             return False
         if event == 'native_finished':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
@@ -388,14 +363,15 @@ class Controller:
                 # No automatic input: give the user a useful stopped state
                 # instead of an indefinitely ambiguous "presenting" state.
                 if self.authorized:
-                    self.pause('native_inconclusive_manual_handoff')
+                    self.pause('native_inconclusive_hold')
             return False
         raise ValueError(f'unknown presentation event: {event}')
 
     def _presentation_done(self, reason: str) -> bool:
         self.completed = True
         self.presentation_reason = reason
-        self.reason = 'ready' if self.authorized else (self.pause_reason or 'awaiting_permission')
+        self.reason = ('ready' if self.authorized and self.pause_reason is None
+                       else (self.pause_reason or 'awaiting_permission'))
         return True
 
     @property
@@ -405,24 +381,36 @@ class Controller:
         return Token(self.session, self.utterance.line)
 
     def permit(self, allowed: bool) -> None:
-        if allowed and self.manual_advance_pending:
-            self.authorized = False
-            self.pause_reason = 'manual_intervention'
-            self.reason = 'manual_advance_waiting'
-            return
-        self.authorized = bool(allowed) and self.profile is not None
-        self.pause_reason = None if self.authorized else 'advance_not_authorized'
-        self.reason = ('ready' if self.completed else 'presenting') if self.authorized else 'advance_not_authorized'
+        """Change only the user's automatic-advance authorization.
 
-    def pause(self, reason: str = 'manual_intervention') -> None:
-        self.authorized = False
+        Runtime uncertainty is represented by ``pause_reason`` and must not
+        silently turn the user's mode switch off.
+        """
+        if allowed and self.profile is not None:
+            self.authorized = True
+            # Re-enabling is an explicit user operation and may retry a
+            # previously held line. System events never perform this step.
+            self.pause_reason = None
+        else:
+            self.authorized = False
+            self.pause_reason = 'advance_not_authorized'
+        if not self.authorized:
+            self.reason = 'advance_not_authorized'
+        elif self.pause_reason:
+            self.reason = self.pause_reason
+        else:
+            self.reason = 'ready' if self.completed else 'presenting'
+
+    def pause(self, reason: str) -> None:
+        """Hold automatic input without changing the user's mode choice."""
         self.pause_reason = reason
         self.reason = reason
 
     def expire_next_line(self, token: Token) -> bool:
-        """Return input authority to the user after an unanswered advance.
+        """Hold further input after an unanswered advance.
 
-        A late response may still be displayed, but cannot reauthorize input.
+        The user's auto-mode choice remains ON; a later valid line may resume
+        it without fabricating another input for the timed-out utterance.
         """
         if token != self.token or not self.sent or not self.awaiting_next:
             return False
@@ -432,7 +420,7 @@ class Controller:
 
     def try_advance(self) -> bool:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent
-                and not self.manual_advance_pending):
+                and self.pause_reason is None):
             return False
         if not self.preflight(self.target):
             self.pause('target_not_foreground')

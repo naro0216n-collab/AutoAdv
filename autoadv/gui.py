@@ -20,7 +20,6 @@ from .model import AdvanceMode, HookSelection, Profile, StructureRule, Replaceme
 from .storage import Catalog, load, save
 from .voice import VoiceJobs
 from .native_audio import NativeAudio
-from .manual_input import WindowsManualMonitor
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .import_luna import inspect_luna, add_luna_games
@@ -105,8 +104,6 @@ def run_gui(session_driver=None) -> int:
             self.ocr_worker: OCRWorker | None = None
             self.native_audio: NativeAudio | None = None
             self.native_audio_setup_error: str | None = None
-            self.manual_monitor: WindowsManualMonitor | None = None
-            self._manual_input_serial = 0
             self.native_token: Token | None = None
             self.native_started = False
             self._known_game_pid = None
@@ -135,7 +132,7 @@ def run_gui(session_driver=None) -> int:
             overview = QHBoxLayout()
             self.overview_capture = QLabel('取得: 未接続')
             self.overview_voice = QLabel('音声: 未接続')
-            self.overview_advance = QLabel('自動送り: 停止')
+            self.overview_advance = QLabel('自動送り: OFF')
             for label in (self.overview_capture, self.overview_voice, self.overview_advance):
                 label.setProperty('statusChip', True)
                 overview.addWidget(label, 1)
@@ -774,12 +771,12 @@ def run_gui(session_driver=None) -> int:
             self.audio_environment_summary.setWordWrap(True)
             advance.addRow(self.audio_environment_summary)
             advance.addRow(QLabel('文字のみ判断は原音終了を確認しません。音声判断で根拠が不足した場合は上のフォールバック設定に従います。'))
-            self.advance_authorization = QPushButton('自動送り: 停止')
+            self.advance_authorization = QPushButton('自動送り: OFF')
             self.advance_authorization.setCheckable(True)
             self.advance_authorization.setProperty('primary', True)
             self.advance_authorization.toggled.connect(self.set_advance_authorization)
             advance.addRow('入力許可', self.advance_authorization)
-            self.status = QLabel('監視: 停止 / 自動送り: 停止')
+            self.status = QLabel('監視: 停止 / 自動送り: OFF')
             self.status.setWordWrap(True)
             advance.addRow('現在状態', self.status)
             self.profile_field_controls = {
@@ -832,10 +829,6 @@ def run_gui(session_driver=None) -> int:
                     layout.removeWidget(widget)
                     layout.insertWidget(position, widget)
                 layout.addStretch(1)
-            self.intervention_timer = QTimer(self)
-            self.intervention_timer.setInterval(150)
-            self.intervention_timer.timeout.connect(self.check_intervention)
-            self.intervention_timer.start()
             self.confirm_migration_if_needed()
             self.fill_games()
             if self.irodori_url.text().strip():
@@ -2679,11 +2672,6 @@ def run_gui(session_driver=None) -> int:
                 self.on_hook(event)
 
         def on_hook(self, event: HookEvent):
-            if event.kind == 'output':
-                # Low-level input is recorded synchronously. Pull it before a
-                # HOOK output is consumed so a manual advance can own the
-                # pre-HOOK audio interval and an identical next line.
-                self.sync_manual_target_input()
             if (event.kind == 'hook_found' and event.process_id == self.attached_pid
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation):
@@ -2800,7 +2788,6 @@ def run_gui(session_driver=None) -> int:
                             source=event.source, text=event.text, pid=event.process_id or 0,
                             received_ns=event.received_ns)
                         if result and self.controller.utterance:
-                            self.apply_confirmed_manual_audio_boundary(result)
                             self.display_utterance(result)
             if event.kind == 'inserted' and event.process_id == self.pid.value():
                 self.note(f'LunaによるHOOK挿入: {event.detail} {event.source.hook_code if event.source else ""}'.strip())
@@ -2871,11 +2858,6 @@ def run_gui(session_driver=None) -> int:
                                           self.host_generation, self.connection_generation,
                                           tuple(self.sources))
                     self.sync_hook_threads()
-                if sys.platform == 'win32':
-                    self.manual_monitor = WindowsManualMonitor(target.hwnd, target.pid)
-                    self._manual_input_serial = self.manual_monitor.target_input_serial
-                else:
-                    self._manual_input_serial = 0
                 self.start_native_audio_if_needed(p)
                 self.validation_trace.emit('monitor_started', session=self.controller.session,
                     source=p.source, game_id=self.game_id, profile_id=self.profile_id,
@@ -2923,7 +2905,6 @@ def run_gui(session_driver=None) -> int:
                 return
             result = self.controller.observe_group(group)
             if result and self.controller.utterance:
-                self.apply_confirmed_manual_audio_boundary(result)
                 self.display_utterance(result)
             else:
                 self.refresh_status()
@@ -2982,7 +2963,7 @@ def run_gui(session_driver=None) -> int:
                 self.note('Native audio unavailable: ' + reason)
                 u = self.controller.utterance
                 if u and u.advance_mode == AdvanceMode.AUDIO and not u.use_tts and not u.uncertain_text_fallback:
-                    self.controller.pause('native_audio_unavailable_manual_handoff')
+                    self.controller.pause('native_audio_unavailable_hold')
                 self.refresh_status()
                 return
             self.native_audio = native
@@ -3043,11 +3024,22 @@ def run_gui(session_driver=None) -> int:
             self.jobs.cancel()
             if self.native_audio:
                 self.native_audio.cancel()
+            external_ns = self.controller.take_external_transition(token)
+            if external_ns:
+                self.validation_trace.emit('external_hook_transition', session=token.session,
+                    line=token.line, received_ns=external_ns)
             if u.advance_mode == AdvanceMode.TEXT:
                 QTimer.singleShot(u.text_wait_ms, lambda t=token: self.presentation_event(t, 'text_elapsed'))
             elif not u.use_tts:
                 if self.native_audio:
-                    self.native_audio.begin(token, u.match_text)
+                    replay_from_ms = None
+                    if external_ns:
+                        # Luna may flush after the game already started voice.
+                        # Replay only the bounded acquisition-delay window; ASR
+                        # still must match the new text before the PCM is owned.
+                        lookback_ms = max(100, self.controller.profile.hook_flush_ms + 100)
+                        replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
+                    self.native_audio.begin(token, u.match_text, replay_from_ms=replay_from_ms)
                 else:
                     self.note('Native observation unavailable; uncertain audio cannot be certified')
                 # The same reading deadline governs opt-in continuation and
@@ -3106,71 +3098,8 @@ def run_gui(session_driver=None) -> int:
             self.controller.pause('ocr_failure')
             self.refresh_status()
 
-        def sync_manual_target_input(self) -> bool:
-            monitor = self.manual_monitor
-            profile = self.controller.profile
-            if not monitor or not profile:
-                return False
-            events = monitor.target_inputs_since(self._manual_input_serial)
-            if not events:
-                return False
-            self._manual_input_serial = max(item.serial for item in events)
-            candidate = next((item for item in reversed(events)
-                              if item.is_advance_candidate(profile.input_key)), None)
-            if candidate is None:
-                if self.controller.authorized:
-                    self.controller.pause('manual_intervention')
-                return False
-
-            # A target-scoped advance operation is only a boundary candidate.
-            # Stop presentation and revoke automatic input now, but keep native
-            # capture bound to the current line until a selected HOOK actually
-            # proves that a next Utterance exists. The PCM history lets us apply
-            # the candidate timestamp retroactively at that point.
-            self.jobs.cancel()
-            if profile.source != 'hook':
-                if self.controller.authorized:
-                    self.controller.pause('manual_intervention')
-                return False
-            if self.controller.manual_advance(candidate.observed_ns):
-                token = self.controller.token
-                self.validation_trace.emit('manual_advance_boundary',
-                    session=self.controller.session, line=token.line if token else 0,
-                    observed_ns=candidate.observed_ns,
-                    device='keyboard' if candidate.keyboard else 'mouse',
-                    code=candidate.code)
-                self.note('手動送りを検出しました。次台詞の取得を待ち、自動送りは停止したままにします。')
-                return True
-            return False
-
-        def apply_confirmed_manual_audio_boundary(self, token: Token):
-            observed_ns = self.controller.take_manual_audio_boundary(token)
-            if observed_ns <= 0:
-                return
-            if self.native_audio:
-                self.native_audio.boundary(observed_ns // 1_000_000)
-            self.validation_trace.emit('manual_advance_confirmed',
-                session=token.session, line=token.line, observed_ns=observed_ns)
-
-        def check_intervention(self):
-            if not self.manual_monitor:
-                return
-            if self.sync_manual_target_input():
-                self.refresh_status()
-                return
-            if not self.manual_monitor.intervened():
-                return
-            if self._pending_monitor_apply:
-                self.controller.pause('settings_changed')
-                QTimer.singleShot(0, self.apply_pending_monitor_transition)
-                self.refresh_status()
-                return
-            if self.controller.authorized:
-                self.controller.pause('manual_intervention')
-                self.refresh_status()
-
         def preflight(self, target: Target) -> bool:
-            if sys.platform != 'win32' or not self.manual_monitor or self.manual_monitor.intervened():
+            if sys.platform != 'win32':
                 return False
             user32 = ctypes.windll.user32
             user32.GetForegroundWindow.restype = ctypes.c_void_p
@@ -3208,26 +3137,18 @@ def run_gui(session_driver=None) -> int:
         def expire_next_line(self, token):
             if self.controller.expire_next_line(token):
                 self.validation_trace.emit('next_line_timeout', session=token.session, line=token.line)
-                self.note('送り後に次の台詞を取得できませんでした。自動送りを停止しました。')
+                self.note('送り後に次の台詞を取得できません。自動送りはONのまま入力を保留します。')
                 self.refresh_status()
 
         def permit(self):
             self.validation_trace.emit('permit_requested', session=self.controller.session)
-            if self.controller.manual_advance_pending:
-                self.controller.permit(True)
-                self.note('手動送り後の次台詞を取得してから自動送りを再許可してください。')
-                self.refresh_status()
-                return
-            if self.manual_monitor:
-                self.manual_monitor.reset_after_authorization()
-                self._manual_input_serial = self.manual_monitor.target_input_serial
             self.controller.permit(True)
             self.advance_if_ready()
             self.refresh_status()
 
         def pause(self):
             self.validation_trace.emit('pause_requested', session=self.controller.session)
-            self.controller.pause()
+            self.controller.permit(False)
             self.refresh_status()
 
         @staticmethod
@@ -3245,8 +3166,6 @@ def run_gui(session_driver=None) -> int:
                 'tts_and_text': 'TTS再生・文字待機完了',
                 'native': '原音終了を確認',
                 'uncertain_text_fallback': '音声判定不確実・文字待機で完了',
-                'manual_intervention': '手動操作を検出',
-                'manual_advance_waiting': '手動送り後の次台詞待ち',
                 'settings_changed': '取得設定の切替待ち',
                 'host_changed': 'LunaHost接続が変更',
                 'ambiguous_identical_line': '同文の別台詞か判別不能',
@@ -3254,9 +3173,9 @@ def run_gui(session_driver=None) -> int:
                 'ambiguous_multihook_speakers': '複数話者の対応が不明',
                 'unpaired_speaker_output': '話者HOOKの対応本文が不明',
                 'ocr_unverified_change': 'OCR変化の台詞境界を確認できない',
-                'native_inconclusive_manual_handoff': '原音終了を確定できず手動へ移行',
+                'native_inconclusive_hold': '原音終了を確定できず入力保留',
                 'native_audio_failure': '原音監視に失敗',
-                'native_audio_unavailable_manual_handoff': '原音監視を利用できず手動へ移行',
+                'native_audio_unavailable_hold': '原音監視を利用できず入力保留',
                 'tts_playback_failed': 'TTS再生に失敗',
                 'stopped': '停止',
             }
@@ -3285,19 +3204,20 @@ def run_gui(session_driver=None) -> int:
                        f'入力 {c.target.pid}:{hex(c.target.hwnd)}') if c.target else '対象未設定'
             monitoring = '監視中' if c.profile else '停止'
             completion = self.status_reason_label(c.presentation_reason) if c.presentation_reason else '判定待ち'
-            pause_reason = f' / 停止理由: {self.status_reason_label(c.pause_reason)}' if c.pause_reason else ''
+            pause_reason = f' / 保留理由: {self.status_reason_label(c.pause_reason)}' if c.pause_reason and c.authorized else ''
             self.status.setText(
-                f'監視: {monitoring} / 自動送り: {"許可" if c.authorized else "停止"} / '
+                f'監視: {monitoring} / 自動送り: {"ON" if c.authorized else "OFF"} / '
                 f'台詞: {c.line_no} / 入力: {"送信済み" if c.sent else "未送信"} / '
                 f'提示完了: {completion}{pause_reason}\n{targets}')
             if hasattr(self, 'advance_authorization'):
                 previous = self.advance_authorization.blockSignals(True)
                 self.advance_authorization.setChecked(bool(c.authorized))
-                self.advance_authorization.setText('自動送り: 許可中' if c.authorized else '自動送り: 停止')
+                self.advance_authorization.setText('自動送り: ON' if c.authorized else '自動送り: OFF')
                 self.advance_authorization.blockSignals(previous)
             self.overview_advance.setText('自動送り: ' +
-                ('許可中' if c.authorized else '停止') +
-                (' ― ' + self.status_reason_label(c.pause_reason) if c.pause_reason else ''))
+                ('ON' if c.authorized else 'OFF') +
+                (' ― 保留: ' + self.status_reason_label(c.pause_reason)
+                 if c.authorized and c.pause_reason else ''))
             if c.profile and c.utterance:
                 self.overview_capture.setText('台詞: ' +
                     (c.utterance.speaker or '話者未設定') + ' / ' + c.utterance.text[:35])
@@ -3316,10 +3236,6 @@ def run_gui(session_driver=None) -> int:
                 self._output_group.clear()
             if hasattr(self, '_synced_sources') and self._synced_sources:
                 self.sync_hook_threads(clear=True)
-            if self.manual_monitor:
-                monitor, self.manual_monitor = self.manual_monitor, None
-                threading.Thread(target=monitor.close, daemon=True).start()
-            self._manual_input_serial = 0
             if self.native_audio:
                 native, self.native_audio = self.native_audio, None
                 threading.Thread(target=native.close, daemon=True).start()

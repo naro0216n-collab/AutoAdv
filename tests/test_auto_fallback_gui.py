@@ -94,6 +94,6 @@ class TwoModeGuiTests(unittest.TestCase):
             window.fallback_due(token)
             self.assertEqual(sent, [])
             self.assertFalse(c.completed)
-            self.assertEqual(c.pause_reason, 'native_inconclusive_manual_handoff')
-            self.assertFalse(c.authorized)
+            self.assertEqual(c.pause_reason, 'native_inconclusive_hold')
+            self.assertTrue(c.authorized)
         self.run_case(mode=AdvanceMode.AUDIO, tts=False, fallback=False, check=check)

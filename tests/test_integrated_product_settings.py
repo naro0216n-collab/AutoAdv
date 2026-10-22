@@ -32,7 +32,7 @@ class SessionOwnership(unittest.TestCase):
         self.assertEqual(sent, [(22, 33, 13)])
         self.assertFalse(controller.try_advance())
 
-    def test_pause_reason_survives_audio_completion_and_late_line(self):
+    def test_runtime_hold_does_not_disable_auto_and_new_line_clears_hold(self):
         p = Profile('p', 'P', hooks=[HookSelection('H', 2, 3)])
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(10, 20), 'host', 1)
@@ -40,16 +40,15 @@ class SessionOwnership(unittest.TestCase):
         token = c.observe(generation='host', connection=1, sequence=1,
                           source=source, text='line', pid=10)
         c.permit(True)
-        c.pause('manual_intervention')
+        c.pause('native_inconclusive_hold')
         c.presentation_event(token, 'text_elapsed')
-        self.assertEqual(c.reason, 'manual_intervention')
-        self.assertFalse(c.authorized)
+        self.assertEqual(c.reason, 'native_inconclusive_hold')
+        self.assertTrue(c.authorized)
         second = c.observe(generation='host', connection=1, sequence=2,
                            source=source, text='another', pid=10)
         self.assertIsNotNone(second)
-        self.assertEqual(c.reason, 'manual_intervention')
-        c.permit(True)
         self.assertEqual(c.reason, 'presenting')
+        self.assertTrue(c.authorized)
 
     def test_selected_text_priority_vs_multiple_flushes_of_one_owner(self):
         p = Profile('p', 'many', hooks=[HookSelection('H', 2, 3), HookSelection('ALT', 4, 5)])
@@ -65,7 +64,7 @@ class SessionOwnership(unittest.TestCase):
         c.permit(True)
         self.assertIsNone(c.observe_group([event(primary, 3, 'first'), event(primary, 4, 'second')]))
         self.assertEqual(c.reason, 'ambiguous_multihook_lines')
-        self.assertFalse(c.authorized)
+        self.assertTrue(c.authorized)
 
 
 class CommonPreferencesContract(unittest.TestCase):
@@ -168,7 +167,7 @@ class OcrEvidence(unittest.TestCase):
         c.permit(True)
         self.assertIsNone(c.observe_ocr(sequence=2, text='台詞B', pid=11, session=session))
         self.assertEqual(c.token, first)
-        self.assertFalse(c.authorized)
+        self.assertTrue(c.authorized)
         self.assertIsNone(c.observe_ocr(sequence=3, text='', pid=11, session=session))
         self.assertIsNotNone(c.observe_ocr(sequence=4, text='台詞B', pid=11, session=session))
 

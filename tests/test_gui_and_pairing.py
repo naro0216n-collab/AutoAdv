@@ -26,7 +26,7 @@ class HookPairingTests(unittest.TestCase):
         self.assertEqual(c.utterance.speaker, '花子')
         c.permit(True)
         self.assertIsNone(c.observe_group([e(p.hooks[2], 4, '古い')]))
-        self.assertFalse(c.authorized)
+        self.assertTrue(c.authorized)
         c.observe_group([e(p.hooks[0], 5, '次')])
         self.assertEqual(c.utterance.speaker, '')
 

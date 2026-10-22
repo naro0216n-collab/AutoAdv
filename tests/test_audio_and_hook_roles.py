@@ -24,7 +24,7 @@ class NativeAndAudioContract(unittest.TestCase):
         self.assertEqual(c.utterance.speaker, '花子')
         c.permit(True)
         self.assertIsNone(c.observe_group([e(speaker, 3, '太郎')]))
-        self.assertFalse(c.authorized)
+        self.assertTrue(c.authorized)
         second = c.observe_group([e(body, 4, '次の台詞')])
         self.assertIsNotNone(second)
         self.assertEqual(c.utterance.speaker, '')

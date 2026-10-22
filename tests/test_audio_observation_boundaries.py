@@ -197,6 +197,25 @@ class PacketVadBoundaryTests(unittest.TestCase):
         finally:
             audio.close()
 
+    def test_external_hook_replay_uses_only_requested_pre_hook_window(self):
+        activity = SimpleNamespace(
+            observe_float32_stereo=lambda _: VADDecision(False, 0),
+            reset=lambda: None)
+        audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+                            lambda *_: None, activity=activity,
+                            recognizer=SimpleNamespace(recognize=lambda _: ''), clock=lambda: 2000)
+        try:
+            audio.history.start(11)
+            for when in (1000, 1400, 1800):
+                audio.history.push(PCMChunk(when, bytes(960 * 8), 48000, 2, 4), target_pid=11)
+            token = Token(1, 2)
+            audio.begin(token, '新しい台詞', replay_from_ms=1300)
+            self.assertEqual(audio.window_start_ms, 1300)
+            self.assertEqual(audio._last_processed_ms, 1800)
+            self.assertEqual(audio.token, token)
+        finally:
+            audio.close()
+
     def test_delayed_old_pcm_cannot_mutate_new_line_vad(self):
         entered = threading.Event()
         release = threading.Event()

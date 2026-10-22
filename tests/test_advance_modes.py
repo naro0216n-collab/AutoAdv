@@ -161,8 +161,8 @@ class ControllerModes(unittest.TestCase):
     def test_uncertain_audio_without_opt_in_hands_control_back_at_reading_deadline(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('fallback_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_manual_handoff')
-        self.assertFalse(self.ctrl.authorized)
+        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+        self.assertTrue(self.ctrl.authorized)
         self.assertIsNone(self.ctrl.presentation_reason)
         self.assertFalse(self.ctrl.try_advance())
 
@@ -178,7 +178,7 @@ class ControllerModes(unittest.TestCase):
                 self.assertEqual(self.ctrl.presentation_reason,
                                  'uncertain_text_fallback' if opt_in else None)
                 if not opt_in:
-                    self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_manual_handoff')
+                    self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
                     self.assertFalse(self.ctrl.try_advance())
                 else:
                     self.assertTrue(self.ctrl.try_advance())
@@ -278,40 +278,33 @@ class ControllerModes(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertEqual(self.ctrl.profile.repeat_rule, 'each_after_input')
 
-    def test_manual_advance_waits_for_post_input_selected_hook(self):
+    def test_unsent_new_hook_is_external_transition_without_disabling_auto(self):
         p = make_profile(AdvanceMode.AUDIO, tts=False)
         self.ctrl = Controller(lambda *_: None, lambda *_: True)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
-                                  source=SOURCE, text='「同じ台詞」', pid=10, received_ns=1_000)
-        original = self.ctrl.utterance
+                                  source=SOURCE, text='「一行目」', pid=10, received_ns=1_000)
         self.ctrl.permit(True)
-        self.assertTrue(self.ctrl.manual_advance(2_000))
-        self.assertIs(self.ctrl.utterance, original)
-        self.assertFalse(self.ctrl.authorized)
-        self.assertEqual(self.ctrl.take_manual_audio_boundary(first), 0)
-        self.assertIsNone(self.ctrl.observe(generation='generation', connection=1, sequence=2,
-                                            source=SOURCE, text='「同じ台詞」', pid=10, received_ns=1_500))
-        second = self.ctrl.observe(generation='generation', connection=1, sequence=3,
-                                   source=SOURCE, text='「同じ台詞」', pid=10, received_ns=2_500)
+        second = self.ctrl.observe(generation='generation', connection=1, sequence=2,
+                                   source=SOURCE, text='「二行目」', pid=10, received_ns=2_500)
         self.assertIsNotNone(second)
         self.assertEqual(second.line, first.line + 1)
-        self.assertEqual(self.ctrl.take_manual_audio_boundary(second), 2_000)
-        self.assertEqual(self.ctrl.take_manual_audio_boundary(second), 0)
-        self.assertFalse(self.ctrl.authorized)
+        self.assertTrue(self.ctrl.authorized)
+        self.assertEqual(self.ctrl.take_external_transition(second), 2_500)
+        self.assertEqual(self.ctrl.take_external_transition(second), 0)
+        self.assertFalse(self.ctrl.presentation_event(first, 'native_finished'))
 
-    def test_manual_advance_candidate_blocks_old_completion_and_reauthorization(self):
+    def test_unsent_identical_hook_is_not_guessed_as_external_transition(self):
         p = make_profile(AdvanceMode.TEXT, tts=False)
         self.ctrl = Controller(lambda *_: None, lambda *_: True)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
-        token = self.ctrl.observe(generation='generation', connection=1, sequence=1,
-                                  source=SOURCE, text='「一行目」', pid=10, received_ns=1_000)
+        first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
+                                  source=SOURCE, text='「同じ台詞」', pid=10, received_ns=1_000)
         self.ctrl.permit(True)
-        self.assertTrue(self.ctrl.manual_advance(2_000))
-        self.assertFalse(self.ctrl.presentation_event(token, 'text_elapsed'))
-        self.ctrl.permit(True)
-        self.assertFalse(self.ctrl.authorized)
-        self.assertEqual(self.ctrl.reason, 'manual_advance_waiting')
+        self.assertIsNone(self.ctrl.observe(generation='generation', connection=1, sequence=2,
+                                            source=SOURCE, text='「同じ台詞」', pid=10, received_ns=2_500))
+        self.assertEqual(self.ctrl.token, first)
+        self.assertTrue(self.ctrl.authorized)
 
     def test_staged_profile_rejects_active_ocr_capture_changes(self):
         p = make_profile()

@@ -3,7 +3,7 @@ import ctypes
 import unittest
 from unittest.mock import patch
 
-from autoadv.windows_input import WindowsAdvancementInput, AUTOADV_INPUT_MARK
+from autoadv.windows_input import WindowsAdvancementInput
 
 
 class _Win32Function:
@@ -36,7 +36,7 @@ class WindowsInputContract(unittest.TestCase):
         self.assertEqual(len(fake.calls), 2)
         self.assertEqual([c[3] for c in fake.calls], [0x08, 0x0a])
         self.assertEqual([c[2] for c in fake.calls], [0x1c, 0x1c])
-        self.assertEqual([c[4] for c in fake.calls], [AUTOADV_INPUT_MARK] * 2)
+        self.assertEqual([c[4] for c in fake.calls], [0, 0])
         sleep.assert_called_once_with(0.035)
 
     def test_failed_press_does_not_retry_and_does_not_release(self):
