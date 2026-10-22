@@ -1626,6 +1626,10 @@ def run_gui(session_driver=None) -> int:
             if not self.current_profile():
                 self.note('作品を登録してください')
                 return
+            # Connection uses the settings visible on this page, including
+            # the per-game Win32 option. Do not silently use the old saved value.
+            if not self.save_profile():
+                return
             if not self.hook_host or self.hook_host.child is None or self.hook_host.child.poll() is not None:
                 self.start_host()
             if not self.hook_host or self.hook_host.child is None:
@@ -1691,8 +1695,9 @@ def run_gui(session_driver=None) -> int:
                 if not history or history[-1] != sample:
                     history.append(sample)
             latest = self.source_samples.get(source.identity, ())
-            values = (role, f'{source.hook_code} / {source.hook_name}', str(source.process_id),
-                      f'{source.context} / {source.context2}', hex(source.address), latest[-1] if latest else '')
+            values = (latest[-1] if latest else '（本文未受信）', role,
+                      f'{source.hook_code} / {source.hook_name}', str(source.process_id),
+                      f'{source.context} / {source.context2}', hex(source.address))
             for col, value in enumerate(values):
                 item = self.source_table.item(row, col)
                 if item is None:

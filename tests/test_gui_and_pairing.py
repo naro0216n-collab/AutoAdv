@@ -93,18 +93,23 @@ class WindowsGuiInitialization(unittest.TestCase):
         catalog = Catalog()
         game = catalog.create_game('Win32 test', 'C:/Game.exe')
         p = game.profiles[game.default_profile]
-        p.insert_pc_hooks = True
+        p.insert_pc_hooks = False
         commands = Mock()
 
         def inspect(*_):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                self.assertTrue(window.insert_pc_hooks_on_attach.isChecked())
+                self.assertFalse(window.insert_pc_hooks_on_attach.isChecked())
                 window.pid.setValue(31)
-                window.hook_host = SimpleNamespace(command=commands, child=None)
+                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.find_hooks()
                 commands.assert_not_called()
+                window.insert_pc_hooks_on_attach.setChecked(True)
+                window.connect_game()
+                self.assertTrue(window.current_profile().insert_pc_hooks)
+                commands.assert_any_call('connect', pid=31)
+                commands.reset_mock()
                 window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=31))
                 commands.assert_any_call('insert_pc_hooks', pid=31)
                 commands.reset_mock()
