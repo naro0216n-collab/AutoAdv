@@ -1,5 +1,6 @@
 name: Validation Fixture Runtime
 
+# Fixture source identity normalizes text line endings; audio remains byte-exact.
 on:
   push:
     branches: [develop]
