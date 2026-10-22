@@ -448,6 +448,9 @@ class AutoAdvApplication:
         self._preview_jobs: VoiceJobs | None = None
         self._searched_hook_codes: set[str] = set()
         self._trial_hook_codes: set[str] = set()
+        self._capture_output_group: list[HookEvent] = []
+        self._runtime_output_group: list[HookEvent] = []
+        self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
 
     def runtime_state(self) -> RuntimeState:
         c = self.controller
@@ -494,7 +497,36 @@ class AutoAdvApplication:
         self.controller.permit(enabled)
 
     def close_runtime(self, reason: str = 'stopped') -> None:
+        self._runtime_output_group.clear()
         self.controller.close(reason)
+
+    def handle_runtime_hook_output(self, event: HookEvent) -> tuple[Token | None, int | None]:
+        """Feed one Hook output or queue the selected multi-source batch.
+
+        The returned delay is only a scheduling request for the UI/event loop;
+        ownership of the batch and the grouping policy remain in Application.
+        """
+        state = self.runtime_state()
+        profile, target = state.profile, state.target
+        if (event.kind != 'output' or event.source is None or profile is None or target is None or
+                profile.source != 'hook' or event.process_id != (target.hook_pid or target.pid) or
+                event.host_generation != state.source_generation or
+                event.connection_generation != state.connection_generation):
+            return None, None
+        selected = profile.hooks
+        if len(selected) > 1 and any(h.matches(event.source) for h in selected):
+            self._runtime_output_group.append(event)
+            if len(self._runtime_output_group) >= 32:
+                return self.flush_runtime_hook_outputs(), None
+            return None, max(10, min(100, profile.hook_flush_ms))
+        return (self.controller.observe(
+            generation=event.host_generation, connection=event.connection_generation,
+            sequence=event.sequence, source=event.source, text=event.text,
+            pid=event.process_id or 0, received_ns=event.received_ns), None)
+
+    def flush_runtime_hook_outputs(self) -> Token | None:
+        group, self._runtime_output_group = self._runtime_output_group, []
+        return self.controller.observe_group(group) if group and self.controller.profile else None
 
     @property
     def native_audio_available(self) -> bool:
@@ -708,6 +740,7 @@ class AutoAdvApplication:
         if self.hook_host is not None:
             self.hook_host.close()
             self.hook_host = None
+        self._synced_sources.clear()
 
         def current(callback, *args):
             if epoch == self._host_epoch:
@@ -726,8 +759,61 @@ class AutoAdvApplication:
     def close_hook_host(self) -> None:
         self._host_epoch += 1
         host, self.hook_host = self.hook_host, None
+        self._synced_sources.clear()
         if host is not None:
             host.close()
+
+    def sync_hook_threads(self, process_id: int, *, clear: bool = False) -> tuple[str, ...]:
+        """Apply Luna selected-thread synchronization from application-owned recipes.
+
+        The UI can request a recomputation when sources or recipes change, but it
+        does not own the selected set or remember which native threads were
+        already synchronized.
+        """
+        selected = []
+        if not clear:
+            profiles = []
+            runtime = self.runtime_state().profile
+            if runtime is not None and runtime.source == 'hook':
+                profiles.append(runtime)
+            if self.capture is not None and self.capture.profile.source == 'hook':
+                profiles.append(self.capture.profile)
+            seen: set[str] = set()
+            for profile in profiles:
+                for hook in profile.hooks if len(profile.hooks) > 1 else ():
+                    if hook.identity not in seen:
+                        selected.append(hook)
+                        seen.add(hook.identity)
+
+        desired: dict[tuple[int, int, int, int], ThreadSource] = {}
+        for source in self.capture_sources():
+            if source.process_id == process_id and any(h.matches(source) for h in selected):
+                key = (source.process_id, source.address, source.context, source.context2)
+                desired[key] = source
+
+        errors: list[str] = []
+        for key, source in tuple(self._synced_sources.items()):
+            if key in desired:
+                continue
+            try:
+                if self.hook_host_running:
+                    self.hook_command('sync_thread', source=source.__dict__, enabled=False)
+            except (RuntimeError, OSError, ValueError) as exc:
+                errors.append(str(exc))
+            self._synced_sources.pop(key, None)
+
+        if self.hook_host_running:
+            for key, source in desired.items():
+                if key in self._synced_sources:
+                    continue
+                try:
+                    self.hook_command('sync_thread', source=source.__dict__, enabled=True)
+                    self._synced_sources[key] = source
+                except (RuntimeError, OSError, ValueError) as exc:
+                    errors.append(str(exc))
+        elif clear:
+            self._synced_sources.clear()
+        return tuple(errors)
 
     def hook_command(self, action: str, **kwargs) -> None:
         if not self.hook_host_running or self.hook_host is None:
@@ -802,11 +888,26 @@ class AutoAdvApplication:
         if self.capture:
             self.capture.observe_group(events)
 
+    def queue_capture_output(self, event: HookEvent) -> int | None:
+        if not self.capture or event.kind != 'output' or event.source is None:
+            return None
+        self._capture_output_group.append(event)
+        if len(self._capture_output_group) >= 64:
+            self.flush_capture_outputs()
+            return None
+        return 100
+
+    def flush_capture_outputs(self) -> None:
+        group, self._capture_output_group = self._capture_output_group, []
+        if group and self.capture:
+            self.capture.observe_group(group)
+
     def remove_capture_source(self, identity: str, address: int) -> None:
         if self.capture:
             self.capture.remove(identity, address)
 
     def clear_capture_observations(self) -> None:
+        self._capture_output_group.clear()
         if self.capture:
             self.capture.clear_observations()
         self._searched_hook_codes.clear()

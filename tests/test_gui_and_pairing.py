@@ -80,7 +80,14 @@ class GuiSourceArchitectureTests(unittest.TestCase):
     def test_normal_hook_output_updates_capture_application_without_refresh_command(self):
         source = Path('autoadv/gui.py').read_text(encoding='utf-8')
         self.assertIn('self.application.observe_capture(', source)
-        self.assertIn('self.application.observe_capture_group(group)', source)
+        self.assertIn('self.application.queue_capture_output(event)', source)
+        self.assertIn('self.application.flush_capture_outputs()', source)
+        self.assertIn('self.application.handle_runtime_hook_output(event)', source)
+        self.assertIn('self.application.flush_runtime_hook_outputs()', source)
+        self.assertNotIn('self._capture_output_group', source)
+        self.assertNotIn('self._output_group', source)
+        self.assertNotIn('self._synced_sources', source)
+        self.assertIn('self.application.sync_hook_threads(', source)
         self.assertIn('self.refresh_capture_workspace()', source)
 
 

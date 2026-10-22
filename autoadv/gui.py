@@ -82,12 +82,9 @@ def run_gui(session_driver=None) -> int:
             self._connecting_pid = 0
             self.game_id = ''
             self.profile_id = ''
-            self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
-            self._output_group: list[HookEvent] = []
             self._output_timer = QTimer(self)
             self._output_timer.setSingleShot(True)
             self._output_timer.timeout.connect(self.flush_selected_outputs)
-            self._capture_output_group: list[HookEvent] = []
             self._capture_output_timer = QTimer(self)
             self._capture_output_timer.setSingleShot(True)
             self._capture_output_timer.timeout.connect(self.flush_capture_outputs)
@@ -1830,7 +1827,6 @@ def run_gui(session_driver=None) -> int:
         def clear_hook_observations(self):
             self.source_rows.clear()
             self._capture_output_timer.stop()
-            self._capture_output_group.clear()
             self.application.clear_capture_observations()
             self.source_table.setRowCount(0)
             self.route_table.setRowCount(0)
@@ -2177,14 +2173,12 @@ def run_gui(session_driver=None) -> int:
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation
                     and not self.application.capture_identity_is_ambiguous(event.source.identity)):
-                self._capture_output_group.append(event)
-                if len(self._capture_output_group) >= 64:
+                delay = self.application.queue_capture_output(event)
+                if delay is None:
                     self._capture_output_timer.stop()
-                    self.flush_capture_outputs()
+                    self.refresh_capture_workspace()
                 else:
-                    # Same upper bound as the selected multi-HOOK collector.
-                    # This batch is preview evidence only and never drives input.
-                    self._capture_output_timer.start(100)
+                    self._capture_output_timer.start(delay)
             if event.kind == 'output' and event.source:
                 pending_profile = self.current_profile()
                 if self.pending_hook_boundary(event, pending_profile):
@@ -2207,23 +2201,13 @@ def run_gui(session_driver=None) -> int:
                         and not self.application.capture_identity_is_ambiguous(event.source.identity)
                         and event.host_generation == self.host_generation
                         and event.connection_generation == self.connection_generation):
-                    selected = self.application.runtime_state().profile.hooks if self.application.runtime_state().profile else ()
-                    if len(selected) > 1 and any(h.matches(event.source) for h in selected):
-                        # Luna's Python multi-HOOK collector groups already-flushed
-                        # outputs; it does not re-flush or reconstruct raw bytes.
-                        self._output_group.append(event)
-                        if len(self._output_group) >= 32:
-                            self._output_timer.stop()
-                            self.flush_selected_outputs()
-                        else:
-                            self._output_timer.start(max(10, min(100, self.application.runtime_state().profile.hook_flush_ms)))
-                    else:
-                        result = self.application.observe_runtime_hook(generation=event.host_generation,
-                            connection=event.connection_generation, sequence=event.sequence,
-                            source=event.source, text=event.text, pid=event.process_id or 0,
-                            received_ns=event.received_ns)
-                        if result and self.application.runtime_state().utterance:
-                            self.display_utterance(result)
+                    result, delay = self.application.handle_runtime_hook_output(event)
+                    if delay is not None:
+                        self._output_timer.start(delay)
+                    elif result is not None:
+                        self._output_timer.stop()
+                    if result and self.application.runtime_state().utterance:
+                        self.display_utterance(result)
             if event.kind == 'inserted' and event.process_id == self.pid.value():
                 self.note(f'LunaによるHOOK挿入: {event.detail} {event.source.hook_code if event.source else ""}'.strip())
             if event.kind == 'diagnostic':
@@ -2312,56 +2296,15 @@ def run_gui(session_driver=None) -> int:
             self.refresh_status()
 
         def sync_hook_threads(self, *, clear: bool = False):
-            """Use Luna synchronization for every currently meaningful multi-source recipe."""
-            selected = []
-            if not clear:
-                profiles = []
-                if self.application.runtime_state().profile and self.application.runtime_state().profile.source == 'hook':
-                    profiles.append(self.application.runtime_state().profile)
-                if self.application.capture and self.application.capture.profile.source == 'hook':
-                    profiles.append(self.application.capture.profile)
-                seen = set()
-                for profile in profiles:
-                    hooks = profile.hooks if len(profile.hooks) > 1 else ()
-                    for hook in hooks:
-                        if hook.identity not in seen:
-                            selected.append(hook)
-                            seen.add(hook.identity)
-            desired = {}
-            for source in self.application.capture_sources():
-                if (source.process_id == self.pid.value() and
-                        any(h.matches(source) for h in selected)):
-                    key = (source.process_id, source.address, source.context, source.context2)
-                    desired[key] = source
-            for key, source in tuple(self._synced_sources.items()):
-                if key not in desired:
-                    try:
-                        if self.application.hook_host_running:
-                            self.application.hook_command('sync_thread', source=source.__dict__, enabled=False)
-                    except (RuntimeError, OSError, ValueError):
-                        pass
-                    self._synced_sources.pop(key, None)
-            if self.application.hook_host_running:
-                for key, source in desired.items():
-                    if key not in self._synced_sources:
-                        try:
-                            self.application.hook_command('sync_thread', source=source.__dict__, enabled=True)
-                            self._synced_sources[key] = source
-                        except (RuntimeError, OSError, ValueError) as exc:
-                            self.note('Luna selected-HOOK sync unavailable: ' + str(exc))
+            for reason in self.application.sync_hook_threads(self.pid.value(), clear=clear):
+                self.note('Luna selected-HOOK sync unavailable: ' + reason)
 
         def flush_capture_outputs(self):
-            group, self._capture_output_group = self._capture_output_group, []
-            if not group:
-                return
-            self.application.observe_capture_group(group)
+            self.application.flush_capture_outputs()
             self.refresh_capture_workspace()
 
         def flush_selected_outputs(self):
-            group, self._output_group = self._output_group, []
-            if not group or not self.application.runtime_state().profile:
-                return
-            result = self.application.observe_runtime_group(group)
+            result = self.application.flush_runtime_hook_outputs()
             if result and self.application.runtime_state().utterance:
                 self.display_utterance(result)
             else:
@@ -2639,12 +2582,9 @@ def run_gui(session_driver=None) -> int:
             self.validation_trace.emit('monitor_ended', session=self.application.runtime_state().session)
             if hasattr(self, '_output_timer'):
                 self._output_timer.stop()
-                self._output_group.clear()
             if hasattr(self, '_capture_output_timer'):
                 self._capture_output_timer.stop()
-                self._capture_output_group.clear()
-            if hasattr(self, '_synced_sources') and self._synced_sources:
-                self.sync_hook_threads(clear=True)
+            self.sync_hook_threads(clear=True)
             self.application.close_native_audio()
             self.application.close_ocr()
             self.application.cancel_voice()

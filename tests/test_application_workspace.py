@@ -1,7 +1,7 @@
 from autoadv.application import AutoAdvApplication
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import AdvanceMode
+from autoadv.model import AdvanceMode, HookSelection
 from autoadv.storage import Catalog
 
 
@@ -139,6 +139,49 @@ def test_multi_hook_preview_never_reuses_a_later_speaker_for_older_dialogue():
     app.set_capture_role(speaker.identity, speaker.address, 'speaker')
     previews = app.capture_view().previews
     assert [(p.speaker, p.text) for p in previews] == [('大和', '一つ目'), ('京', '二つ目')]
+
+
+def test_capture_batch_buffer_is_owned_by_application_and_preserves_same_flush_pairing():
+    app, _ = app_with_game()
+    text = source('T', 1)
+    speaker = source('S', 5, address=2)
+    app.observe_capture(text, 'おはよう', sequence=1)
+    app.observe_capture(speaker, '大和', sequence=2)
+    app.set_capture_role(text.identity, text.address, 'text')
+    app.set_capture_role(speaker.identity, speaker.address, 'speaker')
+
+    first = HookEvent('output', 'host', 1, 1, 100, 101, text, 'おはよう')
+    second = HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')
+    assert app.queue_capture_output(first) == 100
+    assert app.queue_capture_output(second) == 100
+    assert app.capture_view().previews == ()
+    app.flush_capture_outputs()
+    assert [(p.speaker, p.text) for p in app.capture_view().previews] == [('大和', 'おはよう')]
+
+
+def test_runtime_batch_buffer_is_owned_by_application_not_the_ui():
+    app, _ = app_with_game()
+    text = source('T', 1)
+    speaker = source('S', 5, address=2)
+    profile = app.current_profile()
+    text_hook = HookSelection('T', 1, 2, 'text')
+    speaker_hook = HookSelection('S', 5, 6, 'speaker')
+    profile.hooks = [text_hook, speaker_hook]
+    profile.speaker_links = {text_hook.identity: speaker_hook.identity}
+    app.begin_runtime(
+        profile, Target(101, 500, hook_pid=101), 'host', 1,
+        available_sources=(text.identity, speaker.identity))
+
+    first = HookEvent('output', 'host', 1, 1, 100, 101, text, 'おはよう')
+    second = HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')
+    token, delay = app.handle_runtime_hook_output(first)
+    assert token is None and delay == 100
+    token, delay = app.handle_runtime_hook_output(second)
+    assert token is None and delay == 100
+    token = app.flush_runtime_hook_outputs()
+    assert token is not None
+    assert app.runtime_state().utterance.text == 'おはよう'
+    assert app.runtime_state().utterance.speaker == '大和'
 
 
 def test_profile_setting_commands_hide_inheritance_storage_from_the_gui_contract():
@@ -496,3 +539,37 @@ def test_application_owns_irodori_lifecycle_and_ignores_stale_results(monkeypatc
 
     app.close_irodori()
     assert second.closed
+
+def test_application_owns_selected_thread_sync_state():
+    class Child:
+        def poll(self):
+            return None
+
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    host = Host()
+    app.hook_host = host
+    text = source('T', 1)
+    speaker = source('S', 5, address=2)
+    app.observe_capture(text, '本文', sequence=1)
+    app.observe_capture(speaker, '大和', sequence=2)
+    app.set_capture_role(text.identity, text.address, 'text')
+    app.set_capture_role(speaker.identity, speaker.address, 'speaker')
+
+    assert app.sync_hook_threads(101) == ()
+    enables = [kwargs['source']['hook_code'] for action, kwargs in host.commands
+               if action == 'sync_thread' and kwargs['enabled']]
+    assert enables == ['T', 'S']
+
+    host.commands.clear()
+    app.set_capture_role(speaker.identity, speaker.address, None)
+    assert app.sync_hook_threads(101) == ()
+    disables = [kwargs['source']['hook_code'] for action, kwargs in host.commands
+                if action == 'sync_thread' and not kwargs['enabled']]
+    assert set(disables) == {'T', 'S'}
