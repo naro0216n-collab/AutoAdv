@@ -290,7 +290,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.hwnd.setText('0x1234')
                 window.begin_monitor()
                 self.assertIsNone(window.controller.profile)
-                self.assertIn('collision', window.log.toPlainText())
+                self.assertIn('衝突', window.log.toPlainText())
                 events.append('complete')
             finally:
                 window.close()

@@ -34,6 +34,7 @@ class Controller:
         self.session = 0
         self.target: Target | None = None
         self.profile: Profile | None = None
+        self.pending_profile: Profile | None = None
         self.source_generation = ''
         self.connection_generation = 0
         self.highest_sequence = 0
@@ -52,6 +53,9 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source: str | None = None
+        self.manual_advance_pending = False
+        self.manual_boundary_ns = 0
+        self.accepted_manual_boundary_ns = 0
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
               available_sources: tuple[str, ...] = ()) -> int:
@@ -62,6 +66,7 @@ class Controller:
             raise ValueError('Host connection must be identified')
         self.close('session_changed')
         self.profile, self.target = deepcopy(profile), target
+        self.pending_profile = None
         self.source_generation, self.connection_generation = host_generation, connection_generation
         # Only one selected dialogue stream may own the utterance sequence.
         # Prefer the highest-priority saved source that is already observed.
@@ -74,6 +79,7 @@ class Controller:
     def close(self, reason: str = 'stopped') -> None:
         self.session += 1
         self.profile = None
+        self.pending_profile = None
         self.target = None
         self.source_generation = ''
         self.connection_generation = 0
@@ -84,10 +90,53 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.active_text_source = None
+        self.manual_advance_pending = False
+        self.manual_boundary_ns = 0
+        self.accepted_manual_boundary_ns = 0
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.pause_reason = None
         self.reason = reason
+
+    def manual_advance(self, observed_ns: int) -> bool:
+        """Record a user advance candidate without inventing the next line.
+
+        The old presentation can no longer authorize input. A later selected
+        HOOK flush at or after this boundary is allowed to establish the next
+        Utterance, including an identical line.
+        """
+        if self.profile is None or observed_ns <= 0:
+            return False
+        self.manual_advance_pending = True
+        self.manual_boundary_ns = max(self.manual_boundary_ns, observed_ns)
+        self.accepted_manual_boundary_ns = 0
+        self.authorized = False
+        self.completed = False
+        self.presentation_reason = None
+        self.pause_reason = 'manual_intervention'
+        self.reason = 'manual_advance_waiting'
+        return True
+
+    def stage_profile(self, profile: Profile) -> None:
+        """Apply compatible setting edits at the next utterance boundary.
+
+        The active Utterance and its input key remain frozen. Capture-source or
+        HOOK ownership changes require a new monitoring session and therefore
+        are rejected here rather than hidden behind compatibility behavior.
+        """
+        profile.validate()
+        if self.profile is None:
+            raise ValueError('monitoring is not active')
+        if (profile.id != self.profile.id or profile.source != self.profile.source or
+                profile.hooks != self.profile.hooks or profile.speaker_links != self.profile.speaker_links or
+                (profile.source == 'ocr' and profile.ocr != self.profile.ocr)):
+            raise ValueError('capture ownership changes require a new monitoring session')
+        staged = deepcopy(profile)
+        if self.utterance is None:
+            self.profile = staged
+            self.pending_profile = None
+        else:
+            self.pending_profile = staged
 
     def observe(self, *, generation: str, connection: int, sequence: int,
                 source: object, text: str, pid: int, received_ns: int = 0,
@@ -120,9 +169,14 @@ class Controller:
             self.active_text_source = identity
         if identity != self.active_text_source:
             return None
+        if (self.manual_advance_pending and received_ns > 0 and
+                received_ns < self.manual_boundary_ns):
+            # The Host had already received this output before the observed
+            # manual advance. It belongs to the state the user just dismissed.
+            return None
         return self._accept_line(sequence=sequence, text=text, origin=identity,
                                  side_speaker=paired_speaker or '',
-                                 verified_boundary=False)
+                                 verified_boundary=False, received_ns=received_ns)
 
     def observe_group(self, events: Sequence[HookEvent]) -> Token | None:
         """Join selected Luna-flushed sources like Luna's multi-HOOK collector.
@@ -221,15 +275,32 @@ class Controller:
         return self._accept_line(sequence=sequence, text=text, origin='ocr', side_speaker='', verified_boundary=had_blank)
 
     def _accept_line(self, *, sequence: int, text: str, origin: str, side_speaker: str,
-                     verified_boundary: bool = False) -> Token | None:
+                     verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
         old = self.utterance
-        if old and not self.sent and old.raw == text and not verified_boundary:
+        manual_boundary = bool(self.manual_advance_pending and received_ns > 0 and
+                               received_ns >= self.manual_boundary_ns)
+        if old and not self.sent and old.raw == text and not verified_boundary and not manual_boundary:
+            # A duplicate notification is still the same Utterance unless an
+            # observed manual advance precedes this new selected-HOOK flush.
             return None
-        if old and self.sent and not verified_boundary:
+        # Once the incoming output can establish a new boundary, settings staged
+        # during the previous Utterance become the active profile before the new
+        # line is interpreted. This also makes a newly selected repeat policy the
+        # one that decides whether a post-input identical line is admissible.
+        if self.pending_profile is not None:
+            self.profile = self.pending_profile
+            self.pending_profile = None
+        if old and self.sent and not verified_boundary and not manual_boundary:
             if text == old.raw:
                 if self.profile.repeat_rule != 'each_after_input':
                     self.pause('ambiguous_identical_line')
                     return None
+        if manual_boundary:
+            self.accepted_manual_boundary_ns = self.manual_boundary_ns
+            self.manual_advance_pending = False
+            self.manual_boundary_ns = 0
+        else:
+            self.accepted_manual_boundary_ns = 0
         self.line_no += 1
         self.utterance = interpret(text, self.profile, session=self.session,
                                    line=self.line_no, source=origin,
@@ -242,6 +313,14 @@ class Controller:
         self.reason = self.pause_reason or 'presenting'
         return Token(self.session, self.line_no)
 
+    def take_manual_audio_boundary(self, token: Token) -> int:
+        """Return a confirmed manual-input boundary for the accepted token once."""
+        if token != self.token or self.accepted_manual_boundary_ns <= 0:
+            return 0
+        value = self.accepted_manual_boundary_ns
+        self.accepted_manual_boundary_ns = 0
+        return value
+
     def presentation_event(self, token: Token, event: str, *,
                            success: bool = True) -> bool:
         """All presentation evidence is owned by this Controller, never by GUI callbacks.
@@ -249,7 +328,8 @@ class Controller:
         A completion event returns True only on the first transition to ready.
         Events from another line/session or after input are inert.
         """
-        if token != self.token or self.sent or self.completed or not self.utterance:
+        if (token != self.token or self.sent or self.completed or not self.utterance
+                or self.manual_advance_pending):
             return False
         u = self.utterance
         if event == 'tts_finished':
@@ -325,6 +405,11 @@ class Controller:
         return Token(self.session, self.utterance.line)
 
     def permit(self, allowed: bool) -> None:
+        if allowed and self.manual_advance_pending:
+            self.authorized = False
+            self.pause_reason = 'manual_intervention'
+            self.reason = 'manual_advance_waiting'
+            return
         self.authorized = bool(allowed) and self.profile is not None
         self.pause_reason = None if self.authorized else 'advance_not_authorized'
         self.reason = ('ready' if self.completed else 'presenting') if self.authorized else 'advance_not_authorized'
@@ -346,7 +431,8 @@ class Controller:
         return True
 
     def try_advance(self) -> bool:
-        if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):
+        if not (self.authorized and self.completed and self.utterance and self.target and not self.sent
+                and not self.manual_advance_pending):
             return False
         if not self.preflight(self.target):
             self.pause('target_not_foreground')

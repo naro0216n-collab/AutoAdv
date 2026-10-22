@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from autoadv.conversation import Controller, Target
-from autoadv.model import (AdvanceMode, Profile, HookSelection, ReplacementRule,
+from autoadv.model import (AdvanceMode, Profile, HookSelection, OCRSettings, ReplacementRule,
                            count_reading_characters, interpret, matching_structure_rule, StructureRule)
 from autoadv.storage import Catalog, CommonSettings, load, save
 
@@ -208,6 +208,124 @@ class ControllerModes(unittest.TestCase):
         self.assertEqual(original.advance_mode, AdvanceMode.TEXT)
         self.assertEqual(original.text_wait_ms, 900)
         self.assertTrue(original.use_tts)
+
+    def test_staged_profile_applies_only_at_next_utterance_boundary(self):
+        p = make_profile(AdvanceMode.TEXT, tts=False)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
+        first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
+                                  source=SOURCE, text='「一行目」', pid=10)
+        original = self.ctrl.utterance
+        updated = make_profile(AdvanceMode.AUDIO, tts=False)
+        updated.id = p.id
+        updated.hooks = list(p.hooks)
+        updated.input_key = 99
+        self.ctrl.stage_profile(updated)
+        self.assertEqual(self.ctrl.utterance, original)
+        self.assertEqual(self.ctrl.profile.input_key, p.input_key)
+        self.ctrl.permit(True)
+        self.ctrl.presentation_event(first, 'text_elapsed')
+        self.assertTrue(self.ctrl.try_advance())
+        second = self.ctrl.observe(generation='generation', connection=1, sequence=2,
+                                   source=SOURCE, text='「二行目」', pid=10)
+        self.assertIsNotNone(second)
+        self.assertEqual(self.ctrl.profile.input_key, 99)
+        self.assertEqual(self.ctrl.utterance.advance_mode, AdvanceMode.AUDIO)
+        self.assertFalse(self.ctrl.utterance.use_tts)
+        self.assertIsNone(self.ctrl.pending_profile)
+
+    def test_staged_profile_rejects_capture_ownership_changes(self):
+        p = make_profile()
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
+        changed = make_profile()
+        changed.id = p.id
+        changed.hooks = [HookSelection('OTHER', 9, 10)]
+        with self.assertRaises(ValueError):
+            self.ctrl.stage_profile(changed)
+
+    def test_staged_profile_waits_through_same_utterance_duplicate(self):
+        p = make_profile()
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
+        self.ctrl.observe(generation='generation', connection=1, sequence=1,
+                          source=SOURCE, text='「同じ台詞」', pid=10)
+        updated = make_profile(AdvanceMode.AUDIO)
+        updated.id = p.id
+        updated.hooks = list(p.hooks)
+        self.ctrl.stage_profile(updated)
+        self.assertIsNone(self.ctrl.observe(generation='generation', connection=1, sequence=2,
+                                            source=SOURCE, text='「同じ台詞」', pid=10))
+        self.assertEqual(self.ctrl.profile.advance_mode, AdvanceMode.TEXT)
+        self.assertIsNotNone(self.ctrl.pending_profile)
+
+    def test_staged_repeat_policy_decides_next_identical_line(self):
+        p = make_profile()
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
+        first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
+                                  source=SOURCE, text='「繰り返し」', pid=10)
+        updated = make_profile()
+        updated.id = p.id
+        updated.hooks = list(p.hooks)
+        updated.repeat_rule = 'each_after_input'
+        self.ctrl.stage_profile(updated)
+        self.ctrl.permit(True)
+        self.ctrl.presentation_event(first, 'text_elapsed')
+        self.assertTrue(self.ctrl.try_advance())
+        second = self.ctrl.observe(generation='generation', connection=1, sequence=2,
+                                   source=SOURCE, text='「繰り返し」', pid=10)
+        self.assertIsNotNone(second)
+        self.assertEqual(self.ctrl.profile.repeat_rule, 'each_after_input')
+
+    def test_manual_advance_waits_for_post_input_selected_hook(self):
+        p = make_profile(AdvanceMode.AUDIO, tts=False)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
+        first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
+                                  source=SOURCE, text='「同じ台詞」', pid=10, received_ns=1_000)
+        original = self.ctrl.utterance
+        self.ctrl.permit(True)
+        self.assertTrue(self.ctrl.manual_advance(2_000))
+        self.assertIs(self.ctrl.utterance, original)
+        self.assertFalse(self.ctrl.authorized)
+        self.assertEqual(self.ctrl.take_manual_audio_boundary(first), 0)
+        self.assertIsNone(self.ctrl.observe(generation='generation', connection=1, sequence=2,
+                                            source=SOURCE, text='「同じ台詞」', pid=10, received_ns=1_500))
+        second = self.ctrl.observe(generation='generation', connection=1, sequence=3,
+                                   source=SOURCE, text='「同じ台詞」', pid=10, received_ns=2_500)
+        self.assertIsNotNone(second)
+        self.assertEqual(second.line, first.line + 1)
+        self.assertEqual(self.ctrl.take_manual_audio_boundary(second), 2_000)
+        self.assertEqual(self.ctrl.take_manual_audio_boundary(second), 0)
+        self.assertFalse(self.ctrl.authorized)
+
+    def test_manual_advance_candidate_blocks_old_completion_and_reauthorization(self):
+        p = make_profile(AdvanceMode.TEXT, tts=False)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
+        token = self.ctrl.observe(generation='generation', connection=1, sequence=1,
+                                  source=SOURCE, text='「一行目」', pid=10, received_ns=1_000)
+        self.ctrl.permit(True)
+        self.assertTrue(self.ctrl.manual_advance(2_000))
+        self.assertFalse(self.ctrl.presentation_event(token, 'text_elapsed'))
+        self.ctrl.permit(True)
+        self.assertFalse(self.ctrl.authorized)
+        self.assertEqual(self.ctrl.reason, 'manual_advance_waiting')
+
+    def test_staged_profile_rejects_active_ocr_capture_changes(self):
+        p = make_profile()
+        p.source = 'ocr'
+        p.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 640, 180), stable_samples=2)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl.begin(p, Target(10, 20), 'ocr', 1)
+        changed = make_profile()
+        changed.id = p.id
+        changed.source = 'ocr'
+        changed.hooks = list(p.hooks)
+        changed.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 800, 240), stable_samples=2)
+        with self.assertRaises(ValueError):
+            self.ctrl.stage_profile(changed)
 
 
 class StorageModes(unittest.TestCase):

@@ -99,20 +99,24 @@ class NativeAudio:
         self.boundary()
         self._capture.start()
 
-    def boundary(self):
-        """An advance opens the *next* observation interval, not a new recorder.
+    def boundary(self, at_ms: int | None = None):
+        """An observed advance opens the next interval without restarting capture.
 
-        The old token and all pending ASR results lose ownership immediately.
-        PCM already retained in history is not destroyed, and may be matched
-        only after a subsequent HOOK establishes the new text.
+        ``at_ms`` allows a physical-input observer to preserve the real manual
+        input time even if the GUI handles that event slightly later. The old
+        token and pending ASR results lose ownership immediately; retained PCM
+        is replayed only after a later HOOK establishes the new text.
         """
+        boundary_ms = self.clock() if at_ms is None else int(at_ms)
+        if boundary_ms <= 0:
+            raise ValueError('audio boundary must be a positive monotonic timestamp')
         with self._lock:
             self._generation += 1
             self._inflight = False
             self._inflight_generation = None
             self.token = None
             self.matcher = None
-            self.boundary_ms = self.clock()
+            self.boundary_ms = boundary_ms
             self.window_start_ms = self.boundary_ms
             self._awaiting_hook = True
             self._last_processed_ms = -1

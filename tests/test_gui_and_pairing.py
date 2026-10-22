@@ -167,7 +167,7 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                                  ['プレイ', '台詞取得', '台詞・音声'])
                 self.assertFalse(hasattr(window, 'found_hooks'))
                 for section in ('game_details', 'target_details', 'advance_details', 'audio_details',
-                                'hook_details', 'ocr_details', 'irodori', 'extraction', 'replacement'):
+                                'hook_details', 'ocr_details', 'irodori', 'extraction', 'replacement', 'diagnostics'):
                     self.assertIn(section, window.section_toggles)
                     self.assertIn(section, window.section_summaries)
                     self.assertFalse(window.section_toggles[section].isChecked())
@@ -192,7 +192,9 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 window.btn_recovery.click()
                 self.assertTrue(window.section_toggles['hook_details'].isChecked())
                 self.assertEqual(window.tabs.currentIndex(), 1)
-                window.source_mode.setCurrentIndex(window.source_mode.findData('ocr'))
+                self.assertFalse(hasattr(window, 'source_mode'))
+                window.source_ocr_button.click()
+                self.assertEqual(window.current_source_mode(), 'ocr')
                 self.assertTrue(window.section_toggles['ocr_details'].isChecked())
             finally:
                 window.close()

@@ -15,7 +15,7 @@ from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
 from autoadv.audio_match import TargetMatcher, phonetic_key, VADDecision
 from autoadv.audio_buffer import PCMChunk
-from autoadv.manual_input import is_manual_hook_event, InputOriginTracker
+from autoadv.manual_input import is_manual_hook_event, targets_selected_window, ManualTargetInput
 from autoadv.native_audio import NativeAudio
 
 
@@ -138,15 +138,24 @@ class AcquisitionAndInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'text HOOK'):
             Controller(lambda *_: None, lambda _: True).begin(p, Target(11, 22), 'h', 1)
 
-    def test_input_origin_distinguishes_user_and_auto(self):
+    def test_manual_input_is_scoped_to_selected_game_window(self):
         self.assertFalse(is_manual_hook_event(keyboard=True, flags=0x10, extra_info=0x41564456))
         self.assertTrue(is_manual_hook_event(keyboard=True, flags=0x10, extra_info=0x1))
         self.assertTrue(is_manual_hook_event(keyboard=True, flags=0, extra_info=0))
-        t = InputOriginTracker(100)
-        t.hook_event(keyboard=False, flags=0, extra_info=0, tick=101, passive_mouse_motion=True)
-        self.assertFalse(t.os_input_tick(101))
-        t.hook_event(keyboard=True, flags=0, extra_info=0, tick=102)
-        self.assertTrue(t.os_input_tick(102))
+        self.assertTrue(targets_selected_window(target_root=100, target_pid=10,
+                                                event_root=100, event_pid=10))
+        self.assertFalse(targets_selected_window(target_root=100, target_pid=10,
+                                                 event_root=200, event_pid=20))
+        self.assertFalse(targets_selected_window(target_root=100, target_pid=10,
+                                                 event_root=200, event_pid=10))
+        self.assertFalse(targets_selected_window(target_root=100, target_pid=10,
+                                                 event_root=100, event_pid=20))
+
+    def test_only_configured_key_or_left_click_is_manual_advance_candidate(self):
+        self.assertTrue(ManualTargetInput(1, 100, True, 0x20, 0x0100).is_advance_candidate(0x20))
+        self.assertFalse(ManualTargetInput(2, 101, True, 0x0D, 0x0100).is_advance_candidate(0x20))
+        self.assertTrue(ManualTargetInput(3, 102, False, 0x0201, 0x0201).is_advance_candidate(0x20))
+        self.assertFalse(ManualTargetInput(4, 103, False, 0x0204, 0x0204).is_advance_candidate(0x20))
 
     def test_target_matcher_does_not_complete_unrelated_or_unstable_voice(self):
         m = TargetMatcher('おはようございます')
@@ -160,6 +169,30 @@ class AcquisitionAndInputTests(unittest.TestCase):
 
 
 class NativeAudioSessionTests(unittest.TestCase):
+    def test_manual_boundary_can_be_applied_retroactively_before_hook_binding(self):
+        class Recognizer:
+            def recognize(self, chunks):
+                return ''
+        class VAD:
+            def reset(self):
+                pass
+            def observe_float32_stereo(self, frames):
+                return VADDecision(False, 0)
+        audio = NativeAudio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
+                            lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 3000)
+        from autoadv.conversation import Token
+        try:
+            audio.history.start(11)
+            for ts in (1200, 1800, 2400):
+                audio.history.push(PCMChunk(ts, b'\x00' * 80, 48000, 2, 4), target_pid=11)
+            audio.boundary(1500)
+            token = Token(1, 1)
+            audio.begin(token, '次の台詞')
+            self.assertEqual(audio.window_start_ms, 1500)
+            self.assertEqual([c.at_ms for c in audio.history.since(audio.window_start_ms)], [1800, 2400])
+        finally:
+            audio.close()
+
     def test_callback_on_attributed_matching_voice_only(self):
         class Recognizer:
             def recognize(self, chunks):
