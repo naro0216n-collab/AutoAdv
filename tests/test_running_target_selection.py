@@ -64,8 +64,6 @@ class RunningTargetGuiTests(unittest.TestCase):
                 starts = []
                 def fake_host_start():
                     starts.append('host-start')
-                    window._connecting_pid = 0
-                    window.attached_pid = 0
                     window.application.hook_host = SimpleNamespace(
                         command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.start_host = fake_host_start
@@ -73,8 +71,8 @@ class RunningTargetGuiTests(unittest.TestCase):
                 self.assertEqual(window.tabs.currentIndex(), 1)
                 commands.assert_any_call('connect', pid=candidate.pid)
                 self.assertEqual(len(starts), 1)
-                self.assertEqual(window.pid.value(), candidate.pid)
-                self.assertEqual(window.hwnd.text(), hex(candidate.hwnd))
+                self.assertEqual(window.application.runtime_target_state().hook_pid, candidate.pid)
+                self.assertEqual(window.application.runtime_target_state().hwnd, candidate.hwnd)
                 self.assertEqual(window.catalog.games[window.game_id].executable, candidate.executable)
                 gid = window.game_id
                 commands.reset_mock()
@@ -87,7 +85,7 @@ class RunningTargetGuiTests(unittest.TestCase):
                 window.use_running_target(next_target)
                 self.assertEqual(len(starts), 2)
                 commands.assert_any_call('connect', pid=next_target.pid)
-                self.assertEqual(window._connecting_pid, next_target.pid)
+                self.assertEqual(window.application.hook_connection_state().connecting_pid, next_target.pid)
                 self.assertFalse(window.application.runtime_state().authorized)
                 self.assertTrue(window.application.hook_host_running)
             finally:
@@ -126,8 +124,8 @@ class RunningTargetGuiTests(unittest.TestCase):
                     window.auto_attach_selected_game()
                 commands.assert_any_call('connect', pid=137)
                 self.assertEqual(len(starts), 1)
-                self.assertEqual(window.pid.value(), 137)
-                self.assertEqual(window.hwnd.text(), hex(target.hwnd))
+                self.assertEqual(window.application.runtime_target_state().hook_pid, 137)
+                self.assertEqual(window.application.runtime_target_state().hwnd, target.hwnd)
             finally:
                 window.application.hook_host = None
                 window.close()

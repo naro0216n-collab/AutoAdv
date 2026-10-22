@@ -127,7 +127,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 self.assertEqual([window.tabs.tabText(i) for i in range(3)], ['プレイ', 'ゲーム', '設定'])
                 self.assertFalse(hasattr(window, 'btn_find'))
                 self.assertFalse(hasattr(window, 'attach'))
-                window.pid.setValue(101)
+                window.application.select_primary_target(101, 0x1234)
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
@@ -162,7 +162,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                window.pid.setValue(101)
+                window.application.select_primary_target(101, 0x1234)
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
@@ -203,7 +203,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                window.pid.setValue(101)
+                window.application.select_primary_target(101, 0x1234)
                 window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
                 text_source = source('T', 1)
@@ -246,7 +246,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                window.pid.setValue(101)
+                window.application.select_primary_target(101, 0x1234)
                 window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 window.tabs.setCurrentIndex(1)

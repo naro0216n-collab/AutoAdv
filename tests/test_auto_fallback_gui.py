@@ -69,12 +69,12 @@ class TwoModeGuiTests(unittest.TestCase):
         def check(window, c, token, requests, sent):
             self.assertEqual(len(requests), 1)
             self.assertEqual(requests[0][2], 'speaker-voice')
-            window.presentation_event(token, 'text_elapsed')
+            window.application.runtime_presentation_event(token, 'text_elapsed')
             self.assertFalse(c.completed)
-            window.on_voice(token, True, '')
+            window.application.runtime_presentation_event(token, 'tts_finished', success=True)
             self.assertEqual(c.presentation_reason, 'tts_and_text')
             self.assertEqual(sent, ['advance'])
-            window.on_voice(token, True, '')
+            window.application.runtime_presentation_event(token, 'tts_finished', success=True)
             self.assertEqual(sent, ['advance'])
         self.run_case(mode=AdvanceMode.TEXT, tts=True, check=check)
 
@@ -82,9 +82,9 @@ class TwoModeGuiTests(unittest.TestCase):
         def check(window, c, token, requests, sent):
             self.assertEqual(len(requests), 1)
             self.assertFalse(window.application.native_audio_available)
-            window.fallback_due(token)
+            window.application.runtime_presentation_event(token, 'fallback_elapsed')
             self.assertEqual(sent, [])
-            window.on_voice(token, True, '')
+            window.application.runtime_presentation_event(token, 'tts_finished', success=True)
             self.assertEqual(c.presentation_reason, 'tts')
             self.assertEqual(sent, ['advance'])
         self.run_case(mode=AdvanceMode.AUDIO, tts=True, fallback=True, check=check)
@@ -92,7 +92,7 @@ class TwoModeGuiTests(unittest.TestCase):
     def test_audio_uncertain_fallback_is_opt_in(self):
         def check(window, c, token, requests, sent):
             self.assertEqual(requests, [])
-            window.fallback_due(token)
+            window.application.runtime_presentation_event(token, 'fallback_elapsed')
             self.assertEqual(c.presentation_reason, 'uncertain_text_fallback')
             self.assertEqual(sent, ['advance'])
         self.run_case(mode=AdvanceMode.AUDIO, tts=False, fallback=True, check=check)
@@ -100,7 +100,7 @@ class TwoModeGuiTests(unittest.TestCase):
     def test_audio_without_fallback_returns_control_to_user(self):
         def check(window, c, token, requests, sent):
             self.assertEqual(requests, [])
-            window.fallback_due(token)
+            window.application.runtime_presentation_event(token, 'fallback_elapsed')
             self.assertEqual(sent, [])
             self.assertFalse(c.completed)
             self.assertEqual(c.pause_reason, 'native_inconclusive_hold')

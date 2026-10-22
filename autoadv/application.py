@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+import ctypes
+import sys
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
@@ -20,12 +22,14 @@ from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import HookSelection, Profile, Utterance, interpret
+from .model import (HookSelection, OCRSettings, Profile, ReplacementRule, StructureRule,
+                    Utterance, interpret)
 from .native_audio import NativeAudio
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .storage import Catalog
 from .voice import VoiceJobs
+from .windows_input import WindowsAdvancementInput
 
 
 @dataclass(frozen=True)
@@ -57,9 +61,18 @@ class CaptureProblemView:
 
 
 @dataclass(frozen=True)
+class CaptureRouteView:
+    text_identity: str
+    text_label: str
+    speaker_identity: str | None
+    speaker_options: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class CaptureWorkspaceView:
     candidates: tuple[CaptureCandidateView, ...]
     previews: tuple[DialoguePreviewView, ...]
+    routes: tuple[CaptureRouteView, ...]
     dirty: bool
     can_commit: bool
     problem: CaptureProblemView | None
@@ -85,6 +98,53 @@ class RuntimeState:
 
 
 @dataclass(frozen=True)
+class HookConnectionState:
+    attached_pid: int = 0
+    connecting_pid: int = 0
+    host_generation: str = ''
+    connection_generation: int = 0
+
+    @property
+    def connected(self) -> bool:
+        return bool(self.attached_pid and self.host_generation and self.connection_generation > 0)
+
+    def connected_to(self, pid: int) -> bool:
+        return self.connected and self.attached_pid == pid
+
+
+@dataclass(frozen=True)
+class RuntimeTargetState:
+    hook_pid: int = 0
+    hook_hwnd: int = 0
+    audio_pid: int = 0
+    input_pid: int = 0
+    input_hwnd: int = 0
+
+    @property
+    def selected(self) -> bool:
+        return self.hook_pid > 0
+
+    @property
+    def input_ready(self) -> bool:
+        return bool((self.input_pid or self.hook_pid) > 0 and self.hwnd > 0)
+
+    @property
+    def hwnd(self) -> int:
+        return self.input_hwnd or self.hook_hwnd
+
+    def target(self) -> Target:
+        input_pid = self.input_pid or self.hook_pid
+        if self.hook_pid <= 0 or input_pid <= 0 or self.hwnd <= 0:
+            raise ValueError('自動送りに使うゲームウィンドウを確認できません')
+        return Target(
+            input_pid,
+            self.hwnd,
+            hook_pid=self.hook_pid,
+            audio_pid=self.audio_pid or self.hook_pid,
+        )
+
+
+@dataclass(frozen=True)
 class VoiceServiceView:
     voices: tuple[str, ...]
     issue: str = ''
@@ -94,6 +154,8 @@ class VoiceServiceView:
 class PlayDialogueView:
     speaker: str
     text: str
+    use_tts: bool
+    voice: str
 
 
 @dataclass(frozen=True)
@@ -101,6 +163,23 @@ class PlayView:
     advance_authorized: bool
     dialogue: PlayDialogueView | None
     issue: CaptureProblemView | None
+
+
+@dataclass(frozen=True)
+class DiagnosticsView:
+    lines: tuple[str, ...]
+
+    @property
+    def text(self) -> str:
+        return '\n'.join(self.lines)
+
+
+@dataclass(frozen=True)
+class CaptureHostEventOutcome:
+    changed: bool = False
+    new_ambiguity: bool = False
+    active_source_removed: bool = False
+    monitor_started: bool = False
 
 
 _PLAY_ISSUES = {
@@ -118,6 +197,17 @@ _PLAY_ISSUES = {
     'tts_playback_failed': ('TTS再生に失敗したため、この台詞の自動送りを保留しています。', 'open_voice'),
     'host_changed': ('ゲームからの台詞取得が途切れたため、自動送りを保留しています。', 'open_capture_recovery'),
     'input_failure_no_retry': ('ゲームへの送り操作に失敗しました。安全のため自動再試行していません。', None),
+}
+
+_PLAY_ISSUES_WITHOUT_AUTO = {
+    'ambiguous_identical_line',
+    'ambiguous_multihook_lines',
+    'ambiguous_multihook_speakers',
+    'unpaired_speaker_output',
+    'ocr_unverified_change',
+    'ocr_failure',
+    'tts_playback_failed',
+    'host_changed',
 }
 
 
@@ -207,6 +297,21 @@ class CaptureWorkspace:
     def has_identity(self, identity: str) -> bool:
         return any(candidate_identity == identity for candidate_identity, _ in self._observed)
 
+    def has_output(self, identity: str) -> bool:
+        record = self._record_for_identity(identity)
+        return bool(record and record.history)
+
+    def output_identities(self) -> tuple[str, ...]:
+        identities = []
+        seen = set()
+        for hook in self._draft.hooks:
+            if hook.role != 'text' or hook.identity in seen:
+                continue
+            if self.has_output(hook.identity):
+                identities.append(hook.identity)
+                seen.add(hook.identity)
+        return tuple(identities)
+
     def has_hook_code(self, code: str) -> bool:
         return any(record.source.hook_code == code for record in self._observed.values())
 
@@ -293,14 +398,14 @@ class CaptureWorkspace:
                    if candidate_identity == identity]
         return matches[0] if len(matches) == 1 and not matches[0].ambiguous else None
 
-    def _preview_from_group(self, events: tuple[HookEvent, ...], profile: Profile) -> DialoguePreviewView | None:
+    def _preview_from_group(self, events: tuple[HookEvent, ...], profile: Profile,
+                            text_identity: str) -> DialoguePreviewView | None:
         roles = {hook.identity: hook.role for hook in self._draft.hooks}
         matching = [event for event in events if event.source and event.source.identity in roles]
         if not matching:
             return None
-        texts = [hook for hook in self._draft.hooks if hook.role == 'text']
-        chosen = next((hook for hook in texts
-                       if any(event.source.identity == hook.identity for event in matching)), None)
+        chosen = next((hook for hook in self._draft.hooks
+                       if hook.role == 'text' and hook.identity == text_identity), None)
         if chosen is None:
             return None
         primary = [event for event in matching if event.source.identity == chosen.identity]
@@ -329,29 +434,51 @@ class CaptureWorkspace:
         speakers = [hook for hook in self._draft.hooks if hook.role == 'speaker']
         profile = self._resolve(deepcopy(self._draft))
         previews: list[DialoguePreviewView] = []
+        # Runtime selects one dialogue owner from the saved priority order and
+        # never mixes lower-priority fallback text into the same session.  The
+        # Workspace preview must model that same contract instead of presenting
+        # a synthetic conversation made from every selected text source.
+        active = next((hook for hook in texts if self.has_output(hook.identity)), None)
+        if active is None:
+            return ()
         # Multi-HOOK preview must use outputs observed in the same bounded batch;
         # a speaker from a later line is never painted onto older dialogue.
         if speakers:
             for group in self._groups:
-                preview = self._preview_from_group(group, profile)
+                preview = self._preview_from_group(group, profile, active.identity)
                 if preview is not None:
                     previews.append(preview)
         else:
-            # A single dialogue source needs no pairing batch and should preview
-            # immediately while the user advances the game.
-            for hook in texts:
-                record = self._record_for_identity(hook.identity)
-                if record is None:
-                    continue
+            record = self._record_for_identity(active.identity)
+            if record is not None:
                 for sequence, raw in record.history:
                     utterance = interpret(
-                        raw, profile, session=0, line=0, source=hook.identity, sequence=sequence)
+                        raw, profile, session=0, line=0, source=active.identity, sequence=sequence)
                     previews.append(DialoguePreviewView(
                         sequence=sequence, raw=utterance.raw, speaker=utterance.speaker,
                         text=utterance.text, reading=utterance.reading, match_text=utterance.match_text,
                         use_tts=utterance.use_tts, voice=utterance.voice))
         previews.sort(key=lambda item: item.sequence)
         return tuple(previews[-12:])
+
+    def _routes(self) -> tuple[CaptureRouteView, ...]:
+        texts = [hook for hook in self._draft.hooks if hook.role == 'text']
+        speakers = [hook for hook in self._draft.hooks if hook.role == 'speaker']
+        if len(texts) <= 1 and len(speakers) <= 1:
+            return ()
+
+        def label(identity: str, fallback: str) -> str:
+            record = self._record_for_identity(identity)
+            return record.history[-1][1][:60] if record and record.history else fallback
+
+        speaker_options = tuple(
+            (hook.identity, label(hook.identity, hook.code)[:40]) for hook in speakers)
+        return tuple(CaptureRouteView(
+            text_identity=hook.identity,
+            text_label=label(hook.identity, hook.code),
+            speaker_identity=self._draft.speaker_links.get(hook.identity) or None,
+            speaker_options=speaker_options,
+        ) for hook in texts)
 
     def view(self) -> CaptureWorkspaceView:
         hooks = {h.identity: h for h in self._draft.hooks}
@@ -380,6 +507,7 @@ class CaptureWorkspace:
         return CaptureWorkspaceView(
             candidates=tuple(candidates),
             previews=self._previews(),
+            routes=self._routes(),
             dirty=self.dirty,
             can_commit=can_commit,
             problem=problem,
@@ -428,14 +556,16 @@ class AutoAdvApplication:
     """
 
     def __init__(self, catalog: Catalog, persist: Callable[[], None], *,
-                 input_send: Callable, preflight: Callable):
+                 input_send: Callable | None = None, preflight: Callable | None = None):
         self.catalog = catalog
         self._persist = persist
         self.game_id = ''
         self.profile_id = ''
         self.capture: CaptureWorkspace | None = None
         self._runtime_capture_problem: CaptureProblemView | None = None
-        self.controller = Controller(input_send, preflight)
+        self._raw_input_send = input_send or self._windows_input_send
+        self._input_observer: Callable[[str, Token | None], None] | None = None
+        self.controller = Controller(self._send_runtime_input, preflight or self._windows_preflight)
         self.hook_host: HookHost | None = None
         self._host_epoch = 0
         self._irodori_server: IrodoriServer | None = None
@@ -451,6 +581,107 @@ class AutoAdvApplication:
         self._capture_output_group: list[HookEvent] = []
         self._runtime_output_group: list[HookEvent] = []
         self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
+        self._hook_connection = HookConnectionState()
+        self._runtime_target = RuntimeTargetState()
+        self._inserted_hook_codes: set[str] = set()
+        self._pc_hooks_inserted = False
+        self._resume_saved_monitor = False
+        self._capture_transition_pending = False
+        self._schedule_runtime: Callable[[int, Callable[[], None]], None] | None = None
+        self._runtime_observer: Callable[[], None] | None = None
+        self._runtime_event_observer: Callable[[str, Token | None, dict], None] | None = None
+        self._ocr_text_observer: Callable[[int, int, int, str], None] | None = None
+        self._ocr_error_observer: Callable[[str], None] | None = None
+        self._native_ready_observer: Callable[[int, bool, str], None] | None = None
+        self._native_event_observer: Callable[[Token | None, str, str], None] | None = None
+        self._native_pcm_observer: Callable[[Token, int], None] | None = None
+        self._native_inference_observer: Callable[[Token, dict], None] | None = None
+        self._native_voice_end_observer: Callable[[Token, dict], None] | None = None
+        self._hook_event_observer: Callable[[HookEvent], None] | None = None
+        self._hook_closed_observer: Callable[[str], None] | None = None
+        self._hook_error_observer: Callable[[str], None] | None = None
+
+    @staticmethod
+    def _windows_preflight(target: Target) -> bool:
+        if sys.platform != 'win32':
+            return False
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        focus = user32.GetForegroundWindow()
+        pid = ctypes.c_uint32()
+        user32.GetWindowThreadProcessId(ctypes.c_void_p(focus), ctypes.byref(pid))
+        return focus == target.hwnd and pid.value == target.pid
+
+    @staticmethod
+    def _windows_input_send(target: Target, virtual_key: int) -> None:
+        WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
+
+    def configure_input_observer(self, observer: Callable[[str, Token | None], None] | None) -> None:
+        """Expose diagnostic milestones without giving the GUI input authority."""
+        self._input_observer = observer
+
+    def configure_runtime_loop(self, *,
+                               schedule: Callable[[int, Callable[[], None]], None],
+                               on_change: Callable[[], None] | None = None,
+                               on_event: Callable[[str, Token | None, dict], None] | None = None) -> None:
+        """Bind the event-loop adapter without giving it conversation policy.
+
+        Application owns which deadlines, playback and advancement operations
+        occur.  Qt only schedules callbacks and repaints semantic views.
+        """
+        self._schedule_runtime = schedule
+        self._runtime_observer = on_change
+        self._runtime_event_observer = on_event
+
+    def configure_runtime_services(self, *,
+                                   on_ocr_text: Callable[[int, int, int, str], None] | None = None,
+                                   on_ocr_error: Callable[[str], None] | None = None,
+                                   on_native_ready: Callable[[int, bool, str], None] | None = None,
+                                   on_native_event: Callable[[Token | None, str, str], None] | None = None,
+                                   on_native_pcm: Callable[[Token, int], None] | None = None,
+                                   on_native_inference: Callable[[Token, dict], None] | None = None,
+                                   on_native_voice_end: Callable[[Token, dict], None] | None = None) -> None:
+        """Bind observation adapters for runtime services once."""
+        self._ocr_text_observer = on_ocr_text
+        self._ocr_error_observer = on_ocr_error
+        self._native_ready_observer = on_native_ready
+        self._native_event_observer = on_native_event
+        self._native_pcm_observer = on_native_pcm
+        self._native_inference_observer = on_native_inference
+        self._native_voice_end_observer = on_native_voice_end
+
+    def configure_hook_service(self, *, on_event: Callable[[HookEvent], None],
+                               on_closed: Callable[[str], None],
+                               on_error: Callable[[str], None]) -> None:
+        """Bind Host observation adapters; Application retains Host lifecycle policy."""
+        self._hook_event_observer = on_event
+        self._hook_closed_observer = on_closed
+        self._hook_error_observer = on_error
+
+    def _notify_runtime(self) -> None:
+        if self._runtime_observer is not None:
+            self._runtime_observer()
+
+    def _emit_runtime_event(self, event: str, token: Token | None = None, **detail) -> None:
+        if self._runtime_event_observer is not None:
+            self._runtime_event_observer(event, token, detail)
+
+    def _schedule(self, delay_ms: int, callback: Callable[[], None]) -> None:
+        if self._schedule_runtime is None:
+            raise RuntimeError('runtime scheduler is not configured')
+        self._schedule_runtime(max(0, int(delay_ms)), callback)
+
+    def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
+        token = self.controller.token
+        if self._input_observer is not None:
+            self._input_observer('attempt', token)
+        if self._native_audio is not None:
+            self._native_audio.boundary()
+            if self._input_observer is not None:
+                self._input_observer('audio_boundary', token)
+        self._raw_input_send(target, virtual_key)
+        if self._input_observer is not None:
+            self._input_observer('sent', token)
 
     def runtime_state(self) -> RuntimeState:
         c = self.controller
@@ -464,6 +695,53 @@ class AutoAdvApplication:
 
     def stage_runtime_profile(self, profile: Profile) -> None:
         self.controller.stage_profile(profile)
+
+    def runtime_capture_matches(self, profile: Profile) -> bool:
+        active = self.runtime_state().profile
+        if active is None or active.id != profile.id:
+            return False
+        if not (active.source == profile.source and active.hooks == profile.hooks and
+                active.speaker_links == profile.speaker_links and
+                not (profile.source == 'ocr' and active.ocr != profile.ocr)):
+            return False
+        if active.advance_mode != profile.advance_mode:
+            return False
+        if active.advance_mode.value == 'audio' or profile.advance_mode.value == 'audio':
+            return (active.native_helper == profile.native_helper and
+                    active.asr_model == profile.asr_model and
+                    active.asr_tokens == profile.asr_tokens)
+        return True
+
+    def _request_capture_transition(self) -> None:
+        if self.defer_capture_transition():
+            self._schedule(0, self.apply_capture_transition)
+
+    def _apply_persisted_profile_change(self, previous: Profile, updated: Profile) -> None:
+        """Apply one saved profile change to Host/runtime from one owner."""
+        effective = self.catalog.effective_profile(updated)
+        hook_environment_changed = (
+            previous.hook_flush_ms, previous.hook_codepage,
+            previous.hook_max_buffer, previous.hook_max_history, previous.insert_pc_hooks,
+            tuple(previous.inserted_hooks)) != (
+            updated.hook_flush_ms, updated.hook_codepage,
+            updated.hook_max_buffer, updated.hook_max_history, updated.insert_pc_hooks,
+            tuple(updated.inserted_hooks))
+        if (updated.source == 'hook' and hook_environment_changed and
+                self._hook_connection.connected and self.hook_host_running):
+            try:
+                self.restore_profile_capture(updated)
+                self.clear_capture_problem()
+            except Exception as exc:
+                self.report_capture_problem(
+                    '保存した取得設定を現在のゲームへ反映できません。取得の復旧を確認してください。')
+                self._emit_runtime_event('capture_environment_apply_failed', None, reason=str(exc))
+        state = self.runtime_state()
+        if state.profile is not None and state.profile.id == updated.id:
+            if self.runtime_capture_matches(effective):
+                self.controller.stage_profile(effective)
+                self._notify_runtime()
+            else:
+                self._request_capture_transition()
 
     def hold_runtime(self, reason: str) -> None:
         self.controller.pause(reason)
@@ -484,21 +762,298 @@ class AutoAdvApplication:
     def take_external_transition(self, token: Token) -> int:
         return self.controller.take_external_transition(token)
 
-    def runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
-        return self.controller.presentation_event(token, event, success=success)
+    def _attempt_advance(self) -> bool:
+        sent = self.controller.try_advance()
+        state = self.runtime_state()
+        if sent and state.token is not None and state.profile is not None:
+            token = state.token
+            if self._capture_transition_pending:
+                self._schedule(0, self.apply_capture_transition)
+            self._schedule(state.profile.next_line_timeout_ms,
+                           lambda t=token: self._expire_next_line(t))
+        self._notify_runtime()
+        return sent
 
-    def try_advance(self) -> bool:
-        return self.controller.try_advance()
+    def _expire_next_line(self, token: Token) -> bool:
+        expired = self.controller.expire_next_line(token)
+        if expired:
+            self._emit_runtime_event('next_line_timeout', token)
+        self._notify_runtime()
+        return expired
 
     def expire_next_line(self, token: Token) -> bool:
-        return self.controller.expire_next_line(token)
+        return self._expire_next_line(token)
+
+    def runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
+        completed = self.controller.presentation_event(token, event, success=success)
+        if completed:
+            self._emit_runtime_event('presentation_complete', token,
+                                     reason=self.controller.presentation_reason)
+            self._attempt_advance()
+        else:
+            self._notify_runtime()
+        return completed
+
+    def try_advance(self) -> bool:
+        return self._attempt_advance()
 
     def set_auto_advance(self, enabled: bool) -> None:
         self.controller.permit(enabled)
+        if enabled:
+            self._attempt_advance()
+        else:
+            self._notify_runtime()
+
+    def _fallback_due(self, token: Token) -> None:
+        state = self.runtime_state()
+        utterance = state.utterance
+        if (token != state.token or utterance is None or utterance.use_tts or
+                utterance.advance_mode.value != 'audio' or state.completed or state.sent):
+            return
+        if self.native_audio_holds_deadline(token):
+            self._schedule(200, lambda t=token: self._fallback_due(t))
+            return
+        if state.native_playing:
+            self.runtime_presentation_event(token, 'native_evidence_stale')
+        self.runtime_presentation_event(token, 'fallback_elapsed')
+
+    def start_presentation(self, token: Token) -> int:
+        """Start every presentation effect for the current immutable Utterance.
+
+        The event-loop adapter does not decide whether text time, native audio,
+        TTS playback or uncertain fallback governs completion.
+        """
+        state = self.runtime_state()
+        utterance = state.utterance
+        if utterance is None or token != state.token:
+            return 0
+        self.cancel_voice()
+        self.cancel_native_audio()
+        external_ns = self.controller.take_external_transition(token)
+        if external_ns:
+            self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns)
+        if utterance.advance_mode.value == 'text':
+            self._schedule(utterance.text_wait_ms,
+                           lambda t=token: self.runtime_presentation_event(t, 'text_elapsed'))
+        elif not utterance.use_tts:
+            if self.native_audio_available:
+                replay_from_ms = None
+                if external_ns and state.profile is not None:
+                    lookback_ms = max(100, state.profile.hook_flush_ms + 100)
+                    replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
+                self.begin_native_audio(token, utterance.match_text, replay_from_ms=replay_from_ms)
+            self._schedule(utterance.text_wait_ms, lambda t=token: self._fallback_due(t))
+        if utterance.use_tts:
+            if not utterance.voice:
+                self.runtime_presentation_event(token, 'tts_finished', success=False)
+            else:
+                self.start_voice(token, utterance.reading, utterance.voice)
+        self._notify_runtime()
+        return external_ns
 
     def close_runtime(self, reason: str = 'stopped') -> None:
         self._runtime_output_group.clear()
         self.controller.close(reason)
+        self._notify_runtime()
+
+    def start_monitoring(self) -> RuntimeState:
+        """Build the selected profile's one runtime path and its services."""
+        profile = self.current_profile()
+        if profile is None:
+            raise ValueError('作品とプロファイルを選択してください')
+        effective = self.catalog.effective_profile(profile)
+        target = self.session_target()
+        self.stop_monitoring('session_changed')
+        if effective.source == 'ocr':
+            self.begin_runtime(effective, target, 'ocr', 1)
+            self.start_ocr(
+                effective,
+                on_text=self._ocr_text_observer or (lambda *_: None),
+                on_error=self._ocr_error_observer or (lambda *_: None))
+        else:
+            if any(self.capture_identity_is_ambiguous(h.identity) for h in effective.hooks):
+                raise ValueError('選択した取得元を一意に識別できません。別の取得元を選択してください')
+            connection = self._hook_connection
+            if not connection.connected:
+                raise RuntimeError('ゲームへのLunaHook接続が完了していません')
+            self.begin_runtime(effective, target, connection.host_generation,
+                               connection.connection_generation, self.capture_output_identities())
+            self._reconcile_hook_sync()
+        self.start_native_audio(
+            effective,
+            on_ready=self._native_ready_observer or (lambda *_: None),
+            on_event=self._native_event_observer or (lambda *_: None),
+            on_pcm=self._native_pcm_observer,
+            on_inference=self._native_inference_observer,
+            on_voice_end=self._native_voice_end_observer)
+        state = self.runtime_state()
+        if state.target is not None and state.profile is not None:
+            self._emit_runtime_event(
+                'monitor_started', None, session=state.session, source=state.profile.source,
+                game_id=self.game_id, profile_id=self.profile_id,
+                hook_pid=state.target.hook_pid or state.target.pid,
+                audio_pid=state.target.audio_pid or state.target.pid, input_pid=state.target.pid,
+                generation=state.source_generation, connection=state.connection_generation)
+        self._notify_runtime()
+        return state
+
+    def stop_monitoring(self, reason: str = 'stopped') -> None:
+        prior = self.runtime_state()
+        if prior.profile is not None:
+            self._emit_runtime_event('monitor_ended', None, session=prior.session, reason=reason)
+        target = self._runtime_target
+        if target.selected:
+            self.sync_hook_threads(target.hook_pid, clear=True)
+        self.close_native_audio()
+        self.close_ocr()
+        self.cancel_voice()
+        self.cancel_voice_preview()
+        self.close_runtime(reason)
+
+    def request_saved_monitor_resume(self, profile: Profile | None) -> None:
+        self._resume_saved_monitor = bool(
+            profile and profile.source == 'hook' and any(h.role == 'text' for h in profile.hooks))
+
+    def cancel_saved_monitor_resume(self) -> None:
+        self._resume_saved_monitor = False
+
+    def saved_monitor_resume_ready(self, profile: Profile | None) -> bool:
+        if (not self._resume_saved_monitor or profile is None or
+                not self._hook_connection.connected or not self.capture_saved_sources_ready(profile)):
+            return False
+        self._resume_saved_monitor = False
+        return True
+
+    def try_resume_saved_monitor(self, profile: Profile | None = None) -> RuntimeState | None:
+        profile = profile or self.current_profile()
+        if not self.saved_monitor_resume_ready(profile):
+            return None
+        return self.start_monitoring()
+
+    def activate_selected_target(self) -> str:
+        """Apply the selected game target without exposing connection mechanics to UI."""
+        profile = self.current_profile()
+        if profile is None:
+            raise ValueError('作品を登録してください')
+        target = self._runtime_target
+        if not target.selected:
+            raise ValueError('実行中のゲーム・プロセスを選択してください')
+        self.request_saved_monitor_resume(profile)
+        if profile.source == 'ocr':
+            if target.input_ready:
+                self.start_monitoring()
+                return 'monitoring'
+            return 'waiting-input-target'
+
+        pid = target.hook_pid
+        connection = self._hook_connection
+        if self.hook_host_running and (connection.connected_to(pid) or connection.connecting_pid == pid):
+            if connection.connected_to(pid):
+                self.restore_profile_capture(profile)
+                if self.try_resume_saved_monitor(profile) is not None:
+                    return 'monitoring'
+                return 'connected'
+            return 'connecting'
+
+        if (not self.hook_host_running or
+                (connection.attached_pid and connection.attached_pid != pid) or
+                (connection.connecting_pid and connection.connecting_pid != pid)):
+            self.stop_monitoring('session_changed')
+            self.clear_capture_observations()
+            self.start_hook_host()
+        if not self.hook_host_running:
+            self.report_capture_problem('ゲームから台詞を取得するためのLunaHookを起動できません。')
+            raise RuntimeError('LunaHook Hostの起動に失敗しました')
+        if self.begin_hook_connection(pid, profile):
+            return 'connecting'
+        if self.try_resume_saved_monitor(profile) is not None:
+            return 'monitoring'
+        return 'connected'
+
+    def handle_hook_connection_event(self, event: HookEvent) -> str | None:
+        """Apply connection provenance, profile restoration and monitor resume."""
+        transition = self.accept_hook_connection_event(event)
+        if transition in ('connected', 'changed'):
+            if transition == 'changed':
+                self.stop_monitoring('host_changed')
+                self.clear_capture_observations()
+            self.clear_capture_problem()
+            profile = self.current_profile()
+            if profile and profile.source == 'hook':
+                try:
+                    self.restore_profile_capture(profile)
+                except Exception as exc:
+                    self.report_capture_problem('保存した会話取得設定を現在のゲームへ復元できません。')
+                    self._emit_runtime_event('capture_environment_apply_failed', None, reason=str(exc))
+                    return 'restore_failed'
+                self.try_resume_saved_monitor(profile)
+        elif transition == 'disconnected':
+            self.stop_monitoring('host_changed')
+            self.clear_capture_observations()
+            self.cancel_saved_monitor_resume()
+            self.report_capture_problem('ゲームからの台詞取得が切断されました。')
+        return transition
+
+    @property
+    def capture_transition_pending(self) -> bool:
+        return self._capture_transition_pending
+
+    def defer_capture_transition(self) -> bool:
+        """Hold input and remember that capture/runtime services need rebuilding.
+
+        Returns True when no current unsent utterance needs to be preserved and
+        the transition can be scheduled immediately by the event-loop adapter.
+        """
+        self.controller.pause('settings_changed')
+        self._capture_transition_pending = True
+        state = self.runtime_state()
+        return state.utterance is None or state.sent
+
+    def capture_transition_boundary(self, event: HookEvent, profile: Profile | None) -> bool:
+        if not self._capture_transition_pending or not profile or profile.source != 'hook':
+            return False
+        if event.kind != 'output' or event.source is None or not event.text.strip():
+            return False
+        selected = next((h for h in profile.hooks if h.role == 'text' and h.matches(event.source)), None)
+        if selected is None:
+            return False
+        state = self.runtime_state()
+        return state.utterance is None or state.sent or event.text != state.utterance.raw
+
+    def consume_capture_transition(self) -> bool:
+        if not self._capture_transition_pending:
+            return False
+        self._capture_transition_pending = False
+        return True
+
+    def apply_capture_transition(self) -> bool:
+        """Rebuild the active acquisition/runtime path at one safe dialogue boundary."""
+        if not self.consume_capture_transition():
+            return False
+        profile = self.current_profile()
+        if profile is None:
+            self.stop_monitoring('session_changed')
+            return False
+        if profile.source == 'hook':
+            if not any(h.role == 'text' for h in profile.hooks):
+                self.stop_monitoring('settings_changed')
+                return False
+            if not self._hook_connection.connected:
+                self.stop_monitoring('host_changed')
+                self.request_saved_monitor_resume(profile)
+                return False
+        self.start_monitoring()
+        return True
+
+    def handle_runtime_ocr_output(self, *, session: int, pid: int, sequence: int, text: str) -> Token | None:
+        """Own OCR boundary transitions before admitting text to Controller."""
+        if self._capture_transition_pending and text.strip():
+            state = self.runtime_state()
+            if state.utterance is None or state.sent or state.ocr_blank:
+                # The replacement OCR worker will observe the still-visible line.
+                self.apply_capture_transition()
+                return None
+        return self.controller.observe_ocr(session=session, pid=pid, sequence=sequence, text=text)
 
     def handle_runtime_hook_output(self, event: HookEvent) -> tuple[Token | None, int | None]:
         """Feed one Hook output or queue the selected multi-source batch.
@@ -506,6 +1061,11 @@ class AutoAdvApplication:
         The returned delay is only a scheduling request for the UI/event loop;
         ownership of the batch and the grouping policy remain in Application.
         """
+        profile = self.current_profile()
+        if self.capture_transition_boundary(event, profile):
+            # Rebuild synchronously on this HookEvent so the same first output is
+            # admitted to the new runtime instead of being discarded.
+            self.apply_capture_transition()
         state = self.runtime_state()
         profile, target = state.profile, state.target
         if (event.kind != 'output' or event.source is None or profile is None or target is None or
@@ -566,6 +1126,7 @@ class AutoAdvApplication:
 
         def publish_event(token: Token | None, event: str, detail: str) -> None:
             if current():
+                self.handle_native_event(token, event, detail)
                 on_event(token, event, detail)
 
         def publish_pcm(token: Token, frames: int) -> None:
@@ -593,6 +1154,11 @@ class AutoAdvApplication:
                     native.close()
                     return
                 self._native_audio = native
+                now = self.runtime_state()
+                if (now.token is not None and now.utterance is not None and not now.sent and
+                        not now.completed and now.utterance.advance_mode.value == 'audio' and
+                        not now.utterance.use_tts):
+                    native.begin(now.token, now.utterance.match_text)
                 on_ready(session, True, '')
             except Exception as exc:
                 if native is not None:
@@ -635,7 +1201,7 @@ class AutoAdvApplication:
         return self._native_audio.capture_status() if self._native_audio is not None else {}
 
     def handle_native_event(self, token: Token | None, event: str, detail: str = '') -> bool:
-        """Apply native evidence to Controller and report presentation completion."""
+        """Apply native evidence and drive completion/advance in Application."""
         state = self.runtime_state()
         if token is None or token != state.token or state.utterance is None:
             return False
@@ -645,10 +1211,13 @@ class AutoAdvApplication:
         if event == 'error':
             if not utterance.uncertain_text_fallback:
                 self.controller.pause('native_audio_failure')
+            self._notify_runtime()
             return False
         mapping = {'started': 'native_started', 'quiet': 'native_quiet', 'completed': 'native_finished'}
         presentation = mapping.get(event)
-        return bool(presentation and self.controller.presentation_event(token, presentation))
+        if presentation is None:
+            return False
+        return self.runtime_presentation_event(token, presentation)
 
     @property
     def ocr_running(self) -> bool:
@@ -694,15 +1263,21 @@ class AutoAdvApplication:
         if worker is not None:
             threading.Thread(target=worker.close, daemon=True, name='autoadv-close-ocr').start()
 
-    def configure_voice_jobs(self, *, on_result: Callable[[Token, bool, str], None],
+    def configure_voice_jobs(self, *, on_result: Callable[[Token, bool, str], None] | None,
                              on_preview: Callable[[bool, str], None],
                              on_timing: Callable[[Token, str, float, float], None] | None = None) -> None:
-        """Bind presentation callbacks while retaining playback ownership here."""
+        """Bind observers while Application retains playback completion policy."""
         if self._voice_jobs is not None:
             self._voice_jobs.cancel()
         if self._preview_jobs is not None:
             self._preview_jobs.cancel()
-        self._voice_jobs = VoiceJobs(on_result, on_timing=on_timing)
+
+        def runtime_result(token: Token, done: bool, reason: str) -> None:
+            self.runtime_presentation_event(token, 'tts_finished', success=done)
+            if on_result is not None:
+                on_result(token, done, reason)
+
+        self._voice_jobs = VoiceJobs(runtime_result, on_timing=on_timing)
         self._preview_jobs = VoiceJobs(lambda _token, done, reason: on_preview(done, reason))
 
     def start_voice(self, token: Token, reading: str, voice: str) -> None:
@@ -723,6 +1298,149 @@ class AutoAdvApplication:
         if self._preview_jobs is not None:
             self._preview_jobs.cancel()
 
+    def hook_connection_state(self) -> HookConnectionState:
+        return self._hook_connection
+
+    def runtime_target_state(self) -> RuntimeTargetState:
+        return self._runtime_target
+
+    def clear_runtime_target(self) -> None:
+        self._runtime_target = RuntimeTargetState()
+
+    def select_primary_target(self, pid: int, hwnd: int = 0) -> RuntimeTargetState:
+        if pid <= 0 or hwnd < 0:
+            raise ValueError('実行中ゲームのPID/HWNDを確認できません')
+        self._runtime_target = RuntimeTargetState(
+            hook_pid=pid, hook_hwnd=hwnd, audio_pid=pid, input_pid=pid, input_hwnd=hwnd)
+        return self._runtime_target
+
+    def select_audio_target(self, pid: int | None) -> RuntimeTargetState:
+        current = self._runtime_target
+        if not current.selected:
+            raise ValueError('先に実行中ゲームを選択してください')
+        if pid is not None and pid <= 0:
+            raise ValueError('音声PIDを確認できません')
+        self._runtime_target = RuntimeTargetState(
+            hook_pid=current.hook_pid,
+            hook_hwnd=current.hook_hwnd,
+            audio_pid=pid or current.hook_pid,
+            input_pid=current.input_pid or current.hook_pid,
+            input_hwnd=current.input_hwnd or current.hook_hwnd,
+        )
+        return self._runtime_target
+
+    def select_input_target(self, pid: int | None, hwnd: int | None) -> RuntimeTargetState:
+        current = self._runtime_target
+        if not current.selected:
+            raise ValueError('先に実行中ゲームを選択してください')
+        if pid is not None and (pid <= 0 or hwnd is None or hwnd <= 0):
+            raise ValueError('入力先ウィンドウを確認できません')
+        input_pid = current.hook_pid if pid is None else pid
+        input_hwnd = current.hook_hwnd if pid is None else hwnd
+        self._runtime_target = RuntimeTargetState(
+            hook_pid=current.hook_pid,
+            hook_hwnd=current.hook_hwnd,
+            audio_pid=current.audio_pid or current.hook_pid,
+            input_pid=input_pid,
+            input_hwnd=input_hwnd or 0,
+        )
+        return self._runtime_target
+
+    def session_target(self) -> Target:
+        return self._runtime_target.target()
+
+    def reset_hook_connection(self) -> None:
+        self._hook_connection = HookConnectionState()
+        self._inserted_hook_codes.clear()
+        self._pc_hooks_inserted = False
+
+    def begin_hook_connection(self, pid: int, profile: Profile) -> bool:
+        """Request one Host connection and own its transient identity."""
+        if pid <= 0:
+            raise ValueError('hook pid must be positive')
+        state = self._hook_connection
+        if state.connected_to(pid) or state.connecting_pid == pid:
+            return False
+        if not self.hook_host_running:
+            raise RuntimeError('LunaHook Host is not running')
+        self._hook_connection = HookConnectionState(connecting_pid=pid)
+        try:
+            self.hook_command('settings', flush_ms=profile.hook_flush_ms,
+                codepage=profile.hook_codepage, max_buffer=profile.hook_max_buffer,
+                max_history=profile.hook_max_history)
+            self.hook_command('connect', pid=pid)
+        except Exception:
+            self.reset_hook_connection()
+            raise
+        return True
+
+    def record_inserted_hook(self, code: str) -> None:
+        code = code.strip()
+        if code:
+            self._inserted_hook_codes.add(code)
+
+    def record_pc_hooks_inserted(self) -> None:
+        self._pc_hooks_inserted = True
+
+    def restore_profile_capture(self, profile: Profile) -> None:
+        """Apply one profile's Luna settings to the current connection.
+
+        Reusing an already connected game after a profile change must not leave
+        the previous profile's flush/codepage or omit saved inserted hooks.
+        Idempotence is connection-scoped so repeated UI refreshes do not insert
+        the same manual hooks again.
+        """
+        state = self._hook_connection
+        if not self.hook_host_running or not state.connected:
+            raise RuntimeError('LunaHook is not connected')
+        self.hook_command('settings', flush_ms=profile.hook_flush_ms,
+            codepage=profile.hook_codepage, max_buffer=profile.hook_max_buffer,
+            max_history=profile.hook_max_history)
+        if profile.insert_pc_hooks and not self._pc_hooks_inserted:
+            self.hook_command('insert_pc_hooks', pid=state.attached_pid)
+            self._pc_hooks_inserted = True
+        for code in profile.inserted_hooks:
+            if code in self._inserted_hook_codes:
+                continue
+            self.hook_command('insert_hook', pid=state.attached_pid, code=code)
+            self._inserted_hook_codes.add(code)
+
+    def accept_hook_connection_event(self, event: HookEvent) -> str | None:
+        """Update transient Host connection identity from one provenance event."""
+        state = self._hook_connection
+        if event.kind == 'connected':
+            if event.process_id is None or state.connecting_pid != event.process_id:
+                return None
+            changed = (state.attached_pid != event.process_id or
+                       state.host_generation != event.host_generation or
+                       state.connection_generation != event.connection_generation)
+            self._hook_connection = HookConnectionState(
+                attached_pid=event.process_id, connecting_pid=0,
+                host_generation=event.host_generation,
+                connection_generation=event.connection_generation)
+            return 'changed' if changed else 'connected'
+        if event.kind == 'disconnected' and event.process_id == state.attached_pid:
+            self.reset_hook_connection()
+            return 'disconnected'
+        return None
+
+    def cancel_hook_connection_attempt(self, pid: int | None = None) -> None:
+        state = self._hook_connection
+        if pid is not None and state.connecting_pid != pid:
+            return
+        if state.connected:
+            self._hook_connection = HookConnectionState(
+                attached_pid=state.attached_pid, host_generation=state.host_generation,
+                connection_generation=state.connection_generation)
+        else:
+            self.reset_hook_connection()
+
+    def capture_event_matches_connection(self, event: HookEvent) -> bool:
+        state = self._hook_connection
+        return bool(state.connected and event.process_id == state.attached_pid and
+                    event.host_generation == state.host_generation and
+                    event.connection_generation == state.connection_generation)
+
     @property
     def host_epoch(self) -> int:
         return self._host_epoch
@@ -732,11 +1450,13 @@ class AutoAdvApplication:
         host = self.hook_host
         return bool(host and host.child is not None and host.child.poll() is None)
 
-    def start_hook_host(self, *, on_event: Callable, on_closed: Callable,
-                        on_error: Callable) -> None:
+    def start_hook_host(self) -> None:
         """Own the isolated Luna Host lifecycle and suppress stale callbacks."""
+        if self._hook_event_observer is None or self._hook_closed_observer is None or self._hook_error_observer is None:
+            raise RuntimeError('Hook service observers are not configured')
         self._host_epoch += 1
         epoch = self._host_epoch
+        self.reset_hook_connection()
         if self.hook_host is not None:
             self.hook_host.close()
             self.hook_host = None
@@ -749,26 +1469,37 @@ class AutoAdvApplication:
         runtime = adopted_runtime()
         host = HookHost(
             runtime.host,
-            lambda event: current(on_event, event),
-            lambda reason: current(on_closed, reason),
-            lambda message: current(on_error, message),
+            lambda event: current(self._hook_event_observer, event),
+            lambda reason: current(self._hook_closed_observer, reason),
+            lambda message: current(self._hook_error_observer, message),
         )
         host.start()
         self.hook_host = host
 
     def close_hook_host(self) -> None:
         self._host_epoch += 1
+        self.reset_hook_connection()
         host, self.hook_host = self.hook_host, None
         self._synced_sources.clear()
         if host is not None:
             host.close()
 
+    def _reconcile_hook_sync(self) -> None:
+        target = self._runtime_target
+        if not target.selected:
+            return
+        errors = self.sync_hook_threads(target.hook_pid)
+        if errors:
+            self.report_capture_problem('複数の取得元を同期できません。取得の復旧を確認してください。')
+            for reason in errors:
+                self._emit_runtime_event('hook_sync_failed', None, reason=reason)
+
     def sync_hook_threads(self, process_id: int, *, clear: bool = False) -> tuple[str, ...]:
         """Apply Luna selected-thread synchronization from application-owned recipes.
 
-        The UI can request a recomputation when sources or recipes change, but it
-        does not own the selected set or remember which native threads were
-        already synchronized.
+        Application recomputes synchronization whenever observed sources,
+        capture recipes or the active runtime change.  The UI never owns the
+        selected set or remembers which native threads were synchronized.
         """
         selected = []
         if not clear:
@@ -820,6 +1551,91 @@ class AutoAdvApplication:
             raise RuntimeError('LunaHook Host is not running')
         self.hook_host.command(action, **kwargs)
 
+    def create_game(self, name: str, executable: str = ''):
+        game = self.catalog.create_game(name, executable)
+        try:
+            self._persist()
+        except Exception:
+            self.catalog.games.pop(game.id, None)
+            raise
+        return game
+
+    def add_profile(self, name: str) -> Profile:
+        if self.game_id not in self.catalog.games:
+            raise ValueError('作品を選択してください')
+        profile = self.catalog.add_profile(self.game_id, name)
+        try:
+            self._persist()
+        except Exception:
+            self.catalog.games[self.game_id].profiles.pop(profile.id, None)
+            raise
+        return profile
+
+    def duplicate_current_profile(self, name: str) -> Profile:
+        current = self.current_profile()
+        if current is None:
+            raise ValueError('プロファイルを選択してください')
+        duplicate = self.catalog.duplicate_profile(self.game_id, current.id, name)
+        try:
+            self._persist()
+        except Exception:
+            self.catalog.games[self.game_id].profiles.pop(duplicate.id, None)
+            raise
+        return duplicate
+
+    def rename_current_profile(self, name: str) -> Profile:
+        current = self.current_profile()
+        if current is None:
+            raise ValueError('プロファイルを選択してください')
+        previous = current.name
+        self.catalog.rename_profile(self.game_id, current.id, name)
+        try:
+            self._persist()
+        except Exception:
+            current.name = previous
+            raise
+        return current
+
+    def delete_current_profile(self) -> str:
+        current = self.current_profile()
+        game = self.catalog.games.get(self.game_id)
+        if current is None or game is None:
+            raise ValueError('プロファイルを選択してください')
+        previous = deepcopy(game)
+        self.catalog.delete_profile(self.game_id, current.id)
+        try:
+            self._persist()
+        except Exception:
+            self.catalog.games[self.game_id] = previous
+            raise
+        next_id = game.default_profile
+        self.select_profile(self.game_id, next_id)
+        return next_id
+
+    def set_default_profile(self) -> None:
+        current = self.current_profile()
+        game = self.catalog.games.get(self.game_id)
+        if current is None or game is None:
+            raise ValueError('プロファイルを選択してください')
+        previous = game.default_profile
+        game.default_profile = current.id
+        try:
+            self._persist()
+        except Exception:
+            game.default_profile = previous
+            raise
+
+    def install_catalog(self, catalog: Catalog) -> None:
+        """Persist one imported catalog atomically, then make it the sole source."""
+        previous = self.catalog
+        self.catalog = catalog
+        try:
+            self._persist()
+        except Exception:
+            self.catalog = previous
+            raise
+        self.replace_catalog(catalog)
+
     def replace_catalog(self, catalog: Catalog) -> None:
         """Replace the persisted catalog after an explicit import.
 
@@ -831,6 +1647,11 @@ class AutoAdvApplication:
         self.game_id = ''
         self.profile_id = ''
         self.capture = None
+        self._capture_output_group.clear()
+        self._runtime_output_group.clear()
+        self.clear_runtime_target()
+        self._resume_saved_monitor = False
+        self._capture_transition_pending = False
         self._runtime_capture_problem = None
 
     def start_irodori(self, on_result: Callable[[VoiceServiceView], None]) -> None:
@@ -870,6 +1691,10 @@ class AutoAdvApplication:
         self.game_id, self.profile_id = game_id, profile_id
         game = self.catalog.games.get(game_id)
         profile = game.profiles.get(profile_id) if game else None
+        self._capture_output_group.clear()
+        self._runtime_output_group.clear()
+        self._resume_saved_monitor = False
+        self._capture_transition_pending = False
         self.capture = CaptureWorkspace(profile, self.catalog.effective_profile) if profile else None
         self._runtime_capture_problem = None
         self._searched_hook_codes.clear()
@@ -883,6 +1708,7 @@ class AutoAdvApplication:
     def observe_capture(self, source: ThreadSource, text: str = '', *, sequence: int = 0) -> None:
         if self.capture:
             self.capture.observe(source, text, sequence=sequence)
+            self._reconcile_hook_sync()
 
     def observe_capture_group(self, events: Sequence[HookEvent]) -> None:
         if self.capture:
@@ -905,8 +1731,12 @@ class AutoAdvApplication:
     def remove_capture_source(self, identity: str, address: int) -> None:
         if self.capture:
             self.capture.remove(identity, address)
+            self._reconcile_hook_sync()
 
     def clear_capture_observations(self) -> None:
+        target = self._runtime_target
+        if target.selected:
+            self.sync_hook_threads(target.hook_pid, clear=True)
         self._capture_output_group.clear()
         if self.capture:
             self.capture.clear_observations()
@@ -922,17 +1752,136 @@ class AutoAdvApplication:
     def capture_candidate(self, identity: str, address: int) -> CaptureCandidateView | None:
         return self.capture.candidate(identity, address) if self.capture else None
 
+    def capture_profile_snapshot(self) -> Profile | None:
+        return deepcopy(self.capture.profile) if self.capture else None
+
     def capture_identity_is_ambiguous(self, identity: str) -> bool:
         return bool(self.capture and self.capture.identity_is_ambiguous(identity))
 
     def capture_has_identity(self, identity: str) -> bool:
         return bool(self.capture and self.capture.has_identity(identity))
 
+    def capture_has_output(self, identity: str) -> bool:
+        return bool(self.capture and self.capture.has_output(identity))
+
     def capture_saved_sources_ready(self, profile: Profile) -> bool:
         if not self.capture:
             return False
-        return (not any(self.capture.identity_is_ambiguous(h.identity) for h in profile.hooks)
-                and all(self.capture.has_identity(h.identity) for h in profile.hooks))
+        return any(
+            h.role == 'text' and not self.capture.identity_is_ambiguous(h.identity)
+            and self.capture.has_output(h.identity)
+            for h in profile.hooks)
+
+    def capture_output_identities(self) -> tuple[str, ...]:
+        return self.capture.output_identities() if self.capture else ()
+
+    def handle_capture_host_event(self, event: HookEvent) -> CaptureHostEventOutcome:
+        """Own capture-source state transitions for one current Host event."""
+        if event.source is None or not self.capture_event_matches_connection(event):
+            return CaptureHostEventOutcome()
+        identity = event.source.identity
+        if event.kind == 'removed':
+            active_removed = self.runtime_state().active_text_source == identity
+            self.remove_capture_source(identity, event.source.address)
+            resumed = False
+            if active_removed:
+                self.stop_monitoring('host_changed')
+                profile = self.current_profile()
+                self.request_saved_monitor_resume(profile)
+                resumed = self.try_resume_saved_monitor(profile) is not None
+                if resumed:
+                    self.clear_capture_problem()
+                else:
+                    self.report_capture_problem('監視中の台詞取得元が消失しました。取得の復旧を確認してください。')
+            return CaptureHostEventOutcome(
+                changed=True, active_source_removed=active_removed, monitor_started=resumed)
+        if event.kind not in ('created', 'output'):
+            return CaptureHostEventOutcome()
+        was_ambiguous = self.capture_identity_is_ambiguous(identity)
+        self.observe_capture(event.source, event.text if event.kind == 'output' else '', sequence=event.sequence)
+        new_ambiguity = self.capture_identity_is_ambiguous(identity) and not was_ambiguous
+        if new_ambiguity and self.runtime_state().profile is not None:
+            self.stop_monitoring('host_changed')
+            self.report_capture_problem('同じ識別子の取得元が複数あり、台詞を一意に選べません。')
+        resumed = self.try_resume_saved_monitor(self.current_profile()) is not None
+        return CaptureHostEventOutcome(
+            changed=True, new_ambiguity=new_ambiguity, monitor_started=resumed)
+
+    def handle_hook_diagnostic(self, event: HookEvent) -> None:
+        if event.kind != 'diagnostic':
+            return
+        if event.detail in ('existing_luna_injection_detected', 'cannot_attach_to_host_process'):
+            self.cancel_saved_monitor_resume()
+            self.cancel_hook_connection_attempt(event.process_id)
+        if event.detail == 'existing_luna_injection_detected':
+            self.report_capture_problem(
+                '対象には既にLunaHookが注入されています。ゲームを再起動してから選び直してください。')
+        elif event.detail == 'cannot_attach_to_host_process':
+            self.report_capture_problem(
+                'ゲームではないLunaHostプロセスが選択されています。実行中のゲームを選び直してください。')
+
+    def handle_capture_activation_error(self, message: str = '') -> None:
+        """Translate a capture-service activation failure into product state."""
+        if self._runtime_capture_problem is None:
+            self.report_capture_problem('ゲームから会話を取得できません。取得の復旧を確認してください。')
+        if message:
+            self._emit_runtime_event('capture_activation_failed', None, reason=message)
+
+    def handle_hook_error(self, message: str = '') -> None:
+        """Expose a Host failure as a user-actionable capture problem.
+
+        The UI adapter may log the native diagnostic, but it must not decide
+        whether the failure is a capture problem or how it affects the product
+        view.
+        """
+        self.handle_capture_activation_error(message)
+        if message:
+            self._emit_runtime_event('hook_error', None, reason=message)
+
+    def handle_hook_closed(self) -> None:
+        self.cancel_saved_monitor_resume()
+        self.stop_monitoring('host_changed')
+        self.reset_hook_connection()
+        self.report_capture_problem('ゲームからの台詞取得が停止しました。')
+
+    def target_resolution_needed(self) -> bool:
+        connection = self._hook_connection
+        return not self._runtime_target.selected and not connection.attached_pid and not connection.connecting_pid
+
+    def _connected_hook_pid(self) -> int:
+        target = self._runtime_target
+        connection = self._hook_connection
+        if (not self.hook_host_running or not target.selected or
+                not connection.connected_to(target.hook_pid)):
+            raise RuntimeError('ゲームへのLunaHook接続が完了していません')
+        return target.hook_pid
+
+    def start_recovery_hook_search(self, boundary_module: str = '') -> None:
+        pid = self._connected_hook_pid()
+        self.hook_command('find_hooks', pid=pid, boundary_module=boundary_module,
+                          parameters={'maxRecords': 64})
+
+    def insert_pc_recovery_hooks(self) -> None:
+        pid = self._connected_hook_pid()
+        self.hook_command('insert_pc_hooks', pid=pid)
+        self.record_pc_hooks_inserted()
+
+    def insert_recovery_hook(self, code: str, *, discovered: bool = False) -> bool:
+        code = code.strip()
+        if not code:
+            return False
+        if discovered and not self.begin_recovery_hook_trial(code):
+            return False
+        try:
+            pid = self._connected_hook_pid()
+            self.hook_command('insert_hook', pid=pid, code=code)
+            self.record_inserted_hook(code)
+            self.mark_recovery_hook_inserted(code)
+            return True
+        except Exception:
+            if discovered:
+                self.recovery_hook_trial_failed(code)
+            raise
 
     def begin_recovery_hook_trial(self, code: str) -> bool:
         code = code.strip()
@@ -941,6 +1890,9 @@ class AutoAdvApplication:
             return False
         self._searched_hook_codes.add(code)
         return True
+
+    def recovery_hook_trial_failed(self, code: str) -> None:
+        self._searched_hook_codes.discard(code.strip())
 
     def mark_recovery_hook_inserted(self, code: str) -> None:
         code = code.strip()
@@ -956,6 +1908,7 @@ class AutoAdvApplication:
         self.capture.set_role(identity, address, role)
         if role is not None and source.hook_code in self._trial_hook_codes:
             self.capture.adopt_inserted_hook(source.hook_code)
+        self._reconcile_hook_sync()
 
     def move_dialogue_source(self, identity: str, offset: int) -> None:
         if self.capture:
@@ -968,12 +1921,12 @@ class AutoAdvApplication:
 
     def capture_view(self) -> CaptureWorkspaceView:
         if not self.capture:
-            return CaptureWorkspaceView((), (), False, False, self._runtime_capture_problem)
+            return CaptureWorkspaceView((), (), (), False, False, self._runtime_capture_problem)
         view = self.capture.view()
         if view.problem is not None or self._runtime_capture_problem is None:
             return view
         return CaptureWorkspaceView(
-            candidates=view.candidates, previews=view.previews, dirty=view.dirty,
+            candidates=view.candidates, previews=view.previews, routes=view.routes, dirty=view.dirty,
             can_commit=view.can_commit, problem=self._runtime_capture_problem)
 
     def report_capture_problem(self, message: str, action: str = 'open_capture_recovery') -> None:
@@ -983,14 +1936,47 @@ class AutoAdvApplication:
     def clear_capture_problem(self) -> None:
         self._runtime_capture_problem = None
 
+    def diagnostics_view(self) -> DiagnosticsView:
+        connection = self._hook_connection
+        target = self._runtime_target
+        runtime = self.runtime_state()
+        capture = self.capture_view()
+        profile = self.current_profile()
+        lines = [
+            'LunaHost: ' + ('running' if self.hook_host_running else 'stopped'),
+            ('Luna connection: pid=' + str(connection.attached_pid) +
+             f' generation={connection.host_generation or "-"}/{connection.connection_generation}'
+             if connection.connected else
+             ('Luna connection: connecting pid=' + str(connection.connecting_pid)
+              if connection.connecting_pid else 'Luna connection: disconnected')),
+            ('Target: hook=' + str(target.hook_pid or '-') +
+             ' audio=' + str(target.audio_pid or '-') +
+             ' input=' + str(target.input_pid or '-') +
+             ' hwnd=' + (hex(target.hwnd) if target.hwnd else '-')),
+            f'Capture: candidates={len(capture.candidates)} routes={len(capture.routes)} dirty={capture.dirty}',
+            ('Saved sources: ' + str(len(profile.hooks)) if profile else 'Saved sources: -'),
+            ('Runtime: session=' + str(runtime.session) +
+             ' source=' + (runtime.profile.source if runtime.profile else '-') +
+             ' active=' + (runtime.active_text_source or '-') +
+             ' token=' + (f'{runtime.token.session}:{runtime.token.line}' if runtime.token else '-') +
+             ' sent=' + str(runtime.sent) + ' completed=' + str(runtime.completed)),
+            ('Runtime reason: presentation=' + (runtime.presentation_reason or '-') +
+             ' pause=' + (runtime.pause_reason or '-')),
+        ]
+        if capture.problem is not None:
+            lines.append('Capture problem: ' + capture.problem.message)
+        return DiagnosticsView(tuple(lines))
+
     def play_view(self) -> PlayView:
         controller = self.controller
         utterance = controller.utterance
-        dialogue = (PlayDialogueView(utterance.speaker, utterance.text) if utterance is not None else None)
+        dialogue = (PlayDialogueView(
+            utterance.speaker, utterance.text, utterance.use_tts, utterance.voice)
+            if utterance is not None else None)
         authorized = controller.authorized
         issue = None
-        if authorized:
-            reason = controller.pause_reason
+        reason = controller.pause_reason
+        if authorized or reason in _PLAY_ISSUES_WITHOUT_AUTO:
             resolved = _PLAY_ISSUES.get(reason)
             if resolved:
                 issue = CaptureProblemView(*resolved)
@@ -1000,7 +1986,7 @@ class AutoAdvApplication:
         if self.capture:
             self.capture.adopt_inserted_hook(code)
 
-    def update_capture_recipe(self, mutate: Callable[[Profile], None]) -> None:
+    def _update_capture_recipe(self, mutate: Callable[[Profile], None]) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
         self.capture.mutate_recipe(mutate)
@@ -1023,14 +2009,29 @@ class AutoAdvApplication:
             game.profiles[current.id] = previous
             raise
         self.capture.mark_committed(updated)
+        self._reconcile_hook_sync()
+        self._apply_persisted_profile_change(previous, updated)
+        if (self.runtime_state().profile is None and any(h.role == 'text' for h in updated.hooks)
+                and self._hook_connection.connected):
+            self.request_saved_monitor_resume(updated)
+            self.try_resume_saved_monitor(updated)
         return updated
 
-    def update_profile(self, mutate: Callable[[Profile], None]) -> Profile:
+    def _update_profile(self, mutate: Callable[[Profile], None]) -> Profile:
         current = self.current_profile()
         if current is None:
             raise ValueError('作品を選択してください')
         updated = deepcopy(current)
         mutate(updated)
+        capture_transaction_fields = ('hooks', 'speaker_links', 'inserted_hooks', 'structure_rules')
+        changed_capture_fields = [
+            field for field in capture_transaction_fields
+            if getattr(updated, field) != getattr(current, field)
+        ]
+        if changed_capture_fields:
+            raise ValueError(
+                'capture recipe changes require the Capture Workspace transaction: ' +
+                ', '.join(changed_capture_fields))
         updated.validate()
         game = self.catalog.games[self.game_id]
         previous = game.profiles[current.id]
@@ -1042,7 +2043,173 @@ class AutoAdvApplication:
             raise
         if self.capture:
             self.capture.rebase_settings(updated)
+        self._apply_persisted_profile_change(previous, updated)
         return updated
+
+    def set_capture_environment(self, *, ocr_executable: str, ocr_language: str,
+                                ocr_region: tuple[int, int, int, int], ocr_stable_samples: int,
+                                insert_pc_hooks: bool, hook_flush_ms: int, hook_codepage: int,
+                                hook_max_buffer: int, hook_max_history: int) -> Profile:
+        """Persist the acquisition environment as one user-meaningful command."""
+        ocr = OCRSettings(ocr_executable.strip(), ocr_language.strip(), tuple(ocr_region),
+                          stable_samples=ocr_stable_samples)
+
+        def change(profile: Profile) -> None:
+            profile.ocr = ocr
+            profile.insert_pc_hooks = bool(insert_pc_hooks)
+            profile.hook_flush_ms = int(hook_flush_ms)
+            profile.hook_codepage = int(hook_codepage)
+            profile.hook_max_buffer = int(hook_max_buffer)
+            profile.hook_max_history = int(hook_max_history)
+
+        return self._update_profile(change)
+
+    def add_speaker(self, name: str, tts_enabled: bool, voice: str = '') -> Profile:
+        name = name.strip()
+        if not name:
+            raise ValueError('話者名を入力してください')
+        current = self.current_profile()
+        if current is None:
+            raise ValueError('作品を選択してください')
+        if name in set(current.speaker_tts) | set(current.speaker_voices):
+            raise ValueError('同名の話者が既にあります')
+
+        def change(profile: Profile) -> None:
+            profile.speaker_tts[name] = bool(tts_enabled)
+            profile.speaker_voices[name] = voice.strip()
+
+        return self._update_profile(change)
+
+    def rename_speaker(self, old_name: str, new_name: str) -> Profile:
+        old_name, new_name = old_name.strip(), new_name.strip()
+        if not old_name or not new_name:
+            raise ValueError('話者名を入力してください')
+        current = self.current_profile()
+        if current is None:
+            raise ValueError('作品を選択してください')
+        existing = set(current.speaker_tts) | set(current.speaker_voices)
+        if old_name not in existing:
+            raise ValueError('変更する話者がありません')
+        if new_name != old_name and new_name in existing:
+            raise ValueError('同名の話者が既にあります')
+
+        def change(profile: Profile) -> None:
+            if old_name in profile.speaker_tts:
+                profile.speaker_tts[new_name] = profile.speaker_tts.pop(old_name)
+            if old_name in profile.speaker_voices:
+                profile.speaker_voices[new_name] = profile.speaker_voices.pop(old_name)
+
+        return self._update_profile(change)
+
+    def set_speaker_tts(self, name: str, enabled: bool) -> Profile:
+        name = name.strip()
+        current = self.current_profile()
+        if current is None or name not in set(current.speaker_tts) | set(current.speaker_voices):
+            raise ValueError('変更する話者がありません')
+        return self._update_profile(lambda profile: profile.speaker_tts.__setitem__(name, bool(enabled)))
+
+    def set_speaker_voice(self, name: str, voice: str) -> Profile:
+        name = name.strip()
+        current = self.current_profile()
+        if current is None or name not in set(current.speaker_tts) | set(current.speaker_voices):
+            raise ValueError('変更する話者がありません')
+        return self._update_profile(lambda profile: profile.speaker_voices.__setitem__(name, voice.strip()))
+
+    def delete_speaker(self, name: str) -> Profile:
+        name = name.strip()
+
+        def change(profile: Profile) -> None:
+            profile.speaker_tts.pop(name, None)
+            profile.speaker_voices.pop(name, None)
+
+        return self._update_profile(change)
+
+    def save_replacement_rule(self, index: int | None, rule: ReplacementRule) -> Profile:
+        def change(profile: Profile) -> None:
+            if index is not None and 0 <= index < len(profile.replacements):
+                profile.replacements[index] = deepcopy(rule)
+            else:
+                profile.replacements.append(deepcopy(rule))
+
+        return self._update_profile(change)
+
+    def move_replacement_rule(self, index: int, movement: int) -> Profile:
+        current = self.current_profile()
+        if current is None or not 0 <= index < len(current.replacements):
+            raise ValueError('変更する置換規則を選択してください')
+        destination = index + movement
+        if not 0 <= destination < len(current.replacements):
+            return current
+
+        def change(profile: Profile) -> None:
+            profile.replacements[index], profile.replacements[destination] = (
+                profile.replacements[destination], profile.replacements[index])
+
+        return self._update_profile(change)
+
+    def delete_replacement_rule(self, index: int) -> Profile:
+        current = self.current_profile()
+        if current is None or not 0 <= index < len(current.replacements):
+            raise ValueError('削除する置換規則を選択してください')
+        return self._update_profile(lambda profile: profile.replacements.pop(index))
+
+    def add_reading(self, word: str, reading: str) -> Profile:
+        word, reading = word.strip(), reading.strip()
+        if not word or not reading:
+            raise ValueError('表記と読みの両方を入力してください')
+        current = self.current_profile()
+        if current is None:
+            raise ValueError('作品を選択してください')
+        if word in current.name_readings:
+            raise ValueError('同じ表記が既にあります')
+        return self._update_profile(lambda profile: profile.name_readings.__setitem__(word, reading))
+
+    def update_reading(self, old_word: str, word: str, reading: str) -> Profile:
+        old_word, word, reading = old_word.strip(), word.strip(), reading.strip()
+        if not word or not reading:
+            raise ValueError('表記と読みの両方を入力してください')
+        current = self.current_profile()
+        if current is None or old_word not in current.name_readings:
+            raise ValueError('変更する読みがありません')
+        if word != old_word and word in current.name_readings:
+            raise ValueError('同じ表記が既にあります')
+
+        def change(profile: Profile) -> None:
+            if old_word != word:
+                profile.name_readings.pop(old_word, None)
+            profile.name_readings[word] = reading
+
+        return self._update_profile(change)
+
+    def delete_reading(self, word: str) -> Profile:
+        return self._update_profile(lambda profile: profile.name_readings.pop(word, None))
+
+    def save_capture_structure_rule(self, index: int | None, rule: StructureRule) -> None:
+        def change(profile: Profile) -> None:
+            if index is not None and 0 <= index < len(profile.structure_rules):
+                profile.structure_rules[index] = deepcopy(rule)
+            else:
+                profile.structure_rules.insert(0, deepcopy(rule))
+        self._update_capture_recipe(change)
+
+    def move_capture_structure_rule(self, index: int, movement: int) -> None:
+        profile = self.capture_profile_snapshot()
+        if profile is None or not 0 <= index < len(profile.structure_rules):
+            raise ValueError('変更する抽出規則を選択してください')
+        destination = index + movement
+        if not 0 <= destination < len(profile.structure_rules):
+            return
+
+        def change(draft: Profile) -> None:
+            draft.structure_rules[index], draft.structure_rules[destination] = (
+                draft.structure_rules[destination], draft.structure_rules[index])
+        self._update_capture_recipe(change)
+
+    def delete_capture_structure_rule(self, index: int) -> None:
+        profile = self.capture_profile_snapshot()
+        if profile is None or not 0 <= index < len(profile.structure_rules):
+            raise ValueError('削除する抽出規則を選択してください')
+        self._update_capture_recipe(lambda draft: draft.structure_rules.pop(index))
 
     def set_profile_setting(self, name: str, value) -> Profile:
         """Persist one user-visible setting without reconstructing a form.
@@ -1051,7 +2218,8 @@ class AutoAdvApplication:
         user's decision to create a game override.  The persistence shape stays
         internal to the application; the GUI never toggles an inheritance field.
         """
-        if name not in Profile.__dataclass_fields__ or name in {'id', 'name', 'hooks', 'speaker_links'}:
+        if (name not in Profile.__dataclass_fields__ or
+                name in {'id', 'name', 'hooks', 'speaker_links', 'inserted_hooks', 'structure_rules'}):
             raise ValueError('unsupported profile setting')
 
         def change(profile: Profile) -> None:
@@ -1059,7 +2227,7 @@ class AutoAdvApplication:
             if name in profile.inherit_common:
                 profile.inherit_common.remove(name)
 
-        return self.update_profile(change)
+        return self._update_profile(change)
 
     def reset_profile_setting(self, name: str) -> Profile:
         """Remove a game override and use the current common value."""
@@ -1070,7 +2238,7 @@ class AutoAdvApplication:
             if name not in profile.inherit_common:
                 profile.inherit_common.append(name)
 
-        return self.update_profile(change)
+        return self._update_profile(change)
 
     def effective_setting(self, name: str):
         profile = self.current_profile()
@@ -1097,6 +2265,9 @@ class AutoAdvApplication:
     def set_common_setting(self, name: str, value) -> None:
         if name not in self.catalog.common.__dataclass_fields__:
             raise ValueError('unsupported common setting')
+        current_profile = self.current_profile()
+        previous_effective = (self.catalog.effective_profile(current_profile)
+                              if current_profile and name in current_profile.inherit_common else None)
         previous = deepcopy(self.catalog.common)
         setattr(self.catalog.common, name, deepcopy(value))
         try:
@@ -1105,6 +2276,16 @@ class AutoAdvApplication:
         except Exception:
             self.catalog.common = previous
             raise
+        if current_profile and previous_effective is not None:
+            updated_effective = self.catalog.effective_profile(current_profile)
+            # The raw profile did not change, but the effective runtime contract did.
+            state = self.runtime_state()
+            if state.profile is not None and state.profile.id == current_profile.id:
+                if self.runtime_capture_matches(updated_effective):
+                    self.controller.stage_profile(updated_effective)
+                    self._notify_runtime()
+                else:
+                    self._request_capture_transition()
 
     def set_irodori_environment(self, root: str, url: str) -> None:
         previous = (self.catalog.irodori_root, self.catalog.irodori_url)

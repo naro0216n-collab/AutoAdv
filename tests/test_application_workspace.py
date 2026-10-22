@@ -1,7 +1,7 @@
 from autoadv.application import AutoAdvApplication
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import AdvanceMode, HookSelection
+from autoadv.model import AdvanceMode, HookSelection, ReplacementRule, StructureRule
 from autoadv.storage import Catalog
 
 
@@ -207,7 +207,7 @@ def test_structure_rules_are_part_of_capture_transaction_not_independent_persist
     app.set_capture_role(candidate.identity, candidate.address, 'text')
     original_rules = list(app.current_profile().structure_rules)
     rule = StructureRule(r'^(?P<speaker>[^：]+)：(?P<body>.+)$')
-    app.update_capture_recipe(lambda profile: profile.structure_rules.insert(0, rule))
+    app.save_capture_structure_rule(None, rule)
     assert calls == []
     assert app.current_profile().structure_rules == original_rules
     assert app.capture_view().previews[-1].speaker == '大和'
@@ -255,6 +255,15 @@ def test_play_view_hides_normal_internal_state_and_surfaces_only_actionable_hold
     assert app.play_view().issue is None
 
 
+def test_play_view_keeps_tts_failure_actionable_even_when_auto_is_off():
+    app, _ = app_with_game()
+    app.controller.authorized = False
+    app.controller.pause_reason = 'tts_playback_failed'
+    view = app.play_view()
+    assert view.issue is not None
+    assert view.issue.action == 'open_voice'
+
+
 
 def test_application_owns_hook_host_lifecycle_and_discards_stale_callbacks(monkeypatch):
     from types import SimpleNamespace
@@ -293,7 +302,8 @@ def test_application_owns_hook_host_lifecycle_and_discards_stale_callbacks(monke
     closed = []
     errors = []
 
-    app.start_hook_host(on_event=events.append, on_closed=closed.append, on_error=errors.append)
+    app.configure_hook_service(on_event=events.append, on_closed=closed.append, on_error=errors.append)
+    app.start_hook_host()
     first = FakeHost.instances[-1]
     assert app.hook_host_running
     app.hook_command('connect', pid=101)
@@ -301,7 +311,7 @@ def test_application_owns_hook_host_lifecycle_and_discards_stale_callbacks(monke
     first.on_event('first')
     assert events == ['first']
 
-    app.start_hook_host(on_event=events.append, on_closed=closed.append, on_error=errors.append)
+    app.start_hook_host()
     second = FakeHost.instances[-1]
     assert first.closed
     first.on_event('stale')
@@ -573,3 +583,665 @@ def test_application_owns_selected_thread_sync_state():
     disables = [kwargs['source']['hook_code'] for action, kwargs in host.commands
                 if action == 'sync_thread' and not kwargs['enabled']]
     assert set(disables) == {'T', 'S'}
+
+
+def test_application_owns_hook_connection_identity_and_rejects_stale_events():
+    class Child:
+        def poll(self):
+            return None
+
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    host = Host()
+    app.hook_host = host
+    profile = app.current_profile()
+    assert app.begin_hook_connection(101, profile)
+    state = app.hook_connection_state()
+    assert state.connecting_pid == 101
+    assert not state.connected
+    assert [action for action, _ in host.commands] == ['settings', 'connect']
+
+    stale = HookEvent('connected', 'old-host', 1, 1, 10, 999)
+    assert app.accept_hook_connection_event(stale) is None
+    assert app.hook_connection_state().connecting_pid == 101
+
+    connected = HookEvent('connected', 'host-a', 7, 2, 20, 101)
+    assert app.accept_hook_connection_event(connected) == 'changed'
+    state = app.hook_connection_state()
+    assert state.connected_to(101)
+    assert state.connecting_pid == 0
+    current_output = HookEvent('output', 'host-a', 7, 3, 30, 101, source('T', 1), '本文')
+    stale_output = HookEvent('output', 'host-a', 6, 4, 40, 101, source('T', 1), '旧本文')
+    assert app.capture_event_matches_connection(current_output)
+    assert not app.capture_event_matches_connection(stale_output)
+
+    disconnected = HookEvent('disconnected', 'host-a', 7, 5, 50, 101)
+    assert app.accept_hook_connection_event(disconnected) == 'disconnected'
+    assert not app.hook_connection_state().connected
+
+
+def test_hook_host_restart_invalidates_connection_identity():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+        def command(self, *_args, **_kwargs):
+            pass
+        def close(self):
+            pass
+
+    app, _ = app_with_game()
+    app.hook_host = Host()
+    app.begin_hook_connection(101, app.current_profile())
+    app.accept_hook_connection_event(HookEvent('connected', 'host-a', 3, 1, 10, 101))
+    assert app.hook_connection_state().connected
+    app.close_hook_host()
+    assert not app.hook_connection_state().connected
+
+
+def test_multiple_dialogue_routes_preview_only_the_effective_priority_owner():
+    app, _ = app_with_game()
+    primary = source('A', 1, address=1)
+    fallback = source('B', 3, address=2)
+    app.observe_capture(primary, 'Aの台詞', sequence=1)
+    app.observe_capture(fallback, 'Bの台詞', sequence=2)
+    app.set_capture_role(primary.identity, primary.address, 'text')
+    app.set_capture_role(fallback.identity, fallback.address, 'text')
+    view = app.capture_view()
+    assert [preview.text for preview in view.previews] == ['Aの台詞']
+    assert [route.text_identity for route in view.routes] == [primary.identity, fallback.identity]
+    app.move_dialogue_source(fallback.identity, -1)
+    view = app.capture_view()
+    assert [preview.text for preview in view.previews] == ['Bの台詞']
+
+
+def test_saved_route_readiness_requires_real_text_output_and_allows_fallback():
+    app, _ = app_with_game()
+    primary = source('A', 1, address=1)
+    fallback = source('B', 3, address=2)
+    profile = app.current_profile()
+    profile.hooks = [HookSelection('A', 1, 2, 'text'), HookSelection('B', 3, 4, 'text')]
+    app.select_profile(app.game_id, app.profile_id)
+    app.observe_capture(primary, '', sequence=1)  # thread exists, but produced no dialogue
+    assert not app.capture_saved_sources_ready(profile)
+    app.observe_capture(fallback, 'fallback line', sequence=2)
+    assert app.capture_saved_sources_ready(profile)
+    assert app.capture_output_identities() == (fallback.identity,)
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
+                      available_sources=app.capture_output_identities())
+    assert app.runtime_state().active_text_source == fallback.identity
+
+
+def test_failed_recovery_hook_trial_can_be_retried():
+    app, _ = app_with_game()
+    assert app.begin_recovery_hook_trial('HCODE')
+    app.recovery_hook_trial_failed('HCODE')
+    assert app.begin_recovery_hook_trial('HCODE')
+
+
+def test_runtime_target_identity_is_application_session_state():
+    app, _ = app_with_game()
+    state = app.select_primary_target(101, 0x1234)
+    assert state.hook_pid == state.audio_pid == state.input_pid == 101
+    assert state.hwnd == 0x1234
+    app.select_audio_target(202)
+    app.select_input_target(303, 0x5678)
+    target = app.session_target()
+    assert (target.hook_pid, target.audio_pid, target.pid, target.hwnd) == (101, 202, 303, 0x5678)
+    app.clear_runtime_target()
+    assert not app.runtime_target_state().selected
+
+
+def test_profile_selection_discards_capture_batches_and_pending_runtime_transitions():
+    app, _ = app_with_game()
+    text = source('T', 1)
+    event = HookEvent('output', 'host', 1, 1, 100, 101, text, 'old')
+    assert app.queue_capture_output(event) == 100
+    app.defer_capture_transition()
+    app.request_saved_monitor_resume(app.current_profile())
+    game_id, profile_id = app.game_id, app.profile_id
+    app.select_profile(game_id, profile_id)
+    assert not app.capture_transition_pending
+    assert app.capture_view().previews == ()
+    app.flush_capture_outputs()
+    assert app.capture_view().previews == ()
+
+
+def test_capture_transition_boundary_is_application_owned():
+    app, _ = app_with_game()
+    text = source('T', 1)
+    profile = app.current_profile()
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
+                      available_sources=(text.identity,))
+    first = app.observe_runtime_hook(
+        generation='host', connection=1, sequence=1, source=text,
+        text='first', pid=101, received_ns=100)
+    assert first is not None
+    assert not app.defer_capture_transition()
+    duplicate = HookEvent('output', 'host', 1, 2, 200, 101, text, 'first')
+    changed = HookEvent('output', 'host', 1, 3, 300, 101, text, 'second')
+    assert not app.capture_transition_boundary(duplicate, profile)
+    assert app.capture_transition_boundary(changed, profile)
+    assert app.consume_capture_transition()
+    assert not app.capture_transition_pending
+
+
+def test_runtime_target_alternates_reset_to_primary_without_losing_primary_window():
+    app, _ = app_with_game()
+    app.select_primary_target(101, 0x1234)
+    app.select_audio_target(202)
+    app.select_input_target(303, 0x5678)
+    state = app.select_audio_target(None)
+    assert state.audio_pid == 101
+    state = app.select_input_target(None, None)
+    assert (state.input_pid, state.hwnd, state.hook_hwnd) == (101, 0x1234, 0x1234)
+    target = app.session_target()
+    assert (target.hook_pid, target.audio_pid, target.pid, target.hwnd) == (101, 101, 101, 0x1234)
+
+
+def test_explicit_input_override_requires_a_real_window():
+    app, _ = app_with_game()
+    app.select_primary_target(101, 0x1234)
+    import pytest
+    with pytest.raises(ValueError):
+        app.select_input_target(303, 0)
+    with pytest.raises(ValueError):
+        app.select_input_target(303, None)
+
+
+def test_catalog_crud_rolls_back_when_persistence_fails():
+    catalog = Catalog()
+    game = catalog.create_game('Game')
+    second = catalog.add_profile(game.id, 'Second')
+    original_default = game.default_profile
+    app = AutoAdvApplication(
+        catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
+        input_send=lambda *_: None, preflight=lambda *_: True)
+    app.select_profile(game.id, second.id)
+    original_profiles = set(game.profiles)
+    import pytest
+    with pytest.raises(OSError):
+        app.add_profile('New')
+    assert set(game.profiles) == original_profiles
+    with pytest.raises(OSError):
+        app.rename_current_profile('Renamed')
+    assert app.current_profile().name == 'Second'
+    with pytest.raises(OSError):
+        app.set_default_profile()
+    assert game.default_profile == original_default
+
+
+def test_import_catalog_rolls_back_application_source_when_persistence_fails():
+    catalog = Catalog()
+    game = catalog.create_game('Game')
+    app = AutoAdvApplication(
+        catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
+        input_send=lambda *_: None, preflight=lambda *_: True)
+    app.select_profile(game.id, game.default_profile)
+    replacement = Catalog()
+    replacement.create_game('Imported')
+    import pytest
+    with pytest.raises(OSError):
+        app.install_catalog(replacement)
+    assert app.catalog is catalog
+    assert app.current_profile() is catalog.games[game.id].profiles[game.default_profile]
+
+
+def test_import_catalog_persists_before_invalidating_selection():
+    app, calls = app_with_game()
+    replacement = Catalog()
+    replacement.create_game('Imported')
+    app.install_catalog(replacement)
+    assert calls == ['save']
+    assert app.catalog is replacement
+    assert app.current_profile() is None
+    assert app.capture is None
+
+
+def test_profile_capture_restore_is_idempotent_and_connection_scoped():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    host = Host()
+    app.hook_host = host
+    profile = app.current_profile()
+    profile.insert_pc_hooks = True
+    profile.inserted_hooks = ['H1', 'H2']
+    app.begin_hook_connection(101, profile)
+    app.accept_hook_connection_event(HookEvent('connected', 'host-a', 3, 1, 10, 101))
+
+    host.commands.clear()
+    app.restore_profile_capture(profile)
+    assert [action for action, _ in host.commands] == ['settings', 'insert_pc_hooks', 'insert_hook', 'insert_hook']
+    host.commands.clear()
+    app.restore_profile_capture(profile)
+    assert [action for action, _ in host.commands] == ['settings']
+
+    app.reset_hook_connection()
+    app.hook_host = host
+    app.begin_hook_connection(101, profile)
+    app.accept_hook_connection_event(HookEvent('connected', 'host-b', 4, 2, 20, 101))
+    host.commands.clear()
+    app.restore_profile_capture(profile)
+    assert [action for action, _ in host.commands] == ['settings', 'insert_pc_hooks', 'insert_hook', 'insert_hook']
+
+
+def test_diagnostics_view_is_generated_from_application_state():
+    app, _ = app_with_game()
+    app.select_primary_target(101, 0x1234)
+    view = app.diagnostics_view()
+    assert 'Target: hook=101' in view.text
+    assert 'Luna connection: disconnected' in view.text
+    assert 'Runtime: session=' in view.text
+
+
+def test_application_owns_text_presentation_deadline_and_next_line_timeout():
+    catalog = Catalog()
+    game = catalog.create_game('Game')
+    sent = []
+    app = AutoAdvApplication(
+        catalog, lambda: None,
+        input_send=lambda target, key: sent.append((target.pid, key)),
+        preflight=lambda _target: True)
+    profile = app.select_profile(game.id, game.default_profile)
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.advance_mode = AdvanceMode.TEXT
+    scheduled = []
+    changed = []
+    events = []
+    app.configure_runtime_loop(
+        schedule=lambda delay, callback: scheduled.append((delay, callback)),
+        on_change=lambda: changed.append(app.runtime_state().pause_reason),
+        on_event=lambda name, token, detail: events.append((name, token, detail)))
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
+                      available_sources=(text.identity,))
+    token = app.observe_runtime_hook(
+        generation='host', connection=1, sequence=1, source=text,
+        text='本文', pid=101, received_ns=100)
+    app.set_auto_advance(True)
+    app.start_presentation(token)
+    assert scheduled[0][0] == app.runtime_state().utterance.text_wait_ms
+    scheduled.pop(0)[1]()
+    assert sent == [(101, profile.input_key)]
+    assert app.runtime_state().sent
+    assert any(name == 'presentation_complete' for name, _, _ in events)
+    timeout_delay, timeout = scheduled.pop(0)
+    assert timeout_delay == profile.next_line_timeout_ms
+    timeout()
+    assert app.play_view().issue is not None
+    assert app.runtime_state().pause_reason == 'next_line_timeout'
+    assert any(name == 'next_line_timeout' for name, _, _ in events)
+
+
+def test_application_owns_uncertain_audio_fallback_policy():
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.advance_mode = AdvanceMode.AUDIO
+    profile.uncertain_text_fallback = False
+    scheduled = []
+    app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
+                      available_sources=(text.identity,))
+    token = app.observe_runtime_hook(
+        generation='host', connection=1, sequence=1, source=text,
+        text='本文', pid=101)
+    app.set_auto_advance(True)
+    app.start_presentation(token)
+    assert len(scheduled) == 1
+    scheduled.pop(0)[1]()
+    assert app.runtime_state().pause_reason == 'native_inconclusive_hold'
+    assert not app.runtime_state().sent
+
+
+def test_application_auto_advance_can_complete_without_gui_runtime_policy():
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    scheduled = []
+    app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
+                      available_sources=(text.identity,))
+    token = app.observe_runtime_hook(
+        generation='host', connection=1, sequence=1, source=text,
+        text='本文', pid=101)
+    app.start_presentation(token)
+    scheduled.pop(0)[1]()
+    assert app.runtime_state().completed
+    assert not app.runtime_state().sent
+    app.set_auto_advance(True)
+    assert app.runtime_state().sent
+
+
+def test_application_rebuilds_pending_hook_capture_before_admitting_first_new_line():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    app.select_primary_target(101, 500)
+    app.hook_host = Host()
+    app.begin_hook_connection(101, profile)
+    app.accept_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, 101))
+    app.observe_capture(text, '一つ目', sequence=1)
+    first_state = app.start_monitoring()
+    first = app.handle_runtime_hook_output(
+        HookEvent('output', 'host', 1, 2, 20, 101, text, '一つ目'))[0]
+    assert first is not None
+    first_session = first_state.session
+
+    # A capture-affecting setting edit keeps the current utterance frozen until
+    # the next distinct Hook output, then that same output must enter the new runtime.
+    app.defer_capture_transition()
+    second, delay = app.handle_runtime_hook_output(
+        HookEvent('output', 'host', 1, 3, 30, 101, text, '二つ目'))
+    assert delay is None
+    assert second is not None
+    assert second.session > first_session
+    assert app.runtime_state().utterance.raw == '二つ目'
+    assert not app.capture_transition_pending
+
+
+def test_application_owns_ocr_capture_transition_boundary():
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    profile.source = 'ocr'
+    app.begin_runtime(profile, Target(101, 500), 'ocr', 1)
+    app.defer_capture_transition()
+    calls = []
+    app.apply_capture_transition = lambda: calls.append('apply') or True
+
+    result = app.handle_runtime_ocr_output(
+        session=app.runtime_state().session, pid=101, sequence=1, text='新しい台詞')
+    assert result is None
+    assert calls == ['apply']
+
+
+def test_activate_selected_target_owns_connection_request_and_saved_monitor_resume():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    app.select_profile(app.game_id, app.profile_id)
+    profile = app.current_profile()
+    app.select_primary_target(101, 500)
+    app.hook_host = Host()
+
+    assert app.activate_selected_target() == 'connecting'
+    assert [action for action, _ in app.hook_host.commands] == ['settings', 'connect']
+    assert app.hook_connection_state().connecting_pid == 101
+
+    transition = app.handle_hook_connection_event(
+        HookEvent('connected', 'host', 1, 1, 10, process_id=101))
+    assert transition == 'changed'
+    assert app.hook_connection_state().connected
+    assert app.runtime_state().profile is None
+
+    app.observe_capture(text, '最初の台詞', sequence=2)
+    state = app.try_resume_saved_monitor(profile)
+    assert state is not None
+    assert state.profile is not None
+    assert state.active_text_source == text.identity
+
+
+
+def test_reusing_connected_target_after_profile_switch_reapplies_profile_capture_settings():
+    class Child:
+        def poll(self):
+            return None
+
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    game_id = app.game_id
+    first = app.current_profile()
+    first.hook_flush_ms = 111
+    first.inserted_hooks = ['H1']
+    second = app.add_profile('Alt')
+    second.hook_flush_ms = 222
+    second.hook_codepage = 65001
+    second.inserted_hooks = ['H2']
+
+    app.select_primary_target(101, 500)
+    app.hook_host = Host()
+    assert app.activate_selected_target() == 'connecting'
+    app.handle_hook_connection_event(
+        HookEvent('connected', 'host-a', 1, 1, 10, process_id=101))
+
+    app.hook_host.commands.clear()
+    app.select_profile(game_id, second.id)
+    assert app.runtime_target_state().selected
+    assert app.hook_connection_state().connected_to(101)
+    assert app.activate_selected_target() == 'connected'
+
+    settings = [kwargs for action, kwargs in app.hook_host.commands if action == 'settings']
+    assert settings == [{
+        'flush_ms': 222,
+        'codepage': 65001,
+        'max_buffer': second.hook_max_buffer,
+        'max_history': second.hook_max_history,
+    }]
+    assert ('insert_hook', {'pid': 101, 'code': 'H2'}) in app.hook_host.commands
+
+
+def test_hook_error_is_translated_to_capture_problem_by_application():
+    app, _ = app_with_game()
+    events = []
+    app.configure_runtime_loop(schedule=lambda *_: None, on_event=lambda name, token, detail: events.append((name, detail)))
+    app.handle_hook_error('native failure')
+    assert app.capture_view().problem is not None
+    assert app.capture_view().problem.action == 'open_capture_recovery'
+    assert events[-1][0] == 'hook_error'
+    assert events[-1][1]['reason'] == 'native failure'
+
+def test_capture_host_event_resumes_saved_monitor_before_same_first_output_enters_runtime():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    app.select_profile(app.game_id, app.profile_id)
+    profile = app.current_profile()
+    app.select_primary_target(101, 500)
+    app.hook_host = Host()
+    assert app.activate_selected_target() == 'connecting'
+    app.handle_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, process_id=101))
+
+    first = HookEvent('output', 'host', 1, 2, 20, 101, text, '最初の台詞')
+    outcome = app.handle_capture_host_event(first)
+    assert outcome.monitor_started
+    token, delay = app.handle_runtime_hook_output(first)
+    assert delay is None
+    assert token is not None
+    assert app.runtime_state().utterance.raw == '最初の台詞'
+
+
+def test_active_text_source_removal_automatically_falls_back_to_next_saved_route():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    primary = source('A', 1, address=1)
+    fallback = source('B', 3, address=2)
+    profile.hooks = [
+        HookSelection('A', 1, 2, 'text'),
+        HookSelection('B', 3, 4, 'text'),
+    ]
+    app.select_profile(app.game_id, app.profile_id)
+    profile = app.current_profile()
+    app.select_primary_target(101, 500)
+    app.hook_host = Host()
+    app.begin_hook_connection(101, profile)
+    app.handle_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, process_id=101))
+    app.observe_capture(primary, 'A', sequence=1)
+    app.observe_capture(fallback, 'B', sequence=2)
+    app.request_saved_monitor_resume(profile)
+    app.try_resume_saved_monitor(profile)
+    assert app.runtime_state().active_text_source == primary.identity
+
+    removed = HookEvent('removed', 'host', 1, 3, 30, 101, primary)
+    outcome = app.handle_capture_host_event(removed)
+    assert outcome.active_source_removed
+    assert outcome.monitor_started
+    assert app.runtime_state().active_text_source == fallback.identity
+    assert app.capture_view().problem is None
+
+
+def test_public_profile_setting_api_cannot_bypass_capture_workspace_transaction():
+    import pytest
+    app, calls = app_with_game()
+    assert not hasattr(app, 'update_profile')
+    assert not hasattr(app, 'update_capture_recipe')
+    with pytest.raises(ValueError, match='unsupported profile setting'):
+        app.set_profile_setting('hooks', [HookSelection('T', 1, 2, 'text')])
+    assert app.current_profile().hooks == []
+    assert calls == []
+
+
+def test_monitor_lifecycle_is_observable_from_application_events_without_gui_policy():
+    class Child:
+        def poll(self):
+            return None
+    class Host:
+        def __init__(self):
+            self.child = Child()
+            self.commands = []
+        def command(self, action, **kwargs):
+            self.commands.append((action, kwargs))
+
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    app.select_profile(app.game_id, app.profile_id)
+    profile = app.current_profile()
+    app.select_primary_target(101, 500)
+    app.hook_host = Host()
+    app.begin_hook_connection(101, profile)
+    app.accept_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, 101))
+    app.observe_capture(text, '本文', sequence=1)
+    events = []
+    app.configure_runtime_loop(
+        schedule=lambda *_: None,
+        on_event=lambda name, token, detail: events.append((name, token, detail)))
+    state = app.start_monitoring()
+    assert any(name == 'monitor_started' and detail['session'] == state.session
+               for name, _, detail in events)
+    app.stop_monitoring('session_changed')
+    assert any(name == 'monitor_ended' and detail['session'] == state.session
+               for name, _, detail in events)
+
+
+def test_speaker_commands_preserve_only_explicit_overrides_when_renaming():
+    app, calls = app_with_game()
+    profile = app.current_profile()
+    profile.speaker_voices['京'] = 'v1'
+    assert '京' not in profile.speaker_tts
+
+    app.rename_speaker('京', 'みやこ')
+
+    updated = app.current_profile()
+    assert updated.speaker_voices == {'みやこ': 'v1'}
+    assert 'みやこ' not in updated.speaker_tts
+    assert calls == ['save']
+
+
+def test_user_level_edit_commands_persist_without_gui_profile_mutators():
+    app, calls = app_with_game()
+    app.set_capture_environment(
+        ocr_executable='tesseract.exe', ocr_language='jpn', ocr_region=(1, 2, 3, 4),
+        ocr_stable_samples=3, insert_pc_hooks=True, hook_flush_ms=250,
+        hook_codepage=65001, hook_max_buffer=2048, hook_max_history=64)
+    app.add_speaker('京', True, 'v1')
+    app.set_speaker_voice('京', 'v2')
+    app.add_reading('京', 'みやこ')
+    app.save_replacement_rule(None, ReplacementRule('旧', '新', False, 'tts', True))
+
+    profile = app.current_profile()
+    assert profile.ocr.executable == 'tesseract.exe'
+    assert profile.ocr.region == (1, 2, 3, 4)
+    assert profile.hook_flush_ms == 250
+    assert profile.hook_codepage == 65001
+    assert profile.speaker_tts['京'] is True
+    assert profile.speaker_voices['京'] == 'v2'
+    assert profile.name_readings['京'] == 'みやこ'
+    assert profile.replacements[-1].replacement == '新'
+    assert len(calls) == 5
+
+
+def test_capture_structure_commands_remain_inside_capture_transaction():
+    app, calls = app_with_game()
+    before = list(app.current_profile().structure_rules)
+    rule = StructureRule(r'^(?P<speaker>.+?)「(?P<body>.+)」$')
+    candidate = source('T', 1)
+    app.observe_capture(candidate, '大和「台詞」', sequence=1)
+    app.set_capture_role(candidate.identity, candidate.address, 'text')
+    app.save_capture_structure_rule(None, rule)
+    assert app.current_profile().structure_rules == before
+    assert app.capture_profile_snapshot().structure_rules == [rule, *before]
+    assert calls == []
+    app.commit_capture()
+    assert app.current_profile().structure_rules == [rule, *before]
+    assert calls == ['save']
