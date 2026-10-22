@@ -64,6 +64,13 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
                 verify_runtime(runtime, source=source)
 
 
+    def test_fixture_text_checkout_is_lf_stable_across_operating_systems(self):
+        attributes = Path('.gitattributes').read_text(encoding='utf-8')
+        self.assertIn('/validation/real_game/renpy/**/*.rpy text eol=lf', attributes)
+        self.assertIn('/validation/real_game/renpy/**/*.txt text eol=lf', attributes)
+        self.assertIn('/validation/real_game/renpy/game/audio/** -text', attributes)
+
+
     def test_live_workflow_consumes_prebuilt_fixture_and_keeps_construction_separate(self):
         live = Path('.github/workflows/live-advancement.yml').read_text(encoding='utf-8')
         fixture = Path('.github/workflows/validation-fixture.yml').read_text(encoding='utf-8')
