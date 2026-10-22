@@ -21,12 +21,15 @@ def parse_host_event(packet:dict)->HookEvent:
         source=source,text=packet.get('text',''),detail=packet.get('detail',''))
 
 class HookHost:
-    def __init__(self,dll_path:Path,on_event:Callable[[HookEvent],None],on_closed:Callable[[str],None]):
+    def __init__(self,dll_path:Path,on_event:Callable[[HookEvent],None],on_closed:Callable[[str],None],
+                 on_error:Callable[[str],None] | None = None):
         self.dll_path=Path(dll_path)
         self.on_event=on_event
         self.on_closed=on_closed
+        self.on_error=on_error or (lambda _:None)
         self.child=None
         self.thread=None
+        self.error_thread=None
         self._send_lock=threading.Lock()
 
     def start(self):
@@ -34,10 +37,21 @@ class HookHost:
         if not self.dll_path.is_file():raise FileNotFoundError(self.dll_path)
         flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
         self.child=subprocess.Popen([sys.executable,'-m','autoadv.hook_host_worker','--dll',str(self.dll_path)],
-            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
             text=True,encoding='utf-8',bufsize=1,creationflags=flags)
         self.thread=threading.Thread(target=self._reader,name='autoadv-native-host-reader',daemon=True)
         self.thread.start()
+        self.error_thread=threading.Thread(target=self._read_errors,name='autoadv-native-host-errors',daemon=True)
+        self.error_thread.start()
+
+    def _read_errors(self):
+        # ctypes callback exceptions go to stderr, not to the JSON event pipe.
+        # Discarding stderr made an alive Host with zero visible HOOKs impossible
+        # to diagnose. Keep each channel separate to preserve IPC framing.
+        child = self.child
+        for line in child.stderr:
+            if line.strip():
+                self.on_error(line.rstrip())
 
     def _reader(self):
         reason='native_host_exit'

@@ -114,6 +114,14 @@ class NativeHost:
             self.connected.discard(pid)
             self.connection_generation+=1
             self.emit('diagnostic',pid=pid,detail='detached')
+        elif action=='insert_pc_hooks':
+            if type(pid) is not int or pid not in self.connected:
+                raise ValueError('PC hook insertion requires attached process')
+            # Use upstream Luna's two existing PC API families. This does not
+            # select a text source or infer game-specific hook codes.
+            self.dll.Luna_InsertPCHooks(pid, 0)
+            self.dll.Luna_InsertPCHooks(pid, 1)
+            self.emit('diagnostic',pid=pid,detail='upstream_pc_hooks_requested')
         elif action=='insert_hook':
             if type(pid) is not int or pid not in self.connected or not isinstance(message.get('code'),str) or not message['code']:
                 raise ValueError('requires attached pid and nonempty code')

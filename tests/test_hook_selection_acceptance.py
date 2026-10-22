@@ -131,8 +131,8 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                     window.on_hook(HookEvent('output', 'host', 7, i, i * 100,
                                             process_id=101, source=hook, text=f'raw-{hook.hook_code}'))
                 self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertIn('raw-A', window.source_table.item(0, 5).text())
-                self.assertIn('raw-B', window.source_table.item(1, 5).text())
+                self.assertIn('raw-A', window.source_table.item(0, 0).text())
+                self.assertIn('raw-B', window.source_table.item(1, 0).text())
                 window.source_table.selectRow(0)
                 window.select_hook('text')
                 window.source_table.selectRow(1)
@@ -148,7 +148,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 self.assertIn('1/2', window.hook_reconnect.text())
                 self.assertEqual(window.saved_hook_choice.count(), 2)
                 self.assertEqual(window.source_table.rowCount(), 1)
-                self.assertIn('text #1', window.source_table.item(0, 0).text())
+                self.assertIn('text #1', window.source_table.item(0, 1).text())
                 # Same saved identity appearing in two native threads is not
                 # grounds for choosing one automatically or sending game input.
                 window.on_hook(HookEvent('created', 'newhost', 8, 7, 700,

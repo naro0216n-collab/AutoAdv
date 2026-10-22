@@ -41,6 +41,7 @@ def run_gui(session_driver=None) -> int:
     class SignalBridge(QObject):
         hook = Signal(object)
         closed = Signal(str)
+        host_error = Signal(str)
         voice = Signal(object, bool, str)
         server = Signal(object)
         ocr = Signal(int, int, int, str)
@@ -59,6 +60,7 @@ def run_gui(session_driver=None) -> int:
             self.bridge = SignalBridge()
             self.bridge.hook.connect(self.on_hook)
             self.bridge.closed.connect(self.on_closed)
+            self.bridge.host_error.connect(self.on_host_error)
             self.bridge.voice.connect(self.on_voice)
             self.bridge.server.connect(self.on_server)
             self.bridge.ocr.connect(self.on_ocr)
@@ -299,7 +301,12 @@ def run_gui(session_driver=None) -> int:
             self.btn_find = QPushButton('HOOK候補を追加探索')
             self.btn_find.clicked.connect(self.find_hooks)
             capture.addRow(self.btn_find)
-            capture.addRow(QLabel('接続後にゲームで台詞を表示すると、取得できた原文が一覧に並びます。'))
+            self.btn_pc_hooks = QPushButton('標準文字APIのHOOKを追加（候補が出ない場合）')
+            self.btn_pc_hooks.clicked.connect(self.insert_pc_hooks)
+            capture.addRow(self.btn_pc_hooks)
+            capture.addRow(QLabel('接続後にゲームで台詞を表示してください。HOOK追加・探索は候補の選択を自動化しません。'))
+            self.hook_capture_status = QLabel('HOOK取得: 未接続')
+            capture.addRow(self.hook_capture_status)
             self.manual_hook = QLineEdit()
             self.manual_hook.setPlaceholderText('Manual Luna HOOK code')
             hook_details.addRow('手動HOOKコード（通常は不要）', self.manual_hook)
@@ -923,6 +930,15 @@ def run_gui(session_driver=None) -> int:
             except Exception as exc:
                 self.note(str(exc))
 
+        def insert_pc_hooks(self):
+            try:
+                if not (self.host_generation and self.connection_generation and self.hook_host):
+                    raise RuntimeError('先にゲームへLunaHookを接続してください')
+                self.hook_host.command('insert_pc_hooks', pid=self.pid.value())
+                self.note('本家Lunaの標準文字API用HOOK追加を要求しました。ゲームで台詞を表示してください。')
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.note('PC用HOOK追加に失敗: ' + str(exc))
+
         def insert_found(self):
             row = self.found_hooks.currentRow()
             code = self.found_hooks.item(row, 0).text() if row >= 0 and self.found_hooks.item(row, 0) else ''
@@ -982,7 +998,8 @@ def run_gui(session_driver=None) -> int:
             self.clear_hook_observations()
             try:
                 runtime = adopted_runtime()
-                self.hook_host = HookHost(runtime.host, self.bridge.hook.emit, self.bridge.closed.emit)
+                self.hook_host = HookHost(runtime.host, self.bridge.hook.emit,
+                                          self.bridge.closed.emit, self.bridge.host_error.emit)
                 self.hook_host.start()
                 self.host_status.setText('LunaHook Host: launched')
             except Exception as exc:
@@ -1175,6 +1192,7 @@ def run_gui(session_driver=None) -> int:
             self.source_rows.clear()
             self.source_table.setRowCount(0)
             self.hook_preview.clear()
+            self.hook_capture_status.setText('HOOK取得: 未接続または候補なし')
             self.refresh_hook_connection()
 
         def chosen_source(self):
@@ -1285,6 +1303,7 @@ def run_gui(session_driver=None) -> int:
                 self.validation_trace.emit('hook_connected', pid=event.process_id,
                     generation=event.host_generation, connection=event.connection_generation)
                 self.host_status.setText(f'LunaHook connected: PID {event.process_id}')
+                self.hook_capture_status.setText(f'PID {event.process_id}: 接続済み・本文HOOKは未観測')
                 p = self.current_profile()
                 if p and p.source == 'hook':
                     for code in p.inserted_hooks:
@@ -1326,6 +1345,18 @@ def run_gui(session_driver=None) -> int:
                     self.sources[key] = source
                 self.update_candidate(source, event.text if event.kind == 'output' else None)
                 self.refresh_hook_connection()
+                self.hook_capture_status.setText(
+                    f'PID {event.process_id}: HOOK候補 {len(self.sources)}件 / '
+                    f'本文あり {sum(bool(values) for values in self.source_samples.values())}件')
+                if event.kind == 'created':
+                    self.validation_trace.emit('hook_candidate_created', pid=event.process_id,
+                        generation=event.host_generation, connection=event.connection_generation,
+                        source=source.identity, hook_sequence=event.sequence)
+                else:
+                    self.validation_trace.emit('hook_candidate_output', pid=event.process_id,
+                        generation=event.host_generation, connection=event.connection_generation,
+                        source=source.identity, hook_sequence=event.sequence,
+                        raw_hash=text_digest(event.text))
             if event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value():
                 self.sync_hook_threads()
             if event.kind == 'output' and event.source:
@@ -1360,8 +1391,18 @@ def run_gui(session_driver=None) -> int:
                             received_ns=event.received_ns)
                         if result and self.controller.utterance:
                             self.display_utterance(result)
-            if event.kind == 'diagnostic' and event.detail.startswith(('command_failed', 'injection_conflict')):
-                self.note(event.detail)
+            if event.kind == 'inserted' and event.process_id == self.pid.value():
+                self.note(f'LunaによるHOOK挿入: {event.detail} {event.source.hook_code if event.source else ""}'.strip())
+            if event.kind == 'diagnostic':
+                self.validation_trace.emit('hook_native_diagnostic',
+                    pid=event.process_id,
+                    generation=event.host_generation,
+                    connection=event.connection_generation,
+                    info_type=event.detail.partition(':')[0][:64],
+                    message_hash=text_digest(event.detail))
+                # Upstream engine detection and injection warnings are product
+                # connection facts. Suppressing them masked a genuine failure.
+                self.note('LunaHost: ' + event.detail)
 
         def select_hook(self, role: str):
             p = self.current_profile()
@@ -1772,6 +1813,9 @@ def run_gui(session_driver=None) -> int:
                 self.preview.clear()
             if hasattr(self, 'status'):
                 self.refresh_status()
+
+        def on_host_error(self, message):
+            self.note('LunaHost native error: ' + message)
 
         def on_closed(self, reason):
             self.stop_session()

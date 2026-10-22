@@ -42,6 +42,7 @@ def load_exports(dll):
         'Luna_DetachProcess':((C.c_uint32,),None),
         'Luna_CheckIfNeedInject':((C.c_uint32,),C.c_bool),
         'Luna_InsertHookCode':((C.c_uint32,C.c_wchar_p),None),
+        'Luna_InsertPCHooks':((C.c_uint32,C.c_int),None),
         'Luna_RemoveHook':((C.c_uint32,C.c_uint64),None),
         'Luna_Settings':((C.c_int,C.c_int,C.c_int,C.c_int,C.c_bool),None),
         'Luna_QueryThreadHistory':((ThreadParam,C.c_bool,HISTORY),None),
