@@ -64,6 +64,34 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
                 verify_runtime(runtime, source=source)
 
 
+    def test_live_workflow_consumes_prebuilt_fixture_and_keeps_construction_separate(self):
+        live = Path('.github/workflows/live-advancement.yml').read_text(encoding='utf-8')
+        fixture = Path('.github/workflows/validation-fixture.yml').read_text(encoding='utf-8')
+        runner = Path('validation/real_game/run_live_check.ps1').read_text(encoding='utf-8')
+        self.assertIn('fixture_runtime source-digest', live)
+        self.assertIn('gh release download autoadv-validation-fixtures', live)
+        self.assertIn('-GameExecutable $env:AUTOADV_VALIDATION_GAME', live)
+        self.assertNotIn('renpy.org', live)
+        self.assertNotIn('RenPySdk', live)
+        self.assertNotIn('launcher distribute', live)
+        self.assertIn('renpy.org', fixture)
+        self.assertIn('launcher distribute', fixture)
+        self.assertIn('gh release upload', fixture)
+        self.assertNotIn('RenPySdk', runner)
+        self.assertNotIn('dotnet build', runner)
+        self.assertNotIn('prepare_asr_model', runner)
+
+    def test_real_audio_contract_is_not_a_broad_fixture_discovery_command(self):
+        readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')
+        self.assertIn('python -m unittest validation.real_game.test_native_audio -v', readme)
+        self.assertIn('一括 `unittest discover` をRealAudio検証として使用しない', readme)
+
+    def test_explicit_live_may_provision_pinned_asr_but_quality_benchmark_stays_separate(self):
+        readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')
+        self.assertIn('明示的に起動するAutoAdv Live Advancementでは', readme)
+        self.assertIn('固定manifestのASR model/tokens', readme)
+        self.assertIn('ASR品質ベンチマークをCI合否へ導入することではなく', readme)
+
 
 if __name__ == '__main__':
     unittest.main()
