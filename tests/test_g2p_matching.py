@@ -1,3 +1,4 @@
+import importlib.util
 import unittest
 from types import SimpleNamespace
 
@@ -34,6 +35,15 @@ class HaqumeiAdapterTests(unittest.TestCase):
         engine = SimpleNamespace(
             g2p_candidates=lambda _: SimpleNamespace(candidates=[unknown]))
         self.assertEqual(HaqumeiG2P(engine).candidates('未知語'), ())
+
+    @unittest.skipUnless(importlib.util.find_spec('haqumei'), 'haqumei native extra not installed')
+    def test_installed_haqumei_matches_kanji_and_hiragana_pronunciation(self):
+        g2p = HaqumeiG2P()
+        kanji = g2p.candidates('嘘', max_candidates=4)
+        hiragana = g2p.candidates('うそ', max_candidates=4)
+        self.assertTrue(kanji)
+        self.assertTrue(hiragana)
+        self.assertEqual(kanji[0].phonemes, hiragana[0].phonemes)
 
 
 class PhoneticMatcherTests(unittest.TestCase):
