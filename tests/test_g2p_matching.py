@@ -73,6 +73,20 @@ class PhoneticMatcherTests(unittest.TestCase):
         self.assertFalse(progress.terminal_candidate)
         self.assertGreater(progress.contradiction_score, .2)
 
+    def test_terminal_token_prefix_does_not_skip_unrelated_lead_in(self):
+        matcher = TargetMatcher('えっ嘘でしょ')
+        self.assertIsNone(matcher.terminal_token_prefix(tuple('別のえっ嘘でしょ')))
+
+    def test_terminal_token_prefix_can_leave_trailing_background_outside_target(self):
+        matcher = TargetMatcher('えっ嘘でしょ')
+        tokens = tuple('えっ嘘でしょまだ話す')
+        found = matcher.terminal_token_prefix(tokens)
+        self.assertIsNotNone(found)
+        count, progress = found
+        self.assertLess(count, len(tokens))
+        self.assertTrue(progress.terminal_candidate)
+        self.assertGreaterEqual(progress.completion_score, .78)
+
 
 if __name__ == '__main__':
     unittest.main()

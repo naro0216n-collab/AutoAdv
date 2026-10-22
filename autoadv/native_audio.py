@@ -421,15 +421,21 @@ class NativeAudio:
         self._dispatch(item)
 
     @staticmethod
-    def _timestamp_endpoint(samples, result: ASRResult) -> tuple[int, float]:
-        """Estimate the last recognized-token time and trailing captured audio.
+    def _timestamp_endpoint(samples, result: ASRResult,
+                            target_token_count: int) -> tuple[int, float]:
+        """Estimate a target-local endpoint from a matched ASR token prefix.
 
         SenseVoice timestamps are relative to the decode window. PCMChunk.at_ms
-        is packet receipt/end time, so reconstruct the first packet start. The
-        timestamp is supporting evidence only, never an audio-device truth.
+        is packet receipt/end time, so reconstruct the first packet start. A
+        following non-target token is a conservative upper bound for the target
+        token's end. When there is no following token, reserve a short duration
+        guard because SenseVoice timestamps mark token positions, not guaranteed
+        token-end times. The result is evidence, never an audio-device truth.
         """
         if (not samples or not result.tokens or not result.timestamps
-                or len(result.tokens) != len(result.timestamps)):
+                or len(result.tokens) != len(result.timestamps)
+                or target_token_count <= 0
+                or target_token_count > len(result.tokens)):
             return -1, 0.0
         usable = list(result.timestamps)
         if (any(t < 0 for t in usable) or
@@ -439,7 +445,19 @@ class NativeAudio:
         window_ms = max(0.0, samples[-1].at_ms - window_start)
         if max(usable) * 1000 > window_ms + 100:
             return -1, 0.0
-        endpoint_ms = int(round(window_start + max(usable) * 1000))
+        last_target = usable[target_token_count - 1]
+        if target_token_count < len(usable):
+            # The next recognized token cannot start before the target token
+            # has yielded its acoustic slot. This also handles a background
+            # speaker continuing after the matched foreground line.
+            endpoint_s = usable[target_token_count]
+        else:
+            # SenseVoice exposes token timestamps but not reliable durations
+            # for this model. Keep a conservative 180 ms token-duration guard.
+            endpoint_s = last_target + .180
+        if endpoint_s * 1000 > window_ms + 100:
+            return -1, 0.0
+        endpoint_ms = int(round(window_start + endpoint_s * 1000))
         trailing_ms = max(0.0, samples[-1].at_ms - endpoint_ms)
         return endpoint_ms, trailing_ms
 
@@ -452,21 +470,27 @@ class NativeAudio:
             result = _coerce_asr_result(self.asr.recognize(samples))
             decoded_ns = time.perf_counter_ns() if self.on_inference else 0
             events = []
-            endpoint_ms, trailing_after_token_ms = self._timestamp_endpoint(samples, result)
             with self._lock:
                 if (self._closed or self._generation != generation or token != self.token
                         or not self.matcher or not self.history.healthy):
                     return
                 progress = self.matcher.observe(result.text)
+                target_prefix = self.matcher.terminal_token_prefix(result.tokens)
+                if target_prefix is not None:
+                    target_token_count, evidence_progress = target_prefix
+                else:
+                    target_token_count, evidence_progress = 0, progress
+                endpoint_ms, trailing_after_token_ms = self._timestamp_endpoint(
+                    samples, result, target_token_count)
                 recent = self.rise_ms >= self.window_start_ms
-                if (progress.attribution_score >= .72
-                        and progress.phonetic_coverage > self._best_match_coverage + .02):
-                    self._best_match_coverage = progress.phonetic_coverage
+                if (evidence_progress.attribution_score >= .72
+                        and evidence_progress.phonetic_coverage > self._best_match_coverage + .02):
+                    self._best_match_coverage = evidence_progress.phonetic_coverage
                     self._last_matching_asr_ms = self.clock()
                 if (not self.attributed and recent
-                        and progress.matched_phonemes >= min(4, max(1, len(self.matcher.target)))
-                        and progress.attribution_score >= .78
-                        and progress.contradiction_score <= .30):
+                        and evidence_progress.matched_phonemes >= min(4, max(1, len(self.matcher.target)))
+                        and evidence_progress.attribution_score >= .78
+                        and evidence_progress.contradiction_score <= .30):
                     self.attributed = True
                     self._last_active_ms = self.clock()
                     self._last_matching_asr_ms = self.clock()
@@ -485,9 +509,9 @@ class NativeAudio:
                 stability_score = min(1.0, progress.tail_confidence)
                 endpoint_score = max(timestamp_score, .85 * vad_score, .70 * stability_score)
                 evidence_score = max(0.0, min(1.0,
-                    .82 * progress.completion_score + .18 * endpoint_score
-                    - .12 * progress.contradiction_score))
-                if (self.attributed and progress.terminal_candidate
+                    .82 * evidence_progress.completion_score + .18 * endpoint_score
+                    - .12 * evidence_progress.contradiction_score))
+                if (self.attributed and evidence_progress.terminal_candidate
                         and endpoint_score >= .35 and evidence_score >= .78):
                     self.completed = True
                     events.append('completed')
@@ -517,23 +541,25 @@ class NativeAudio:
                     'decode_ms': round(max(0, decoded_ns - started_ns) / 1_000_000, 3),
                     'audio_ms': round(audio_ms, 3),
                     'coverage': round(progress.coverage, 4),
-                    'phonetic_coverage': round(progress.phonetic_coverage, 4),
-                    'attribution_score': round(progress.attribution_score, 4),
-                    'completion_score': round(progress.completion_score, 4),
-                    'contradiction_score': round(progress.contradiction_score, 4),
+                    'phonetic_coverage': round(evidence_progress.phonetic_coverage, 4),
+                    'attribution_score': round(evidence_progress.attribution_score, 4),
+                    'completion_score': round(evidence_progress.completion_score, 4),
+                    'contradiction_score': round(evidence_progress.contradiction_score, 4),
                     'endpoint_score': round(endpoint_score, 4),
                     'evidence_score': round(evidence_score, 4),
                     'asr_token_timestamp_count': len(result.timestamps),
+                    'target_token_prefix_count': target_token_count,
+                    'post_target_token_count': max(0, len(result.tokens) - target_token_count),
                     'trailing_after_token_ms': round(trailing_after_token_ms, 3),
                     'monotonic': progress.monotonic,
                     'tail_confidence': progress.tail_confidence,
                     'matched_chars': progress.matched_chars,
-                    'matched_phonemes': progress.matched_phonemes,
+                    'matched_phonemes': evidence_progress.matched_phonemes,
                     'edit_count': progress.edit_count,
-                    'phonetic_edit_count': progress.phonetic_edit_count,
+                    'phonetic_edit_count': evidence_progress.phonetic_edit_count,
                     'length_ratio': round(progress.length_ratio, 4),
-                    'reading_rank': progress.reading_rank,
-                    'terminal_candidate': progress.terminal_candidate,
+                    'reading_rank': evidence_progress.reading_rank,
+                    'terminal_candidate': evidence_progress.terminal_candidate,
                 }
                 try:
                     self.on_inference(token, measurements)

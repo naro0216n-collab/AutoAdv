@@ -5,7 +5,7 @@ session ownership remain with NativeAudio; game-input authority remains with
 Controller.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import unicodedata
 
 
@@ -56,6 +56,7 @@ class ASRProgress:
     completion_score: float = 0.0
     contradiction_score: float = 0.0
     reading_rank: int = 0
+    observed_units: int = 0
 
 
 class TargetMatcher:
@@ -78,12 +79,11 @@ class TargetMatcher:
         self._previous_signature = None
         self._previous_coverage = 0.0
 
-    def observe(self, hypothesis: str) -> ASRProgress:
+    def _evaluate(self, hypothesis: str) -> ASRProgress:
         key = surface_key(hypothesis)
         n, m = len(self.target), len(key)
         if not n or not m or n > self.MAX_CHARS or m > self.MAX_CHARS:
-            self._previous_signature, self._previous_coverage = ('surface', key), 0.0
-            return ASRProgress(0, 0, 0, False, 0, key)
+            return ASRProgress(0, 0, 0, False, 0, key, observed_units=m)
 
         matched, prefix_len, errors = _align(self.target, key)
         surface_coverage = matched / max(n, m)
@@ -153,18 +153,53 @@ class TargetMatcher:
             and completion_score >= .78
             and contradiction_score <= .35
         )
-        signature = (
-            'phonetic', round(phonetic_coverage, 4), matched_phonemes,
-            phonetic_errors, reading_rank
-        ) if best_phone is not None else ('surface', key)
-        stable = terminal and self._previous_signature == signature
-        monotonic = (phonetic_coverage >= self._previous_coverage - .15)
-        self._previous_signature, self._previous_coverage = signature, phonetic_coverage
         return ASRProgress(
-            surface_coverage, surface_onset, float(stable), monotonic,
+            surface_coverage, surface_onset, 0.0, True,
             matched, key, errors, surface_length_ratio, terminal,
             phonetic_coverage, matched_phonemes, phonetic_errors,
-            attribution_score, completion_score, contradiction_score, reading_rank)
+            attribution_score, completion_score, contradiction_score, reading_rank, m)
+
+    def observe(self, hypothesis: str) -> ASRProgress:
+        progress = self._evaluate(hypothesis)
+        signature = (
+            'phonetic', round(progress.phonetic_coverage, 4),
+            progress.matched_phonemes, progress.phonetic_edit_count,
+            progress.reading_rank
+        ) if self._target_pronunciations else ('surface', progress.observed)
+        stable = progress.terminal_candidate and self._previous_signature == signature
+        monotonic = progress.phonetic_coverage >= self._previous_coverage - .15
+        self._previous_signature = signature
+        self._previous_coverage = progress.phonetic_coverage
+        return replace(progress, tail_confidence=float(stable), monotonic=monotonic)
+
+    def terminal_token_prefix(self, tokens: tuple[str, ...]) -> tuple[int, ASRProgress] | None:
+        """Find a bounded terminal target prefix in timestamped ASR tokens.
+
+        The prefix always starts at the beginning of the decode window. This
+        intentionally does not become arbitrary substring search: unrelated
+        speech before the target still incurs edit/length penalties. Trailing
+        tokens can, however, be left outside the target once a complete target
+        prefix has already been established, which is essential when a BGM or
+        background speaker continues after the foreground line.
+        """
+        if not tokens or len(tokens) > self.MAX_CHARS:
+            return None
+        best = None
+        text = ''
+        for index, token in enumerate(tokens, 1):
+            text += str(token)
+            progress = self._evaluate(text)
+            if not progress.terminal_candidate:
+                continue
+            score = (progress.completion_score
+                     - .20 * progress.contradiction_score
+                     + .04 * progress.attribution_score)
+            item = (score, -index, index, progress)
+            if best is None or item[:2] > best[:2]:
+                best = item
+        if best is None:
+            return None
+        return best[2], best[3]
 
 
 @dataclass(frozen=True)

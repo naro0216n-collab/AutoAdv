@@ -500,6 +500,45 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         finally:
             native.close()
 
+    def test_target_token_endpoint_can_finish_before_trailing_background_speech(self):
+        events = []
+        metrics = []
+        spoken = 'えっ嘘でしょ。まだ話す'
+        class Recognizer:
+            def recognize(self, chunks):
+                tokens = tuple(spoken)
+                timestamps = tuple(.10 + i * .08 for i in range(len(tokens)))
+                return ASRResult(spoken, tokens, timestamps)
+        class BackgroundActive:
+            def observe_float32_stereo(self, frames):
+                return VADDecision(True, 0, contains_speech=True)
+            def reset(self):
+                pass
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
+            activity=BackgroundActive(), clock=lambda: 2500,
+            on_inference=lambda _t, values: metrics.append(values))
+        try:
+            native.history.start(11)
+            native.begin(Token(1, 1), 'えっ嘘でしょ。')
+            pcm = PCMChunk(2500, bytes(48000 * 2 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertIn('completed', events)
+            self.assertTrue(native._last_vad)
+            self.assertTrue(metrics)
+            self.assertGreater(metrics[-1]['post_target_token_count'], 0)
+            self.assertGreater(metrics[-1]['target_token_prefix_count'], 0)
+        finally:
+            native.close()
+
     def test_malformed_token_timestamps_cannot_finish_active_background(self):
         events = []
         class Recognizer:
