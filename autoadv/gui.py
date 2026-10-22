@@ -433,7 +433,7 @@ def run_gui(session_driver=None) -> int:
             self.btn_pair = QPushButton('本文HOOKと話者HOOKを対応づける')
             self.btn_pair.clicked.connect(self.pair_hooks)
             hook_details.addRow(self.btn_pair)
-            self.btn_monitor = QPushButton('選択したHOOKで監視開始')
+            self.btn_monitor = QPushButton('現在の作品設定を保存して監視開始')
             self.btn_monitor.clicked.connect(self.begin_monitor)
             self.btn_to_play = QPushButton('台詞を選択できたらプレイ画面へ')
             self.btn_to_play.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
@@ -2625,7 +2625,7 @@ def run_gui(session_driver=None) -> int:
                 (' ― ' + c.pause_reason if c.pause_reason else ''))
             if c.profile and c.utterance:
                 self.overview_capture.setText('台詞: ' +
-                    (c.utterance.speaker or '話者未設定') + ' / ' + c.utterance.display_body[:35])
+                    (c.utterance.speaker or '話者未設定') + ' / ' + c.utterance.text[:35])
             elif not self.attached_pid:
                 self.overview_capture.setText('台詞取得: 未接続')
             if c.profile and c.profile.source == 'hook':
