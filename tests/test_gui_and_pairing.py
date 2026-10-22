@@ -87,6 +87,8 @@ class GuiSourceArchitectureTests(unittest.TestCase):
             self.assertNotIn(legacy_status, source)
         self.assertIn('diagnostics_snapshot', source)
         self.assertIn("('home', 'プレイ'), ('game', 'ゲーム'), ('settings', '設定')", source)
+        self.assertIn("group('話者・音声', page='game', section='speakers')", source)
+        self.assertNotIn("group('話者とVoice', page='game', section='speakers')", source)
 
     def test_capture_workspace_exposes_format_preview_and_independent_final_fields(self):
         source = Path('autoadv/gui.py').read_text(encoding='utf-8')

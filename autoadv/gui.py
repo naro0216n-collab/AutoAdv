@@ -396,7 +396,7 @@ def run_gui(session_driver=None) -> int:
             ocr_details.addRow('Tesseract', self.ocr_exe); ocr_details.addRow('言語', self.ocr_lang); ocr_details.addRow('領域 x,y,幅,高さ', self.ocr_region); ocr_details.addRow('安定確認回数', self.ocr_stability)
             self.source_ocr_button.toggled.connect(lambda checked: checked and self.reveal_section('ocr_details', 'game'))
 
-            speech = group('話者とVoice', page='game', section='speakers')
+            speech = group('話者・音声', page='game', section='speakers')
             self.default_tts = QCheckBox('未登録話者にもTTSを使用')
             self.default_voice = QComboBox(); self.default_voice.setEditable(True)
             speech.addRow(setting_row('default_tts', self.default_tts)); speech.addRow('既定Voice', setting_row('default_voice', self.default_voice))
