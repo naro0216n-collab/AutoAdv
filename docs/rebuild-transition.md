@@ -56,11 +56,19 @@
 | `process_audio.py`、`audio_buffer.py`、`audio_match.py`、`audio_recognition.py`、`native_gate.py` | Process Loopback、VAD/ASR、BGM・遅発音声・TTS専用利用との相性を確認し、技術処理を活用 |
 | `acquisition.py`、`ocr.py` | 取得元の一貫性、標準HOOKと任意OCRの使い分けを確認して採用 |
 | `profiles.py`、`preferences.py` | 作品・Voice・HOOK情報の保存と復元が完成モデルに合う部分を利用 |
-| `gui.py` | HOOK候補プレビュー、Voice設定・試聴、監視、許可・停止、状態表示の有用な部品を利用 |
+| `gui.py` | 個々の有用なWidget処理は参照してよいが、旧タブ構成、状態要約、手動接続・検出・保存ボタン、WidgetからProfileを再構成する経路は再利用しない。Play / Game Workspace / SettingsをApplication契約から再構築する |
 | `controller.py`、`application.py`、`runtime.py`、`live.py`、`live_guard.py`、`services.py` | 完成時の処理順・状態所有から再設計し、入力・イベント配送等の有用なコードを取り込む |
 | `evaluation.py`、補助スクリプト | 実接続・障害調査・テストのために有効な処理を利用 |
 
 継続採用したモジュールにも、Application・Persistence・GUIとの接続不良があれば是正する。新しい経路と同じ責務を果たす旧経路を通常実行で並走させない。
+
+## UI再構築のApplication境界
+
+GUIはHookHost、NativeAudio、Irodori、保存、Controller内部状態を組み合わせて製品状態を作らない。Applicationが利用者の操作を受け、必要な内部処理を自動実行し、GUIへはPlay・会話取得Workspace・作品設定・全体設定の意味へ解決済みのViewを返す。正常状態を多数の説明ラベルへ変換しない。
+
+会話取得はWorkspaceを開いている間に通常候補を継続収集する。候補の台詞/話者構成と、その原文を話者・本文へ切り分ける規則は同じdraftとして実サンプルへ適用し、完成会話をPreviewしてから一つの取得構成として確定する。単一の台詞ソースと話者ソースは自動対応し、複数経路時だけ対応や優先を利用者へ要求する。追加HOOK探索は通常候補が不足した場合の障害回復であり、通常取得の開始ボタンにしない。
+
+独立したVoice・読み・進行設定等は変更単位で保存する。画面全体のdirty flagと「作品設定を保存」を通常経路にしない。取得構成のように途中状態が意味を持つ相互依存編集だけtransactionを持つ。
 
 ## 4. 現状から優先して解消する利用上の問題
 

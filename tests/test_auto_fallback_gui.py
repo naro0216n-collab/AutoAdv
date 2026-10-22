@@ -50,8 +50,9 @@ class TwoModeGuiTests(unittest.TestCase):
                 window.display_utterance(token)
                 self.assertEqual(c.utterance.character_count, 5)
                 self.assertIn('500ms', window.wait_preview.text())
-                self.assertIn('こんにちは', window.overview_capture.text())
-                self.assertIn('自動送り: ON', window.overview_advance.text())
+                self.assertIn('こんにちは', window.preview.toPlainText())
+                self.assertEqual(window.advance_authorization.text(), '自動送り ON')
+                self.assertFalse(window.play_issue.isVisible())
                 check(window, c, token, requests, sent)
                 window.native_audio = None
             finally:

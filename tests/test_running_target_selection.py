@@ -102,7 +102,7 @@ class RunningTargetGuiTests(unittest.TestCase):
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
-    def test_saved_window_selection_attaches_without_extra_clicks(self):
+    def test_saved_window_is_auto_attached_without_detect_buttons(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from types import SimpleNamespace
@@ -118,20 +118,19 @@ class RunningTargetGuiTests(unittest.TestCase):
             commands = Mock()
             starts = []
             try:
+                self.assertFalse(hasattr(window, 'detect_game'))
+                self.assertFalse(hasattr(window, 'detect_registered_game'))
                 def fake_host_start():
                     starts.append('start')
                     window.hook_host = SimpleNamespace(command=commands,
                         child=SimpleNamespace(poll=lambda: None))
                 window.start_host = fake_host_start
                 with patch('autoadv.gui.find_game_windows', return_value=(target,)):
-                    window.detect_game()
-                    commands.assert_any_call('connect', pid=137)
-                    self.assertEqual(len(starts), 1)
-                    commands.reset_mock()
-                    window.detect_registered_game()
-                    commands.assert_not_called()
-                    self.assertEqual(len(starts), 1)
-                    self.assertEqual(window.pid.value(), 137)
+                    window.auto_attach_selected_game()
+                commands.assert_any_call('connect', pid=137)
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(window.pid.value(), 137)
+                self.assertEqual(window.hwnd.text(), hex(target.hwnd))
             finally:
                 window.hook_host = None
                 window.close()
@@ -139,6 +138,7 @@ class RunningTargetGuiTests(unittest.TestCase):
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
+
 
 
 if __name__ == '__main__':

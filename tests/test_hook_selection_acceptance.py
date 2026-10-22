@@ -112,82 +112,35 @@ class SelectedHookContracts(unittest.TestCase):
 
 @unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'PySide6 required for native GUI acceptance')
 class HookCandidateGuiAcceptance(unittest.TestCase):
-    def test_all_acquisition_routes_feed_one_live_dialogue_list(self):
+    def test_normal_outputs_appear_automatically_and_recovery_search_is_separate(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
 
         catalog = Catalog()
         catalog.create_game('Native dialogue and extended discovery')
-        verified = []
 
         def check_widgets(*_):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                self.assertEqual([window.tabs.tabText(i) for i in range(3)],
-                                 ['プレイ', '台詞取得', '台詞・音声'])
-                self.assertEqual(window.attach.parentWidget().isVisible(), False)
-                self.assertFalse(hasattr(window, 'search_code_choice'))
-                self.assertFalse(hasattr(window, 'btn_insert_search'))
-                self.assertFalse(window.btn_find.isHidden())
+                self.assertEqual([window.tabs.tabText(i) for i in range(3)], ['プレイ', 'ゲーム', '設定'])
+                self.assertFalse(hasattr(window, 'btn_find'))
+                self.assertFalse(hasattr(window, 'attach'))
                 window.pid.setValue(101)
                 commands = Mock()
-                window.hook_host = SimpleNamespace(command=commands)
+                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 existing = source('A', 1)
-                window.on_hook(HookEvent('created', 'host', 7, 2, 200,
-                                         process_id=101, source=existing))
-                self.assertEqual(window.source_table.rowCount(), 0)
-                window.on_hook(HookEvent('output', 'host', 7, 3, 300,
+                window.on_hook(HookEvent('output', 'host', 7, 2, 200,
                                          process_id=101, source=existing, text='台詞A'))
-                window.find_hooks()
+                self.assertEqual(window.source_table.rowCount(), 1)
+                self.assertEqual(window.source_table.item(0, 1).text(), '台詞A')
+                self.assertFalse(window.capture_hint.isVisible())
+                commands.reset_mock()
+                window.btn_recovery_search.click()
                 commands.assert_any_call('find_hooks', pid=101, boundary_module='',
                                          parameters={'maxRecords': 64})
-                window.on_hook(HookEvent('hook_found', 'host', 7, 4, 400,
-                                         process_id=101, text='探索サンプル（使わない）', detail='B'))
-                commands.assert_any_call('insert_hook', pid=101, code='B')
-                self.assertEqual(window.source_table.rowCount(), 1)
-                self.assertEqual(window.current_profile().inserted_hooks, [])
-                # A repeat native notification does not issue a second insert.
-                before = commands.call_count
-                window.on_hook(HookEvent('hook_found', 'host', 7, 5, 500,
-                                         process_id=101, text='sample again', detail='B'))
-                self.assertEqual(commands.call_count, before)
-                # Search trials are ephemeral until real output and user choice.
-                found = source('B', 5)
-                window.on_hook(HookEvent('created', 'host', 7, 6, 600,
-                                         process_id=101, source=found))
-                self.assertEqual(window.source_table.rowCount(), 1)
-                window.on_hook(HookEvent('output', 'host', 7, 7, 700,
-                                         process_id=101, source=found, text='台詞B'))
-                self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertNotIn('探索サンプル', window.source_table.item(1, 4).text())
-                window.source_table.item(1, 0).setCheckState(__import__('PySide6.QtCore', fromlist=['Qt']).Qt.CheckState.Checked)
-                self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
-                self.assertFalse(hasattr(window, 'select_hook'))
-                self.assertEqual(window.current_profile().inserted_hooks, ['B'])
-                # Unselected trials are not persisted.
-                window.on_hook(HookEvent('hook_found', 'host', 7, 8, 800,
-                                         process_id=101, text='sample C', detail='C'))
-                commands.assert_any_call('insert_hook', pid=101, code='C')
-                self.assertNotIn('C', window.current_profile().inserted_hooks)
-                self.assertEqual(window.source_table.rowCount(), 2)
-                # The adopted search HOOK is inserted again on reconnect,
-                # while the other search-only trial is never restored.
-                window.on_hook(HookEvent('disconnected', 'host', 7, 9, 850, process_id=101))
-                commands.reset_mock()
-                window.on_hook(HookEvent('connected', 'new-host', 8, 10, 900, process_id=101))
-                commands.assert_any_call('insert_hook', pid=101, code='B')
-                self.assertFalse(any(call.args == ('insert_hook',) and
-                                     call.kwargs.get('code') == 'C' for call in commands.call_args_list))
-                # Events from an obsolete Host connection are ignored.
-                before = commands.call_count
-                window.on_hook(HookEvent('hook_found', 'other-host', 7, 11, 920,
-                                         process_id=101, text='古い', detail='OLD'))
-                self.assertEqual(commands.call_count, before)
-                self.assertNotIn('OLD', window._searched_codes)
-                verified.append('one-acquisition-list')
             finally:
                 window.hook_host = None
                 window.close()
@@ -196,109 +149,123 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
-        self.assertEqual(verified, ['one-acquisition-list'])
 
-    def test_role_and_speaker_pairing_are_direct_row_controls(self):
+    def test_trial_hook_is_persisted_only_after_real_output_selection_and_recipe_commit(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-        from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
 
         catalog = Catalog()
-        catalog.create_game('Direct hook controls')
-        verified = []
+        catalog.create_game('Recovery')
+
         def check_widgets(*_):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 window.pid.setValue(101)
-                window.on_hook(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
-                text_source = source('T', 1)
-                speaker_source = source('S', 5)
-                window.on_hook(HookEvent('output', 'host', 3, 2, 200,
-                                         process_id=101, source=text_source, text='本文'))
-                window.on_hook(HookEvent('output', 'host', 3, 3, 300,
-                                         process_id=101, source=speaker_source, text='京'))
-                speaker_role = window.source_table.cellWidget(1, 1)
-                speaker_role.setCurrentIndex(speaker_role.findData('speaker'))
-                window.source_table.item(1, 0).setCheckState(Qt.CheckState.Checked)
-                window.source_table.item(0, 0).setCheckState(Qt.CheckState.Checked)
-                profile = window.current_profile()
-                self.assertEqual([(h.code, h.role) for h in profile.hooks],
-                                 [('S', 'speaker'), ('T', 'text')])
-                pair = window.source_table.cellWidget(0, 3)
-                pair.setCurrentIndex(pair.findData(profile.hooks[0].identity))
-                profile = window.current_profile()
-                text_hook = next(h for h in profile.hooks if h.role == 'text')
-                speaker_hook = next(h for h in profile.hooks if h.role == 'speaker')
-                self.assertEqual(profile.speaker_links[text_hook.identity], speaker_hook.identity)
-                verified.append(True)
+                commands = Mock()
+                window.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
+                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                window.btn_recovery_search.click()
+                window.on_hook(HookEvent('hook_found', 'host', 7, 2, 200,
+                                         process_id=101, detail='B', text='探索試料'))
+                commands.assert_any_call('insert_hook', pid=101, code='B')
+                self.assertEqual(window.current_profile().inserted_hooks, [])
+                found = source('B', 5)
+                window.on_hook(HookEvent('output', 'host', 7, 3, 300,
+                                         process_id=101, source=found, text='台詞B'))
+                buttons = window._capture_role_buttons[(found.identity, found.address)]
+                buttons['text'].click()
+                self.assertEqual(window.current_profile().hooks, [])
+                self.assertEqual(window.current_profile().inserted_hooks, [])
+                self.assertTrue(window.btn_commit_capture.isEnabled())
+                window.btn_commit_capture.click()
+                self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
+                self.assertEqual(window.current_profile().inserted_hooks, ['B'])
             finally:
+                window.hook_host = None
                 window.close()
             return 0
+
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
-        self.assertEqual(verified, [True])
 
-    def test_compare_choose_save_reorder_and_restore_in_real_widgets(self):
+    def test_one_dialogue_and_one_speaker_are_implicitly_paired_in_preview(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
 
         catalog = Catalog()
-        game = catalog.create_game('Sample game')
-        events = []
+        catalog.create_game('Pairing')
+
         def check_widgets(*_):
             window = next(w for w in QApplication.topLevelWidgets()
-                          if w.windowTitle().startswith('AutoAdv') and getattr(w, 'catalog', None) is catalog)
-            self.assertIsNotNone(window.current_profile())
+                          if getattr(w, 'catalog', None) is catalog)
             try:
                 window.pid.setValue(101)
-                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
-                for i, hook in enumerate((source('A', 1), source('B', 3)), 2):
-                    window.on_hook(HookEvent('output', 'host', 7, i, i * 100,
-                                            process_id=101, source=hook, text=f'raw-{hook.hook_code}'))
-                self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertIn('raw-A', window.source_table.item(0, 4).text())
-                self.assertIn('raw-B', window.source_table.item(1, 4).text())
-                from PySide6.QtCore import Qt
-                window.source_table.item(0, 0).setCheckState(Qt.CheckState.Checked)
-                window.source_table.item(1, 0).setCheckState(Qt.CheckState.Checked)
-                self.assertEqual([h.code for h in window.current_profile().hooks], ['A', 'B'])
-                self.assertFalse(hasattr(window, 'saved_hook_choice'))
-                self.assertFalse(hasattr(window, 'move_saved_hook'))
-                window.source_table.cellWidget(1, 2).setValue(1)
-                self.assertEqual([h.code for h in window.current_profile().hooks], ['B', 'A'])
-                window.on_hook(HookEvent('disconnected', 'host', 7, 4, 400, process_id=101))
-                self.assertIn('0/2', window.hook_reconnect.text())
-                window.on_hook(HookEvent('connected', 'newhost', 8, 5, 500, process_id=101))
-                window.on_hook(HookEvent('created', 'newhost', 8, 6, 600, process_id=101, source=source('B', 3, 0xBEE)))
-                self.assertIn('1/2', window.hook_reconnect.text())
-                self.assertEqual(window.source_table.rowCount(), 0)
-                window.on_hook(HookEvent('output', 'newhost', 8, 7, 650,
-                                         process_id=101, source=source('B', 3, 0xBEE), text='再接続後の本文'))
-                self.assertEqual(window.source_table.rowCount(), 1)
-                self.assertEqual(window.source_table.cellWidget(0, 1).currentData(), 'text')
-                # Same saved identity appearing in two native threads is not
-                # grounds for choosing one automatically or sending game input.
-                window.on_hook(HookEvent('created', 'newhost', 8, 7, 700,
-                              process_id=101, source=source('B', 3, 0xC0DE)))
-                self.assertIn('識別衝突', window.hook_reconnect.text())
-                self.assertEqual(window.source_table.rowCount(), 1)
-                self.assertIsNone(window.chosen_source())
-                window.hwnd.setText('0x1234')
-                window.begin_monitor()
-                self.assertIsNone(window.controller.profile)
-                self.assertIn('衝突', window.log.toPlainText())
-                events.append('complete')
+                window.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
+                window.on_hook(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
+                text_source = source('T', 1)
+                speaker_source = source('S', 5, address=0x200)
+                window.on_hook(HookEvent('output', 'host', 3, 2, 200,
+                                         process_id=101, source=text_source, text='本文'))
+                window.on_hook(HookEvent('output', 'host', 3, 3, 220,
+                                         process_id=101, source=speaker_source, text='京'))
+                window.flush_capture_outputs()
+                window._capture_role_buttons[(text_source.identity, text_source.address)]['text'].click()
+                window._capture_role_buttons[(speaker_source.identity, speaker_source.address)]['speaker'].click()
+                self.assertFalse(window.route_table.isVisible())
+                self.assertIn('京', window.capture_dialogue_preview.toPlainText())
+                self.assertIn('本文', window.capture_dialogue_preview.toPlainText())
+                window.btn_commit_capture.click()
+                profile = window.current_profile()
+                text_hook = next(h for h in profile.hooks if h.role == 'text')
+                speaker_hook = next(h for h in profile.hooks if h.role == 'speaker')
+                self.assertEqual(profile.speaker_links[text_hook.identity], speaker_hook.identity)
             finally:
+                window.hook_host = None
                 window.close()
             return 0
+
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
-        self.assertEqual(events, ['complete'])
+
+    def test_multiple_dialogue_sources_expose_route_priority_only_when_needed(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+
+        catalog = Catalog()
+        catalog.create_game('Routes')
+
+        def check_widgets(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            try:
+                window.pid.setValue(101)
+                window.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
+                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                a, b = source('A', 1), source('B', 3, address=0x300)
+                window.on_hook(HookEvent('output', 'host', 7, 2, 200, process_id=101, source=a, text='A'))
+                window.on_hook(HookEvent('output', 'host', 7, 3, 300, process_id=101, source=b, text='B'))
+                window._capture_role_buttons[(a.identity, a.address)]['text'].click()
+                self.assertFalse(window.route_table.isVisible())
+                window._capture_role_buttons[(b.identity, b.address)]['text'].click()
+                self.assertTrue(window.route_table.isVisible())
+                self.assertEqual(window.route_table.rowCount(), 2)
+                window.move_capture_route(b.identity, -1)
+                self.assertEqual([h.code for h in window.application.capture.profile.hooks if h.role == 'text'], ['B', 'A'])
+                self.assertEqual(window.current_profile().hooks, [])  # still a draft
+            finally:
+                window.hook_host = None
+                window.close()
+            return 0
+
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', check_widgets):
+                self.assertEqual(run_gui(), 0)
 
 
 if __name__ == '__main__':
