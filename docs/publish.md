@@ -14,12 +14,13 @@ workflow保守専用経路で`scripts/workflow_maintenance.py record-update`を�
 
 実装・関連検証・ローカルcommit後は`scripts/publish_request.py prepare`を実行する。publish直前のremote `develop`と`publish` HEADを取得し、helperが出力するconnector-planと固定Launcherの手順を**一切改変せず**記載順に実行する。Gateway成功後、結果を`scripts/publish_request.py record`に渡して既存ローカルrepoのpublish基点を更新し、そのrepoで次の作業を続ける。次のpublish前に直前のFast CI結果を確認し、失敗原因を解消する。標準経路に失敗した場合は`DEVELOPMENT.md`の指定手順を参照し、独自経路を作らない。
 
-Fast CIは継続検証であり設計妥当性の証明ではない。Lunaネイティブ取込み時はx86/x64 Windows実ビルドと接続検証を別途実施し、既存のWindows CIが新規ソースで発火することを確認する。Windows実ゲーム検証をモック成功で代替しない。
+Fast CIは継続検証であり設計妥当性の証明ではない。Lunaネイティブ取込み時は64bit Windows上でx86/x64ゲームプロセス向けNativeを実ビルドし、接続検証を別途実施する。x86 buildは32bit OS対応ではなく32bitゲームへの注入互換性を検証する。Windows実ゲーム検証をモック成功で代替しない。
 
 ## 継続CIと明示的な重量級検証
 
 - `develop` への通常publishでは Fast CI（単体契約・clean install・復元用source-snapshot）を実行する。Fast CIから別の重量級ワークフローを起動しない。
-- Windows Adapter Validation、Real Audio Validation（固定モデルSenseVoiceの実推論、通常14音声・特殊音声・速度計測）、Luna Native Source and ABI Validation（x86/x64）は、検証専用のドラフトPR `develop` → `main` の **close → reopen** で実行する。PRの `pull_request: reopened` のみをトリガーにし、単なる `develop` のpushやPR作成では起動しない。
+- Windows Adapter ValidationとLuna Native Source and ABI Validation（64bit Windows上のx86/x64ゲームプロセス向けNative）は、検証専用のドラフトPR `develop` → `main` の **close → reopen** で実行する。PRの `pull_request: reopened` のみをトリガーにし、単なる `develop` のpushやPR作成では起動しない。
+- 実録音・実モデルASRの品質／速度測定はGitHub Actionsの重量級スイートから外し、実際にAutoAdvを利用するWindows実機で明示実行する。CIランナーの計測値を実機性能や実ゲーム成立の代理にしない。
 - 検証用PRは **マージ禁止**。`main`を更新する権限や承認を意味しない。headが同じリポジトリの`develop`、baseが`main`の場合だけ重量級jobを実行する。追加の開発branch・worktreeは作らない。
 - PR上の検証はGitHubのマージ用refで行う。`main`が`develop`の祖先である間はツリーが`develop`と一致するが、両者が分岐した場合は`develop`単独の検証結果と同一視せず、入力commitを記録する。
 - 通常のFast CIとPR重量級検証は別の合否。実モデルの品質・速度結果は測定値であり、実ゲームのHOOK→入力→次HOOKの実機検収を代用しない。

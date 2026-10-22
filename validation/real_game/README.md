@@ -23,7 +23,7 @@ AutoAdv本体は検証シナリオ／台詞一覧／音声ファイルの内容�
 音声SHA-256、台詞、ファイルパスは `VOICE_MANIFEST.json` に固定する。
 原音は人間の録音。通常声とささやき声は同一話者であり別人の発話検査ではない。
 
-## 検査A：実音声を使ったAutoAdv音声解析契約（CI・ローカル）
+## 検査A：実音声を使ったAutoAdv音声解析契約（Windows実機・ローカル）
 
 `python -m unittest discover -s validation/real_game -p 'test_*.py' -v`
 
@@ -31,7 +31,7 @@ AutoAdv本体は検証シナリオ／台詞一覧／音声ファイルの内容�
 **AutoAdvのNativeAudioとVoiceActivityの既存コード**に渡す。
 音声開始、末尾無音を受け取る前に完了しないこと、完了が一度だけになることを確認。
 ゲームの実HOOK、Process Loopbackの捕捉、Irodori実音声、Windows実入力の成立は**証明しない**。
-Fast CIとは別の `Real Audio Validation` ワークフローで走らせる。
+この契約検査と実モデルASR測定はGitHub Actionsの専用スイートには含めない。必要時は実際にAutoAdvを利用するWindows実機で明示実行する。
 
 ## 自動実行：既存ゲームと製品GUIによる自動進行検査
 
@@ -143,7 +143,7 @@ TTS使用台詞はIrodoriの合成と**デバイスでの再生終了**を待ち
 実HOOKからの原音検収では、GUIで該当作品のASRモデル／tokensに、この隔離キャッシュのパスを明示指定する。
 TTS専用の作品設定にはASRモデルの指定も準備も要求しない。
 版・SHA-256は `ASR_MODEL.json` に固定し、既存ファイルが不一致なら上書きせず失敗する。
-新規取得は検証者が下記を明示実行したとき、または検証専用ドラフトPRを再オープンしてReal Audio Validationの実モデル検証を要求したときに限る。通常起動とFast CIでは取得しない。
+新規取得は検証者がWindows実機で下記を明示実行したときに限る。通常起動、Fast CI、検証専用ドラフトPRでは取得しない。
 
 ```powershell
 python -m validation.real_game.prepare_asr_model
@@ -192,11 +192,11 @@ VAD終了は混合音声による推定であり、ゲーム内再生終了の�
 別系統の観測が必要であり、推定時刻だけで合否を確定しない。
 
 録音コーパスは**検証ゲーム内の実再生**とASRの独立計測に使用できる。ただし録音PCMのAutoAdv内部への直接注入を、実経路の証拠にはしない。CIは実ゲームを起動しないため、
-CIの実モデル結果を自動進行の実環境合格と称さない。
+実モデルベンチマーク結果を自動進行の実環境合格と称さない。
 
 ## 音声認識品質と処理速度（任意実行、Fast CI対象外）
 
-**実モデルの認識精度をFast CIの合否条件にはしない。** 同一モデル・コーパス・前処理ではほぼ不変のため、モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に明示実行する。手元で明示実行する場合は既存のASR環境を利用し、通常起動とFast CIでは取得しない。検証専用ドラフトPRのクローズ→再オープンでは`Real Audio Validation`が隔離キャッシュに固定モデルを検証付きで用意し、実モデルベンチマークを実行する。
+**実モデルの認識精度をFast CIの合否条件にはしない。** モデル・前処理・照合設定を採用／変更した場合、または実機での品質・応答速度を調査する際に、実際にAutoAdvを利用するWindows実機で明示実行する。既存のASR環境を利用し、通常起動、Fast CI、検証専用ドラフトPRではモデル取得やベンチマークを行わない。
 
 ```powershell
 python -m validation.real_game.benchmark_asr `
@@ -212,7 +212,7 @@ python -m validation.real_game.benchmark_asr `
 
 ## GitHubでの専用検証の実行操作
 
-検証専用ドラフトPR（`develop` → `main`、マージ禁止）をクローズしてから再オープンすると、Real Audio Validationを含む3つの重量級検証が起動する。追加branchやワークフロー変更は不要。Fast CIのpush検証とは別に結果を確認する。PRをマージして`main`を変更しないこと。実SenseVoice推論による品質・RTFの測定は実ゲームでの自動進行成立の証拠ではない。
+検証専用ドラフトPR（`develop` → `main`、マージ禁止）をクローズしてから再オープンすると、Windows Adapter ValidationとLuna Native Source and ABI Validationが起動する。追加branchや通常開発用workflow変更は不要。Fast CIのpush検証とは別に結果を確認する。PRをマージして`main`を変更しないこと。実SenseVoice推論による品質・RTFの測定はWindows実機で別途行い、実ゲームでの自動進行成立の証拠とは分離する。
 
 ## 音声判定ストレス検証の解釈（2026-10-21）
 

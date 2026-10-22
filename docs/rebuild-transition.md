@@ -48,7 +48,7 @@
 
 | 対象 | 再利用の判断 |
 |---|---|
-| Luna Native、`scripts/sync_luna_upstream.py`、ビルド資産 | 上流の採用範囲、x86/x64、HOOK候補の実接続、ライセンス、更新経路を確認して活用 |
+| Luna Native、`scripts/sync_luna_upstream.py`、ビルド資産 | 上流の採用範囲、64bit Windows上のx86/x64ゲームプロセス対応、HOOK候補の実接続、ライセンス、更新経路を確認して活用 |
 | `luna_abi.py`、`hook_host.py`、`hook_host_worker.py`、`hook_protocol.py` | ABIとコールバック、IPC、Host生存・再接続、取得元情報の受渡しを確認して採用 |
 | `hook_application.py`、HOOK設定 | 探索・手動追加・復元・取得補正・必要な複数出力の設定が実際に機能するか確認 |
 | `text.py` | 話者分離、ルビ・辞書、表示・照合・読み上げ文、音声方針への接続を確認 |
@@ -93,7 +93,7 @@ Utteranceの音声方針を使って、既存音声の区間と再生終了、Ir
 
 ### E. 通常運用と実ゲーム
 
-Irodoriフォルダ自動起動、Voice試聴、作品の検出・復元、HOOK取得、音声・送り、手動操作をWindows GUIで連続して確認する。Native x86/x64と複数種類の実ゲームを用いて、対応が成立した条件と残る問題を記録する。
+Irodoriフォルダ自動起動、Voice試聴、作品の検出・復元、HOOK取得、音声・送り、手動操作をWindows GUIで連続して確認する。64bit Windows上でx86/x64ゲームプロセス向けNativeと複数種類の実ゲームを用いて、対応が成立した条件と残る問題を記録する。
 
 checkpointは自然な責務のまとまりを示す。各段階の中でも、接続と関連検証が成立した部分はcommit・publishしてよい。成果は一連の実利用経路の成立で判断する。
 
