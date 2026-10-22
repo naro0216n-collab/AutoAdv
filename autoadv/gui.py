@@ -2448,14 +2448,16 @@ def run_gui(session_driver=None) -> int:
             self._refreshing_hook_rows = True
             self.source_table.blockSignals(True)
             try:
-                use_item = self.source_table.item(row, 0) or QTableWidgetItem('')
+                use_item = self.source_table.item(row, 0)
+                if use_item is None:
+                    use_item = QTableWidgetItem('')
+                    self.source_table.setItem(row, 0, use_item)
                 flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable
                 if not ambiguous:
                     flags |= Qt.ItemFlag.ItemIsEnabled
                 use_item.setFlags(flags)
                 use_item.setCheckState(Qt.CheckState.Checked if hook and not ambiguous else Qt.CheckState.Unchecked)
                 use_item.setToolTip('この取得元を作品設定で使用する')
-                self.source_table.setItem(row, 0, use_item)
 
                 role = QComboBox()
                 role.addItem('本文', 'text')
@@ -2492,16 +2494,22 @@ def run_gui(session_driver=None) -> int:
                     self.hook_pair_changed(identity, address, control.currentData() or ''))
                 self.source_table.setCellWidget(row, 3, pair)
 
-                sample_item = self.source_table.item(row, 4) or QTableWidgetItem()
+                sample_item = self.source_table.item(row, 4)
+                if sample_item is None:
+                    sample_item = QTableWidgetItem()
+                    self.source_table.setItem(row, 4, sample_item)
                 sample_item.setText(latest[-1])
                 sample_item.setData(Qt.ItemDataRole.UserRole, key)
-                self.source_table.setItem(row, 4, sample_item)
-                source_item = self.source_table.item(row, 5) or QTableWidgetItem()
+                source_item = self.source_table.item(row, 5)
+                if source_item is None:
+                    source_item = QTableWidgetItem()
+                    self.source_table.setItem(row, 5, source_item)
                 source_item.setText(source.hook_name or source.hook_code or '取得元')
-                self.source_table.setItem(row, 5, source_item)
-                status_item = self.source_table.item(row, 6) or QTableWidgetItem()
+                status_item = self.source_table.item(row, 6)
+                if status_item is None:
+                    status_item = QTableWidgetItem()
+                    self.source_table.setItem(row, 6, status_item)
                 status_item.setText('識別衝突' if ambiguous else '受信中')
-                self.source_table.setItem(row, 6, status_item)
             finally:
                 self.source_table.blockSignals(False)
                 self._refreshing_hook_rows = False
@@ -2563,15 +2571,16 @@ def run_gui(session_driver=None) -> int:
                     raise
                 active = self.controller.profile and self.controller.profile.id == updated.id
                 if active:
-                    # Capture ownership edits revoke input authority but do not
-                    # rewrite the Utterance currently being presented.
+                    # Capture ownership edits hold further input but do not
+                    # rewrite the Utterance currently being presented or the
+                    # user's AUTO ON/OFF choice.
                     self.defer_capture_transition()
                 elif any(h.role == 'text' for h in updated.hooks) and self.attached_pid and self.host_generation:
                     self._resume_monitor_requested = True
                     self.start_saved_monitor_when_ready()
                 self.refresh_selected_hooks()
                 self.refresh_status()
-                self.note(label + 'を保存しました。自動送り権限は停止したまま、現在の台詞を維持して取得設定を切り替えます。')
+                self.note(label + 'を保存しました。現在の台詞を維持して入力を保留し、次の台詞境界で取得設定を切り替えます。')
                 return True
             except Exception as exc:
                 self.catalog.games[self.game_id].profiles[original.id] = original

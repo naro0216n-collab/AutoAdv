@@ -17,6 +17,12 @@ class TwoModeGuiTests(unittest.TestCase):
         game = catalog.create_game('GUI game')
         profile = game.profiles[game.default_profile]
         profile.source = 'ocr'
+        # This case verifies game-specific controls, so do not leave these
+        # fields inherited from the catalog common defaults.
+        for field in ('advance_mode', 'default_tts', 'default_voice',
+                      'uncertain_text_fallback', 'reading_ms', 'per_character_wait_ms'):
+            if field in profile.inherit_common:
+                profile.inherit_common.remove(field)
         profile.advance_mode = mode
         profile.default_tts = tts
         profile.default_voice = 'speaker-voice'
@@ -45,7 +51,7 @@ class TwoModeGuiTests(unittest.TestCase):
                 self.assertEqual(c.utterance.character_count, 5)
                 self.assertIn('500ms', window.wait_preview.text())
                 self.assertIn('こんにちは', window.overview_capture.text())
-                self.assertIn('許可中', window.overview_advance.text())
+                self.assertIn('自動送り: ON', window.overview_advance.text())
                 check(window, c, token, requests, sent)
                 window.native_audio = None
             finally:
