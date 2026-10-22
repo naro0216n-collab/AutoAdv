@@ -50,6 +50,17 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         for stale in ('RenPySdk', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
             self.assertNotIn(stale, source)
 
+    def test_hosted_and_broad_ci_do_not_run_real_audio(self):
+        live = (ROOT / '.github' / 'workflows' / 'live-advancement.yml').read_text(encoding='utf-8')
+        self.assertIn('-Phase reading', live)
+        for forbidden in ('-Phase native', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj'):
+            self.assertNotIn(forbidden, live)
+
+        for name in ('ci.yml', 'windows-adapters.yml'):
+            source = (ROOT / '.github' / 'workflows' / name).read_text(encoding='utf-8')
+            self.assertNotIn('validation.real_game.test_native_audio', source)
+            self.assertNotIn('run_live_check.ps1', source)
+
 
 if __name__ == '__main__':
     unittest.main()

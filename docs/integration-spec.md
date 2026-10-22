@@ -146,9 +146,10 @@ LunaHook Native/Hostをゲーム処理と分離して管理し、64bit Windows�
 | 原音未検出・遅延・非言語・BGM | PCM/ASR/VADで確証を捏造せず、実測されたリスク・保留・途中送りを区別する |
 | 連続送信、同文別台詞、セッション切替 | 一台詞一入力、旧Token失効、フォーカス・手動停止・次HOOK待機を満たす |
 | 共通・作品設定と旧設定の取込み | 設定反映とGUI表示が一致し、旧ファイルを残して不明項目を利用者確認のうえ移行する |
-| 実ゲーム検収 | Windows上の選択HOOK→ASR/TTS/文字判断→実入力→次HOOKを検証し、未実施を未検収として報告する |
+| Hosted実ゲーム検収 | prebuilt検証ゲームで選択HOOK→文字判断→実入力→次HOOKを検証する。Process Loopback・ASR・NativeAudioの成立証拠にはしない |
+| RealAudio実機検収 | 実際に利用するWindows実機で選択HOOK→Process Loopback→NativeAudio/Controller→実入力→次HOOKを検証し、未実施を未検収として報告する |
 
-ユニット・時系列・GUI・Persistence・Fast CI・実モデル・実ゲームの証拠を区別する。CER/RTFは補助指標で、モデル全音声一括認識を時系列会話送りの成功と同一視しない。時系列の実環境検収では、音声開始とHOOK到着の遅延等の外部条件をゲーム側で固定してよいが、PCM録音の直接投入、固定HOOK通知、固定入力応答を実環境成立の代用にしない。**LunaHook受信→Process Loopback実捕捉→製品NativeAudioとController（`presentation_event`→`try_advance`）→Windows入力→次HOOK**を実行して確認する。録音コーパスは実ゲームで再生する音声としても活用するが、AutoAdv内部への直接PCM注入は実経路検収の代わりにならない。未帰属音声のASR解析中は無制限の保留を認めず、有限の解析猶予後も根拠不足なら明示フォールバックまたは入力保留へ進む。fixture作者の分類や一定件数の保留だけを受入条件にしない。
+ユニット・時系列・GUI・Persistence・Fast CI・実モデル・Hosted実ゲーム・RealAudio実機の証拠を区別する。CER/RTFは補助指標で、モデル全音声一括認識を時系列会話送りの成功と同一視しない。Hosted実ゲーム検収はprebuiltゲームを使って**LunaHook受信→文字判断のController（`presentation_event`→`try_advance`）→Windows入力→次HOOK**を確認し、音声捕捉環境を要求しない。RealAudio実機検収では、音声開始とHOOK到着の遅延等の外部条件をゲーム側で固定してよいが、PCM録音の直接投入、固定HOOK通知、固定入力応答を実環境成立の代用にせず、**LunaHook受信→Process Loopback実捕捉→製品NativeAudioとController（`presentation_event`→`try_advance`）→Windows入力→次HOOK**を実際に利用するWindowsデスクトップで確認する。RealAudioはFast CI、Windows Adapter Validation、Hosted Liveその他の一括テストへ含めない。録音コーパスは実ゲームで再生する音声としても活用するが、AutoAdv内部への直接PCM注入はRealAudio実機検収の代わりにならない。未帰属音声のASR解析中は無制限の保留を認めず、有限の解析猶予後も根拠不足なら明示フォールバックまたは入力保留へ進む。fixture作者の分類や一定件数の保留だけを受入条件にしない。
 
 
 ### 検証結果の独立性と受入判断
@@ -157,4 +158,4 @@ LunaHook Native/Hostをゲーム処理と分離して管理し、64bit Windows�
 
 実環境での評価は**台詞ごと**に、原音再生終了前の入力、終了後の入力遅延、根拠不足時の不確実送信、誤帰属、入力保留、二重送り、次HOOK未取得を区別して集計する。原音が現に再生中のときの送りは不適切であり、原音終了の真値が取得できなければ正常と認定しない。検証ゲームのvoiceチャンネル観測は離散サンプリングであり、デバイス出力のサンプル単位の絶対真値と同一視しない。CER・完全一致率・ASR単体RTFは原因分析に限り、送り成功や安全性の代理合格条件にはしない。
 
-内部契約、実録音のASR、検証ゲーム上の実経路、利用者の任意の実作品での検収は別の証拠階層とし、いずれかの削除や評価指標の置換によって上位の未検収を合格としてはならない。自動進行の変更では関連する局所検証を優先し、毎回全てのCI重量級テストを起動することを要求しない。
+内部契約、実録音のASR、HostedのHOOK/文字送り実経路、Windows実機のRealAudio実経路、利用者の任意の実作品での検収は別の証拠階層とし、いずれかの削除や評価指標の置換によって上位の未検収を合格としてはならない。RealAudio実機検収をHosted CIへ移して環境差を製品合否へ混ぜず、自動進行の変更では関連する局所検証を優先し、毎回全てのCI重量級テストを起動することを要求しない。

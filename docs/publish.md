@@ -21,10 +21,11 @@ Fast CIは継続検証であり設計妥当性の証明ではない。Lunaネイ
 - `develop` への通常publishでは Fast CI（単体契約・clean install・復元用source-snapshot）を実行する。Fast CIから別の重量級ワークフローを起動しない。
 - Windows Adapter Validationは、検証専用のドラフトPR `develop` → `main` の **close → reopen** で実行する。PRの `pull_request: reopened` のみをトリガーにし、単なる `develop` のpushやPR作成では起動しない。
 - Validation Fixture Runtimeは、`validation/real_game/renpy/**`等のfixture構築入力を変更したときに明示実行し、prebuilt Windows検証ゲームを専用pre-release `autoadv-validation-fixtures` へfixtureソースSHA-256付きassetとして保存する。通常publishやFast CIから重量級buildを自動連鎖させない。これはAutoAdv製品のversion/releaseではなく検証用binaryの保管であり、AutoAdvの合否検証でもない。AutoAdv Live Advancementは現行fixtureと一致するready-to-run assetだけを使用し、Live run内でRen'Py SDK取得・ゲーム配布物生成を行わない。
-- AutoAdv Live Advancementは検証用draft PRのタイトルを`[RUN AUTOADV LIVE]`で始める編集時だけ実行する。実Hook→Process Loopback→NativeAudio/Controller→Windows入力→次Hookを検収し、fixture runtime準備、Fast CI、Windows Adapter、Luna Nativeとは別の結果として扱う。
+- AutoAdv Live Advancementは検証用draft PRのタイトルを`[RUN AUTOADV LIVE]`で始める編集時だけ実行する。Hosted Windowsではprebuilt fixtureを使い、実Hook→文字判断のController→Windows入力→次Hookだけを検収する。Process Loopback・ASR・NativeAudioは実行せず、RealAudioの合否には使わない。
 - Luna Native Source and ABI Validationは通常開発CIから外す。Luna採用版の更新・Native patch変更を明示的に検収するときだけ、検証用ドラフトPRのタイトルへ`[RUN LUNA NATIVE]`を追加する編集で起動する。64bit Windows上でx86/x64ゲームプロセス向けに、AutoAdvがpatchするLunaHost DLLだけを双方実ビルドし、x86 buildは32bit OS対応ではなく32bitゲームへの注入互換性を検証する。未改変のLunaHook本体を通常検証で再ビルドせず、上流版が変わらないGUI・Domain変更で同じNative完全buildを反復しない。検収後はタイトルのマーカーを外す。
-- 実録音・実モデルASRの品質／速度測定はGitHub Actionsの重量級スイートから外し、実際にAutoAdvを利用するWindows実機で明示実行する。CIランナーの計測値を実機性能や実ゲーム成立の代理にしない。AutoAdv Live AdvancementがNativeAudio実経路を動かすため、固定manifestのASR runtimeを隔離cacheへ必要時取得することは品質ベンチマークとは区別する。
+- RealAudio実ゲーム検収は`AutoAdv-Windows-Validate.cmd`からGit管理下の`run_windows_validation.ps1`を起動し、実際にAutoAdvを利用する対話可能なWindows実機で明示実行する。固定ASR runtimeの取得、Process Loopback helper build、NativeAudio/Controller→実入力→次Hookはこの実機経路だけが担当する。Fast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／FullテストへRealAudioを追加しない。
+- 実録音・実モデルASRの品質／速度測定もGitHub Actionsの重量級スイートから外し、必要時にWindows実機で明示実行する。CIランナーの計測値を実機性能やRealAudio成立の代理にしない。
 - 検証用PRは **マージ禁止**。`main`を更新する権限や承認を意味しない。headが同じリポジトリの`develop`、baseが`main`の場合だけ重量級jobを実行する。追加の開発branch・worktreeは作らない。
 - PR上の検証はGitHubのマージ用refで行う。`main`が`develop`の祖先である間はツリーが`develop`と一致するが、両者が分岐した場合は`develop`単独の検証結果と同一視せず、入力commitを記録する。
-- 通常のFast CIとPR重量級検証は別の合否。実モデルの品質・速度結果は測定値であり、実ゲームのHOOK→入力→次HOOKの実機検収を代用しない。
+- 通常のFast CIとPR重量級検証は別の合否。Hosted LiveのHOOK→文字判断→入力→次HOOK、実モデルの品質・速度測定、Windows実機RealAudio検収も相互に代用しない。
 - Luna Release Asset Adoptionは採用操作であり、PR検証スイートへ混ぜない。Publish Gatewayの経路・権限は変更しない。

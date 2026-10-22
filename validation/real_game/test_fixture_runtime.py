@@ -101,11 +101,18 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
         self.assertIn('python -m unittest validation.real_game.test_native_audio -v', readme)
         self.assertIn('一括 `unittest discover` をRealAudio検証として使用しない', readme)
 
-    def test_explicit_live_may_provision_pinned_asr_but_quality_benchmark_stays_separate(self):
+    def test_hosted_live_excludes_real_audio_and_actual_machine_path_owns_it(self):
+        live = Path('.github/workflows/live-advancement.yml').read_text(encoding='utf-8')
+        launcher = Path('validation/real_game/run_windows_validation.ps1').read_text(encoding='utf-8')
         readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')
-        self.assertIn('明示的に起動するAutoAdv Live Advancementでは', readme)
-        self.assertIn('固定manifestのASR model/tokens', readme)
-        self.assertIn('ASR品質ベンチマークをCI合否へ導入することではなく', readme)
+        self.assertIn('-Phase reading', live)
+        self.assertNotIn('-Phase native', live)
+        self.assertNotIn('prepare_asr_model', live)
+        self.assertNotIn('AutoAdv.ProcessLoopback.csproj', live)
+        self.assertIn('validation.real_game.prepare_asr_model', launcher)
+        self.assertIn('AutoAdv.ProcessLoopback.csproj', launcher)
+        self.assertIn('Windows実機RealAudio', readme)
+        self.assertIn('一括／Fullテストへ含めない', readme)
 
 
 if __name__ == '__main__':

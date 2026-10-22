@@ -35,7 +35,7 @@ dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Rel
 python -m unittest discover -s tests -v
 ```
 
-Local Linux tests verify domain contracts, import/storage, process-audio handling and generation invalidation, but do not certify Windows game compatibility. Windows CI validates Qt/adapter installation and the loopback helper build. Real games and real audio input remain separate acceptance requirements; unverified modes must never be described as universally supported.
+Local Linux tests verify domain contracts, import/storage, process-audio handling and generation invalidation, but do not certify Windows game compatibility. Windows CI validates Qt/adapter installation and the loopback helper build. Hosted Live validation covers the real LunaHook → text-decision → Windows-input → next-Hook path only. RealAudio acceptance is an explicit actual-Windows-machine test and is not part of Fast CI, Windows Adapter Validation, Hosted Live, or any broad/full test suite; unverified modes must never be described as universally supported.
 
 Changes are published to `develop` via [Publish Gateway](docs/publish.md). `main` and the product version remain unchanged without explicit approval.
 
