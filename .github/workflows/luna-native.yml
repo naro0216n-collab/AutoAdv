@@ -1,17 +1,21 @@
 name: Luna Native Source and ABI Validation
 
 on:
-  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [edited]
 
-# Explicit adoption/patch validation only. x86 here means a 32-bit game target
-# on 64-bit Windows, not 32-bit Windows OS support. Normal development CI uses
-# the pinned shipped runtime and does not rebuild upstream Luna native code.
+# Explicit adoption/patch validation only. Add [RUN LUNA NATIVE] to the
+# develop -> main validation PR title to run it. x86 here means a 32-bit game
+# target on 64-bit Windows, not 32-bit Windows OS support. Normal development
+# CI uses the pinned shipped runtime and does not rebuild upstream Luna native code.
 
 permissions:
   contents: read
 
 jobs:
   pinned-source:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' && contains(github.event.pull_request.title, '[RUN LUNA NATIVE]') }}
     name: Pinned Luna source acquisition
     runs-on: ubuntu-latest
     timeout-minutes: 20
