@@ -155,8 +155,14 @@ class CaptureWorkspace:
         self._observed.clear()
         self._groups.clear()
 
-    def observe(self, source: ThreadSource, text: str = '', *, sequence: int = 0,
-                ambiguous: bool = False) -> None:
+    def _refresh_ambiguity(self, identity: str) -> None:
+        matches = [record for (candidate_identity, _), record in self._observed.items()
+                   if candidate_identity == identity]
+        ambiguous = len(matches) > 1
+        for record in matches:
+            record.ambiguous = ambiguous
+
+    def observe(self, source: ThreadSource, text: str = '', *, sequence: int = 0) -> None:
         key = (source.identity, source.address)
         record = self._observed.get(key)
         if record is None:
@@ -164,7 +170,7 @@ class CaptureWorkspace:
             self._observed[key] = record
         else:
             record.source = source
-        record.ambiguous = record.ambiguous or ambiguous
+        self._refresh_ambiguity(source.identity)
         value = text.strip()
         if value and (not record.history or record.history[-1][1] != value):
             record.history.append((sequence, value))
@@ -178,10 +184,40 @@ class CaptureWorkspace:
 
     def remove(self, identity: str, address: int) -> None:
         self._observed.pop((identity, address), None)
+        self._refresh_ambiguity(identity)
 
     def clear_observations(self) -> None:
         self._observed.clear()
         self._groups.clear()
+
+    def source(self, identity: str, address: int, *, require_unique: bool = True) -> ThreadSource | None:
+        record = self._observed.get((identity, address))
+        if record is None or (require_unique and record.ambiguous):
+            return None
+        return record.source
+
+    def sources(self, *, unique_only: bool = True) -> tuple[ThreadSource, ...]:
+        return tuple(record.source for record in self._observed.values()
+                     if not unique_only or not record.ambiguous)
+
+    def identity_is_ambiguous(self, identity: str) -> bool:
+        return any(record.ambiguous for (candidate_identity, _), record in self._observed.items()
+                   if candidate_identity == identity)
+
+    def has_identity(self, identity: str) -> bool:
+        return any(candidate_identity == identity for candidate_identity, _ in self._observed)
+
+    def has_hook_code(self, code: str) -> bool:
+        return any(record.source.hook_code == code for record in self._observed.values())
+
+    def candidate(self, identity: str, address: int) -> CaptureCandidateView | None:
+        record = self._observed.get((identity, address))
+        if record is None:
+            return None
+        history = tuple(text for _, text in record.history)
+        hook = next((item for item in self._draft.hooks if item.identity == identity), None)
+        return CaptureCandidateView(identity, address, history[-1] if history else '', history,
+                                    hook.role if hook else None, record.ambiguous)
 
     def _source(self, identity: str, address: int) -> ThreadSource:
         record = self._observed.get((identity, address))
@@ -410,6 +446,8 @@ class AutoAdvApplication:
         self._ocr_epoch = 0
         self._voice_jobs: VoiceJobs | None = None
         self._preview_jobs: VoiceJobs | None = None
+        self._searched_hook_codes: set[str] = set()
+        self._trial_hook_codes: set[str] = set()
 
     def runtime_state(self) -> RuntimeState:
         c = self.controller
@@ -748,16 +786,17 @@ class AutoAdvApplication:
         profile = game.profiles.get(profile_id) if game else None
         self.capture = CaptureWorkspace(profile, self.catalog.effective_profile) if profile else None
         self._runtime_capture_problem = None
+        self._searched_hook_codes.clear()
+        self._trial_hook_codes.clear()
         return profile
 
     def current_profile(self) -> Profile | None:
         game = self.catalog.games.get(self.game_id)
         return game.profiles.get(self.profile_id) if game else None
 
-    def observe_capture(self, source: ThreadSource, text: str = '', *, sequence: int = 0,
-                        ambiguous: bool = False) -> None:
+    def observe_capture(self, source: ThreadSource, text: str = '', *, sequence: int = 0) -> None:
         if self.capture:
-            self.capture.observe(source, text, sequence=sequence, ambiguous=ambiguous)
+            self.capture.observe(source, text, sequence=sequence)
 
     def observe_capture_group(self, events: Sequence[HookEvent]) -> None:
         if self.capture:
@@ -770,11 +809,52 @@ class AutoAdvApplication:
     def clear_capture_observations(self) -> None:
         if self.capture:
             self.capture.clear_observations()
+        self._searched_hook_codes.clear()
+        self._trial_hook_codes.clear()
+
+    def capture_source(self, identity: str, address: int, *, require_unique: bool = True) -> ThreadSource | None:
+        return self.capture.source(identity, address, require_unique=require_unique) if self.capture else None
+
+    def capture_sources(self, *, unique_only: bool = True) -> tuple[ThreadSource, ...]:
+        return self.capture.sources(unique_only=unique_only) if self.capture else ()
+
+    def capture_candidate(self, identity: str, address: int) -> CaptureCandidateView | None:
+        return self.capture.candidate(identity, address) if self.capture else None
+
+    def capture_identity_is_ambiguous(self, identity: str) -> bool:
+        return bool(self.capture and self.capture.identity_is_ambiguous(identity))
+
+    def capture_has_identity(self, identity: str) -> bool:
+        return bool(self.capture and self.capture.has_identity(identity))
+
+    def capture_saved_sources_ready(self, profile: Profile) -> bool:
+        if not self.capture:
+            return False
+        return (not any(self.capture.identity_is_ambiguous(h.identity) for h in profile.hooks)
+                and all(self.capture.has_identity(h.identity) for h in profile.hooks))
+
+    def begin_recovery_hook_trial(self, code: str) -> bool:
+        code = code.strip()
+        if (not code or code in self._searched_hook_codes or
+                (self.capture is not None and self.capture.has_hook_code(code))):
+            return False
+        self._searched_hook_codes.add(code)
+        return True
+
+    def mark_recovery_hook_inserted(self, code: str) -> None:
+        code = code.strip()
+        if code:
+            self._trial_hook_codes.add(code)
 
     def set_capture_role(self, identity: str, address: int, role: str | None) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
+        source = self.capture.source(identity, address)
+        if source is None:
+            raise ValueError('取得元を利用できません')
         self.capture.set_role(identity, address, role)
+        if role is not None and source.hook_code in self._trial_hook_codes:
+            self.capture.adopt_inserted_hook(source.hook_code)
 
     def move_dialogue_source(self, identity: str, offset: int) -> None:
         if self.capture:

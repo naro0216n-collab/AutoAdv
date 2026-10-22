@@ -83,10 +83,40 @@ def test_ambiguous_source_cannot_be_committed():
     candidate = source('T', 1)
     app.observe_capture(candidate, '台詞', sequence=1)
     app.set_capture_role(candidate.identity, candidate.address, 'text')
-    app.observe_capture(candidate, '', ambiguous=True)
+    app.observe_capture(source('T', 1, address=2), '', sequence=2)
     view = app.capture_view()
     assert not view.can_commit
     assert view.problem is not None
+
+
+def test_source_identity_collision_and_recovery_are_owned_by_capture_workspace():
+    app, _ = app_with_game()
+    first = source('T', 1, address=1)
+    second = source('T', 1, address=2)
+    app.observe_capture(first, '台詞1', sequence=1)
+    assert not app.capture_identity_is_ambiguous(first.identity)
+    app.observe_capture(second, '台詞2', sequence=2)
+    assert app.capture_identity_is_ambiguous(first.identity)
+    assert app.capture_source(first.identity, first.address) is None
+    assert app.capture_source(first.identity, first.address, require_unique=False) == first
+    app.remove_capture_source(second.identity, second.address)
+    assert not app.capture_identity_is_ambiguous(first.identity)
+    assert app.capture_source(first.identity, first.address) == first
+
+
+def test_recovery_trial_becomes_persistent_only_when_selected_in_recipe():
+    app, _ = app_with_game()
+    candidate = source('RECOVERY', 7)
+    assert app.begin_recovery_hook_trial(candidate.hook_code)
+    assert not app.begin_recovery_hook_trial(candidate.hook_code)
+    app.mark_recovery_hook_inserted(candidate.hook_code)
+    app.observe_capture(candidate, '本文', sequence=1)
+    assert app.current_profile().inserted_hooks == []
+    app.set_capture_role(candidate.identity, candidate.address, 'text')
+    assert app.capture.profile.inserted_hooks == [candidate.hook_code]
+    assert app.current_profile().inserted_hooks == []
+    app.commit_capture()
+    assert app.current_profile().inserted_hooks == [candidate.hook_code]
 
 
 def test_multi_hook_preview_never_reuses_a_later_speaker_for_older_dialogue():

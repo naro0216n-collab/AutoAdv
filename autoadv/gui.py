@@ -7,7 +7,6 @@ import subprocess
 import threading
 import copy
 import ntpath
-from collections import deque
 from pathlib import Path
 import re
 
@@ -79,12 +78,7 @@ def run_gui(session_driver=None) -> int:
             self._resume_monitor_requested = False
             self._pending_monitor_apply = False
             self._loading_profile = False
-            self.sources: dict[str, ThreadSource] = {}
-            self.source_samples: dict[str, deque[str]] = {}
-            self.ambiguous_sources: set[str] = set()
             self.source_rows: dict[tuple[str, int], int] = {}
-            self._searched_codes: set[str] = set()
-            self._trial_hook_codes: set[str] = set()
             self._connecting_pid = 0
             self.game_id = ''
             self.profile_id = ''
@@ -1580,7 +1574,7 @@ def run_gui(session_driver=None) -> int:
                         self.attached_pid != self.pid.value()):
                     raise RuntimeError('先にゲームへLunaHookを接続してください')
                 self.application.hook_command('insert_hook', pid=self.pid.value(), code=code)
-                self._trial_hook_codes.add(code)
+                self.application.mark_recovery_hook_inserted(code)
             except Exception as exc:
                 self.note('HOOKの追加に失敗: ' + str(exc))
 
@@ -1774,8 +1768,7 @@ def run_gui(session_driver=None) -> int:
             profile = self.current_profile()
             if not profile or not self.host_generation or not self.attached_pid:
                 return
-            if (any(h.identity in self.ambiguous_sources for h in profile.hooks) or
-                    not all(any(h.matches(src) for src in self.sources.values()) for h in profile.hooks)):
+            if not self.application.capture_saved_sources_ready(profile):
                 return
             self._resume_monitor_requested = False
             # The output that proves a saved source is available may itself be
@@ -1835,12 +1828,7 @@ def run_gui(session_driver=None) -> int:
                 self.note('LunaHook接続失敗: ' + str(exc))
 
         def clear_hook_observations(self):
-            self.sources.clear()
-            self.source_samples.clear()
-            self.ambiguous_sources.clear()
             self.source_rows.clear()
-            self._searched_codes.clear()
-            self._trial_hook_codes.clear()
             self._capture_output_timer.stop()
             self._capture_output_group.clear()
             self.application.clear_capture_observations()
@@ -1862,8 +1850,7 @@ def run_gui(session_driver=None) -> int:
             if not isinstance(identity, (tuple, list)) or len(identity) != 2:
                 return None
             key, address = identity
-            source = self.sources.get(key)
-            return source if source and source.address == address and key not in self.ambiguous_sources else None
+            return self.application.capture_source(key, address, require_unique=False)
 
         def chosen_source(self):
             return self.source_from_candidate_row(self.source_table.currentRow())
@@ -1876,17 +1863,14 @@ def run_gui(session_driver=None) -> int:
 
         def try_discovered_hook(self, code: str):
             """Trial a recovery-search code; only real output becomes a candidate."""
-            if not code or code in self._searched_codes:
-                return
-            self._searched_codes.add(code)
-            if any(src.hook_code == code for src in self.sources.values()):
+            if not self.application.begin_recovery_hook_trial(code):
                 return
             if (not self.application.hook_host_running or not self.host_generation or
                     self.attached_pid != self.pid.value()):
                 return
             try:
                 self.application.hook_command('insert_hook', pid=self.attached_pid, code=code)
-                self._trial_hook_codes.add(code)
+                self.application.mark_recovery_hook_inserted(code)
             except (RuntimeError, OSError, ValueError) as exc:
                 self.note('探索したHOOKを試用できません: ' + str(exc))
 
@@ -1904,7 +1888,9 @@ def run_gui(session_driver=None) -> int:
 
         def refresh_candidate_actions(self, *_):
             source = self.chosen_source()
-            history = self.source_samples.get(source.identity, ()) if source else ()
+            candidate = (self.application.capture_candidate(source.identity, source.address)
+                         if source else None)
+            history = candidate.history if candidate else ()
             if history and self.example_raw.toPlainText() != history[-1]:
                 blocked = self.example_raw.blockSignals(True)
                 self.example_raw.setPlainText(history[-1])
@@ -1925,9 +1911,6 @@ def run_gui(session_driver=None) -> int:
                 return
             try:
                 self.application.set_capture_role(identity, address, role)
-                source = self.source_by_identity_address(identity, address)
-                if source and role is not None and source.hook_code in self._trial_hook_codes:
-                    self.application.adopt_inserted_hook(source.hook_code)
                 self.sync_hook_threads()
                 self.refresh_capture_workspace()
             except Exception as exc:
@@ -2047,18 +2030,11 @@ def run_gui(session_driver=None) -> int:
             self.refresh_capture_workspace()
 
         def update_candidate(self, source: ThreadSource, sample: str | None, *, sequence: int = 0):
-            if sample is not None and sample.strip():
-                history = self.source_samples.setdefault(source.identity, deque(maxlen=8))
-                if not history or history[-1] != sample:
-                    history.append(sample)
-            self.application.observe_capture(
-                source, sample or '', sequence=sequence,
-                ambiguous=source.identity in self.ambiguous_sources)
+            self.application.observe_capture(source, sample or '', sequence=sequence)
             self.refresh_capture_workspace()
 
         def source_by_identity_address(self, identity: str, address: int):
-            source = self.sources.get(identity)
-            return source if source and source.address == address and identity not in self.ambiguous_sources else None
+            return self.application.capture_source(identity, address)
 
         def apply_pending_monitor_transition(self):
             if not self._pending_monitor_apply:
@@ -2110,8 +2086,11 @@ def run_gui(session_driver=None) -> int:
             if not profile or not profile.hooks:
                 self.hook_reconnect.setText('保存済み会話ソースなし')
                 return
-            ready = [h for h in profile.hooks if h.identity in self.sources and h.identity not in self.ambiguous_sources]
-            ambiguous = [h for h in profile.hooks if h.identity in self.ambiguous_sources]
+            ready = [h for h in profile.hooks
+                     if self.application.capture_has_identity(h.identity)
+                     and not self.application.capture_identity_is_ambiguous(h.identity)]
+            ambiguous = [h for h in profile.hooks
+                         if self.application.capture_identity_is_ambiguous(h.identity)]
             self.hook_reconnect.setText(
                 f'保存ソース {len(ready)}/{len(profile.hooks)}確認' +
                 (f' / 識別衝突 {len(ambiguous)}' if ambiguous else ''))
@@ -2162,15 +2141,10 @@ def run_gui(session_driver=None) -> int:
                     and event.connection_generation == self.connection_generation):
                 key = event.source.identity
                 self.application.remove_capture_source(key, event.source.address)
-                if self.sources.get(key) and self.sources[key].address == event.source.address:
-                    self.sources.pop(key, None)
                 if self.application.runtime_state().active_text_source == key:
                     self.stop_session()
                     self.note('監視中の本文HOOKが消失しました。取得候補を確認してください。')
-                row = self.source_rows.get((key, event.source.address))
-                if row is not None:
-                    self.remove_candidate_row(row)
-                self.source_samples.pop(key, None)
+                self.refresh_capture_workspace()
                 self.refresh_hook_connection()
                 self.refresh_capture_status()
             if (event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value()
@@ -2178,18 +2152,13 @@ def run_gui(session_driver=None) -> int:
                     and event.connection_generation == self.connection_generation):
                 source = event.source
                 key = source.identity
-                current = self.sources.get(key)
-                if current and (current.process_id, current.address) != (source.process_id, source.address):
-                    self.ambiguous_sources.add(key)
+                was_ambiguous = self.application.capture_identity_is_ambiguous(key)
+                self.update_candidate(source, event.text if event.kind == 'output' else None,
+                                      sequence=event.sequence)
+                if self.application.capture_identity_is_ambiguous(key) and not was_ambiguous:
                     if self.application.runtime_state().profile:
                         self.stop_session()
                     self.note('同一識別子のHOOKが複数検出されました。衝突していない取得元を選択してください。')
-                    self.update_candidate(current, None, sequence=event.sequence)
-                    # A colliding thread has no safe text ownership; do not
-                    # display its output under the first thread's identity.
-                else:
-                    self.sources[key] = source
-                    self.update_candidate(source, event.text if event.kind == 'output' else None, sequence=event.sequence)
                 self.refresh_hook_connection()
                 self.refresh_capture_status()
                 self.start_saved_monitor_when_ready()
@@ -2207,7 +2176,7 @@ def run_gui(session_driver=None) -> int:
             if (event.kind == 'output' and event.source and event.process_id == self.pid.value()
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation
-                    and event.source.identity not in self.ambiguous_sources):
+                    and not self.application.capture_identity_is_ambiguous(event.source.identity)):
                 self._capture_output_group.append(event)
                 if len(self._capture_output_group) >= 64:
                     self._capture_output_timer.stop()
@@ -2234,7 +2203,8 @@ def run_gui(session_driver=None) -> int:
                         received_ns=event.received_ns, pid=event.process_id, address=event.source.address,
                         context=event.source.context, context2=event.source.context2,
                         raw_hash=text_digest(event.text))
-                if (event.process_id == self.pid.value() and event.source.identity not in self.ambiguous_sources
+                if (event.process_id == self.pid.value()
+                        and not self.application.capture_identity_is_ambiguous(event.source.identity)
                         and event.host_generation == self.host_generation
                         and event.connection_generation == self.connection_generation):
                     selected = self.application.runtime_state().profile.hooks if self.application.runtime_state().profile else ()
@@ -2282,7 +2252,9 @@ def run_gui(session_driver=None) -> int:
 
         def show_hook_preview(self, *_):
             source = self.chosen_source()
-            history = self.source_samples.get(source.identity, ()) if source else ()
+            candidate = (self.application.capture_candidate(source.identity, source.address)
+                         if source else None)
+            history = candidate.history if candidate else ()
             self.hook_preview.setPlainText('\n── 前回の取得 ──\n'.join(reversed(history)))
             if source:
                 self.hook_technical_info.setText(
@@ -2294,7 +2266,9 @@ def run_gui(session_driver=None) -> int:
 
         def use_selected_hook_as_example(self):
             source = self.chosen_source()
-            samples = self.source_samples.get(source.identity, ()) if source else ()
+            candidate = (self.application.capture_candidate(source.identity, source.address)
+                         if source else None)
+            samples = candidate.history if candidate else ()
             sample = samples[-1] if samples else ''
             if not sample:
                 self.note('実際に受信された本文を選択してください')
@@ -2319,11 +2293,11 @@ def run_gui(session_driver=None) -> int:
                             self.bridge.ocr.emit(session, pid, sequence, text),
                         on_error=self.bridge.ocr_error.emit)
                 else:
-                    if any(h.identity in self.ambiguous_sources for h in p.hooks):
+                    if any(self.application.capture_identity_is_ambiguous(h.identity) for h in p.hooks):
                         raise ValueError('選択したHOOKの識別子が衝突しています。再接続するか別の取得元を選択してください')
                     self.application.begin_runtime(p, target,
                                           self.host_generation, self.connection_generation,
-                                          tuple(self.sources))
+                                          tuple(source.identity for source in self.application.capture_sources()))
                     self.sync_hook_threads()
                 self.start_native_audio_if_needed(p)
                 self.validation_trace.emit('monitor_started', session=self.application.runtime_state().session,
@@ -2354,9 +2328,8 @@ def run_gui(session_driver=None) -> int:
                             selected.append(hook)
                             seen.add(hook.identity)
             desired = {}
-            for source in self.sources.values():
+            for source in self.application.capture_sources():
                 if (source.process_id == self.pid.value() and
-                        source.identity not in self.ambiguous_sources and
                         any(h.matches(source) for h in selected)):
                     key = (source.process_id, source.address, source.context, source.context2)
                     desired[key] = source
