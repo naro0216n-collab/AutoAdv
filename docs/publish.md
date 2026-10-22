@@ -20,7 +20,7 @@ Fast CIは継続検証であり設計妥当性の証明ではない。Lunaネイ
 
 - `develop` への通常publishでは Fast CI（単体契約・clean install・復元用source-snapshot）を実行する。Fast CIから別の重量級ワークフローを起動しない。
 - Windows Adapter Validationは、検証専用のドラフトPR `develop` → `main` の **close → reopen** で実行する。PRの `pull_request: reopened` のみをトリガーにし、単なる `develop` のpushやPR作成では起動しない。
-- Luna Native Source and ABI Validationは通常開発CIから外し、Luna採用版の更新・Native patch変更を明示的に検収するときだけ手動実行する。64bit Windows上でx86/x64ゲームプロセス向けNativeを双方実ビルドし、x86 buildは32bit OS対応ではなく32bitゲームへの注入互換性を検証する。上流版が変わらない通常のGUI・Domain変更で同じNative完全buildを反復しない。
+- Luna Native Source and ABI Validationは通常開発CIから外す。Luna採用版の更新・Native patch変更を明示的に検収するときだけ、検証用ドラフトPRのタイトルへ`[RUN LUNA NATIVE]`を追加する編集で起動する。64bit Windows上でx86/x64ゲームプロセス向けに、AutoAdvがpatchするLunaHost DLLだけを双方実ビルドし、x86 buildは32bit OS対応ではなく32bitゲームへの注入互換性を検証する。未改変のLunaHook本体を通常検証で再ビルドせず、上流版が変わらないGUI・Domain変更で同じNative完全buildを反復しない。検収後はタイトルのマーカーを外す。
 - 実録音・実モデルASRの品質／速度測定はGitHub Actionsの重量級スイートから外し、実際にAutoAdvを利用するWindows実機で明示実行する。CIランナーの計測値を実機性能や実ゲーム成立の代理にしない。
 - 検証用PRは **マージ禁止**。`main`を更新する権限や承認を意味しない。headが同じリポジトリの`develop`、baseが`main`の場合だけ重量級jobを実行する。追加の開発branch・worktreeは作らない。
 - PR上の検証はGitHubのマージ用refで行う。`main`が`develop`の祖先である間はツリーが`develop`と一致するが、両者が分岐した場合は`develop`単独の検証結果と同一視せず、入力commitを記録する。
