@@ -5,7 +5,7 @@ on:
     branches: [main]
     types: [reopened]
 
-# The upstream x86/x64 build is intentionally excluded from Fast CI.
+# x86 here means a 32-bit game target on 64-bit Windows, not 32-bit Windows OS support.
 
 permissions:
   contents: read
@@ -45,7 +45,7 @@ jobs:
           retention-days: 15
 
   native-build:
-    name: Windows x86 and x64 native build
+    name: Windows native build for x86/x64 game targets
     runs-on: windows-2022
     timeout-minutes: 60
     needs: pinned-source
