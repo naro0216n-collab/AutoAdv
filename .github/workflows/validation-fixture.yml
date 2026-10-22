@@ -1,0 +1,90 @@
+name: Validation Fixture Runtime
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'validation/real_game/renpy/**'
+      - 'validation/real_game/fixture_runtime.py'
+      - '.github/workflows/validation-fixture.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: validation-fixture-runtime
+  cancel-in-progress: true
+
+jobs:
+  build-fixture:
+    name: Build precompiled validation game
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RENPY_VERSION: '8.4.1'
+      RENPY_SDK_SHA256: 'b542062465b6a253f4286b0fd48b83dd578bd7b6282a52d4c1eaecbfe21f002d'
+      FIXTURE_RELEASE: 'autoadv-validation-fixtures'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Fetch pinned RenPy SDK for fixture construction only
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/renpy-sdk"
+          mkdir -p "$root"
+          zip="$root/renpy-${RENPY_VERSION}-sdk.zip"
+          curl --fail --location --retry 3 \
+            "https://www.renpy.org/dl/${RENPY_VERSION}/renpy-${RENPY_VERSION}-sdk.zip" \
+            --output "$zip"
+          actual="$(sha256sum "$zip" | cut -d' ' -f1)"
+          [[ "$actual" == "$RENPY_SDK_SHA256" ]]
+          unzip -q "$zip" -d "$root"
+          sdk="$(find "$root" -type f -name renpy.sh -printf '%h\n' | head -n 1)"
+          [[ -n "$sdk" ]]
+          printf 'RENPY_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+      - name: Build ready-to-run Windows fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "$RENPY_SDK/renpy.sh"
+          "$RENPY_SDK/renpy.sh" launcher distribute \
+            "$GITHUB_WORKSPACE/validation/real_game/renpy" \
+            --destination "$RUNNER_TEMP/dists" --package win --no-update
+          archive="$(find "$RUNNER_TEMP/dists" -maxdepth 1 -type f -iname '*win.zip' | head -n 1)"
+          [[ -n "$archive" ]]
+          stage="$RUNNER_TEMP/fixture-stage"
+          runtime="$RUNNER_TEMP/validation-game"
+          mkdir -p "$stage" "$runtime"
+          unzip -q "$archive" -d "$stage"
+          exe="$(find "$stage" -maxdepth 3 -type f -name 'AutoAdvValidationGame.exe' | head -n 1)"
+          [[ -n "$exe" ]]
+          distribution="$(dirname "$exe")"
+          cp -a "$distribution/." "$runtime/"
+          python -m validation.real_game.fixture_runtime manifest \
+            --runtime "$runtime" \
+            --executable "$runtime/AutoAdvValidationGame.exe" \
+            --renpy-version "$RENPY_VERSION" \
+            --sdk-sha256 "$RENPY_SDK_SHA256"
+          python -m validation.real_game.fixture_runtime verify --runtime "$runtime"
+          digest="$(python -m validation.real_game.fixture_runtime source-digest)"
+          asset="$RUNNER_TEMP/autoadv-validation-game-${digest}.zip"
+          (cd "$runtime" && zip -qr "$asset" .)
+          printf 'FIXTURE_ASSET=%s\n' "$asset" >> "$GITHUB_ENV"
+      - name: Publish immutable validation fixture asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$FIXTURE_RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$FIXTURE_RELEASE" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title 'AutoAdv validation fixtures' \
+              --notes 'Prebuilt validation-game runtimes. These are test fixtures, not AutoAdv product releases.' \
+              --prerelease
+          fi
+          gh release upload "$FIXTURE_RELEASE" "$FIXTURE_ASSET" \
+            --repo "$GITHUB_REPOSITORY" --clobber

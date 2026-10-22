@@ -8,8 +8,8 @@ on:
 permissions:
   contents: read
 
-# Explicit PR title edit requests only this focused Windows game run;
-# it does not rebuild Luna or launch the other heavyweight suites.
+# Explicit PR title edit requests only this focused Windows game run.
+# The game is consumed as a prebuilt fixture; RenPy construction is separate.
 jobs:
   native-auto-advance:
     if: >-
@@ -32,35 +32,57 @@ jobs:
           dotnet-version: '9.0.x'
       - name: Install production GUI, Luna and real audio requirements
         run: python -m pip install '.[gui,native]'
-      - name: Fetch pinned RenPy SDK for existing validation game
+      - name: Acquire prebuilt validation game matching this fixture source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $digest = & python -m validation.real_game.fixture_runtime source-digest
+          if ($LASTEXITCODE -ne 0 -or -not $digest) { throw 'Cannot calculate validation fixture source digest' }
+          $asset = "autoadv-validation-game-$digest.zip"
+          $download = Join-Path $env:RUNNER_TEMP $asset
+          gh release download autoadv-validation-fixtures --repo $env:GITHUB_REPOSITORY `
+            --pattern $asset --dir $env:RUNNER_TEMP --clobber
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $download)) {
+              throw "No prebuilt validation game matches current fixture source: $digest"
+          }
+          $runtime = Join-Path $env:RUNNER_TEMP 'validation-game'
+          Expand-Archive -LiteralPath $download -DestinationPath $runtime
+          $game = & python -m validation.real_game.fixture_runtime verify --runtime $runtime
+          if ($LASTEXITCODE -ne 0 -or -not $game) { throw 'Prebuilt validation game verification failed' }
+          "AUTOADV_VALIDATION_GAME=$game" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build AutoAdv process-loopback product component
         shell: pwsh
         run: |
-          $root = Join-Path $env:RUNNER_TEMP 'renpy-sdk'
-          New-Item -ItemType Directory -Path $root | Out-Null
-          $zip = Join-Path $root 'renpy-8.4.1-sdk.zip'
-          Invoke-WebRequest -Uri 'https://www.renpy.org/dl/8.4.1/renpy-8.4.1-sdk.zip' -OutFile $zip
-          $expected = 'b542062465b6a253f4286b0fd48b83dd578bd7b6282a52d4c1eaecbfe21f002d'
-          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "RenPy SDK hash mismatch: $actual" }
-          Expand-Archive -LiteralPath $zip -DestinationPath $root
-          $sdk = Get-ChildItem -LiteralPath $root -Filter renpy.py -Recurse -File |
-            Where-Object { (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'lib/py3-windows-x86_64/python.exe')) } |
-            Select-Object -First 1 -ExpandProperty DirectoryName
-          if (-not $sdk) { throw 'Pinned RenPy SDK runtime was not found' }
-          "AUTOADV_RENPY_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj --configuration Release --nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $helper = (Resolve-Path 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll').Path
+          "AUTOADV_PROCESS_LOOPBACK=$helper" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Provision pinned ASR runtime for live audio path
+        shell: pwsh
+        run: |
+          $modelRoot = & python -c 'from validation.real_game.prepare_asr_model import default_model_directory; print(default_model_directory())'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve live-validation ASR cache' }
+          python -m validation.real_game.prepare_asr_model --directory $modelRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned live-validation ASR model unavailable' }
+          "AUTOADV_VALIDATION_ASR_MODEL=$(Join-Path $modelRoot 'model.int8.onnx')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AUTOADV_VALIDATION_ASR_TOKENS=$(Join-Path $modelRoot 'tokens.txt')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Check AutoAdv reading decision through actual Luna and Windows input
         shell: pwsh
         run: |
           & .\validation\real_game\run_live_check.ps1 -Phase reading `
-            -RenPySdk $env:AUTOADV_RENPY_SDK -Automated `
+            -GameExecutable $env:AUTOADV_VALIDATION_GAME -Automated `
             -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-reading.jsonl') `
             -Report (Join-Path $env:RUNNER_TEMP 'autoadv-reading.result.json') `
             -TimeoutSeconds 120
-      - name: Execute existing RenPy game through actual Luna and AutoAdv GUI
+      - name: Execute prebuilt game through actual Luna and AutoAdv GUI
         shell: pwsh
         run: |
           & .\validation\real_game\run_live_check.ps1 -Phase native `
-            -RenPySdk $env:AUTOADV_RENPY_SDK -Automated `
+            -GameExecutable $env:AUTOADV_VALIDATION_GAME -Automated `
+            -ProcessLoopbackHelper $env:AUTOADV_PROCESS_LOOPBACK `
+            -AsrModel $env:AUTOADV_VALIDATION_ASR_MODEL `
+            -AsrTokens $env:AUTOADV_VALIDATION_ASR_TOKENS `
             -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-native.jsonl') `
             -Report (Join-Path $env:RUNNER_TEMP 'autoadv-native.result.json') `
             -TimeoutSeconds 180
