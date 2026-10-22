@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import sys
 import time
 import threading
 import uuid
 from pathlib import Path
-from .luna_runtime import LunaRuntime, inject
+from .luna_runtime import LunaRuntime, inject, is_process_64bit
 from .luna_abi import (ThreadParam,SearchParam,PROCESS,CREATE,THREAD,OUTPUT,INFO,
                        INSERT,EMBED,I18N,EMU,FIND,HISTORY,load_exports,validate_abi)
 
@@ -63,6 +64,7 @@ class NativeHost:
         ]
         self.dll.Luna_Start(*self.callbacks)
         self.dll.Luna_Settings(500,932,3000,1000000,False)
+        self.codepage=932
         self.emit('diagnostic',detail='native_host_ready')
 
     def _connected(self,pid):
@@ -83,10 +85,11 @@ class NativeHost:
         if action=='settings':
             values = tuple(message[key] for key in ('flush_ms', 'codepage', 'max_buffer', 'max_history'))
             if (any(type(v) is not int for v in values) or not 0 <= values[0] <= 10000
-                    or not 1 <= values[1] <= 65535 or not 1 <= values[2] <= 1000000
+                    or not 0 <= values[1] <= 65535 or not 1 <= values[2] <= 1000000
                     or not 1 <= values[3] <= 10000000):
                 raise ValueError('invalid Luna text thread settings')
             self.dll.Luna_Settings(*values, False)
+            self.codepage=values[1]
         elif action=='connect':
             if type(pid) is not int or pid<=0:raise ValueError('positive pid required')
             if pid in self.managed:
@@ -94,7 +97,9 @@ class NativeHost:
             # Preflight BEFORE creating the upstream Named Pipes. If a Luna
             # hook is already injected, never attach, detach or overwrite it.
             if not self.dll.Luna_CheckIfNeedInject(pid):
-                self.emit('diagnostic',pid=pid,detail='injection_conflict_or_self')
+                reason = ('cannot_attach_to_host_process' if pid == os.getpid()
+                          else 'existing_luna_injection_detected')
+                self.emit('diagnostic',pid=pid,detail=reason)
                 return True
             self.connection_generation+=1
             self.managed.add(pid)
@@ -137,13 +142,21 @@ class NativeHost:
             valid={field for field,_ in SearchParam._fields_}
             if set(parameters)-valid:raise ValueError('invalid hook search parameter')
             sp=SearchParam()
-            sp.pattern=bytes([0xCC,0xCC,0x48,0x89]) if ctypes.sizeof(ctypes.c_void_p)==8 else bytes([0x55,0x8B,0xEC])
-            sp.length=4 if ctypes.sizeof(ctypes.c_void_p)==8 else 3
-            sp.offset=2 if ctypes.sizeof(ctypes.c_void_p)==8 else 0
-            sp.maxAddress=(1<<(8*ctypes.sizeof(ctypes.c_void_p)))-1
+            # The 64-bit Host may be attached to a 32-bit game. Match the
+            # search pattern and address range to the *target*, as Luna does.
+            target_64bit = is_process_64bit(pid)
+            sp.pattern=(bytes([0xCC,0xCC,0x48,0x89]) if target_64bit
+                        else bytes([0x55,0x8B,0xEC]))
+            sp.length=4 if target_64bit else 3
+            sp.offset=2 if target_64bit else 0
+            sp.maxAddress=0xFFFFFFFFFFFFFFFF if target_64bit else 0xFFFFFFFF
             sp.searchTime=30000
             sp.maxRecords=100000
-            sp.codepage=932
+            sp.codepage=self.codepage
+            module=message.get('boundary_module', '')
+            if not isinstance(module, str) or len(module)>119 or ('\\' in module or '/' in module):
+                raise ValueError('search boundary_module must be an executable basename')
+            sp.boundaryModule=module
             for field,value in parameters.items():
                 setattr(sp,field,value)
             def found(code,sample):
@@ -165,6 +178,15 @@ class NativeHost:
         else:raise ValueError('unknown native Host command')
         return True
 
+def ipc_json(packet: dict) -> str:
+    """Keep the worker-to-GUI pipe ASCII-clean on CP932 Windows consoles.
+
+    The parent decodes the JSON back to Unicode. Native callbacks must never
+    throw merely because an upstream warning contains non-Japanese glyphs.
+    """
+    return json.dumps(packet, ensure_ascii=True)
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser()
     parser.add_argument('--dll',required=True,type=Path)
@@ -172,7 +194,7 @@ def main(argv=None):
     out_lock=threading.Lock()
     def send(obj):
         with out_lock:
-            print(json.dumps(obj,ensure_ascii=False),flush=True)
+            print(ipc_json(obj),flush=True)
     try:
         host=NativeHost(args.dll,send)
         host.start()
@@ -183,7 +205,7 @@ def main(argv=None):
                 host.emit('diagnostic',detail=f'command_failed: {type(error).__name__}: {error}')
         return 0
     except Exception as error:
-        print(json.dumps({'kind':'fatal','reason':f'{type(error).__name__}: {error}'}),flush=True)
+        print(ipc_json({'kind':'fatal','reason':f'{type(error).__name__}: {error}'}),flush=True)
         return 1
 
 if __name__=='__main__':raise SystemExit(main())

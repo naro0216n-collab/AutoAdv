@@ -95,7 +95,7 @@ def user_settings_path() -> Path:
 
 
 def _profile_payload(p: Profile) -> dict:
-    return dict(id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks], inserted_hooks=p.inserted_hooks, speaker_links=p.speaker_links,
+    return dict(id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks], inserted_hooks=p.inserted_hooks, insert_pc_hooks=p.insert_pc_hooks, speaker_links=p.speaker_links,
                 advance_mode=p.advance_mode.value, uncertain_text_fallback=p.uncertain_text_fallback,
                 default_tts=p.default_tts, default_voice=p.default_voice,
                 speaker_tts=p.speaker_tts,
@@ -125,7 +125,7 @@ def _read_replacements(raw: list | dict) -> list[ReplacementRule]:
 def _read_profile(raw: dict) -> Profile:
     p = Profile(id=raw['id'], name=raw['name'],
                 hooks=[HookSelection(**h) for h in raw.get('hooks', [])],
-                inserted_hooks=list(raw.get('inserted_hooks', [])), speaker_links=dict(raw.get('speaker_links', {})),
+                inserted_hooks=list(raw.get('inserted_hooks', [])), insert_pc_hooks=raw.get('insert_pc_hooks', False), speaker_links=dict(raw.get('speaker_links', {})),
                 advance_mode=AdvanceMode(raw.get('advance_mode', 'text')),
                 uncertain_text_fallback=raw.get('uncertain_text_fallback', False),
                 default_tts=raw.get('default_tts', False), default_voice=raw.get('default_voice', ''),

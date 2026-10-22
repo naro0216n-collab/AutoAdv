@@ -82,6 +82,7 @@ def run_gui(session_driver=None) -> int:
             self.hook_host: HookHost | None = None
             self.host_generation = ''
             self.connection_generation = 0
+            self.attached_pid = 0
             self.sources: dict[str, ThreadSource] = {}
             self.source_samples: dict[str, deque[str]] = {}
             self.ambiguous_sources: set[str] = set()
@@ -326,6 +327,8 @@ def run_gui(session_driver=None) -> int:
             self.btn_pc_hooks = QPushButton('標準文字APIのHOOKを追加（候補が出ない場合）')
             self.btn_pc_hooks.clicked.connect(self.insert_pc_hooks)
             capture.addRow(self.btn_pc_hooks)
+            self.insert_pc_hooks_on_attach = QCheckBox('この作品では接続時にWin32汎用HOOKを追加する')
+            capture.addRow(self.insert_pc_hooks_on_attach)
             capture.addRow(QLabel('接続後にゲームで台詞を表示してください。HOOK追加・探索は候補の選択を自動化しません。'))
             self.hook_capture_status = QLabel('HOOK取得: 未接続')
             capture.addRow(self.hook_capture_status)
@@ -574,8 +577,12 @@ def run_gui(session_driver=None) -> int:
             self.hook_flush.setRange(0, 10000)
             advanced.addRow('Luna HOOK出力までの待機（ms）', self.hook_flush)
             self.hook_codepage = QSpinBox()
-            self.hook_codepage.setRange(1, 65535)
+            self.hook_codepage.setRange(0, 65535)
+            self.hook_codepage.setSpecialValueText('自動 (0)')
             advanced.addRow('Luna文字コードページ', self.hook_codepage)
+            self.hook_history = QSpinBox()
+            self.hook_history.setRange(1, 10000000)
+            advanced.addRow('Luna HOOK履歴の上限', self.hook_history)
             self.hook_buffer = QSpinBox()
             self.hook_buffer.setRange(1, 1000000)
             advanced.addRow('Luna文字バッファの上限', self.hook_buffer)
@@ -769,9 +776,11 @@ def run_gui(session_driver=None) -> int:
             self.per_character_wait_ms.setValue(effective.per_character_wait_ms)
             self.default_voice.setEditText(effective.default_voice)
             self.reading_ms.setValue(effective.reading_ms)
+            self.insert_pc_hooks_on_attach.setChecked(profile.insert_pc_hooks)
             self.hook_flush.setValue(profile.hook_flush_ms)
             self.hook_codepage.setValue(profile.hook_codepage)
             self.hook_buffer.setValue(profile.hook_max_buffer)
+            self.hook_history.setValue(profile.hook_max_history)
             self.input_key.setValue(effective.input_key)
             self.repeat.setCurrentIndex(self.repeat.findData(profile.repeat_rule))
             self.source_mode.setCurrentText(profile.source)
@@ -838,9 +847,11 @@ def run_gui(session_driver=None) -> int:
                 updated.per_character_wait_ms = self.per_character_wait_ms.value()
                 updated.default_voice = self.default_voice.currentText().strip()
                 updated.reading_ms = self.reading_ms.value()
+                updated.insert_pc_hooks = self.insert_pc_hooks_on_attach.isChecked()
                 updated.hook_flush_ms = self.hook_flush.value()
                 updated.hook_codepage = self.hook_codepage.value()
                 updated.hook_max_buffer = self.hook_buffer.value()
+                updated.hook_max_history = self.hook_history.value()
                 updated.input_key = self.input_key.value()
                 updated.repeat_rule = self.repeat.currentData()
                 updated.inherit_common = [key for key, widget in self.inherit_controls.items() if widget.isChecked()]
@@ -1359,18 +1370,22 @@ def run_gui(session_driver=None) -> int:
                 self.note('Previous AutoAdv import not applied: ' + str(exc))
 
         def find_hooks(self):
-            if not self.hook_host:
-                self.note('Start and attach LunaHook first')
+            if (not self.hook_host or self.attached_pid != self.pid.value()
+                    or not self.host_generation):
+                self.note('HOOKの接続完了後に探索できます。接続状態と診断を確認してください。')
                 return
             self.found_hooks.setRowCount(0)
             try:
-                self.hook_host.command('find_hooks', pid=self.pid.value())
+                game = self.catalog.games.get(self.game_id)
+                module = Path(game.executable).name if game and game.executable else ''
+                self.hook_host.command('find_hooks', pid=self.pid.value(), boundary_module=module)
             except Exception as exc:
                 self.note(str(exc))
 
         def insert_pc_hooks(self):
             try:
-                if not (self.host_generation and self.connection_generation and self.hook_host):
+                if not (self.host_generation and self.connection_generation and self.hook_host
+                        and self.attached_pid == self.pid.value()):
                     raise RuntimeError('先にゲームへLunaHookを接続してください')
                 self.hook_host.command('insert_pc_hooks', pid=self.pid.value())
                 self.note('本家Lunaの標準文字API用HOOK追加を要求しました。ゲームで台詞を表示してください。')
@@ -1433,6 +1448,8 @@ def run_gui(session_driver=None) -> int:
             if self.hook_host:
                 self.hook_host.close()
             self.host_generation = ''
+            self.connection_generation = 0
+            self.attached_pid = 0
             self.clear_hook_observations()
             try:
                 runtime = adopted_runtime()
@@ -1616,10 +1633,16 @@ def run_gui(session_driver=None) -> int:
                 p = self.current_profile()
                 if p is None:
                     raise ValueError('select a game and profile')
+                if self.attached_pid == self.pid.value() and self.host_generation:
+                    self.note('このゲームには既にLunaHookが接続されています。')
+                    return
+                self.attached_pid = 0
+                self.host_generation = ''
+                self.connection_generation = 0
                 self.hook_host.command('settings', flush_ms=p.hook_flush_ms,
                     codepage=p.hook_codepage, max_buffer=p.hook_max_buffer, max_history=p.hook_max_history)
                 self.hook_host.command('connect', pid=self.pid.value())
-                self.note('Hook injection requested; wait for connected event')
+                self.note('LunaHookへの接続を要求しました。接続完了または診断結果を確認してください。')
             except Exception as exc:
                 self.note(str(exc))
 
@@ -1738,16 +1761,22 @@ def run_gui(session_driver=None) -> int:
                     self.found_hooks.setRowCount(0)
                 self.host_generation = event.host_generation
                 self.connection_generation = event.connection_generation
+                self.attached_pid = event.process_id
                 self.validation_trace.emit('hook_connected', pid=event.process_id,
                     generation=event.host_generation, connection=event.connection_generation)
                 self.host_status.setText(f'LunaHook connected: PID {event.process_id}')
                 self.hook_capture_status.setText(f'PID {event.process_id}: 接続済み・本文HOOKは未観測')
                 p = self.current_profile()
                 if p and p.source == 'hook':
+                    if p.insert_pc_hooks:
+                        self.hook_host.command('insert_pc_hooks', pid=event.process_id)
                     for code in p.inserted_hooks:
                         self.hook_host.command('insert_hook', pid=event.process_id, code=code)
             elif event.kind == 'disconnected' and event.process_id == self.pid.value():
                 self.stop_session()
+                self.attached_pid = 0
+                self.host_generation = ''
+                self.connection_generation = 0
                 self.clear_hook_observations()
                 self.host_status.setText('LunaHook disconnected')
             if (event.kind == 'removed' and event.source and event.process_id == self.pid.value()
@@ -1840,6 +1869,10 @@ def run_gui(session_driver=None) -> int:
                     message_hash=text_digest(event.detail))
                 # Upstream engine detection and injection warnings are product
                 # connection facts. Suppressing them masked a genuine failure.
+                if event.detail == 'existing_luna_injection_detected':
+                    self.host_status.setText('対象には既にLunaHookが注入されています。ゲームを再起動して再接続してください。')
+                elif event.detail == 'cannot_attach_to_host_process':
+                    self.host_status.setText('LunaHost自身には接続できません。ゲームを選択してください。')
                 self.note('LunaHost: ' + event.detail)
 
         def select_hook(self, role: str):
@@ -2266,6 +2299,9 @@ def run_gui(session_driver=None) -> int:
 
         def on_closed(self, reason):
             self.stop_session()
+            self.attached_pid = 0
+            self.host_generation = ''
+            self.connection_generation = 0
             self.host_status.setText(f'LunaHook Host stopped: {reason}')
 
         def closeEvent(self, event):

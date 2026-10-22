@@ -108,6 +108,7 @@ class Profile:
     name: str
     hooks: list[HookSelection] = field(default_factory=list)
     inserted_hooks: list[str] = field(default_factory=list)
+    insert_pc_hooks: bool = False
     speaker_links: dict[str, str] = field(default_factory=dict)
     advance_mode: AdvanceMode = AdvanceMode.TEXT
     uncertain_text_fallback: bool = False
@@ -137,7 +138,7 @@ class Profile:
     def validate(self) -> None:
         if not self.id or not self.name or type(self.reading_ms) is not int or self.reading_ms <= 0 or type(self.per_character_wait_ms) is not int or self.per_character_wait_ms <= 0:
             raise ValueError('invalid profile')
-        if (not 0 <= self.hook_flush_ms <= 10000 or not 1 <= self.hook_codepage <= 65535
+        if (not 0 <= self.hook_flush_ms <= 10000 or not 0 <= self.hook_codepage <= 65535
                 or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
             raise ValueError('invalid Luna capture settings')
         if (self.repeat_rule not in ('distinct_only', 'each_after_input') or not 1 <= self.input_key <= 254
@@ -151,6 +152,8 @@ class Profile:
                 raise ValueError('speaker-to-text mapping requires selected HOOK roles')
         if self.source not in ('hook', 'ocr'):
             raise ValueError('invalid acquisition mode')
+        if type(self.insert_pc_hooks) is not bool:
+            raise ValueError('invalid Luna Win32 generic hook setting')
         if any(not code.strip() for code in self.inserted_hooks):
             raise ValueError('invalid manual HOOK')
         if any(not k or not v for k, v in self.name_readings.items()):

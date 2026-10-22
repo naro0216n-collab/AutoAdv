@@ -37,6 +37,7 @@ class LunaVendorContracts(unittest.TestCase):
         p.hook_codepage = 932
         p.hook_max_buffer = 7500
         p.hook_max_history = 500000
+        p.insert_pc_hooks = True
         p.validate()
         with tempfile.TemporaryDirectory() as temp:
             settings = Path(temp) / 'settings.json'
@@ -45,6 +46,13 @@ class LunaVendorContracts(unittest.TestCase):
             self.assertEqual((restored.hook_flush_ms, restored.hook_codepage,
                               restored.hook_max_buffer, restored.hook_max_history),
                              (850, 932, 7500, 500000))
+            self.assertTrue(restored.insert_pc_hooks)
+            restored.insert_pc_hooks = 'true'
+            with self.assertRaisesRegex(ValueError, 'Win32'):
+                restored.validate()
+            restored.insert_pc_hooks = True
+            restored.hook_codepage = 0
+            restored.validate()
             restored.hook_flush_ms = -1
             with self.assertRaises(ValueError):
                 restored.validate()

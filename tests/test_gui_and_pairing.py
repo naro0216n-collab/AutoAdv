@@ -2,7 +2,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from autoadv.conversation import Controller, Target
 from autoadv.model import Profile, HookSelection
 from autoadv.hook_protocol import HookEvent, ThreadSource
@@ -77,6 +77,48 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.add_replacement()
                 self.assertIn('こんにちは', window.editor_preview.toPlainText())
             finally:
+                window.close()
+            return 0
+
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', inspect):
+                self.assertEqual(run_gui(), 0)
+
+    @unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'Windows GUI dependencies not installed')
+    def test_win32_generic_hooks_are_opt_in_and_restored_in_real_gui(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+        from autoadv.storage import Catalog
+        catalog = Catalog()
+        game = catalog.create_game('Win32 test', 'C:/Game.exe')
+        p = game.profiles[game.default_profile]
+        p.insert_pc_hooks = True
+        commands = Mock()
+
+        def inspect(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            try:
+                self.assertTrue(window.insert_pc_hooks_on_attach.isChecked())
+                window.pid.setValue(31)
+                window.hook_host = SimpleNamespace(command=commands, child=None)
+                window.find_hooks()
+                commands.assert_not_called()
+                window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=31))
+                commands.assert_any_call('insert_pc_hooks', pid=31)
+                commands.reset_mock()
+                window.on_hook(HookEvent('disconnected', 'host', 1, 2, 150, process_id=31))
+                window.find_hooks()
+                commands.assert_not_called()
+                window.insert_pc_hooks_on_attach.setChecked(False)
+                self.assertTrue(window.save_profile())
+                self.assertFalse(window.current_profile().insert_pc_hooks)
+                commands.reset_mock()
+                window.on_hook(HookEvent('connected', 'host2', 2, 2, 200, process_id=31))
+                commands.assert_not_called()
+            finally:
+                window.hook_host = None
                 window.close()
             return 0
 
