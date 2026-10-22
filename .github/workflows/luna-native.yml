@@ -1,18 +1,17 @@
 name: Luna Native Source and ABI Validation
 
 on:
-  pull_request:
-    branches: [main]
-    types: [reopened]
+  workflow_dispatch:
 
-# x86 here means a 32-bit game target on 64-bit Windows, not 32-bit Windows OS support.
+# Explicit adoption/patch validation only. x86 here means a 32-bit game target
+# on 64-bit Windows, not 32-bit Windows OS support. Normal development CI uses
+# the pinned shipped runtime and does not rebuild upstream Luna native code.
 
 permissions:
   contents: read
 
 jobs:
   pinned-source:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' }}
     name: Pinned Luna source acquisition
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -21,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Acquire coherent upstream source (no runtime update)
+      - name: Acquire coherent upstream source for explicit adoption validation
         run: python scripts/sync_luna_upstream.py --write
       - name: Verify manifest coverage and revision
         run: |
@@ -45,9 +44,9 @@ jobs:
           retention-days: 15
 
   native-build:
-    name: Windows native build for x86/x64 game targets
+    name: Patched LunaHost build for x86/x64 game targets
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 30
     needs: pinned-source
     strategy:
       fail-fast: false
@@ -65,14 +64,14 @@ jobs:
       - name: Prepare the exact patched native runtime source
         shell: pwsh
         run: python scripts/prepare_luna_native.py --source vendor/luna --target "${{ runner.temp }}/luna-ready"
-      - name: Build complete Luna Hook and Host native targets
+      - name: Build patched LunaHost DLL only
         shell: pwsh
         run: |
-          cmake -S "${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook" -B "${{ runner.temp }}/luna-build" -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DBUILD_GUI=OFF -DBUILD_HOST=ON -DBUILD_HOOK=ON -DWIN10ABOVE=ON
+          cmake -S "${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook" -B "${{ runner.temp }}/luna-build" -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DBUILD_GUI=OFF -DBUILD_HOST=ON -DBUILD_HOOK=OFF -DWIN10ABOVE=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build "${{ runner.temp }}/luna-build" --config Release --parallel 4
+          cmake --build "${{ runner.temp }}/luna-build" --config Release --target LunaHostDll --parallel 4
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify runtime DLL exports from patched build
+      - name: Verify patched Host exports
         shell: pwsh
         run: |
           $suffix = if ('${{ matrix.arch }}' -eq 'x64') { '64' } else { '32' }
@@ -91,7 +90,7 @@ jobs:
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: luna-native-runtime-${{ matrix.arch }}
+          name: luna-native-host-${{ matrix.arch }}
           path: ${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook/builds
           if-no-files-found: error
           retention-days: 15
