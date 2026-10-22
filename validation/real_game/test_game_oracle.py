@@ -56,7 +56,7 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_voice_timing_uses_confirmed_send_not_attempt(self):
         product = [dict(x) for x in self.product]
         attempt = next(x for x in product if x['event'] == 'advance_attempt' and x['line'] == 1)
-        # Preserve the event sequence; move the preflight attempt earlier than
+        # Preserve the event sequence; move the pre-input attempt earlier than
         # observed game playback, while confirmed advance input stays unchanged.
         attempt['at_ns'] -= 200_000_000
         for rec in product:

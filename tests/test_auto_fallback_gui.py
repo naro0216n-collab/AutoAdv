@@ -41,7 +41,7 @@ class TwoModeGuiTests(unittest.TestCase):
                 app = window.application
                 c = app.controller
                 c.input_send = lambda *_: sent.append('advance')
-                c.preflight = lambda *_: True
+                c.target_ready = lambda *_: True
                 app.begin_runtime(profile, Target(100, 200), 'ocr', 1)
                 app.set_auto_advance(True)
                 token = app.observe_runtime_ocr(sequence=1, text='「こんにちは！」', pid=100, session=app.runtime_state().session)

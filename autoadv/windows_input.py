@@ -66,8 +66,8 @@ class WindowsAdvancementInput:
             raise RuntimeError('configured key has no Windows scancode')
         down_message, down_lparam, up_message, up_lparam = key_message_parameters(
             self.virtual_key, scan)
-        # PostMessage preserves queue order.  Unlike the retired global
-        # SendInput path, there is no physical key-state polling to satisfy, so
+        # PostMessage preserves queue order.  Unlike the retired global input
+        # injection path, there is no physical key-state polling to satisfy, so
         # an artificial held-key delay would only postpone acknowledgement.
         self._post(down_message, down_lparam)
         self._post(up_message, up_lparam)
