@@ -78,6 +78,33 @@ class LiveGuiSessionContract(unittest.TestCase):
         driver.tick()
         self.assertEqual(actions, ['close', 'quit'])
 
+    def test_calibration_timeout_keeps_hook_evidence_separate_from_advancement(self):
+        recorded = []
+        closed = []
+        source = SimpleNamespace(identity='hook-a')
+        worker = SimpleNamespace(poll=lambda: None)
+        window = SimpleNamespace(
+            sources={'hook-a': source}, source_samples={'hook-a': ['unrelated text']},
+            ambiguous_sources=set(), host_generation='real-host-generation',
+            connection_generation=1, hook_host=SimpleNamespace(child=worker),
+            validation_trace=SimpleNamespace(emit=lambda name, **kwargs: recorded.append((name, kwargs))),
+            close=lambda: closed.append('window'))
+        app = SimpleNamespace(exit=lambda code: closed.append(code))
+        driver = SessionDriver(window, app, {'timeout_seconds': 30, 'phase': 'native'})
+        driver.state = 'calibration'
+        driver.fail('finite live-run timeout; no manual game input substituted')
+        self.assertEqual(closed, ['window', 3])
+        self.assertEqual(len(recorded), 1)
+        name, fields = recorded[0]
+        self.assertEqual(name, 'validation_driver_failure')
+        self.assertEqual(fields['stage'], 'calibration')
+        self.assertEqual(fields['candidate_hooks'], 1)
+        self.assertEqual(fields['sampled_hooks'], 1)
+        self.assertEqual(fields['calibration_matches'], 0)
+        self.assertTrue(fields['luna_connected'])
+        self.assertTrue(fields['luna_host_alive'])
+        self.assertNotIn('advancement_observed', fields)
+
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(gate='session-gate', executable='renpy.exe',
                      phase='native', timeout_seconds=120)

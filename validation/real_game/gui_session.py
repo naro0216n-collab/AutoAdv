@@ -77,8 +77,26 @@ class SessionDriver:
         self.focus_deadline = None
 
     def fail(self, why):
-        print('AutoAdv live test failed [' + self.state + ']: ' + why, flush=True)
-        self.w.validation_trace.emit('validation_driver_failure', reason=why, stage=self.state)
+        # Diagnostics from the existing Luna/GUI session only; no extra game
+        # watcher, synthesized HOOK, or alternate advancement decision.
+        sources = getattr(self.w, 'sources', {})
+        samples = getattr(self.w, 'source_samples', {})
+        ambiguous = getattr(self.w, 'ambiguous_sources', set())
+        details = dict(
+            luna_connected=bool(getattr(self.w, 'host_generation', None)
+                                and getattr(self.w, 'connection_generation', 0)),
+            candidate_hooks=len(sources),
+            sampled_hooks=sum(bool(samples.get(identity)) for identity in sources),
+            ambiguous_hooks=len(ambiguous),
+            calibration_matches=len(calibration_candidates(sources, samples, ambiguous)),
+        )
+        host = getattr(self.w, 'hook_host', None)
+        child = getattr(host, 'child', None)
+        details['luna_host_alive'] = bool(child is not None and child.poll() is None)
+        print('AutoAdv live test failed [' + self.state + ']: ' + why
+              + ' | Luna state: ' + json.dumps(details, ensure_ascii=False), flush=True)
+        self.w.validation_trace.emit('validation_driver_failure', reason=why,
+                                     stage=self.state, **details)
         self.w.close()
         self.app.exit(3)
 

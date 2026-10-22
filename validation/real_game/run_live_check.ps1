@@ -135,13 +135,15 @@ public static class AudioRenderProbe {
         var enumerator = (IAudioDeviceEnumerator)new AudioDeviceEnumeratorClass();
         try {
             // eRender=0, DEVICE_STATE_ACTIVE=1, eMultimedia=1.
-            enumerator.EnumAudioEndpoints(0, 1, out var collection);
+            IAudioDeviceCollection collection;
+            enumerator.EnumAudioEndpoints(0, 1, out collection);
             uint count;
             try { collection.GetCount(out count); }
             finally { Marshal.ReleaseComObject(collection); }
             string defaultResult;
             try {
-                enumerator.GetDefaultAudioEndpoint(0, 1, out var device);
+                IAudioDevice device;
+                enumerator.GetDefaultAudioEndpoint(0, 1, out device);
                 defaultResult = "present";
                 Marshal.ReleaseComObject(device);
             } catch (COMException e) {
