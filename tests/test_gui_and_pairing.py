@@ -55,7 +55,7 @@ class WindowsGuiInitialization(unittest.TestCase):
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 self.assertEqual(window.speaker_table.rowCount(), 2)
-                self.assertEqual(window.tabs.count(), 5)
+                self.assertEqual(window.tabs.count(), 3)
                 window.example_raw.setPlainText('大和「おはよう」')
                 self.assertIn('話者: 大和', window.editor_preview.toPlainText())
                 self.assertIn('Voice v2', window.editor_preview.toPlainText())
@@ -143,3 +143,86 @@ class WindowsGuiInitialization(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+@unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'Qt runtime required')
+class TaskOrientedGuiContracts(unittest.TestCase):
+    def test_every_advanced_setting_has_a_context_and_inheritance_shows_actual_value(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+        from autoadv.storage import Catalog
+        catalog = Catalog()
+        game = catalog.create_game('作業フロー確認')
+        profile = game.profiles[game.default_profile]
+        profile.reading_ms = 1750
+        catalog.common.reading_ms = 900
+        profile.inherit_common = ['reading_ms']
+
+        def inspect(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            try:
+                self.assertEqual([window.tabs.tabText(i) for i in range(window.tabs.count())],
+                                 ['プレイ', '台詞取得', '台詞・音声'])
+                self.assertFalse(hasattr(window, 'found_hooks'))
+                for section in ('game_details', 'target_details', 'advance_details', 'audio_details',
+                                'hook_details', 'ocr_details', 'irodori', 'extraction', 'replacement'):
+                    self.assertIn(section, window.section_toggles)
+                    self.assertFalse(window.section_toggles[section].isChecked())
+                self.assertTrue(window.inherit_controls['reading_ms'].isChecked())
+                self.assertEqual(window.reading_ms.value(), 900)
+                self.assertFalse(window.reading_ms.isEnabled())
+                window.inherit_controls['reading_ms'].setChecked(False)
+                self.assertTrue(window.reading_ms.isEnabled())
+                window.reading_ms.setValue(1200)
+                self.assertTrue(window.save_profile())
+                self.assertEqual(profile.reading_ms, 1750)  # old instance not overwritten
+                self.assertEqual(window.current_profile().reading_ms, 1200)
+                window.inherit_controls['reading_ms'].setChecked(True)
+                self.assertTrue(window.save_profile())
+                self.assertEqual(window.current_profile().reading_ms, 1200)
+                self.assertEqual(window.reading_ms.value(), 900)
+                window.btn_recovery.click()
+                self.assertTrue(window.section_toggles['hook_details'].isChecked())
+                self.assertEqual(window.tabs.currentIndex(), 1)
+                window.source_mode.setCurrentText('ocr')
+                self.assertTrue(window.section_toggles['ocr_details'].isChecked())
+            finally:
+                window.close()
+            return 0
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', inspect):
+                self.assertEqual(run_gui(), 0)
+
+    def test_livedialogue_edit_and_saved_resume_do_not_authorize_input(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+        from autoadv.storage import Catalog
+        catalog = Catalog()
+        game = catalog.create_game('保存済み作品', 'C:/Game.exe')
+        profile = game.profiles[game.default_profile]
+        profile.hooks = [HookSelection('HOOK-1', 1, 2, 'text')]
+
+        def inspect(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if getattr(w, 'catalog', None) is catalog)
+            try:
+                # An ordinary user can find the related editor directly from a sample.
+                window.example_raw.setPlainText('京「おはよう」')
+                window.btn_edit_detected_speaker.click()
+                self.assertEqual(window.speaker_name.text(), '京')
+                self.assertEqual(window.tabs.currentIndex(), 2)
+                window.btn_fix_extraction.click()
+                self.assertTrue(window.section_toggles['extraction'].isChecked())
+                window.btn_resume.click()
+                self.assertEqual(window.tabs.currentIndex(), 2)  # No PID/window: no connect
+                self.assertFalse(window.controller.authorized)
+                self.assertIsNone(window.controller.profile)
+                self.assertFalse(window._resume_monitor_requested)
+            finally:
+                window.close()
+            return 0
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', inspect):
+                self.assertEqual(run_gui(), 0)

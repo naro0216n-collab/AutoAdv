@@ -112,69 +112,71 @@ class SelectedHookContracts(unittest.TestCase):
 
 @unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'PySide6 required for native GUI acceptance')
 class HookCandidateGuiAcceptance(unittest.TestCase):
-    def test_native_and_search_results_share_one_list_and_one_choice(self):
+    def test_recovery_codes_do_not_look_like_received_dialogue(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
 
         catalog = Catalog()
-        catalog.create_game('Unified HOOK candidates')
+        catalog.create_game('Native dialogue and technical recovery')
         verified = []
 
         def check_widgets(*_):
             window = next(w for w in QApplication.topLevelWidgets()
-                          if w.windowTitle().startswith('AutoAdv') and getattr(w, 'catalog', None) is catalog)
+                          if getattr(w, 'catalog', None) is catalog)
             try:
+                self.assertEqual(window.tabs.count(), 3)
+                self.assertEqual(window.tabs.tabText(0), 'プレイ')
+                self.assertEqual(window.tabs.tabText(1), '台詞取得')
+                self.assertEqual(window.tabs.tabText(2), '台詞・音声')
+                self.assertFalse(window.section_toggles['hook_details'].isChecked())
                 window.pid.setValue(101)
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 existing = source('A', 1)
-                window.on_hook(HookEvent('output', 'host', 7, 2, 200,
+                window.on_hook(HookEvent('created', 'host', 7, 2, 200,
+                                         process_id=101, source=existing))
+                self.assertEqual(window.source_table.rowCount(), 0)
+                window.on_hook(HookEvent('output', 'host', 7, 3, 300,
                                          process_id=101, source=existing, text='台詞A'))
-                window.on_hook(HookEvent('hook_found', 'host', 7, 3, 300,
+                window.on_hook(HookEvent('hook_found', 'host', 7, 4, 400,
                                          process_id=101, text='探索例文', detail='B'))
-                self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertEqual(window.source_table.item(0, 3).text(), '受信中')
-                self.assertEqual(window.source_table.item(1, 3).text(), '探索候補（未追加）')
-                self.assertFalse(hasattr(window, 'found_hooks'))
-                window.source_table.selectRow(1)
-                self.assertEqual(window.selected_search_code(), 'B')
-                self.assertIsNone(window.chosen_source())
-                self.assertEqual(window.hook_preview.toPlainText(), '探索例文')
-                self.assertEqual(window.text_hook.text(), 'この探索候補をゲームへ追加')
-                self.assertFalse(window.speaker_hook.isEnabled())
+                self.assertEqual(window.source_table.rowCount(), 1)
+                self.assertIn('台詞A', window.source_table.item(0, 0).text())
+                self.assertNotIn('探索例文', window.source_table.item(0, 0).text())
+                window.btn_recovery.click()
+                self.assertTrue(window.section_toggles['hook_details'].isChecked())
+                self.assertEqual(window.search_code_choice.count(), 1)
+                self.assertEqual(window.search_code_choice.currentData(), 'B')
                 fake_host = SimpleNamespace(command=Mock())
                 window.hook_host = fake_host
-                window.select_hook('text')
+                window.btn_insert_search.click()
                 fake_host.command.assert_called_once_with('insert_hook', pid=101, code='B')
-                self.assertEqual(window.source_table.item(1, 3).text(), '追加要求済み（本文待ち）')
                 self.assertEqual(window.current_profile().inserted_hooks, ['B'])
                 self.assertEqual(window.current_profile().hooks, [])
-                self.assertFalse(window.manual_hook.text())
-                # The discovered code becomes a real Luna source after injection.
+                # Native creation is not yet game dialogue.
                 found = source('B', 5)
-                window.on_hook(HookEvent('created', 'host', 7, 4, 400,
+                window.on_hook(HookEvent('created', 'host', 7, 5, 500,
                                          process_id=101, source=found))
-                self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertNotIn('B', window.search_rows)
-                self.assertEqual(window.source_table.item(1, 3).text(), 'HOOK生成済み')
-                window.on_hook(HookEvent('output', 'host', 7, 5, 500,
+                self.assertEqual(window.source_table.rowCount(), 1)
+                self.assertEqual(window.search_code_choice.count(), 0)
+                window.on_hook(HookEvent('output', 'host', 7, 6, 600,
                                          process_id=101, source=found, text='台詞B'))
+                self.assertEqual(window.source_table.rowCount(), 2)
                 window.source_table.selectRow(1)
-                self.assertEqual(window.text_hook.text(), 'この候補を本文に使用')
                 window.select_hook('text')
                 self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
-                # A supplementary rescan clears only uninserted search rows.
-                window.on_hook(HookEvent('hook_found', 'host', 7, 6, 600,
-                                         process_id=101, text='探索C', detail='C'))
-                self.assertEqual(window.source_table.rowCount(), 3)
+                window.on_hook(HookEvent('hook_found', 'host', 7, 7, 700,
+                                         process_id=101, text='探索例文C', detail='C'))
+                self.assertEqual(window.source_table.rowCount(), 2)
+                self.assertEqual(window.search_code_choice.count(), 1)
                 window.clear_search_candidates()
                 self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertEqual(len(window.sources), 2)
-                # Stale results from an earlier host session must be ignored.
-                window.on_hook(HookEvent('hook_found', 'other-host', 8, 7, 700,
+                self.assertEqual(window.search_code_choice.count(), 0)
+                # Old connection's late search response cannot pollute a new session.
+                window.on_hook(HookEvent('hook_found', 'other-host', 8, 8, 800,
                                          process_id=101, text='古い', detail='OLD'))
-                self.assertEqual(window.source_table.rowCount(), 2)
-                verified.append('unified')
+                self.assertEqual(window.search_code_choice.count(), 0)
+                verified.append('native-only')
             finally:
                 window.hook_host = None
                 window.close()
@@ -183,7 +185,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
-        self.assertEqual(verified, ['unified'])
+        self.assertEqual(verified, ['native-only'])
 
     def test_compare_choose_save_reorder_and_restore_in_real_widgets(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -220,6 +222,9 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.on_hook(HookEvent('created', 'newhost', 8, 6, 600, process_id=101, source=source('B', 3, 0xBEE)))
                 self.assertIn('1/2', window.hook_reconnect.text())
                 self.assertEqual(window.saved_hook_choice.count(), 2)
+                self.assertEqual(window.source_table.rowCount(), 0)
+                window.on_hook(HookEvent('output', 'newhost', 8, 7, 650,
+                                         process_id=101, source=source('B', 3, 0xBEE), text='再接続後の本文'))
                 self.assertEqual(window.source_table.rowCount(), 1)
                 self.assertIn('text #1', window.source_table.item(0, 1).text())
                 # Same saved identity appearing in two native threads is not
@@ -227,7 +232,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.on_hook(HookEvent('created', 'newhost', 8, 7, 700,
                               process_id=101, source=source('B', 3, 0xC0DE)))
                 self.assertIn('ambiguous', window.hook_reconnect.text())
-                self.assertEqual(window.source_table.rowCount(), 2)
+                self.assertEqual(window.source_table.rowCount(), 1)
                 self.assertIsNone(window.chosen_source())
                 window.hwnd.setText('0x1234')
                 window.begin_monitor()

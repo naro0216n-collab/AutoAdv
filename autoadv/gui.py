@@ -32,7 +32,7 @@ from .validation_trace import ValidationTrace, text_digest
 
 
 def run_gui(session_driver=None) -> int:
-    from PySide6.QtCore import QObject, Signal, QTimer
+    from PySide6.QtCore import QObject, Signal, QTimer, Qt
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
                                    QLabel, QPushButton, QComboBox, QFileDialog,
@@ -83,12 +83,14 @@ def run_gui(session_driver=None) -> int:
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
+            self._resume_monitor_requested = False
             self.sources: dict[str, ThreadSource] = {}
             self.source_samples: dict[str, deque[str]] = {}
             self.ambiguous_sources: set[str] = set()
             self.source_rows: dict[tuple[str, int], int] = {}
-            self.search_rows: dict[str, int] = {}
-            self.search_samples: dict[str, str] = {}
+            # Advanced search results are candidate HOOK codes, not dialogue
+            # samples and never enter the live dialogue candidate list.
+            self.search_codes: set[str] = set()
             self.search_insert_requested: set[str] = set()
             self.game_id = ''
             self.profile_id = ''
@@ -105,46 +107,85 @@ def run_gui(session_driver=None) -> int:
             self._output_timer = QTimer(self)
             self._output_timer.setSingleShot(True)
             self._output_timer.timeout.connect(self.flush_selected_outputs)
-            # The normal first-run workflow is foremost; specialist settings have
-            # their own tabs, rather than filling the first screen with ABI fields.
+            # The interface follows work: play, acquire dialogue, correct dialogue.
+            # A detail expands beside the operation it affects; no miscellaneous tab.
             tabs = QTabWidget()
             root = QWidget()
             root_layout = QVBoxLayout(root)
-            self.context_banner = QLabel('編集対象: 作品が選択されていません')
-            self.context_banner.setStyleSheet('font-weight: 600; padding: 6px;')
+            self.context_banner = QLabel('作品を選択してください')
+            self.context_banner.setStyleSheet('font-size: 15px; font-weight: 600; padding: 7px;')
             root_layout.addWidget(self.context_banner)
+            overview = QHBoxLayout()
+            self.overview_capture = QLabel('取得: 未接続')
+            self.overview_voice = QLabel('音声: 未接続')
+            self.overview_advance = QLabel('自動送り: 停止')
+            for label in (self.overview_capture, self.overview_voice, self.overview_advance):
+                label.setStyleSheet('padding: 6px; border: 1px solid palette(mid); border-radius: 4px;')
+                overview.addWidget(label, 1)
+            root_layout.addLayout(overview)
             root_layout.addWidget(tabs, 1)
             self.setCentralWidget(root)
             pages = {}
-            for key, name in (('home', 'ゲーム・自動進行'), ('hook', 'HOOK候補'),
-                              ('speakers', '話者・音声'), ('text', '本文整形'), ('settings', '詳細・共通設定')):
+            self.page_scrollers = {}
+            for key, name in (('home', 'プレイ'), ('hook', '台詞取得'), ('tune', '台詞・音声')):
                 scroller = QScrollArea()
                 scroller.setWidgetResizable(True)
                 panel = QWidget()
                 scroller.setWidget(panel)
                 layout = QVBoxLayout(panel)
-                if key == 'text':
+                layout.setSpacing(14)
+                if key == 'tune':
                     self.text_tab_index = tabs.count()
-                    text_page = QWidget()
-                    text_layout = QVBoxLayout(text_page)
+                    tune_page = QWidget()
+                    tune_layout = QVBoxLayout(tune_page)
                     text_preview_area = QVBoxLayout()
-                    text_layout.addLayout(text_preview_area)
-                    text_layout.addWidget(scroller, 1)
-                    tabs.addTab(text_page, name)
+                    tune_layout.addLayout(text_preview_area)
+                    tune_layout.addWidget(scroller, 1)
+                    tabs.addTab(tune_page, name)
                 else:
                     tabs.addTab(scroller, name)
                 pages[key] = layout
+                self.page_scrollers[key] = scroller
+            pages['speakers'] = pages['tune']
+            pages['text'] = pages['tune']
             self.tabs = tabs
+            self.ui_sections = {}
+            self.section_toggles = {}
 
-            def group(title, *, page='home'):
-                widget = QGroupBox(title)
-                form = QFormLayout(widget)
-                if page == 'text' and title.startswith('適用前後を試す'):
+            def group(title, *, page='home', section=None, detail=False):
+                box = QGroupBox(title)
+                form = QFormLayout(box)
+                if detail:
+                    wrapper = QWidget()
+                    outer = QVBoxLayout(wrapper)
+                    outer.setContentsMargins(0, 0, 0, 0)
+                    toggle = QToolButton()
+                    toggle.setText('詳細設定: ' + title)
+                    toggle.setCheckable(True)
+                    toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+                    toggle.setArrowType(Qt.ArrowType.RightArrow)
+                    toggle.toggled.connect(box.setVisible)
+                    if section:
+                        self.section_toggles[section] = toggle
+                    toggle.toggled.connect(lambda checked, button=toggle:
+                                           button.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow))
+                    box.setVisible(False)
+                    outer.addWidget(toggle)
+                    outer.addWidget(box)
+                    widget = wrapper
+                else:
+                    widget = box
+                if section == 'live_preview':
                     text_preview_area.addWidget(widget)
                 else:
                     pages[page].addWidget(widget)
+                if section:
+                    self.ui_sections[section] = widget
                 return form
-            environment = group('共通環境（詳細設定）', page='settings')
+
+            # Shared defaults are edited near the relevant game setting rather
+            # than collected in a parallel and unrelated configuration screen.
+            environment = group('Irodori接続と共通Voice設定', page='tune', section='irodori', detail=True)
             self.irodori_path = QLineEdit(self.catalog.irodori_root)
             self.luna_runtime_status = QLabel(f'{RELEASE}: {runtime_dir()}')
             self.irodori_url = QLineEdit(self.catalog.irodori_url)
@@ -152,8 +193,9 @@ def run_gui(session_driver=None) -> int:
             environment.addRow('Irodori接続先URL', self.irodori_url)
             environment.addRow('同梱Luna実行資産の場所', self.luna_runtime_status)
             self.btn_server = QPushButton('Irodoriに接続してVoice一覧を取得')
-            environment.addRow(self.btn_server)
             self.btn_server.clicked.connect(self.start_server)
+            common_advance = group('共通の進行設定', section='common_advance', detail=True)
+            common_audio = group('音声判断の共通環境', section='common_audio', detail=True)
             self.common_controls = {}
             common_titles = {
                 'advance_mode': '自動進行方式', 'uncertain_text_fallback': '音声判定が不確かなとき文字数時間で進む',
@@ -184,19 +226,26 @@ def run_gui(session_driver=None) -> int:
                 else:
                     control = QLineEdit(value)
                 self.common_controls[key] = control
-                environment.addRow('共通: ' + common_titles[key], control)
-            self.btn_save_common = QPushButton('共通設定を保存')
+                destination = (environment if key in ('default_tts', 'default_voice') else
+                               common_audio if key in ('native_helper', 'asr_model', 'asr_tokens') else
+                               common_advance)
+                destination.addRow(common_titles[key], control)
+            self.btn_save_common = QPushButton('共通の既定値を保存')
             self.btn_save_common.clicked.connect(self.save_common)
-            environment.addRow(self.btn_save_common)
+            # All field groups share one catalog.common; each offers the same
+            # explicit save, avoiding auto-writing global settings on navigation.
+            for destination in (environment, common_advance, common_audio):
+                button = self.btn_save_common if destination is common_advance else QPushButton('共通の既定値を保存')
+                if button is not self.btn_save_common:
+                    button.clicked.connect(self.save_common)
+                destination.addRow(button)
             self.server_status = QLabel('Irodori: not connected')
-            environment.addRow(self.server_status)
             self.btn_host = QPushButton('LunaHook Hostを単独起動（通常は接続時に自動起動）')
-            environment.addRow(self.btn_host)
             self.btn_host.clicked.connect(self.start_host)
             self.host_status = QLabel('LunaHook: disconnected')
 
-            games = group('ゲームを選ぶ')
-            game_details = group('作品・プロファイルの詳細登録', page='settings')
+            games = group('ゲームを選ぶ', section='games')
+            game_details = group('作品・プロファイルの管理', section='game_details', detail=True)
             self.game_choice = QComboBox()
             self.game_choice.currentIndexChanged.connect(self.choose_game)
             games.addRow('作品', self.game_choice)
@@ -217,10 +266,8 @@ def run_gui(session_driver=None) -> int:
             game_details.addRow('ゲーム実行ファイル', self.game_exe)
             self.audio_exe = QLineEdit()
             self.audio_exe.setPlaceholderText('Optional: separate audio process executable')
-            game_details.addRow('音声出力プロセスのEXE（別プロセス時のみ）', self.audio_exe)
             self.input_exe = QLineEdit()
             self.input_exe.setPlaceholderText('Optional: separate input window executable')
-            game_details.addRow('入力対象のEXE（別プロセス時のみ）', self.input_exe)
             self.btn_launch = QPushButton('登録済みのゲームを起動')
             self.btn_launch.clicked.connect(self.launch_game)
             games.addRow(self.btn_launch)
@@ -252,8 +299,13 @@ def run_gui(session_driver=None) -> int:
                 game_details.addRow(button)
                 button.clicked.connect(handler)
 
-            capture = group('HOOK候補・本文の確認と選択', page='hook')
-            hook_details = group('HOOKと入力対象の詳細指定', page='settings')
+            capture = group('ゲームから取得した台詞を選ぶ', page='hook', section='capture')
+            hook_details = group('HOOKの取得条件・手動操作', page='hook', section='hook_details', detail=True)
+            hook_details.addRow(self.btn_host)
+            target_details = group('別プロセスと入力先の指定', section='target_details', detail=True)
+            target_details.addRow('音声出力プロセスのEXE（別プロセス時のみ）', self.audio_exe)
+            target_details.addRow('入力対象のEXE（別プロセス時のみ）', self.input_exe)
+            ocr_details = group('OCRによる台詞取得の設定', page='hook', section='ocr_details', detail=True)
             self.hook_target = QLabel('まず「ゲーム・自動進行」で実行中のゲームを選択してください')
             capture.addRow(self.hook_target)
             self.pid = QSpinBox()
@@ -267,9 +319,9 @@ def run_gui(session_driver=None) -> int:
             self.input_pid = QSpinBox()
             self.input_pid.setRange(0, 2147483647)
             self.input_pid.setSpecialValueText('Use HOOK PID')
-            hook_details.addRow('Audio process PID (0 = HOOK)', self.audio_pid)
-            hook_details.addRow('Input window PID (0 = HOOK)', self.input_pid)
-            hook_details.addRow('Game HWND (current run)', self.hwnd)
+            target_details.addRow('音声出力プロセスPID（未指定ならHOOK）', self.audio_pid)
+            target_details.addRow('入力先プロセスPID（未指定ならHOOK）', self.input_pid)
+            target_details.addRow('入力先ウィンドウ識別子（HWND）', self.hwnd)
             self.attach = QPushButton('選択したゲームにLunaHookを接続')
             self.attach.clicked.connect(self.connect_game)
             capture.addRow(self.attach)
@@ -284,35 +336,37 @@ def run_gui(session_driver=None) -> int:
             self.btn_input_target = QPushButton('Find input window by saved executable')
             self.btn_audio_target.clicked.connect(lambda: self.detect_associated_target('audio'))
             self.btn_input_target.clicked.connect(lambda: self.detect_associated_target('input'))
-            hook_details.addRow(self.btn_audio_target)
-            hook_details.addRow(self.btn_input_target)
+            target_details.addRow(self.btn_audio_target)
+            target_details.addRow(self.btn_input_target)
             self.source_mode = QComboBox()
             self.source_mode.addItems(['hook', 'ocr'])
-            capture.addRow('台詞の取得方法（HOOK / OCR）', self.source_mode)
+            capture.addRow('取得方法', self.source_mode)
             self.ocr_exe = QLineEdit('tesseract')
             self.ocr_lang = QLineEdit('jpn')
             self.ocr_region = QLineEdit('0,0,640,180')
-            hook_details.addRow('Tesseractの実行ファイル', self.ocr_exe)
-            hook_details.addRow('OCRの言語', self.ocr_lang)
-            hook_details.addRow('OCRの領域 x,y,幅,高さ', self.ocr_region)
+            ocr_details.addRow('Tesseractの実行ファイル', self.ocr_exe)
+            ocr_details.addRow('OCRの言語', self.ocr_lang)
+            ocr_details.addRow('OCRの領域 x,y,幅,高さ', self.ocr_region)
             self.ocr_stability = QSpinBox()
             self.ocr_stability.setRange(1, 10)
-            hook_details.addRow('OCRの安定確認回数', self.ocr_stability)
-            self.source_table = QTableWidget(0, 7)
-            self.source_table.setHorizontalHeaderLabels(['本文・探索サンプル', '割当', 'HOOKコード・名称', '状態', 'PID', 'Context', 'Thread'])
+            ocr_details.addRow('OCRの安定確認回数', self.ocr_stability)
+            self.source_mode.currentTextChanged.connect(
+                lambda selected: self.reveal_section('ocr_details', 'hook') if selected == 'ocr' else None)
+            self.source_table = QTableWidget(0, 4)
+            self.source_table.setHorizontalHeaderLabels(['実際に受信した本文', '用途', '取得元', '受信状態'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.source_table.setMinimumHeight(205)
             self.source_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             self.source_table.setColumnWidth(1, 120)
-            self.source_table.setColumnWidth(2, 160)
+            self.source_table.setColumnWidth(2, 140)
             self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
-            capture.addRow('候補一覧（通常取得・追加探索を同じ一覧に表示）', self.source_table)
+            capture.addRow('取得した本文', self.source_table)
             self.hook_preview = QPlainTextEdit()
             self.hook_preview.setReadOnly(True)
             self.hook_preview.setMaximumHeight(130)
-            capture.addRow('選択した候補の原文プレビュー', self.hook_preview)
+            capture.addRow('選択した本文と直近の履歴', self.hook_preview)
             self.btn_test_hook_text = QPushButton('この候補の原文を本文整形で試す')
             self.btn_test_hook_text.clicked.connect(self.use_selected_hook_as_example)
             capture.addRow(self.btn_test_hook_text)
@@ -324,17 +378,22 @@ def run_gui(session_driver=None) -> int:
             row.addWidget(self.text_hook)
             row.addWidget(self.speaker_hook)
             capture.addRow(row)
-            self.btn_recovery = QToolButton()
-            self.btn_recovery.setText('候補が表示されない場合 ▾')
-            self.btn_recovery.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-            recovery_menu = QMenu(self.btn_recovery)
-            self.btn_find = recovery_menu.addAction('通常候補以外も探索する')
-            self.btn_find.triggered.connect(self.find_hooks)
-            self.btn_pc_hooks = recovery_menu.addAction('Win32汎用HOOKを追加する')
-            self.btn_pc_hooks.triggered.connect(self.insert_pc_hooks)
-            self.btn_recovery.setMenu(recovery_menu)
+            self.btn_recovery = QPushButton('取得できない・文字化けする場合の調整')
+            self.btn_recovery.clicked.connect(lambda: self.reveal_section('hook_details', 'hook'))
             capture.addRow(self.btn_recovery)
-            capture.addRow(QLabel('ゲームで台詞を表示し、本文が出た行を選択します。追加探索の結果もここに表示されます。'))
+            self.btn_find = QPushButton('別のHOOKを探索する')
+            self.btn_find.clicked.connect(self.find_hooks)
+            hook_details.addRow(self.btn_find)
+            self.btn_pc_hooks = QPushButton('Win32汎用HOOKを追加する')
+            self.btn_pc_hooks.clicked.connect(self.insert_pc_hooks)
+            hook_details.addRow(self.btn_pc_hooks)
+            hook_details.addRow(QLabel('高度なHOOK探索の結果は本文候補としては扱いません。実際の出力が確認できた時点で上の一覧に現れます。'))
+            self.search_code_choice = QComboBox()
+            hook_details.addRow('追加探索で検出したコード（本文ではない）', self.search_code_choice)
+            self.btn_insert_search = QPushButton('このコードで本文の取得を試す')
+            self.btn_insert_search.clicked.connect(self.insert_selected_search)
+            hook_details.addRow(self.btn_insert_search)
+            capture.addRow(QLabel('ゲーム内で台詞を表示すると、実際に受信された本文が並びます。'))
             self.insert_pc_hooks_on_attach = QCheckBox('この作品では接続時にWin32汎用HOOKを追加する')
             hook_details.addRow(self.insert_pc_hooks_on_attach)
             self.hook_capture_status = QLabel('HOOK取得: 未接続')
@@ -342,6 +401,9 @@ def run_gui(session_driver=None) -> int:
             self.manual_hook = QLineEdit()
             self.manual_hook.setPlaceholderText('Manual Luna HOOK code')
             hook_details.addRow('手動HOOKコード（通常は不要）', self.manual_hook)
+            self.hook_technical_info = QLabel('取得元を選択すると識別情報を表示します')
+            self.hook_technical_info.setWordWrap(True)
+            hook_details.addRow('現在選択中の取得元', self.hook_technical_info)
             self.btn_insert = QPushButton('詳細操作: HOOKコードを手動追加')
             self.btn_insert.clicked.connect(self.insert_hook)
             hook_details.addRow(self.btn_insert)
@@ -373,11 +435,15 @@ def run_gui(session_driver=None) -> int:
             hook_details.addRow(self.btn_pair)
             self.btn_monitor = QPushButton('選択したHOOKで監視開始')
             self.btn_monitor.clicked.connect(self.begin_monitor)
-            capture.addRow(self.btn_monitor)
+            self.btn_to_play = QPushButton('台詞を選択できたらプレイ画面へ')
+            self.btn_to_play.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
+            capture.addRow(self.btn_to_play)
 
             # Multiple saved speaker assignments are visible as rows. Selection
             # edits a *single row*, never silently overwrites an unrelated name.
-            speech = group('1. 話者別の音声設定', page='speakers')
+            speech = group('話者別の音声設定', page='tune', section='speakers')
+            speech.addRow(self.btn_server)
+            speech.addRow(self.server_status)
             speech.addRow(QLabel('この作品の話者ごとにTTS使用有無とVoiceを設定します。'
                                  '一覧にない話者には以下の既定設定が使われます。'))
             self.default_tts = QCheckBox('未登録の話者でもTTSで読み上げる')
@@ -421,7 +487,7 @@ def run_gui(session_driver=None) -> int:
             self.speaker_preview.setReadOnly(True)
             self.speaker_preview.setMinimumHeight(115)
             speech.addRow('話者設定の適用結果（本文整形タブの例文と連動）', self.speaker_preview)
-            audition = group('2. Irodori Voiceの試聴', page='speakers')
+            audition = group('Voiceの試聴', page='tune', section='audition')
             self.audition_text = QLineEdit('音声の試聴です。')
             audition.addRow('試聴する文章', self.audition_text)
             row = QHBoxLayout()
@@ -434,7 +500,7 @@ def run_gui(session_driver=None) -> int:
             audition.addRow(row)
 
             # The very same product interpreter is used for this test surface.
-            preview = group('適用前後を試す（ゲームへの入力・音声再生なし）', page='text')
+            preview = group('原文と調整結果（実際の解釈経路を使用）', page='tune', section='live_preview')
             preview.addRow(QLabel('HOOKから受信した原文、または任意の台詞を入力します。'
                                   '規則は上から順に評価され、抽出は最初の一致だけを採用します。'))
             self.example_raw = QPlainTextEdit()
@@ -451,10 +517,20 @@ def run_gui(session_driver=None) -> int:
             self.editor_preview.setReadOnly(True)
             self.editor_preview.setMinimumHeight(155)
             preview.addRow('適用後（本文・話者・TTS文・ASR照合文・Voice）', self.editor_preview)
+            quick = QHBoxLayout()
+            self.btn_edit_detected_speaker = QPushButton('この話者の音声を設定')
+            self.btn_edit_detected_speaker.clicked.connect(self.edit_detected_speaker)
+            self.btn_fix_extraction = QPushButton('話者・本文の切り出しを修正')
+            self.btn_fix_extraction.clicked.connect(lambda: self.show_task_section('extraction'))
+            self.btn_fix_reading = QPushButton('名前・単語の読みを修正')
+            self.btn_fix_reading.clicked.connect(self.edit_preview_reading)
+            for button in (self.btn_edit_detected_speaker, self.btn_fix_extraction, self.btn_fix_reading):
+                quick.addWidget(button)
+            preview.addRow(quick)
             self.preview_state = QLabel('保存済みの作品設定を使用')
             preview.addRow(self.preview_state)
 
-            extraction = group('1. 話者と本文の抽出（先頭に近い規則が優先）', page='text')
+            extraction = group('話者と本文の切り出しを調整', page='tune', section='extraction', detail=True)
             extraction.addRow(QLabel('正規表現では本文に (?P<body>...) 、話者を取る場合は'
                                      ' (?P<speaker>...) を指定します。最初に一致した有効規則だけを使います。'))
             self.structure_table = QTableWidget(0, 4)
@@ -503,7 +579,7 @@ def run_gui(session_driver=None) -> int:
                 row.addWidget(btn)
             extraction.addRow(row)
 
-            replacement = group('2. 読み上げ用・原音照合用の文字列置換（上から順に適用）', page='text')
+            replacement = group('読み上げ・音声照合の置換規則', page='tune', section='replacement', detail=True)
             replacement.addRow(QLabel('表示本文は変更しません。TTSは読み上げ文、ASRは原音照合文のみを変更します。'))
             self.replacement_table = QTableWidget(0, 5)
             self.replacement_table.setHorizontalHeaderLabels(['有効', '一致対象', '置換後', '適用先', '正規表現'])
@@ -544,7 +620,7 @@ def run_gui(session_driver=None) -> int:
             row.addWidget(self.btn_replace_down)
             replacement.addRow(row)
 
-            reading = group('3. 固有名詞の読み（TTSの読み上げ文のみ）', page='text')
+            reading = group('固有名詞の読みを直す', page='tune', section='reading')
             reading.addRow(QLabel('漢字の単語境界で読み替えます。長い単語を先に処理します。'
                                   '表示本文やASR照合文は変更しません。'))
             self.reading_table = QTableWidget(0, 2)
@@ -568,7 +644,9 @@ def run_gui(session_driver=None) -> int:
             row.addWidget(self.btn_reading_remove)
             reading.addRow(row)
 
-            advanced = group('取得・音声・入力の詳細設定（通常は変更不要）', page='settings')
+            advanced = hook_details
+            audio_details = group('音声判断のモデルと捕捉環境', section='audio_details', detail=True)
+            advance_details = group('送り操作と待機条件', section='advance_details', detail=True)
             self.hook_flush = QSpinBox()
             self.hook_flush.setRange(0, 10000)
             advanced.addRow('Luna HOOK出力までの待機（ms）', self.hook_flush)
@@ -584,32 +662,31 @@ def run_gui(session_driver=None) -> int:
             advanced.addRow('Luna文字バッファの上限', self.hook_buffer)
             self.input_key = QSpinBox()
             self.input_key.setRange(1, 254)
-            advanced.addRow('送信する仮想キーコード', self.input_key)
+            advance_details.addRow('送信する仮想キーコード', self.input_key)
             self.native_helper = QLineEdit()
             self.asr_model = QLineEdit()
             self.asr_tokens = QLineEdit()
-            advanced.addRow('音声捕捉ヘルパーDLL（音声判断のみ）', self.native_helper)
-            advanced.addRow('日本語ASRモデル（音声判断のみ）', self.asr_model)
-            advanced.addRow('ASR語彙ファイル', self.asr_tokens)
+            audio_details.addRow('音声捕捉ヘルパーDLL（音声判断のみ）', self.native_helper)
+            audio_details.addRow('日本語ASRモデル（音声判断のみ）', self.asr_model)
+            audio_details.addRow('ASR語彙ファイル', self.asr_tokens)
             self.next_line_timeout = QSpinBox()
             self.next_line_timeout.setRange(1000, 120000)
-            advanced.addRow('次の台詞を待つ時間（ms）', self.next_line_timeout)
+            advance_details.addRow('次の台詞を待つ時間（ms）', self.next_line_timeout)
             self.repeat = QComboBox()
             self.repeat.addItem('連続した同文を重複として扱う', 'distinct_only')
             self.repeat.addItem('送り後の同文は別台詞として扱う', 'each_after_input')
-            advanced.addRow('同一本文の連続取得', self.repeat)
+            advance_details.addRow('同一本文の連続取得', self.repeat)
             self.inherit_controls = {}
-            for key in COMMON_FIELDS:
-                control = QCheckBox('共通設定を継承: ' + key.replace('_', ' '))
-                self.inherit_controls[key] = control
-                advanced.addRow(control)
-            self.btn_save = QPushButton('この作品の設定を保存')
+            self.btn_save = QPushButton('作品の設定を保存')
             self.btn_save.clicked.connect(self.save_profile)
-            advanced.addRow(self.btn_save)
+            live_dialogue = group('現在の台詞と適用結果', section='current_dialogue')
             self.preview = QPlainTextEdit()
             self.preview.setReadOnly(True)
-            self.preview.setMaximumHeight(125)
-            pages['home'].addWidget(self.preview)
+            self.preview.setMinimumHeight(95)
+            live_dialogue.addRow(self.preview)
+            self.btn_edit_current = QPushButton('現在の台詞を使って本文・話者を調整')
+            self.btn_edit_current.clicked.connect(self.edit_current_dialogue)
+            live_dialogue.addRow(self.btn_edit_current)
 
             for w in (self.structure_pattern, self.structure_condition, self.replace_pattern,
                       self.replace_value, self.reading_word, self.reading_value, self.speaker_name):
@@ -619,7 +696,11 @@ def run_gui(session_driver=None) -> int:
                 w.toggled.connect(lambda _=None, control=w: self.preview_from_control(control))
             for w in (self.replace_target, self.default_voice, self.speaker_voice):
                 w.currentTextChanged.connect(lambda _=None, control=w: self.preview_from_control(control))
-            advance = group('自動進行（TTS使用設定とは独立）')
+            advance = group('進行方式と自動送り', section='advance')
+            advance.addRow(self.btn_monitor)
+            self.btn_resume = QPushButton('保存した設定で接続・監視（自動送りは停止のまま）')
+            self.btn_resume.clicked.connect(self.resume_saved_game)
+            games.addRow(self.btn_resume)
             self.advance_mode = QComboBox()
             self.advance_mode.addItem('文字のみ判断', AdvanceMode.TEXT.value)
             self.advance_mode.addItem('音声判断', AdvanceMode.AUDIO.value)
@@ -645,10 +726,46 @@ def run_gui(session_driver=None) -> int:
             advance.addRow(row)
             self.status = QLabel('Status: not monitoring')
             advance.addRow(self.status)
+            advance.addRow(self.btn_save)
+            inherit_targets = {
+                'default_tts': speech, 'default_voice': speech,
+                'native_helper': audio_details, 'asr_model': audio_details, 'asr_tokens': audio_details,
+                'input_key': advance_details, 'next_line_timeout_ms': advance_details,
+                'advance_mode': advance, 'uncertain_text_fallback': advance,
+                'reading_ms': advance, 'per_character_wait_ms': advance,
+            }
+            self.profile_field_controls = {
+                'advance_mode': self.advance_mode,
+                'uncertain_text_fallback': self.uncertain_text_fallback,
+                'default_tts': self.default_tts, 'default_voice': self.default_voice,
+                'reading_ms': self.reading_ms,
+                'per_character_wait_ms': self.per_character_wait_ms,
+                'native_helper': self.native_helper, 'asr_model': self.asr_model,
+                'asr_tokens': self.asr_tokens, 'input_key': self.input_key,
+                'next_line_timeout_ms': self.next_line_timeout,
+            }
+            for key in COMMON_FIELDS:
+                control = QCheckBox('共通設定を継承: ' + common_titles[key])
+                self.inherit_controls[key] = control
+                control.toggled.connect(lambda _checked, name=key: self.refresh_inherited_control(name))
+                inherit_targets[key].addRow(control)
             self.log = QPlainTextEdit()
             self.log.setReadOnly(True)
             self.log.setMaximumHeight(120)
             pages['home'].addWidget(self.log)
+            section_order = {
+                'home': ('games', 'game_details', 'current_dialogue', 'advance', 'advance_details',
+                         'target_details', 'audio_details', 'common_advance', 'common_audio'),
+                'hook': ('capture', 'hook_details', 'ocr_details'),
+                'tune': ('speakers', 'audition', 'irodori', 'reading', 'extraction', 'replacement'),
+            }
+            for page, order in section_order.items():
+                layout = pages[page]
+                for position, section in enumerate(order):
+                    widget = self.ui_sections[section]
+                    layout.removeWidget(widget)
+                    layout.insertWidget(position, widget)
+                layout.addStretch(1)
             self.intervention_timer = QTimer(self)
             self.intervention_timer.setInterval(150)
             self.intervention_timer.timeout.connect(self.check_intervention)
@@ -726,8 +843,16 @@ def run_gui(session_driver=None) -> int:
             return game.profiles.get(self.profile_id) if game else None
 
         def choose_game(self, *_):
+            self._resume_monitor_requested = False
             self.stop_session()
+            if self.hook_host:
+                self.hook_host.close()
+                self.hook_host = None
+            self.host_generation = ''
+            self.connection_generation = 0
+            self.attached_pid = 0
             self.clear_hook_observations()
+            self.host_status.setText('LunaHook: 未接続')
             self.pid.setValue(0)
             self.audio_pid.setValue(0)
             self.input_pid.setValue(0)
@@ -752,7 +877,34 @@ def run_gui(session_driver=None) -> int:
             self.profile_choice.blockSignals(False)
             self.choose_profile()
 
+        def refresh_inherited_control(self, key: str):
+            """The displayed value and editability agree with the saved source."""
+            checkbox = self.inherit_controls[key]
+            control = self.profile_field_controls[key]
+            inherited = checkbox.isChecked()
+            control.setEnabled(not inherited)
+            if not inherited:
+                return
+            value = getattr(self.catalog.common, key)
+            was_blocked = control.blockSignals(True)
+            try:
+                if isinstance(control, QCheckBox):
+                    control.setChecked(value)
+                elif isinstance(control, QSpinBox):
+                    control.setValue(value)
+                elif isinstance(control, QComboBox):
+                    if key == 'advance_mode':
+                        control.setCurrentIndex(control.findData(value.value))
+                    else:
+                        control.setEditText(value)
+                else:
+                    control.setText(value)
+            finally:
+                control.blockSignals(was_blocked)
+            self.refresh_rule_preview()
+
         def choose_profile(self, *_):
+            self._resume_monitor_requested = False
             self.stop_session()
             self.profile_id = self.profile_choice.currentData() or ''
             profile = self.current_profile()
@@ -790,6 +942,8 @@ def run_gui(session_driver=None) -> int:
             self.asr_model.setText(effective.asr_model)
             self.asr_tokens.setText(effective.asr_tokens)
             self.next_line_timeout.setValue(effective.next_line_timeout_ms)
+            for field in COMMON_FIELDS:
+                self.refresh_inherited_control(field)
             self.refresh_rules()
             self.refresh_selected_hooks()
             self.refresh_speaker_choices()
@@ -853,6 +1007,10 @@ def run_gui(session_driver=None) -> int:
                 updated.input_key = self.input_key.value()
                 updated.repeat_rule = self.repeat.currentData()
                 updated.inherit_common = [key for key, widget in self.inherit_controls.items() if widget.isChecked()]
+                # Inherited values are not custom overrides. Retain dormant
+                # per-game values so switching inheritance off restores them.
+                for field in updated.inherit_common:
+                    setattr(updated, field, getattr(p, field))
                 updated.validate()
                 game = self.catalog.games[self.game_id]
                 game.profiles[updated.id] = updated
@@ -1283,11 +1441,63 @@ def run_gui(session_driver=None) -> int:
                     f'例文の設定: TTS {"使用" if u.use_tts else "不使用"} / '
                     f'Voice {u.voice or "（未指定）"}\n'
                     f'例文に適用した設定: {"話者別" if u.speaker in draft.speaker_tts or u.speaker in draft.speaker_voices else "作品既定"}')
+                self._preview_utterance = u
+                self.btn_edit_detected_speaker.setEnabled(bool(u.speaker))
                 self.preview_state.setText('保存済み設定の結果' if kind is None else
                     '編集中の入力値を仮適用しています。変更は「追加・変更」から保存してください。')
             except (ValueError, re.error, IndexError) as exc:
+                self._preview_utterance = None
+                self.btn_edit_detected_speaker.setEnabled(False)
                 self.editor_preview.setPlainText('編集中の規則は適用できません: ' + str(exc))
                 self.preview_state.setText('設定を修正するまで保存できません。')
+
+        def reveal_section(self, section: str, page: str):
+            """Contextual navigation: basic result -> relevant detailed controls."""
+            toggle = self.section_toggles.get(section)
+            if toggle:
+                toggle.setChecked(True)
+            page_index = {'home': 0, 'hook': 1, 'tune': 2}[page]
+            self.tabs.setCurrentIndex(page_index)
+            widget = self.ui_sections.get(section)
+            if widget is not None:
+                QTimer.singleShot(0, lambda w=widget, p=page:
+                    self.page_scrollers[p].ensureWidgetVisible(w, 0, 22))
+
+        def show_task_section(self, section: str):
+            self.reveal_section(section, 'tune')
+
+        def edit_detected_speaker(self):
+            u = getattr(self, '_preview_utterance', None)
+            if not u or not u.speaker:
+                self.show_task_section('extraction')
+                return
+            self.speaker_table.clearSelection()
+            for row in range(self.speaker_table.rowCount()):
+                if self.speaker_table.item(row, 0).text() == u.speaker:
+                    self.speaker_table.selectRow(row)
+                    break
+            else:
+                self.clear_speaker_editor()
+                self.speaker_name.setText(u.speaker)
+            self.tabs.setCurrentIndex(self.text_tab_index)
+            self.page_scrollers['tune'].ensureWidgetVisible(self.ui_sections['speakers'])
+            self.speaker_name.setFocus()
+
+        def edit_preview_reading(self):
+            chosen = self.example_raw.textCursor().selectedText().strip()
+            self.clear_reading_editor()
+            if chosen:
+                self.reading_word.setText(chosen)
+            self.show_task_section('reading')
+            self.reading_word.setFocus()
+
+        def edit_current_dialogue(self):
+            u = self.controller.utterance
+            if not u:
+                self.note('台詞を取得してから編集を始めてください')
+                return
+            self.example_raw.setPlainText(u.raw)
+            self.tabs.setCurrentIndex(self.text_tab_index)
 
         def duplicate_profile(self):
             if self.current_profile():
@@ -1402,9 +1612,9 @@ def run_gui(session_driver=None) -> int:
                 if code not in p.inserted_hooks:
                     p.inserted_hooks.append(code)
                 self.persist()
-                if code in self.search_rows:
+                if code in self.search_codes:
                     self.search_insert_requested.add(code)
-                    self.add_search_candidate(code, self.search_samples.get(code, ''))
+                    self.refresh_search_codes()
                 self.note('HOOKの追加を要求しました。実際の本文を取得したら用途を選んでください: ' + code)
             except Exception as exc:
                 self.note('HOOKの追加に失敗: ' + str(exc))
@@ -1430,8 +1640,10 @@ def run_gui(session_driver=None) -> int:
         def on_server(self, result):
             if isinstance(result, str):
                 self.server_status.setText('Irodori: ' + result)
+                self.overview_voice.setText('音声: 接続失敗')
                 return
             self.server_status.setText(f'Irodori: {result.status} ({result.origin}); {result.message}')
+            self.overview_voice.setText('音声: ' + ('接続中' if result.status == 'connected' else result.status))
             if result.status == 'connected':
                 for control in (self.default_voice, self.speaker_voice):
                     existing = control.currentText()
@@ -1614,6 +1826,72 @@ def run_gui(session_driver=None) -> int:
                           int(self.hwnd.text().strip(), 0),
                           hook_pid=hook_pid, audio_pid=self.audio_pid.value() or hook_pid)
 
+        def resume_saved_game(self):
+            """Reuse the selected product profile without re-running setup or granting input."""
+            profile = self.current_profile()
+            if profile is None:
+                self.note('プレイする作品を選択してください')
+                return
+            if profile.source == 'hook' and not any(h.role == 'text' for h in profile.hooks):
+                self.tabs.setCurrentIndex(1)
+                self.note('まずゲームから実際の本文を取得し、使用するHOOKを選択してください')
+                return
+            if not self.pid.value() or not self.hwnd.text().strip():
+                self.detect_game()
+            if not self.pid.value() or not self.hwnd.text().strip():
+                self.note('実行中のゲームを選択してください。複数のゲームがある場合はウィンドウを指定します。')
+                return
+            if profile.source == 'ocr':
+                self.begin_monitor(save_draft=False)
+                return
+            if self.attached_pid == self.pid.value() and self.host_generation:
+                self._resume_monitor_requested = True
+                self.start_saved_monitor_when_ready()
+                return
+            self.connect_game()
+            # A failure to launch the Host must never grant auto input.
+            if self.hook_host and self.hook_host.child and self.hook_host.child.poll() is None:
+                self._resume_monitor_requested = True
+                self.note('保存済みHOOKの復元待ちです。接続・取得の状態を表示します。')
+
+        def start_saved_monitor_when_ready(self):
+            if not self._resume_monitor_requested:
+                return
+            profile = self.current_profile()
+            if not profile or not self.host_generation or not self.attached_pid:
+                return
+            if (any(h.identity in self.ambiguous_sources for h in profile.hooks) or
+                    not all(any(h.matches(src) for src in self.sources.values()) for h in profile.hooks)):
+                return
+            self._resume_monitor_requested = False
+            QTimer.singleShot(0, lambda: self.begin_monitor(save_draft=False))
+
+        def save_acquisition_settings(self):
+            """Commit explicitly relevant acquisition settings, not unrelated drafts."""
+            profile = self.current_profile()
+            if profile is None:
+                self.note('先に作品を選択してください')
+                return False
+            try:
+                updated = copy.deepcopy(profile)
+                from .model import OCRSettings
+                updated.source = self.source_mode.currentText()
+                updated.ocr = OCRSettings(self.ocr_exe.text().strip(), self.ocr_lang.text().strip(),
+                    tuple(int(x.strip()) for x in self.ocr_region.text().split(',')),
+                    stable_samples=self.ocr_stability.value())
+                updated.insert_pc_hooks = self.insert_pc_hooks_on_attach.isChecked()
+                updated.hook_flush_ms = self.hook_flush.value()
+                updated.hook_codepage = self.hook_codepage.value()
+                updated.hook_max_buffer = self.hook_buffer.value()
+                updated.hook_max_history = self.hook_history.value()
+                updated.validate()
+                self.catalog.games[self.game_id].profiles[updated.id] = updated
+                self.persist()
+                return True
+            except Exception as exc:
+                self.note('取得設定を保存できません: ' + str(exc))
+                return False
+
         def connect_game(self):
             if not self.pid.value():
                 self.note('実行中のゲーム・プロセスを選択してください')
@@ -1621,9 +1899,9 @@ def run_gui(session_driver=None) -> int:
             if not self.current_profile():
                 self.note('作品を登録してください')
                 return
-            # Connection uses the settings visible on this page, including
-            # the per-game Win32 option. Do not silently use the old saved value.
-            if not self.save_profile():
+            # Connecting a game is not authorization to save draft voice,
+            # advancement or text settings. Commit only capture controls.
+            if not self.save_acquisition_settings():
                 return
             if not self.hook_host or self.hook_host.child is None or self.hook_host.child.poll() is not None:
                 self.start_host()
@@ -1652,19 +1930,20 @@ def run_gui(session_driver=None) -> int:
             self.source_samples.clear()
             self.ambiguous_sources.clear()
             self.source_rows.clear()
-            self.search_rows.clear()
-            self.search_samples.clear()
+            self.search_codes.clear()
             self.search_insert_requested.clear()
             self.source_table.setRowCount(0)
+            self.search_code_choice.clear()
             self.hook_preview.clear()
-            self.hook_capture_status.setText('HOOK取得: 未接続または候補なし')
+            self.hook_technical_info.setText('取得元を選択すると識別情報を表示します')
+            self.refresh_candidate_actions()
+            self.hook_capture_status.setText('取得: 未接続または本文未受信')
             self.refresh_hook_connection()
 
-        def selected_search_code(self) -> str | None:
-            row = self.source_table.currentRow()
-            item = self.source_table.item(row, 2) if row >= 0 else None
-            value = item.data(256) if item is not None else None
-            return value[1] if isinstance(value, tuple) and len(value) == 2 and value[0] == 'search' else None
+        def insert_selected_search(self):
+            code = self.search_code_choice.currentData()
+            if code:
+                self.insert_hook_code(code)
 
         def chosen_source(self):
             row = self.source_table.currentRow()
@@ -1673,7 +1952,10 @@ def run_gui(session_driver=None) -> int:
             item = self.source_table.item(row, 2)
             if item is None:
                 return None
-            key, address = item.data(256) or ('', -1)
+            identity = item.data(256)
+            if not isinstance(identity, (tuple, list)) or len(identity) != 2:
+                return None
+            key, address = identity
             source = self.sources.get(key)
             return source if source and source.address == address and key not in self.ambiguous_sources else None
 
@@ -1681,74 +1963,61 @@ def run_gui(session_driver=None) -> int:
             self.source_table.removeRow(row)
             self.source_rows = {key: index - (index > row) for key, index in self.source_rows.items()
                                 if index != row}
-            self.search_rows = {code: index - (index > row) for code, index in self.search_rows.items()
-                                if index != row}
 
         def clear_search_candidates(self):
-            for row in sorted(self.search_rows.values(), reverse=True):
-                self.remove_candidate_row(row)
-            self.search_samples.clear()
+            self.search_codes.clear()
             self.search_insert_requested.clear()
-            self.refresh_candidate_actions()
-            self.refresh_capture_status()
+            self.refresh_search_codes()
 
-        def add_search_candidate(self, code: str, sample: str):
-            if not code:
+        def add_search_candidate(self, code: str, _sample: str = ''):
+            if not code or any(source.hook_code == code for source in self.sources.values()):
                 return
-            # Native creation/output is the definitive selectable source. Never
-            # replace a live source with a search-only code or guess a thread.
-            if any(src.hook_code == code for src in self.sources.values()):
-                return
-            if code not in self.search_rows:
-                row = self.source_table.rowCount()
-                self.source_table.insertRow(row)
-                self.search_rows[code] = row
-            row = self.search_rows[code]
-            self.search_samples[code] = sample
-            state = '追加要求済み（本文待ち）' if code in self.search_insert_requested else '探索候補（未追加）'
-            values = (sample or '（探索サンプルなし）', '未割当', code, state,
-                      str(self.pid.value()), '—', '—')
-            for col, value in enumerate(values):
-                item = self.source_table.item(row, col)
-                if item is None:
-                    item = QTableWidgetItem()
-                    self.source_table.setItem(row, col, item)
-                item.setText(value)
-                if col == 2:
-                    item.setData(256, ('search', code))
-            self.refresh_candidate_actions()
-            self.refresh_capture_status()
+            self.search_codes.add(code)
+            self.refresh_search_codes()
+
+        def refresh_search_codes(self):
+            previous = self.search_code_choice.currentData()
+            self.search_code_choice.blockSignals(True)
+            self.search_code_choice.clear()
+            for code in sorted(self.search_codes):
+                label = ('試用要求済み: ' if code in self.search_insert_requested else '未追加: ') + code
+                self.search_code_choice.addItem(label, code)
+            if previous in self.search_codes:
+                self.search_code_choice.setCurrentIndex(self.search_code_choice.findData(previous))
+            self.search_code_choice.blockSignals(False)
+            self.btn_insert_search.setEnabled(bool(self.search_codes))
 
         def refresh_capture_status(self):
             if self.attached_pid and self.host_generation:
                 received = sum(bool(values) for values in self.source_samples.values())
                 self.hook_capture_status.setText(
-                    f'PID {self.attached_pid}: 受信HOOK {len(self.sources)}件（本文あり {received}件） / '
-                    f'追加探索 {len(self.search_rows)}件')
+                    f'ゲームに接続中: 本文を受信した取得元 {received}件 / 未受信 {len(self.sources) - received}件')
+            if hasattr(self, 'overview_capture'):
+                self.overview_capture.setText('台詞取得: ' + ('接続中' if self.attached_pid and self.host_generation
+                                              else '未接続'))
 
         def refresh_candidate_actions(self, *_):
-            search_code = self.selected_search_code()
             source = self.chosen_source()
-            if search_code:
-                label = 'HOOK追加を再要求' if search_code in self.search_insert_requested else 'この探索候補をゲームへ追加'
-                self.text_hook.setText(label)
-                self.text_hook.setEnabled(True)
-                self.speaker_hook.setEnabled(False)
-                self.btn_test_hook_text.setEnabled(bool(self.search_samples.get(search_code)))
-            else:
-                self.text_hook.setText('この候補を本文に使用')
-                self.text_hook.setEnabled(source is not None)
-                self.speaker_hook.setEnabled(source is not None)
-                self.btn_test_hook_text.setEnabled(bool(source and self.source_samples.get(source.identity)))
+            history = self.source_samples.get(source.identity, ()) if source else ()
+            self.text_hook.setEnabled(bool(source and history))
+            self.speaker_hook.setEnabled(bool(source and history))
+            self.btn_test_hook_text.setEnabled(bool(history))
 
         def update_candidate(self, source: ThreadSource, sample: str | None):
             code = source.hook_code
-            if code in self.search_rows:
-                row = self.search_rows[code]
-                self.remove_candidate_row(row)
-                self.search_samples.pop(code, None)
+            if code in self.search_codes:
+                self.search_codes.discard(code)
                 self.search_insert_requested.discard(code)
+                self.refresh_search_codes()
             key = (source.identity, source.address)
+            if sample is not None and sample.strip():
+                history = self.source_samples.setdefault(source.identity, deque(maxlen=4))
+                if not history or history[-1] != sample:
+                    history.append(sample)
+            latest = self.source_samples.get(source.identity, ())
+            if not latest:
+                self.refresh_capture_status()
+                return
             if key not in self.source_rows:
                 row = self.source_table.rowCount()
                 self.source_table.insertRow(row)
@@ -1764,14 +2033,7 @@ def run_gui(session_driver=None) -> int:
                         break
             if source.identity in self.ambiguous_sources:
                 role = '識別衝突（使用不可）'
-            if sample is not None:
-                history = self.source_samples.setdefault(source.identity, deque(maxlen=4))
-                if not history or history[-1] != sample:
-                    history.append(sample)
-            latest = self.source_samples.get(source.identity, ())
-            values = (latest[-1] if latest else '（本文未受信）', role,
-                      f'{source.hook_code} / {source.hook_name}', '受信中' if latest else 'HOOK生成済み',
-                      str(source.process_id), f'{source.context} / {source.context2}', hex(source.address))
+            values = (latest[-1], role, source.hook_name or '取得元', '受信中')
             for col, value in enumerate(values):
                 item = self.source_table.item(row, col)
                 if item is None:
@@ -1796,7 +2058,7 @@ def run_gui(session_driver=None) -> int:
             chosen = self.saved_hook_choice.findData(selected)
             self.saved_hook_choice.setCurrentIndex(chosen if chosen >= 0 else (0 if hooks else -1))
             self.saved_hook_choice.blockSignals(False)
-            self.selected_hooks.setText('Selected HOOKs: ' + ', '.join(f'{h.role}: {h.code}' for h in hooks) if hooks else 'Selected HOOKs: none')
+            self.selected_hooks.setText('選択中の取得元: ' + ', '.join(f'{"本文" if h.role == "text" else "話者"}: {h.code}' for h in hooks) if hooks else '使用するHOOKが未選択です')
             self.refresh_hook_pairs()
             for source in self.sources.values():
                 self.update_candidate(source, None)
@@ -1835,7 +2097,7 @@ def run_gui(session_driver=None) -> int:
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation):
                 self.add_search_candidate(event.detail, event.text)
-                self.note('追加探索候補: ' + event.detail)
+                self.note('追加探索: HOOKコードを検出しました（取得方法を調整から試用できます）')
             if event.kind == 'connected' and event.process_id == self.pid.value():
                 if self.connection_generation != event.connection_generation or self.host_generation != event.host_generation:
                     self.stop_session()
@@ -1847,6 +2109,7 @@ def run_gui(session_driver=None) -> int:
                     generation=event.host_generation, connection=event.connection_generation)
                 self.host_status.setText(f'LunaHook connected: PID {event.process_id}')
                 self.refresh_capture_status()
+                self.start_saved_monitor_when_ready()
                 p = self.current_profile()
                 if p and p.source == 'hook':
                     if p.insert_pc_hooks:
@@ -1860,6 +2123,7 @@ def run_gui(session_driver=None) -> int:
                 self.connection_generation = 0
                 self.clear_hook_observations()
                 self.host_status.setText('LunaHook disconnected')
+                self._resume_monitor_requested = False
             if (event.kind == 'removed' and event.source and event.process_id == self.pid.value()
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation):
@@ -1887,12 +2151,15 @@ def run_gui(session_driver=None) -> int:
                         self.stop_session()
                     self.note('HOOK identity collision; select a non-conflicting source before restarting monitoring')
                     self.update_candidate(current, None)
+                    # A colliding thread has no safe text ownership; do not
+                    # display its output under the first thread's identity.
                 else:
                     self.sources[key] = source
-                self.update_candidate(source, event.text if event.kind == 'output' else None)
+                    self.update_candidate(source, event.text if event.kind == 'output' else None)
                 self.refresh_hook_connection()
                 self.refresh_capture_status()
                 if event.kind == 'created':
+                    self.start_saved_monitor_when_ready()
                     self.validation_trace.emit('hook_candidate_created', pid=event.process_id,
                         generation=event.host_generation, connection=event.connection_generation,
                         source=source.identity, hook_sequence=event.sequence)
@@ -1946,6 +2213,8 @@ def run_gui(session_driver=None) -> int:
                     message_hash=text_digest(event.detail))
                 # Upstream engine detection and injection warnings are product
                 # connection facts. Suppressing them masked a genuine failure.
+                if event.detail in ('existing_luna_injection_detected', 'cannot_attach_to_host_process'):
+                    self._resume_monitor_requested = False
                 if event.detail == 'existing_luna_injection_detected':
                     self.host_status.setText('対象には既にLunaHookが注入されています。ゲームを再起動して再接続してください。')
                 elif event.detail == 'cannot_attach_to_host_process':
@@ -1954,10 +2223,6 @@ def run_gui(session_driver=None) -> int:
 
         def select_hook(self, role: str):
             p = self.current_profile()
-            search_code = self.selected_search_code()
-            if search_code:
-                self.insert_hook_code(search_code)
-                return
             source = self.chosen_source()
             if not p or not source:
                 self.note('本文の出力を確認できたHOOK候補を選択してください')
@@ -2005,28 +2270,29 @@ def run_gui(session_driver=None) -> int:
 
         def show_hook_preview(self, *_):
             source = self.chosen_source()
-            code = self.selected_search_code()
-            if code:
-                self.hook_preview.setPlainText(self.search_samples.get(code, ''))
+            history = self.source_samples.get(source.identity, ()) if source else ()
+            self.hook_preview.setPlainText('\n── 前回の取得 ──\n'.join(reversed(history)))
+            if source:
+                self.hook_technical_info.setText(
+                    f'HOOKコード: {source.hook_code} / PID: {source.process_id} / '
+                    f'Context: {source.context}, {source.context2} / Thread: {hex(source.address)}')
             else:
-                history = self.source_samples.get(source.identity, ()) if source else ()
-                self.hook_preview.setPlainText('\n── Previous output ──\n'.join(reversed(history)))
+                self.hook_technical_info.setText('取得元を選択すると識別情報を表示します')
             self.refresh_candidate_actions()
-
 
         def use_selected_hook_as_example(self):
             source = self.chosen_source()
             samples = self.source_samples.get(source.identity, ()) if source else ()
-            sample = samples[-1] if samples else self.search_samples.get(self.selected_search_code() or '', '')
+            sample = samples[-1] if samples else ''
             if not sample:
-                self.note('本文または探索サンプルのある候補を選択してください')
+                self.note('実際に受信された本文を選択してください')
                 return
             self.example_raw.setPlainText(sample)
             self.tabs.setCurrentIndex(self.text_tab_index)
 
-        def begin_monitor(self):
+        def begin_monitor(self, *, save_draft=True):
             try:
-                if not self.save_profile():
+                if save_draft and not self.save_profile():
                     return
                 p = self.current_profile()
                 target = self.session_target()
@@ -2195,7 +2461,11 @@ def run_gui(session_driver=None) -> int:
             u = self.controller.utterance
             if not u:
                 return
-            self.preview.setPlainText(f'Original: {u.raw}\\nSpeaker: {u.speaker}\\nText: {u.text}\\nReading: {u.reading}\\nMatch: {u.match_text}\\nTTS: {u.use_tts}; Voice: {u.voice}; Advance: {u.advance_mode.value}')
+            self.preview.setPlainText(
+                f'{u.speaker or "（話者未設定）"}: {u.text}\n'
+                f'音声: {"Irodori / " + (u.voice or "Voice未設定") if u.use_tts else "ゲーム原音または無音"}  '
+                f'進行方式: {"音声判断" if u.advance_mode == AdvanceMode.AUDIO else "文字のみ判断"}\n'
+                f'取得原文: {u.raw}')
             self.wait_preview.setText(f'{u.character_count}文字 × {self.controller.profile.per_character_wait_ms}ms / 最低{self.controller.profile.reading_ms}ms → {u.text_wait_ms}ms')
             self.validation_trace.emit('utterance', session=token.session, line=token.line,
                 source=u.source, hook_sequence=u.sequence, raw_hash=text_digest(u.raw),
@@ -2350,6 +2620,14 @@ def run_gui(session_driver=None) -> int:
                        f'input {c.target.pid}/{hex(c.target.hwnd)}') if c.target else 'no target'
             self.status.setText(f'Status: {c.reason} | permission={c.authorized} | '
                                 f'line={c.line_no} | sent={c.sent} | completion={c.presentation_reason or "pending"} | {targets}')
+            self.overview_advance.setText('自動送り: ' +
+                ('許可中' if c.authorized else '停止 / 要確認') +
+                (' ― ' + c.pause_reason if c.pause_reason else ''))
+            if c.profile and c.utterance:
+                self.overview_capture.setText('台詞: ' +
+                    (c.utterance.speaker or '話者未設定') + ' / ' + c.utterance.display_body[:35])
+            elif not self.attached_pid:
+                self.overview_capture.setText('台詞取得: 未接続')
             if c.profile and c.profile.source == 'hook':
                 self.active_hook_status.setText('Active dialogue HOOK: ' +
                     (c.active_text_source or 'waiting for selected source output'))
@@ -2385,6 +2663,7 @@ def run_gui(session_driver=None) -> int:
             self.note('LunaHost native error: ' + message)
 
         def on_closed(self, reason):
+            self._resume_monitor_requested = False
             self.stop_session()
             self.attached_pid = 0
             self.host_generation = ''
