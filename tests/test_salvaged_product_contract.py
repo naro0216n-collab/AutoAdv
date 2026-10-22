@@ -9,7 +9,7 @@ import copy
 import unittest
 
 from autoadv.model import (Profile, AdvanceMode, StructureRule, ReplacementRule,
-                           OCRSettings, interpret)
+                           OCRSettings, interpret, DEFAULT_STRUCTURE_RULES)
 from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
@@ -21,7 +21,7 @@ from autoadv.native_audio import NativeAudio
 class SalvagedTextTests(unittest.TestCase):
     def test_quoted_newline_and_custom_priority(self):
         p = Profile('p', 'P')
-        p.structure_rules.insert(0, StructureRule(r'^#(?P<speaker>[^:]+):(?P<body>.*)$'))
+        p.source_rules['src'] = [StructureRule(r'^#(?P<speaker>[^:]+):(?P<body>.*)$'), *DEFAULT_STRUCTURE_RULES]
         a = interpret('#春:おはよう', p, session=1, line=1, source='src', sequence=1)
         self.assertEqual((a.speaker, a.text), ('春', 'おはよう'))
         b = interpret('冬\nおやすみ', p, session=1, line=2, source='src', sequence=2)
@@ -46,7 +46,7 @@ class SalvagedTextTests(unittest.TestCase):
         self.assertEqual((u.use_tts, u.voice), (True, 'voice-01'))
 
     def test_invalid_regexes_fail_before_persisting(self):
-        for constructor in (lambda: StructureRule(r'(?P<speaker>.*)'),
+        for constructor in (lambda: StructureRule(r'(?P<other>.*)'),
                             lambda: ReplacementRule('(', '', regex=True)):
             with self.assertRaises(ValueError): constructor()
 
@@ -73,7 +73,7 @@ class SalvagedProfileTests(unittest.TestCase):
         p.source = 'ocr'
         p.ocr = OCRSettings('tesseract', 'jpn', (50, 60, 700, 130))
         p.inserted_hooks = ['HS7']
-        p.structure_rules = [StructureRule(r'(?P<body>.*)')]
+        p.source_rules['ocr'] = [StructureRule(r'(?P<body>.*)')]
         p.replacements = [ReplacementRule(r'\d+', 'number', True)]
         p.native_helper = 'C:/loopback.dll'
         with TemporaryDirectory() as tmp:
@@ -82,7 +82,7 @@ class SalvagedProfileTests(unittest.TestCase):
             restored = load(path)
             q = restored.games[game.id].profiles[p.id]
             self.assertEqual(q.ocr, p.ocr)
-            self.assertEqual(q.structure_rules, p.structure_rules)
+            self.assertEqual(q.source_rules, p.source_rules)
             self.assertEqual(q.replacements, p.replacements)
             self.assertEqual(q.inserted_hooks, p.inserted_hooks)
             self.assertNotIn('host_generation', path.read_text())
@@ -134,7 +134,7 @@ class AcquisitionAndInputTests(unittest.TestCase):
     def test_hook_only_validation_at_monitoring_not_when_editing_profile(self):
         p = Profile('p', 'Edit first')
         p.validate()
-        with self.assertRaisesRegex(ValueError, 'text HOOK'):
+        with self.assertRaisesRegex(ValueError, 'body source'):
             Controller(lambda *_: None, lambda _: True).begin(p, Target(11, 22), 'h', 1)
 
     def test_target_matcher_does_not_complete_unrelated_or_unstable_voice(self):

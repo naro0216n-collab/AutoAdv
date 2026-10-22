@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
+from collections.abc import Sequence
 import re
 import unicodedata
 
@@ -13,13 +14,17 @@ class AdvanceMode(str, Enum):
 
 @dataclass(frozen=True)
 class HookSelection:
+    """Stable reference to one Luna output source.
+
+    A source has no dialogue/speaker role.  The capture recipe independently
+    chooses which selected sources provide the final body and speaker fields.
+    """
     code: str
     context: int
     context2: int
-    role: str = 'text'
 
     def __post_init__(self):
-        if not self.code or min(self.context, self.context2) < 0 or self.role not in ('text', 'speaker'):
+        if not self.code or min(self.context, self.context2) < 0:
             raise ValueError('invalid selected HOOK')
 
     @property
@@ -34,7 +39,12 @@ class HookSelection:
 
 @dataclass(frozen=True)
 class StructureRule:
-    """First matching named capture wins. Rules are ordered per profile."""
+    """Extract speaker and/or body from one source sample.
+
+    Rules belong to a capture source, never to the whole profile.  A rule may
+    expose only one field so a source with a correct speaker but unusable body
+    can still participate in the final dialogue assembly (and vice versa).
+    """
     pattern: str
     condition: str = ''
     enabled: bool = True
@@ -42,12 +52,20 @@ class StructureRule:
     def __post_init__(self):
         try:
             groups = re.compile(self.pattern, re.S).groupindex
-            if 'body' not in groups or not set(groups).issubset({'body', 'speaker'}):
-                raise ValueError('structure rule requires a named body and optional speaker')
+            names = set(groups)
+            if not names or not names.issubset({'body', 'speaker'}) or not names.intersection({'body', 'speaker'}):
+                raise ValueError('structure rule requires named speaker and/or body')
             if self.condition:
                 re.compile(self.condition, re.S)
         except re.error as exc:
             raise ValueError(f'invalid structure regex: {exc}') from exc
+
+
+@dataclass(frozen=True)
+class ExtractedFields:
+    speaker: str = ''
+    body: str = ''
+    matched_rule: int | None = None
 
 
 @dataclass(frozen=True)
@@ -68,14 +86,36 @@ class ReplacementRule:
                 raise ValueError(f'invalid replacement regex: {exc}') from exc
 
 
+# Extraction works on an NFKC-normalized copy.  These are structural patterns,
+# not title-specific exceptions.  More unusual layouts remain editable per source.
 DEFAULT_STRUCTURE_RULES = (
     StructureRule(r'^\s*(?P<speaker>[^\s「」『』\n]{1,40})\s*[「『](?P<body>.*)[」』]\s*$'),
     StructureRule(r'^\s*(?P<speaker>[^\n]{1,40})\n(?P<body>.+)$'),
     # A colon in dialogue (notably https://) is not a speaker separator.
-    # Unusual names can still be handled through a game's explicit rules.
-    StructureRule(r'^\s*(?P<speaker>[^\s「」『』、。，．！？!?（）()：:\n]{1,40})\s*[：:]\s*(?!https?://)(?P<body>.+)$'),
+    StructureRule(r'^\s*(?P<speaker>[^\s「」『』、。，．！？!?():\n]{1,40})\s*[:]\s*(?!https?://)(?P<body>.+)$'),
+    # Common engine metadata layout: NAME (line/id/voice tag) BODY.
+    StructureRule(r'^\s*(?P<speaker>\S{1,40})\s+\([^\n)]{1,80}\)\s*(?P<body>.+)$'),
     StructureRule(r'^\s*[「『](?P<body>.*)[」』]\s*$'),
 )
+
+BODY_ONLY_RULE = StructureRule(r'^\s*(?P<body>.*)\s*$')
+SPEAKER_ONLY_RULE = StructureRule(r'^\s*(?P<speaker>.*?)\s*$')
+SPEAKER_QUOTED_BODY_RULE = DEFAULT_STRUCTURE_RULES[0]
+SPEAKER_NEWLINE_BODY_RULE = DEFAULT_STRUCTURE_RULES[1]
+SPEAKER_COLON_BODY_RULE = DEFAULT_STRUCTURE_RULES[2]
+SPEAKER_METADATA_BODY_RULE = DEFAULT_STRUCTURE_RULES[3]
+QUOTED_BODY_RULE = DEFAULT_STRUCTURE_RULES[4]
+
+EXTRACTION_PRESETS: dict[str, tuple[StructureRule, ...]] = {
+    'auto': DEFAULT_STRUCTURE_RULES,
+    'body': (BODY_ONLY_RULE,),
+    'speaker': (SPEAKER_ONLY_RULE,),
+    'quoted': (SPEAKER_QUOTED_BODY_RULE,),
+    'colon': (SPEAKER_COLON_BODY_RULE,),
+    'newline': (SPEAKER_NEWLINE_BODY_RULE,),
+    'metadata': (SPEAKER_METADATA_BODY_RULE,),
+    'quoted_body': (QUOTED_BODY_RULE,),
+}
 
 
 @dataclass
@@ -94,8 +134,6 @@ class OCRSettings:
             raise ValueError('invalid OCR configuration')
 
 
-# Only these values can be inherited. The persisted profile owns the choice;
-# the effective session profile is resolved from the catalog when monitoring begins.
 COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
                  'default_voice', 'reading_ms', 'per_character_wait_ms',
                  'native_helper', 'asr_model', 'asr_tokens', 'input_key',
@@ -107,16 +145,21 @@ class Profile:
     id: str
     name: str
     hooks: list[HookSelection] = field(default_factory=list)
+    # Final dialogue fields are assembled independently.  Lists are provider
+    # priority: first usable provider in one synchronized output group wins.
+    body_sources: list[str] = field(default_factory=list)
+    speaker_sources: list[str] = field(default_factory=list)
+    # Source identity -> ordered extraction rules. Missing identity uses the
+    # structural defaults above.  'ocr' may also be configured here.
+    source_rules: dict[str, list[StructureRule]] = field(default_factory=dict)
     inserted_hooks: list[str] = field(default_factory=list)
     insert_pc_hooks: bool = False
-    speaker_links: dict[str, str] = field(default_factory=dict)
     advance_mode: AdvanceMode = AdvanceMode.TEXT
     uncertain_text_fallback: bool = False
     default_tts: bool = False
     default_voice: str = ''
     speaker_tts: dict[str, bool] = field(default_factory=dict)
     speaker_voices: dict[str, str] = field(default_factory=dict)
-    structure_rules: list[StructureRule] = field(default_factory=lambda: list(DEFAULT_STRUCTURE_RULES))
     replacements: list[ReplacementRule] = field(default_factory=list)
     name_readings: dict[str, str] = field(default_factory=dict)
     reading_ms: int = 700
@@ -144,12 +187,18 @@ class Profile:
         if (self.repeat_rule not in ('distinct_only', 'each_after_input') or not 1 <= self.input_key <= 254
                 or not 1000 <= self.next_line_timeout_ms <= 120000):
             raise ValueError('invalid advancement settings')
-        if len(self.hooks) != len({(h.code, h.context, h.context2) for h in self.hooks}):
-            raise ValueError('one HOOK cannot have multiple conflicting roles')
-        selected_roles = {h.identity: h.role for h in self.hooks}
-        for text_source, speaker_source in self.speaker_links.items():
-            if selected_roles.get(text_source) != 'text' or selected_roles.get(speaker_source) != 'speaker':
-                raise ValueError('speaker-to-text mapping requires selected HOOK roles')
+        identities = [hook.identity for hook in self.hooks]
+        if len(identities) != len(set(identities)):
+            raise ValueError('duplicate selected HOOK')
+        selected = set(identities)
+        for providers, label in ((self.body_sources, 'body'), (self.speaker_sources, 'speaker')):
+            if len(providers) != len(set(providers)) or any(identity not in selected for identity in providers):
+                raise ValueError(f'invalid {label} providers')
+        if any(identity not in selected and identity != 'ocr' for identity in self.source_rules):
+            raise ValueError('extraction rules require a selected source')
+        for rules in self.source_rules.values():
+            for rule in rules:
+                StructureRule(rule.pattern, rule.condition, rule.enabled)
         if self.source not in ('hook', 'ocr'):
             raise ValueError('invalid acquisition mode')
         if type(self.insert_pc_hooks) is not bool:
@@ -166,8 +215,6 @@ class Profile:
                 name not in COMMON_FIELDS for name in self.inherit_common):
             raise ValueError('invalid common setting inheritance')
         self.ocr.validate()
-        for rule in self.structure_rules:
-            StructureRule(rule.pattern, rule.condition, rule.enabled)
         for rule in self.replacements:
             ReplacementRule(rule.pattern, rule.replacement, rule.regex, rule.target, rule.enabled)
 
@@ -211,8 +258,6 @@ def count_reading_characters(body: str) -> int:
     without_ruby = _RUBY.sub(lambda m: m.group(1), body)
     def countable(index: int, character: str) -> bool:
         if character == 'ー':
-            # A long vowel mark by itself is punctuation-like. Within kana it
-            # is a pronounced character even though Unicode categorizes it Lm.
             return index > 0 and ('\u3040' <= without_ruby[index-1] <= '\u30ff'
                                   or without_ruby[index-1] == 'ー')
         return unicodedata.category(character)[0] in 'LN'
@@ -220,28 +265,51 @@ def count_reading_characters(body: str) -> int:
     return sum(countable(i, c) for i, c in enumerate(without_ruby))
 
 
-def matching_structure_rule(raw: str, profile: Profile) -> tuple[re.Match | None, int | None]:
-    """Use the product's exact first-match rule order for UI explanations."""
-    for index, rule in enumerate(profile.structure_rules):
-        if not rule.enabled or (rule.condition and not re.search(rule.condition, raw, re.S)):
+def extraction_rules_for(profile: Profile, source_identity: str) -> tuple[StructureRule, ...]:
+    configured = profile.source_rules.get(source_identity)
+    return tuple(configured) if configured is not None else DEFAULT_STRUCTURE_RULES
+
+
+def matching_structure_rule(raw: str, rules: Sequence[StructureRule]) -> tuple[re.Match | None, int | None, str]:
+    """Apply one source's structural rules to an NFKC-normalized sample."""
+    normalized = unicodedata.normalize('NFKC', raw)
+    for index, rule in enumerate(rules):
+        if not rule.enabled or (rule.condition and not re.search(rule.condition, normalized, re.S)):
             continue
-        match = re.fullmatch(rule.pattern, raw, re.S)
+        match = re.fullmatch(rule.pattern, normalized, re.S)
         if match:
-            return match, index
-    return None, None
+            return match, index, normalized
+    return None, None, normalized
+
+
+def extract_source_fields(raw: str, profile: Profile, source_identity: str) -> ExtractedFields:
+    matched, matched_index, normalized = matching_structure_rule(
+        raw, extraction_rules_for(profile, source_identity))
+    if matched is None:
+        # Unknown structures stay usable as body text; the workspace can then
+        # define a source-specific extractor without losing the sample.
+        return ExtractedFields(body=normalized.strip())
+    groups = matched.groupdict()
+    speaker = (groups.get('speaker') or '').strip()
+    body = (groups.get('body') or '').strip()
+    return ExtractedFields(speaker=speaker, body=body, matched_rule=matched_index)
 
 
 def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,
-              sequence: int, side_speaker: str = '', trace: list[str] | None = None) -> Utterance:
-    body, speaker = raw, side_speaker.strip()
-    matched, matched_index = matching_structure_rule(raw, profile)
-    if matched:
-        body = matched.group('body')
-        if not speaker:
-            speaker = (matched.groupdict().get('speaker') or '').strip()
-    if trace is not None:
-        trace.append(f'抽出: 優先順位 {matched_index + 1}' if matched_index is not None else '抽出: 規則なし（原文のまま）')
-    body = unicodedata.normalize('NFKC', body).strip()
+              sequence: int, speaker_override: str | None = None,
+              body_override: str | None = None, trace: list[str] | None = None) -> Utterance:
+    if body_override is None:
+        fields = extract_source_fields(raw, profile, source)
+        body = fields.body
+        speaker = fields.speaker if speaker_override is None else speaker_override.strip()
+        if trace is not None:
+            trace.append(f'抽出: 優先順位 {fields.matched_rule + 1}' if fields.matched_rule is not None
+                         else '抽出: 規則なし（原文を本文として使用）')
+    else:
+        body = unicodedata.normalize('NFKC', body_override).strip()
+        speaker = (speaker_override or '').strip()
+        if trace is not None:
+            trace.append('抽出: 会話取得レシピで確定済み')
     reading = _RUBY.sub(lambda m: m.group(2), body)
     for word, replacement in sorted(profile.name_readings.items(), key=lambda item: -len(item[0])):
         prior = reading

@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 from autoadv.conversation import Controller, Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import Profile, HookSelection, AdvanceMode
+from autoadv.model import Profile, HookSelection, AdvanceMode, SPEAKER_ONLY_RULE
 from autoadv.storage import Catalog, save, load
 from autoadv.native_audio import NativeAudio
 from autoadv.audio_buffer import PCMChunk
@@ -22,15 +22,16 @@ def msg(source, seq, text):
 class MultiHookProductContract(unittest.TestCase):
     def setUp(self):
         self.sent = []
-        self.p = Profile('p', 'test', hooks=[HookSelection('HT', 1, 2, 'text'),
-                                              HookSelection('HS', 3, 4, 'speaker')],
-                         speaker_links={'HT|1|2': 'HS|3|4'},
+        self.p = Profile('p', 'test', hooks=[HookSelection('HT', 1, 2),
+                                              HookSelection('HS', 3, 4)],
+                         body_sources=['HT|1|2'], speaker_sources=['HS|3|4'],
+                         source_rules={'HS|3|4': [SPEAKER_ONLY_RULE]},
                          default_tts=True, default_voice='default',
                          speaker_tts={'京': False})
         self.c = Controller(lambda *_: self.sent.append(1), lambda _: True)
         self.c.begin(self.p, Target(31, 90), 'host', 2)
 
-    def test_speaker_after_text_still_routes_one_utterance(self):
+    def test_speaker_after_body_still_assembles_one_utterance(self):
         token = self.c.observe_group([msg(TEXT, 1, '「はい」'), msg(SPEAKER, 2, '京')])
         self.assertEqual(token, Token(self.c.session, 1))
         self.assertEqual(self.c.utterance.speaker, '京')
@@ -38,20 +39,20 @@ class MultiHookProductContract(unittest.TestCase):
         self.assertEqual(self.c.utterance.raw, '「はい」')
         self.assertEqual(self.c.highest_sequence, 2)
 
-    def test_speaker_before_text_still_routes_one_utterance(self):
+    def test_speaker_before_body_still_assembles_one_utterance(self):
         token = self.c.observe_group([msg(SPEAKER, 1, '京'), msg(TEXT, 2, '「はい」')])
         self.assertIsNotNone(token)
         self.assertEqual(self.c.utterance.speaker, '京')
 
-    def test_unrelated_speakers_do_not_guess_pairing(self):
-        self.p.hooks.append(HookSelection('UNRELATED', 5, 6, 'speaker'))
+    def test_unrelated_speaker_outputs_are_not_reused_across_groups(self):
+        self.p.hooks.append(HookSelection('UNRELATED', 5, 6))
         self.c.begin(self.p, Target(31, 90), 'host', 2)
         other = ThreadSource(31, 0x300, 5, 6, 'UNRELATED', 'other')
         token = self.c.observe_group([msg(TEXT, 1, '台詞'), msg(other, 2, '別人')])
         self.assertIsNotNone(token)
         self.assertEqual(self.c.utterance.speaker, '')
 
-    def test_ambiguous_multiple_texts_fail_closed(self):
+    def test_ambiguous_multiple_body_values_fail_closed(self):
         self.c.permit(True)
         self.assertIsNone(self.c.observe_group([msg(TEXT, 1, '台詞A'), msg(TEXT, 2, '台詞B')]))
         self.assertEqual(self.c.reason, 'ambiguous_multihook_lines')

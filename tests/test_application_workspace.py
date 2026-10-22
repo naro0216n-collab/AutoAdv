@@ -27,63 +27,80 @@ def test_capture_workspace_observes_real_output_without_manual_refresh():
     app.observe_capture(a, '大和「二つ目」', sequence=2)
     view = app.capture_view()
     assert len(view.candidates) == 1
-    assert view.candidates[0].history == ('大和「一つ目」', '大和「二つ目」')
-    assert view.candidates[0].role is None
+    candidate = view.candidates[0]
+    assert candidate.history == ('大和「一つ目」', '大和「二つ目」')
+    assert [(sample.speaker, sample.body) for sample in candidate.samples] == [
+        ('大和', '一つ目'), ('大和', '二つ目')]
+    assert candidate.used_for == ()
 
 
-def test_single_dialogue_and_speaker_sources_pair_without_a_separate_pair_step():
-    app, calls = app_with_game()
-    text = source('T', 1)
-    speaker = source('S', 5, address=2)
-    text_event = HookEvent('output', 'host', 1, 1, 100, 101, text, 'おはよう')
-    speaker_event = HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')
-    app.observe_capture(text, 'おはよう', sequence=1)
-    app.observe_capture(speaker, '大和', sequence=2)
-    app.observe_capture_group((text_event, speaker_event))
-    app.set_capture_role(text.identity, text.address, 'text')
-    app.set_capture_role(speaker.identity, speaker.address, 'speaker')
+def test_one_source_can_supply_both_speaker_and_body_without_exclusive_role():
+    app, _ = app_with_game()
+    combined = source('COMBINED', 1)
+    raw = 'きぬ　（０４０６）あれカレー屋を荒らしてくれた女だ...... ボク達と同じ学校だったんだ'
+    app.observe_capture(combined, raw, sequence=1)
+    app.set_capture_field_source('body', combined.identity, combined.address)
+    # Speaker source left automatic: speaker candidate from the chosen body source.
     view = app.capture_view()
     assert view.can_commit
-    assert view.previews[-1].speaker == '大和'
-    assert view.previews[-1].text == 'おはよう'
-    assert calls == []  # editing the recipe is a draft
+    assert view.body_source == combined.identity
+    assert view.speaker_source is None
+    assert view.candidates[0].used_for == ('body', 'speaker')
+    assert len(view.assembly) == 1
+    assert view.assembly[0].speaker == 'きぬ'
+    assert view.assembly[0].body == 'あれカレー屋を荒らしてくれた女だ...... ボク達と同じ学校だったんだ'
+
+
+def test_different_sources_can_supply_only_the_correct_field_from_each_mixed_output():
+    app, _ = app_with_game()
+    speaker = source('S', 1)
+    body = source('B', 5, address=2)
+    speaker_raw = 'きぬ　（０４０６）■■壊れた本文■■'
+    body_raw = '???「あれカレー屋を荒らしてくれた女だ」'
+    app.observe_capture(speaker, speaker_raw, sequence=1)
+    app.observe_capture(body, body_raw, sequence=2)
+    # Both sources yield both candidates.  Final assembly chooses fields, not a
+    # mutually-exclusive role for each hook.
+    speaker_sample = app.capture_candidate(speaker.identity, speaker.address).samples[-1]
+    body_sample = app.capture_candidate(body.identity, body.address).samples[-1]
+    assert (speaker_sample.speaker, speaker_sample.body) == ('きぬ', '■■壊れた本文■■')
+    assert (body_sample.speaker, body_sample.body) == ('???', 'あれカレー屋を荒らしてくれた女だ')
+    app.set_capture_field_source('speaker', speaker.identity, speaker.address)
+    app.set_capture_field_source('body', body.identity, body.address)
+    app.observe_capture_group((
+        HookEvent('output', 'host', 1, 1, 100, 101, speaker, speaker_raw),
+        HookEvent('output', 'host', 1, 2, 110, 101, body, body_raw),
+    ))
+    view = app.capture_view()
+    assert [(item.speaker, item.body) for item in view.assembly] == [
+        ('きぬ', 'あれカレー屋を荒らしてくれた女だ')]
     updated = app.commit_capture()
-    assert calls == ['save']
-    text_hook = next(h for h in updated.hooks if h.role == 'text')
-    speaker_hook = next(h for h in updated.hooks if h.role == 'speaker')
-    assert updated.speaker_links[text_hook.identity] == speaker_hook.identity
+    assert updated.body_sources == [body.identity]
+    assert updated.speaker_sources == [speaker.identity]
+    assert {hook.identity for hook in updated.hooks} == {body.identity, speaker.identity}
 
 
 def test_capture_recipe_does_not_persist_until_committed():
     app, calls = app_with_game()
     candidate = source('T', 1)
     app.observe_capture(candidate, '大和「台詞」', sequence=1)
-    app.set_capture_role(candidate.identity, candidate.address, 'text')
+    app.set_capture_field_source('body', candidate.identity, candidate.address)
     assert app.current_profile().hooks == []
     assert app.capture_view().dirty
     assert calls == []
     app.commit_capture()
-    assert [h.code for h in app.current_profile().hooks] == ['T']
+    current = app.current_profile()
+    assert [h.code for h in current.hooks] == ['T']
+    assert current.body_sources == [candidate.identity]
     assert calls == ['save']
-
-
-def test_preview_uses_product_interpreter_not_a_ui_copy():
-    app, _ = app_with_game()
-    candidate = source('T', 1)
-    app.observe_capture(candidate, '大和「おはよう」', sequence=1)
-    app.set_capture_role(candidate.identity, candidate.address, 'text')
-    preview = app.capture_view().previews[-1]
-    assert preview.speaker == '大和'
-    assert preview.text == 'おはよう'
-    assert preview.reading == 'おはよう'
 
 
 def test_ambiguous_source_cannot_be_committed():
     app, _ = app_with_game()
     candidate = source('T', 1)
     app.observe_capture(candidate, '台詞', sequence=1)
-    app.set_capture_role(candidate.identity, candidate.address, 'text')
-    app.observe_capture(source('T', 1, address=2), '', sequence=2)
+    app.set_capture_field_source('body', candidate.identity, candidate.address)
+    app.observe_capture(source('T', 1, address=2), '別出力', sequence=2)
     view = app.capture_view()
     assert not view.can_commit
     assert view.problem is not None
@@ -104,80 +121,90 @@ def test_source_identity_collision_and_recovery_are_owned_by_capture_workspace()
     assert app.capture_source(first.identity, first.address) == first
 
 
-def test_recovery_trial_becomes_persistent_only_when_selected_in_recipe():
+def test_recovery_trial_becomes_persistent_only_when_used_by_final_fields():
     app, _ = app_with_game()
     candidate = source('RECOVERY', 7)
     assert app.begin_recovery_hook_trial(candidate.hook_code)
-    assert not app.begin_recovery_hook_trial(candidate.hook_code)
     app.mark_recovery_hook_inserted(candidate.hook_code)
     app.observe_capture(candidate, '本文', sequence=1)
     assert app.current_profile().inserted_hooks == []
-    app.set_capture_role(candidate.identity, candidate.address, 'text')
+    app.set_capture_field_source('body', candidate.identity, candidate.address)
     assert app.capture.profile.inserted_hooks == [candidate.hook_code]
-    assert app.current_profile().inserted_hooks == []
     app.commit_capture()
     assert app.current_profile().inserted_hooks == [candidate.hook_code]
 
 
-def test_multi_hook_preview_never_reuses_a_later_speaker_for_older_dialogue():
+def test_recovery_trial_is_not_persisted_after_switching_to_another_final_source():
     app, _ = app_with_game()
-    text = source('T', 1)
+    trial = source('RECOVERY', 7)
+    normal = source('NORMAL', 8, address=2)
+    assert app.begin_recovery_hook_trial(trial.hook_code)
+    app.mark_recovery_hook_inserted(trial.hook_code)
+    app.observe_capture(trial, '試用本文', sequence=1)
+    app.observe_capture(normal, '採用本文', sequence=2)
+    app.set_capture_field_source('body', trial.identity, trial.address)
+    assert app.capture.profile.inserted_hooks == [trial.hook_code]
+    app.set_capture_field_source('body', normal.identity, normal.address)
+    app.commit_capture()
+    profile = app.current_profile()
+    assert profile.body_sources == [normal.identity]
+    assert [hook.code for hook in profile.hooks] == [normal.hook_code]
+    assert profile.inserted_hooks == []
+
+
+def test_speaker_from_later_flush_is_never_reused_for_older_body():
+    app, _ = app_with_game()
+    body = source('T', 1)
     speaker = source('S', 5, address=2)
-    app.observe_capture(text, '一つ目', sequence=1)
+    app.observe_capture(body, '一つ目', sequence=1)
     app.observe_capture(speaker, '大和', sequence=2)
+    app.set_capture_extraction_preset(body.identity, body.address, 'body')
+    app.set_capture_extraction_preset(speaker.identity, speaker.address, 'speaker')
+    app.set_capture_field_source('body', body.identity, body.address)
+    app.set_capture_field_source('speaker', speaker.identity, speaker.address)
     app.observe_capture_group((
-        HookEvent('output', 'host', 1, 1, 100, 101, text, '一つ目'),
+        HookEvent('output', 'host', 1, 1, 100, 101, body, '一つ目'),
         HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和'),
     ))
-    app.observe_capture(text, '二つ目', sequence=3)
-    app.observe_capture(speaker, '京', sequence=4)
     app.observe_capture_group((
-        HookEvent('output', 'host', 1, 3, 200, 101, text, '二つ目'),
-        HookEvent('output', 'host', 1, 4, 210, 101, speaker, '京'),
+        HookEvent('output', 'host', 1, 3, 200, 101, body, '二つ目'),
     ))
-    app.set_capture_role(text.identity, text.address, 'text')
-    app.set_capture_role(speaker.identity, speaker.address, 'speaker')
-    previews = app.capture_view().previews
-    assert [(p.speaker, p.text) for p in previews] == [('大和', '一つ目'), ('京', '二つ目')]
+    assert [(p.speaker, p.body) for p in app.capture_view().assembly] == [('大和', '一つ目'), ('', '二つ目')]
 
 
-def test_capture_batch_buffer_is_owned_by_application_and_preserves_same_flush_pairing():
+def test_capture_batch_buffer_is_application_owned_and_preserves_same_flush_field_assembly():
     app, _ = app_with_game()
-    text = source('T', 1)
+    body = source('T', 1)
     speaker = source('S', 5, address=2)
-    app.observe_capture(text, 'おはよう', sequence=1)
+    app.observe_capture(body, 'おはよう', sequence=1)
     app.observe_capture(speaker, '大和', sequence=2)
-    app.set_capture_role(text.identity, text.address, 'text')
-    app.set_capture_role(speaker.identity, speaker.address, 'speaker')
-
-    first = HookEvent('output', 'host', 1, 1, 100, 101, text, 'おはよう')
-    second = HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')
-    assert app.queue_capture_output(first) == 100
-    assert app.queue_capture_output(second) == 100
-    assert app.capture_view().previews == ()
+    app.set_capture_extraction_preset(body.identity, body.address, 'body')
+    app.set_capture_extraction_preset(speaker.identity, speaker.address, 'speaker')
+    app.set_capture_field_source('body', body.identity, body.address)
+    app.set_capture_field_source('speaker', speaker.identity, speaker.address)
+    assert app.queue_capture_output(HookEvent('output', 'host', 1, 1, 100, 101, body, 'おはよう')) == 100
+    assert app.queue_capture_output(HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')) == 100
+    assert app.capture_view().assembly == ()
     app.flush_capture_outputs()
-    assert [(p.speaker, p.text) for p in app.capture_view().previews] == [('大和', 'おはよう')]
+    assert [(p.speaker, p.body) for p in app.capture_view().assembly] == [('大和', 'おはよう')]
 
 
-def test_runtime_batch_buffer_is_owned_by_application_not_the_ui():
+def test_runtime_assembles_body_and_speaker_from_independent_sources():
     app, _ = app_with_game()
-    text = source('T', 1)
+    body = source('T', 1)
     speaker = source('S', 5, address=2)
     profile = app.current_profile()
-    text_hook = HookSelection('T', 1, 2, 'text')
-    speaker_hook = HookSelection('S', 5, 6, 'speaker')
-    profile.hooks = [text_hook, speaker_hook]
-    profile.speaker_links = {text_hook.identity: speaker_hook.identity}
-    app.begin_runtime(
-        profile, Target(101, 500, hook_pid=101), 'host', 1,
-        available_sources=(text.identity, speaker.identity))
-
-    first = HookEvent('output', 'host', 1, 1, 100, 101, text, 'おはよう')
-    second = HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')
-    token, delay = app.handle_runtime_hook_output(first)
-    assert token is None and delay == 100
-    token, delay = app.handle_runtime_hook_output(second)
-    assert token is None and delay == 100
+    body_hook = HookSelection('T', 1, 2)
+    speaker_hook = HookSelection('S', 5, 6)
+    profile.hooks = [body_hook, speaker_hook]
+    profile.body_sources = [body_hook.identity]
+    profile.speaker_sources = [speaker_hook.identity]
+    profile.source_rules[body_hook.identity] = [StructureRule(r'^(?P<body>.*)$')]
+    profile.source_rules[speaker_hook.identity] = [StructureRule(r'^(?P<speaker>.*)$')]
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
+                      available_sources=(body.identity, speaker.identity))
+    app.handle_runtime_hook_output(HookEvent('output', 'host', 1, 1, 100, 101, body, 'おはよう'))
+    app.handle_runtime_hook_output(HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和'))
     token = app.flush_runtime_hook_outputs()
     assert token is not None
     assert app.runtime_state().utterance.text == 'おはよう'
@@ -199,22 +226,21 @@ def test_profile_setting_commands_hide_inheritance_storage_from_the_gui_contract
     assert calls == ['save', 'save']
 
 
-def test_structure_rules_are_part_of_capture_transaction_not_independent_persistence():
-    from autoadv.model import StructureRule
+def test_source_specific_extraction_rules_are_part_of_capture_transaction():
     app, calls = app_with_game()
     candidate = source('T', 1)
     app.observe_capture(candidate, '大和：台詞', sequence=1)
-    app.set_capture_role(candidate.identity, candidate.address, 'text')
-    original_rules = list(app.current_profile().structure_rules)
-    rule = StructureRule(r'^(?P<speaker>[^：]+)：(?P<body>.+)$')
-    app.save_capture_structure_rule(None, rule)
+    app.set_capture_field_source('body', candidate.identity, candidate.address)
+    original_rules = dict(app.current_profile().source_rules)
+    rule = StructureRule(r'^(?P<speaker>[^:]+):(?P<body>.+)$')
+    app.save_capture_source_rule(candidate.identity, candidate.address, None, rule)
     assert calls == []
-    assert app.current_profile().structure_rules == original_rules
-    assert app.capture_view().previews[-1].speaker == '大和'
-    assert app.capture_view().previews[-1].text == '台詞'
+    assert app.current_profile().source_rules == original_rules
+    sample = app.capture_candidate(candidate.identity, candidate.address).samples[-1]
+    assert (sample.speaker, sample.body) == ('大和', '台詞')
     app.commit_capture()
     assert calls == ['save']
-    assert app.current_profile().structure_rules[0] == rule
+    assert app.current_profile().source_rules[candidate.identity][0] == rule
 
 
 def test_common_setting_is_persisted_by_application_without_form_reconstruction():
@@ -569,8 +595,10 @@ def test_application_owns_selected_thread_sync_state():
     speaker = source('S', 5, address=2)
     app.observe_capture(text, '本文', sequence=1)
     app.observe_capture(speaker, '大和', sequence=2)
-    app.set_capture_role(text.identity, text.address, 'text')
-    app.set_capture_role(speaker.identity, speaker.address, 'speaker')
+    app.set_capture_extraction_preset(text.identity, text.address, 'body')
+    app.set_capture_extraction_preset(speaker.identity, speaker.address, 'speaker')
+    app.set_capture_field_source('body', text.identity, text.address)
+    app.set_capture_field_source('speaker', speaker.identity, speaker.address)
 
     assert app.sync_hook_threads(101) == ()
     enables = [kwargs['source']['hook_code'] for action, kwargs in host.commands
@@ -578,7 +606,7 @@ def test_application_owns_selected_thread_sync_state():
     assert enables == ['T', 'S']
 
     host.commands.clear()
-    app.set_capture_role(speaker.identity, speaker.address, None)
+    app.set_capture_field_source('speaker', None)
     assert app.sync_hook_threads(101) == ()
     disables = [kwargs['source']['hook_code'] for action, kwargs in host.commands
                 if action == 'sync_thread' and not kwargs['enabled']]
@@ -647,28 +675,28 @@ def test_hook_host_restart_invalidates_connection_identity():
     assert not app.hook_connection_state().connected
 
 
-def test_multiple_dialogue_routes_preview_only_the_effective_priority_owner():
+def test_changing_body_provider_recomputes_final_preview_without_changing_source_formatting():
     app, _ = app_with_game()
-    primary = source('A', 1, address=1)
-    fallback = source('B', 3, address=2)
-    app.observe_capture(primary, 'Aの台詞', sequence=1)
-    app.observe_capture(fallback, 'Bの台詞', sequence=2)
-    app.set_capture_role(primary.identity, primary.address, 'text')
-    app.set_capture_role(fallback.identity, fallback.address, 'text')
-    view = app.capture_view()
-    assert [preview.text for preview in view.previews] == ['Aの台詞']
-    assert [route.text_identity for route in view.routes] == [primary.identity, fallback.identity]
-    app.move_dialogue_source(fallback.identity, -1)
-    view = app.capture_view()
-    assert [preview.text for preview in view.previews] == ['Bの台詞']
+    first = source('A', 1, address=1)
+    second = source('B', 3, address=2)
+    app.observe_capture(first, 'Aの台詞', sequence=1)
+    app.observe_capture(second, 'Bの台詞', sequence=2)
+    app.set_capture_extraction_preset(first.identity, first.address, 'body')
+    app.set_capture_extraction_preset(second.identity, second.address, 'body')
+    app.set_capture_field_source('body', first.identity, first.address)
+    assert [item.body for item in app.capture_view().assembly] == ['Aの台詞']
+    app.set_capture_field_source('body', second.identity, second.address)
+    assert [item.body for item in app.capture_view().assembly] == ['Bの台詞']
+    assert app.capture_candidate(first.identity, first.address).preset == 'body'
 
 
-def test_saved_route_readiness_requires_real_text_output_and_allows_fallback():
+def test_saved_provider_readiness_requires_real_body_output_and_allows_fallback():
     app, _ = app_with_game()
     primary = source('A', 1, address=1)
     fallback = source('B', 3, address=2)
     profile = app.current_profile()
-    profile.hooks = [HookSelection('A', 1, 2, 'text'), HookSelection('B', 3, 4, 'text')]
+    profile.hooks = [HookSelection('A', 1, 2), HookSelection('B', 3, 4)]
+    profile.body_sources = [hook.identity for hook in profile.hooks]
     app.select_profile(app.game_id, app.profile_id)
     app.observe_capture(primary, '', sequence=1)  # thread exists, but produced no dialogue
     assert not app.capture_saved_sources_ready(profile)
@@ -677,7 +705,7 @@ def test_saved_route_readiness_requires_real_text_output_and_allows_fallback():
     assert app.capture_output_identities() == (fallback.identity,)
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
                       available_sources=app.capture_output_identities())
-    assert app.runtime_state().active_text_source == fallback.identity
+    assert app.runtime_state().active_body_source == fallback.identity
 
 
 def test_failed_recovery_hook_trial_can_be_retried():
@@ -710,16 +738,17 @@ def test_profile_selection_discards_capture_batches_and_pending_runtime_transiti
     game_id, profile_id = app.game_id, app.profile_id
     app.select_profile(game_id, profile_id)
     assert not app.capture_transition_pending
-    assert app.capture_view().previews == ()
+    assert app.capture_view().assembly == ()
     app.flush_capture_outputs()
-    assert app.capture_view().previews == ()
+    assert app.capture_view().assembly == ()
 
 
 def test_capture_transition_boundary_is_application_owned():
     app, _ = app_with_game()
     text = source('T', 1)
     profile = app.current_profile()
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
                       available_sources=(text.identity,))
     first = app.observe_runtime_hook(
@@ -778,6 +807,28 @@ def test_catalog_crud_rolls_back_when_persistence_fails():
     with pytest.raises(OSError):
         app.set_default_profile()
     assert game.default_profile == original_default
+
+
+def test_capture_commit_failure_keeps_the_workspace_draft_intact():
+    catalog = Catalog()
+    game = catalog.create_game('Game')
+    app = AutoAdvApplication(
+        catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
+        input_send=lambda *_: None, preflight=lambda *_: True)
+    app.select_profile(game.id, game.default_profile)
+    candidate = source('RECOVERY', 7)
+    app.observe_capture(candidate, 'きぬ「本文」', sequence=1)
+    app.adopt_inserted_hook(candidate.hook_code)
+    app.set_capture_field_source('body', candidate.identity, candidate.address)
+    before = app.capture_profile_snapshot()
+    import pytest
+    with pytest.raises(OSError):
+        app.commit_capture()
+    after = app.capture_profile_snapshot()
+    assert after == before
+    assert app.capture_view().dirty
+    assert app.current_profile().hooks == []
+    assert app.current_profile().inserted_hooks == []
 
 
 def test_import_catalog_rolls_back_application_source_when_persistence_fails():
@@ -862,7 +913,8 @@ def test_application_owns_text_presentation_deadline_and_next_line_timeout():
         preflight=lambda _target: True)
     profile = app.select_profile(game.id, game.default_profile)
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     profile.advance_mode = AdvanceMode.TEXT
     scheduled = []
     changed = []
@@ -895,7 +947,8 @@ def test_application_owns_uncertain_audio_fallback_policy():
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     profile.advance_mode = AdvanceMode.AUDIO
     profile.uncertain_text_fallback = False
     scheduled = []
@@ -917,7 +970,8 @@ def test_application_auto_advance_can_complete_without_gui_runtime_policy():
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     scheduled = []
     app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
@@ -947,7 +1001,8 @@ def test_application_rebuilds_pending_hook_capture_before_admitting_first_new_li
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     app.select_primary_target(101, 500)
     app.hook_host = Host()
     app.begin_hook_connection(101, profile)
@@ -1000,7 +1055,8 @@ def test_activate_selected_target_owns_connection_request_and_saved_monitor_resu
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
@@ -1020,7 +1076,7 @@ def test_activate_selected_target_owns_connection_request_and_saved_monitor_resu
     state = app.try_resume_saved_monitor(profile)
     assert state is not None
     assert state.profile is not None
-    assert state.active_text_source == text.identity
+    assert state.active_body_source == text.identity
 
 
 
@@ -1093,7 +1149,8 @@ def test_capture_host_event_resumes_saved_monitor_before_same_first_output_enter
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
@@ -1110,7 +1167,7 @@ def test_capture_host_event_resumes_saved_monitor_before_same_first_output_enter
     assert app.runtime_state().utterance.raw == '最初の台詞'
 
 
-def test_active_text_source_removal_automatically_falls_back_to_next_saved_route():
+def test_active_body_source_removal_automatically_falls_back_to_next_saved_provider():
     class Child:
         def poll(self):
             return None
@@ -1126,9 +1183,10 @@ def test_active_text_source_removal_automatically_falls_back_to_next_saved_route
     primary = source('A', 1, address=1)
     fallback = source('B', 3, address=2)
     profile.hooks = [
-        HookSelection('A', 1, 2, 'text'),
-        HookSelection('B', 3, 4, 'text'),
+        HookSelection('A', 1, 2),
+        HookSelection('B', 3, 4),
     ]
+    profile.body_sources = [hook.identity for hook in profile.hooks]
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
@@ -1139,13 +1197,13 @@ def test_active_text_source_removal_automatically_falls_back_to_next_saved_route
     app.observe_capture(fallback, 'B', sequence=2)
     app.request_saved_monitor_resume(profile)
     app.try_resume_saved_monitor(profile)
-    assert app.runtime_state().active_text_source == primary.identity
+    assert app.runtime_state().active_body_source == primary.identity
 
     removed = HookEvent('removed', 'host', 1, 3, 30, 101, primary)
     outcome = app.handle_capture_host_event(removed)
     assert outcome.active_source_removed
     assert outcome.monitor_started
-    assert app.runtime_state().active_text_source == fallback.identity
+    assert app.runtime_state().active_body_source == fallback.identity
     assert app.capture_view().problem is None
 
 
@@ -1155,7 +1213,7 @@ def test_public_profile_setting_api_cannot_bypass_capture_workspace_transaction(
     assert not hasattr(app, 'update_profile')
     assert not hasattr(app, 'update_capture_recipe')
     with pytest.raises(ValueError, match='unsupported profile setting'):
-        app.set_profile_setting('hooks', [HookSelection('T', 1, 2, 'text')])
+        app.set_profile_setting('hooks', [HookSelection('T', 1, 2)])
     assert app.current_profile().hooks == []
     assert calls == []
 
@@ -1174,7 +1232,8 @@ def test_monitor_lifecycle_is_observable_from_application_events_without_gui_pol
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
-    profile.hooks = [HookSelection('T', 1, 2, 'text')]
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_sources = [profile.hooks[0].identity]
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
@@ -1231,17 +1290,17 @@ def test_user_level_edit_commands_persist_without_gui_profile_mutators():
     assert len(calls) == 5
 
 
-def test_capture_structure_commands_remain_inside_capture_transaction():
+def test_capture_source_rule_commands_remain_inside_capture_transaction():
     app, calls = app_with_game()
-    before = list(app.current_profile().structure_rules)
+    before = dict(app.current_profile().source_rules)
     rule = StructureRule(r'^(?P<speaker>.+?)「(?P<body>.+)」$')
     candidate = source('T', 1)
     app.observe_capture(candidate, '大和「台詞」', sequence=1)
-    app.set_capture_role(candidate.identity, candidate.address, 'text')
-    app.save_capture_structure_rule(None, rule)
-    assert app.current_profile().structure_rules == before
-    assert app.capture_profile_snapshot().structure_rules == [rule, *before]
+    app.set_capture_field_source('body', candidate.identity, candidate.address)
+    app.save_capture_source_rule(candidate.identity, candidate.address, None, rule)
+    assert app.current_profile().source_rules == before
+    assert app.capture_profile_snapshot().source_rules[candidate.identity][0] == rule
     assert calls == []
     app.commit_capture()
-    assert app.current_profile().structure_rules == [rule, *before]
+    assert app.current_profile().source_rules[candidate.identity][0] == rule
     assert calls == ['save']

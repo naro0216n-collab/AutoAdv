@@ -5,14 +5,16 @@ from unittest.mock import patch
 from types import SimpleNamespace
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import HookSelection, Profile
+from autoadv.model import HookSelection, Profile, SPEAKER_ONLY_RULE
 from autoadv.voice import synthesize
 
 
 class NativeAndAudioContract(unittest.TestCase):
     def test_speaker_is_never_carried_to_a_different_flush_batch(self):
-        p = Profile('id', 'game', hooks=[HookSelection('D', 1, 2, 'text'),
-                                         HookSelection('S', 4, 5, 'speaker')])
+        p = Profile('id', 'game', hooks=[HookSelection('D', 1, 2),
+                                         HookSelection('S', 4, 5)],
+                    body_sources=['D|1|2'], speaker_sources=['S|4|5'],
+                    source_rules={'S|4|5': [SPEAKER_ONLY_RULE]})
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(11, 22), 'host', 1)
         body = ThreadSource(11, 10, 1, 2, 'D', 'body')

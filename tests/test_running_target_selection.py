@@ -66,7 +66,7 @@ class RunningTargetGuiTests(unittest.TestCase):
                     starts.append('host-start')
                     window.application.hook_host = SimpleNamespace(
                         command=commands, child=SimpleNamespace(poll=lambda: None))
-                window.start_host = fake_host_start
+                window.application.start_hook_host = fake_host_start
                 window.use_running_target(candidate)
                 self.assertEqual(window.tabs.currentIndex(), 1)
                 commands.assert_any_call('connect', pid=candidate.pid)
@@ -118,7 +118,7 @@ class RunningTargetGuiTests(unittest.TestCase):
                     starts.append('start')
                     window.application.hook_host = SimpleNamespace(command=commands,
                         child=SimpleNamespace(poll=lambda: None))
-                window.start_host = fake_host_start
+                window.application.start_hook_host = fake_host_start
                 with patch('autoadv.gui.sys.platform', 'win32'), \
                      patch('autoadv.gui.find_game_windows', return_value=(target,)):
                     window.auto_attach_selected_game()

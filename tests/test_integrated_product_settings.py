@@ -14,7 +14,7 @@ from autoadv.ocr import OCRWorker
 
 class SessionOwnership(unittest.TestCase):
     def test_different_hook_audio_and_input_processes_keep_roles(self):
-        p = Profile('p', 'test', hooks=[HookSelection('H', 2, 3)])
+        p = Profile('p', 'test', hooks=[HookSelection('H', 2, 3)], body_sources=['H|2|3'])
         sent = []
         controller = Controller(lambda target, key: sent.append((target.pid, target.audio_pid, key)),
                                 lambda target: target.hwnd == 800 and target.pid == 22)
@@ -33,7 +33,7 @@ class SessionOwnership(unittest.TestCase):
         self.assertFalse(controller.try_advance())
 
     def test_runtime_hold_does_not_disable_auto_and_new_line_clears_hold(self):
-        p = Profile('p', 'P', hooks=[HookSelection('H', 2, 3)])
+        p = Profile('p', 'P', hooks=[HookSelection('H', 2, 3)], body_sources=['H|2|3'])
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(10, 20), 'host', 1)
         source = ThreadSource(10, 100, 2, 3, 'H', 'hook')
@@ -51,7 +51,7 @@ class SessionOwnership(unittest.TestCase):
         self.assertTrue(c.authorized)
 
     def test_selected_text_priority_vs_multiple_flushes_of_one_owner(self):
-        p = Profile('p', 'many', hooks=[HookSelection('H', 2, 3), HookSelection('ALT', 4, 5)])
+        p = Profile('p', 'many', hooks=[HookSelection('H', 2, 3), HookSelection('ALT', 4, 5)], body_sources=['H|2|3', 'ALT|4|5'])
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(10, 20), 'host', 1, ('H|2|3', 'ALT|4|5'))
         primary = ThreadSource(10, 100, 2, 3, 'H', 'primary')

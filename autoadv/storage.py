@@ -7,7 +7,8 @@ import os
 import tempfile
 import uuid
 import copy
-from .model import AdvanceMode, Game, HookSelection, Profile, StructureRule, ReplacementRule, OCRSettings, DEFAULT_STRUCTURE_RULES, COMMON_FIELDS
+from .model import (AdvanceMode, Game, HookSelection, Profile, StructureRule, ReplacementRule, OCRSettings,
+                    DEFAULT_STRUCTURE_RULES, SPEAKER_ONLY_RULE, COMMON_FIELDS)
 
 
 @dataclass
@@ -95,22 +96,23 @@ def user_settings_path() -> Path:
 
 
 def _profile_payload(p: Profile) -> dict:
-    return dict(id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks], inserted_hooks=p.inserted_hooks, insert_pc_hooks=p.insert_pc_hooks, speaker_links=p.speaker_links,
-                advance_mode=p.advance_mode.value, uncertain_text_fallback=p.uncertain_text_fallback,
-                default_tts=p.default_tts, default_voice=p.default_voice,
-                speaker_tts=p.speaker_tts,
-                speaker_voices=p.speaker_voices,
-                structure_rules=[vars(x) for x in p.structure_rules],
-                replacements=[vars(x) for x in p.replacements], name_readings=p.name_readings,
-                source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
-                asr_model=p.asr_model, asr_tokens=p.asr_tokens,
-                next_line_timeout_ms=p.next_line_timeout_ms,
-                inherit_common=p.inherit_common,
-                reading_ms=p.reading_ms, per_character_wait_ms=p.per_character_wait_ms,
-                hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
-                hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
-                repeat_rule=p.repeat_rule, input_key=p.input_key)
-
+    return dict(
+        id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks],
+        body_sources=list(p.body_sources), speaker_sources=list(p.speaker_sources),
+        source_rules={identity: [vars(rule) for rule in rules]
+                      for identity, rules in p.source_rules.items()},
+        inserted_hooks=p.inserted_hooks, insert_pc_hooks=p.insert_pc_hooks,
+        advance_mode=p.advance_mode.value, uncertain_text_fallback=p.uncertain_text_fallback,
+        default_tts=p.default_tts, default_voice=p.default_voice,
+        speaker_tts=p.speaker_tts, speaker_voices=p.speaker_voices,
+        replacements=[vars(x) for x in p.replacements], name_readings=p.name_readings,
+        source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
+        asr_model=p.asr_model, asr_tokens=p.asr_tokens,
+        next_line_timeout_ms=p.next_line_timeout_ms, inherit_common=p.inherit_common,
+        reading_ms=p.reading_ms, per_character_wait_ms=p.per_character_wait_ms,
+        hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
+        hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
+        repeat_rule=p.repeat_rule, input_key=p.input_key)
 
 def _read_replacements(raw: list | dict) -> list[ReplacementRule]:
     # A single one-way data migration from the initial v3 literal dictionary.
@@ -123,31 +125,55 @@ def _read_replacements(raw: list | dict) -> list[ReplacementRule]:
 
 
 def _read_profile(raw: dict) -> Profile:
-    p = Profile(id=raw['id'], name=raw['name'],
-                hooks=[HookSelection(**h) for h in raw.get('hooks', [])],
-                inserted_hooks=list(raw.get('inserted_hooks', [])), insert_pc_hooks=raw.get('insert_pc_hooks', False), speaker_links=dict(raw.get('speaker_links', {})),
-                advance_mode=AdvanceMode(raw.get('advance_mode', 'text')),
-                uncertain_text_fallback=raw.get('uncertain_text_fallback', False),
-                default_tts=raw.get('default_tts', False), default_voice=raw.get('default_voice', ''),
-                speaker_tts=dict(raw.get('speaker_tts', {})),
-                speaker_voices=raw.get('speaker_voices', {}),
-                structure_rules=[StructureRule(**r) for r in raw['structure_rules']] if 'structure_rules' in raw else list(DEFAULT_STRUCTURE_RULES),
-                replacements=_read_replacements(raw.get('replacements', [])),
-                name_readings=raw.get('name_readings', {}),
-                source=raw.get('source', 'hook'), ocr=OCRSettings(**{**raw.get('ocr', {}),
-                                   'region': tuple(raw.get('ocr', {}).get('region', (0, 0, 640, 180)))}),
-                native_helper=raw.get('native_helper', ''), asr_model=raw.get('asr_model', ''),
-                asr_tokens=raw.get('asr_tokens', ''),
-                next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
-                inherit_common=list(raw.get('inherit_common', [])),
-                reading_ms=raw.get('reading_ms', 700),
-                per_character_wait_ms=raw.get('per_character_wait_ms', 200),
-                hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
-                hook_max_buffer=int(raw.get('hook_max_buffer', 3000)), hook_max_history=int(raw.get('hook_max_history', 1000000)),
-                repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))
+    raw_hooks = list(raw.get('hooks', []))
+    hooks = [HookSelection(h['code'], int(h['context']), int(h['context2'])) for h in raw_hooks]
+    identities = [hook.identity for hook in hooks]
+
+    # settings-v4 originally stored one exclusive role on every HOOK plus one
+    # profile-wide extractor.  Read that representation once at the storage
+    # boundary and immediately convert it to the field-provider model.  The
+    # runtime and serializer only use the new representation.
+    if 'body_sources' in raw or 'speaker_sources' in raw or 'source_rules' in raw:
+        body_sources = list(raw.get('body_sources', []))
+        speaker_sources = list(raw.get('speaker_sources', []))
+        source_rules = {identity: [StructureRule(**rule) for rule in rules]
+                        for identity, rules in raw.get('source_rules', {}).items()}
+    else:
+        legacy_roles = {hook.identity: str(data.get('role', 'text'))
+                        for hook, data in zip(hooks, raw_hooks)}
+        body_sources = [identity for identity in identities if legacy_roles.get(identity) != 'speaker']
+        speaker_sources = [identity for identity in identities if legacy_roles.get(identity) == 'speaker']
+        old_rules = ([StructureRule(**rule) for rule in raw['structure_rules']]
+                     if 'structure_rules' in raw else list(DEFAULT_STRUCTURE_RULES))
+        source_rules = {}
+        for identity in body_sources:
+            source_rules[identity] = list(old_rules)
+        for identity in speaker_sources:
+            source_rules[identity] = [SPEAKER_ONLY_RULE]
+    p = Profile(
+        id=raw['id'], name=raw['name'], hooks=hooks,
+        body_sources=body_sources, speaker_sources=speaker_sources, source_rules=source_rules,
+        inserted_hooks=list(raw.get('inserted_hooks', [])),
+        insert_pc_hooks=raw.get('insert_pc_hooks', False),
+        advance_mode=AdvanceMode(raw.get('advance_mode', 'text')),
+        uncertain_text_fallback=raw.get('uncertain_text_fallback', False),
+        default_tts=raw.get('default_tts', False), default_voice=raw.get('default_voice', ''),
+        speaker_tts=dict(raw.get('speaker_tts', {})), speaker_voices=raw.get('speaker_voices', {}),
+        replacements=_read_replacements(raw.get('replacements', [])),
+        name_readings=raw.get('name_readings', {}), source=raw.get('source', 'hook'),
+        ocr=OCRSettings(**{**raw.get('ocr', {}),
+                         'region': tuple(raw.get('ocr', {}).get('region', (0, 0, 640, 180)))}),
+        native_helper=raw.get('native_helper', ''), asr_model=raw.get('asr_model', ''),
+        asr_tokens=raw.get('asr_tokens', ''),
+        next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
+        inherit_common=list(raw.get('inherit_common', [])), reading_ms=raw.get('reading_ms', 700),
+        per_character_wait_ms=raw.get('per_character_wait_ms', 200),
+        hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
+        hook_max_buffer=int(raw.get('hook_max_buffer', 3000)),
+        hook_max_history=int(raw.get('hook_max_history', 1000000)),
+        repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))
     p.validate()
     return p
-
 
 def save(catalog: Catalog, path: Path | None = None) -> None:
     path = path or user_settings_path()

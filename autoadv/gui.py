@@ -112,7 +112,6 @@ def run_gui(session_driver=None) -> int:
             self._capture_output_timer = QTimer(self)
             self._capture_output_timer.setSingleShot(True)
             self._capture_output_timer.timeout.connect(self.flush_capture_outputs)
-            self._capture_role_buttons = {}
             self.profile_reset_buttons = {}
 
             root = QWidget()
@@ -253,69 +252,102 @@ def run_gui(session_driver=None) -> int:
 
             capture_box = QGroupBox('会話取得')
             capture_outer = QVBoxLayout(capture_box)
-            self.capture_hint = QLabel('ゲームで台詞を進めると、取得候補が自動的に追加されます。')
+            self.capture_hint = QLabel('ゲームで台詞を進めると、取得元と実サンプルが自動的に追加されます。')
             self.capture_hint.setWordWrap(True)
             capture_outer.addWidget(self.capture_hint)
-            split = QHBoxLayout()
-            left = QVBoxLayout()
+            workspace = QHBoxLayout()
+
+            source_column = QVBoxLayout()
+            source_column.addWidget(QLabel('1. 取得元'))
             self.source_table = QTableWidget(0, 2)
-            self.source_table.setHorizontalHeaderLabels(['用途', '取得されたテキスト'])
+            self.source_table.setHorizontalHeaderLabels(['取得されたテキスト', '採用先'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.source_table.setMinimumHeight(280)
+            self.source_table.setMinimumHeight(300)
             self.source_table.verticalHeader().setVisible(False)
-            self.source_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            self.source_table.setColumnWidth(0, 180)
+            self.source_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.source_table.setColumnWidth(1, 90)
             self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
-            left.addWidget(self.source_table)
-            split.addLayout(left, 3)
-            right = QVBoxLayout()
-            right.addWidget(QLabel('完成する会話'))
-            self.capture_dialogue_preview = QPlainTextEdit()
-            self.capture_dialogue_preview.setReadOnly(True)
-            self.capture_dialogue_preview.setPlaceholderText('左の候補を台詞・話者として選ぶと、実際の解釈結果をここで確認できます。')
-            self.capture_dialogue_preview.setMinimumHeight(240)
-            right.addWidget(self.capture_dialogue_preview, 1)
-            self.route_table = QTableWidget(0, 3)
-            self.route_table.setHorizontalHeaderLabels(['台詞ソース', '話者ソース', '優先'])
-            self.route_table.verticalHeader().setVisible(False)
-            self.route_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.route_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            self.route_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            self.route_table.setMaximumHeight(155)
-            self.route_table.hide()
-            right.addWidget(self.route_table)
+            source_column.addWidget(self.source_table, 1)
+            workspace.addLayout(source_column, 3)
+
+            format_column = QVBoxLayout()
+            format_column.addWidget(QLabel('2. 選択した取得元の整形'))
+            format_help = QLabel('この取得元から話者候補・本文候補を作ります。どちらを最終会話へ採用するかは右側で選びます。')
+            format_help.setWordWrap(True)
+            format_column.addWidget(format_help)
+            self.capture_format_source = QLabel('取得元を選択してください')
+            self.capture_format_source.setWordWrap(True)
+            format_column.addWidget(self.capture_format_source)
+            self.capture_format = QComboBox()
+            for label, value in (
+                    ('構造を自動判定', 'auto'),
+                    ('原文全体を本文候補にする', 'body'),
+                    ('原文全体を話者候補にする', 'speaker'),
+                    ('話者「本文」', 'quoted'),
+                    ('話者：本文', 'colon'),
+                    ('話者の次行に本文', 'newline'),
+                    ('話者 + 括弧情報 + 本文', 'metadata'),
+                    ('「本文」のみ', 'quoted_body')):
+                self.capture_format.addItem(label, value)
+            self.capture_format.currentIndexChanged.connect(self.capture_format_changed)
+            format_column.addWidget(self.capture_format)
+            self.source_extraction_preview = QTableWidget(0, 3)
+            self.source_extraction_preview.setHorizontalHeaderLabels(['原文', '話者候補', '本文候補'])
+            self.source_extraction_preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.source_extraction_preview.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            self.source_extraction_preview.verticalHeader().setVisible(False)
+            self.source_extraction_preview.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.source_extraction_preview.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            self.source_extraction_preview.setMinimumHeight(300)
+            format_column.addWidget(self.source_extraction_preview, 1)
+            self.btn_advanced_extraction = QPushButton('詳細な抽出規則')
+            self.btn_advanced_extraction.clicked.connect(lambda: self.reveal_section('extraction', 'game'))
+            format_column.addWidget(self.btn_advanced_extraction)
+            workspace.addLayout(format_column, 4)
+
+            assembly_column = QVBoxLayout()
+            assembly_column.addWidget(QLabel('3. 会話の組み立て'))
+            assembly_form = QFormLayout()
+            self.capture_body_source = QComboBox()
+            self.capture_body_source.currentIndexChanged.connect(self.capture_body_source_changed)
+            self.capture_speaker_source = QComboBox()
+            self.capture_speaker_source.currentIndexChanged.connect(self.capture_speaker_source_changed)
+            assembly_form.addRow('本文を使う取得元', self.capture_body_source)
+            assembly_form.addRow('話者を使う取得元', self.capture_speaker_source)
+            assembly_column.addLayout(assembly_form)
+            assembly_column.addWidget(QLabel('最終結果プレビュー'))
+            self.capture_result_table = QTableWidget(0, 2)
+            self.capture_result_table.setHorizontalHeaderLabels(['話者', '本文'])
+            self.capture_result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.capture_result_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            self.capture_result_table.verticalHeader().setVisible(False)
+            self.capture_result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            self.capture_result_table.setColumnWidth(0, 110)
+            self.capture_result_table.setMinimumHeight(245)
+            assembly_column.addWidget(self.capture_result_table, 1)
             self.capture_problem = QLabel('')
             self.capture_problem.setWordWrap(True)
             self.capture_problem.setProperty('problem', True)
             self.capture_problem.hide()
-            right.addWidget(self.capture_problem)
+            assembly_column.addWidget(self.capture_problem)
             self.capture_recovery_action = QPushButton('取得の復旧を開く')
             self.capture_recovery_action.clicked.connect(lambda: self.reveal_section('hook_details', 'game'))
             self.capture_recovery_action.hide()
-            right.addWidget(self.capture_recovery_action)
-            quick = QHBoxLayout()
-            self.btn_edit_detected_speaker = QPushButton('この話者のVoice')
-            self.btn_edit_detected_speaker.clicked.connect(self.edit_detected_speaker)
-            self.btn_fix_extraction = QPushButton('話者・本文を修正')
-            self.btn_fix_extraction.clicked.connect(lambda: self.show_task_section('extraction'))
-            self.btn_fix_reading = QPushButton('読みを修正')
-            self.btn_fix_reading.clicked.connect(self.edit_preview_reading)
-            for button in (self.btn_edit_detected_speaker, self.btn_fix_extraction, self.btn_fix_reading):
-                quick.addWidget(button)
-            right.addLayout(quick)
+            assembly_column.addWidget(self.capture_recovery_action)
             self.btn_commit_capture = QPushButton('この会話取得を使用')
             self.btn_commit_capture.setProperty('primary', True)
             self.btn_commit_capture.clicked.connect(self.commit_capture_workspace)
             self.btn_commit_capture.setEnabled(False)
-            right.addWidget(self.btn_commit_capture)
-            split.addLayout(right, 2)
-            capture_outer.addLayout(split)
+            assembly_column.addWidget(self.btn_commit_capture)
+            workspace.addLayout(assembly_column, 3)
+            capture_outer.addLayout(workspace)
             pages['game'].addWidget(capture_box)
             self.ui_sections['capture'] = capture_box
+            self.ui_sections['source_format'] = capture_box
 
-            candidate_details = group('選択した取得元の詳細', page='game', section='candidate_details', detail=True)
+            candidate_details = group('選択した取得元の技術情報', page='game', section='candidate_details', detail=True)
             self.hook_preview = QPlainTextEdit()
             self.hook_preview.setReadOnly(True)
             self.hook_preview.setMaximumHeight(120)
@@ -403,15 +435,15 @@ def run_gui(session_driver=None) -> int:
             add_reading_layout.addWidget(self.new_reading_word,2); add_reading_layout.addWidget(self.new_reading_value,2); add_reading_layout.addWidget(self.btn_add_reading)
             reading.addRow(add_reading)
 
-            rule_preview = group('選択した会話の処理詳細', page='game', section='live_preview', detail=True)
-            self.example_raw = QPlainTextEdit(); self.example_raw.setPlaceholderText('取得候補を選ぶと実際の原文が入ります'); self.example_raw.setMaximumHeight(80)
-            self.example_raw.textChanged.connect(self.refresh_rule_preview); rule_preview.addRow('原文', self.example_raw)
+            rule_preview = group('読み上げ・原音照合プレビュー', page='game', section='live_preview', detail=True)
+            self.example_raw = QPlainTextEdit(); self.example_raw.setPlaceholderText('本文例。会話取得の整形とは独立して、読み・置換結果だけを確認します'); self.example_raw.setMaximumHeight(80)
+            self.example_raw.textChanged.connect(self.refresh_rule_preview); rule_preview.addRow('本文例', self.example_raw)
             self.editor_preview = QPlainTextEdit(); self.editor_preview.setReadOnly(True); self.editor_preview.setMinimumHeight(110); rule_preview.addRow(self.editor_preview)
 
-            extraction = group('話者・本文の切り分け詳細', page='game', section='extraction', detail=True)
+            extraction = group('選択した取得元の詳細な抽出規則', page='game', section='extraction', detail=True)
             self.structure_table=QTableWidget(0,4); self.structure_table.setHorizontalHeaderLabels(['優先','有効','適用条件','抽出パターン']); self.configure_editor_table(self.structure_table); self.structure_table.itemSelectionChanged.connect(self.show_structure_rule); extraction.addRow(self.structure_table)
             self.structure_template=QComboBox()
-            for label,value in (('よくある形式を選ぶ',''),('話者「本文」',r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」\s*$'),('話者：本文',r'^\s*(?P<speaker>[^：:\n]+)[：:]\s*(?P<body>.+)$'),('話者の次行に本文',r'^\s*(?P<speaker>[^\n]+)\n(?P<body>.+)$'),('「本文」のみ',r'^\s*「(?P<body>.*?)」\s*$')): self.structure_template.addItem(label,value)
+            for label,value in (('よくある形式を選ぶ',''),('本文のみ',r'^\s*(?P<body>.*)\s*$'),('話者名のみ',r'^\s*(?P<speaker>.*?)\s*$'),('話者「本文」',r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」\s*$'),('話者：本文',r'^\s*(?P<speaker>[^：:\n]+)[：:]\s*(?P<body>.+)$'),('話者の次行に本文',r'^\s*(?P<speaker>[^\n]+)\n(?P<body>.+)$'),('話者 + 括弧情報 + 本文',r'^\s*(?P<speaker>\S{1,40})\s+\([^\n)]{1,80}\)\s*(?P<body>.+)$'),('「本文」のみ',r'^\s*「(?P<body>.*?)」\s*$')): self.structure_template.addItem(label,value)
             self.btn_apply_template=QPushButton('この形式を使う'); self.btn_apply_template.clicked.connect(self.use_structure_template); extraction.addRow(self.structure_template,self.btn_apply_template)
             self.structure_pattern=QLineEdit(); self.structure_condition=QLineEdit(); self.structure_enabled=QCheckBox('有効'); self.structure_enabled.setChecked(True)
             extraction.addRow('抽出規則',self.structure_pattern); extraction.addRow('適用条件',self.structure_condition); extraction.addRow(self.structure_enabled)
@@ -1049,14 +1081,23 @@ def run_gui(session_driver=None) -> int:
         def capture_draft_profile(self) -> Profile | None:
             return self.application.capture_profile_snapshot() or self.current_profile()
 
+        def selected_capture_rule_source(self):
+            source = self.chosen_source()
+            if source is None:
+                return None
+            return source.identity, source.address
+
         def refresh_rules(self, focus=None, row=-1):
             p = self.current_profile()
-            capture = self.capture_draft_profile()
-            if not p or not capture:
+            if not p:
                 return
+            source_key = self.selected_capture_rule_source()
+            rules = self.application.capture_source_rules(source_key[0]) if source_key else ()
             self.fill_editor_table(self.structure_table, [
                 (str(i + 1), '有効' if rule.enabled else '無効', rule.condition or '（常時）', rule.pattern)
-                for i, rule in enumerate(capture.structure_rules)], row if focus == 'structure' else -1)
+                for i, rule in enumerate(rules)], row if focus == 'structure' else -1)
+            self.structure_table.setEnabled(source_key is not None)
+            self.btn_structure.setEnabled(source_key is not None)
             self.fill_editor_table(self.replacement_table, [
                 ('有効' if rule.enabled else '無効', rule.pattern, rule.replacement,
                  {'tts': 'TTS', 'asr': 'ASR', 'both': '両方'}[rule.target],
@@ -1067,14 +1108,13 @@ def run_gui(session_driver=None) -> int:
 
         def show_structure_rule(self):
             row = self.selected_editor_row(self.structure_table)
-            p = self.capture_draft_profile()
-            if row >= 0 and p and row < len(p.structure_rules):
-                rule = p.structure_rules[row]
+            source_key = self.selected_capture_rule_source()
+            rules = self.application.capture_source_rules(source_key[0]) if source_key else ()
+            if 0 <= row < len(rules):
+                rule = rules[row]
                 self.structure_pattern.setText(rule.pattern)
                 self.structure_condition.setText(rule.condition)
                 self.structure_enabled.setChecked(rule.enabled)
-                self._preview_edit_kind = 'structure'
-                self.refresh_rule_preview()
 
         def use_structure_template(self):
             template = self.structure_template.currentData()
@@ -1086,18 +1126,16 @@ def run_gui(session_driver=None) -> int:
             self.structure_pattern.clear()
             self.structure_condition.clear()
             self.structure_enabled.setChecked(True)
-            self._preview_edit_kind = 'structure'
-            self.refresh_rule_preview()
 
         def move_structure_rule(self, movement):
             row = self.selected_editor_row(self.structure_table)
-            p = self.capture_draft_profile()
-            if p is None or row < 0 or not 0 <= row + movement < len(p.structure_rules):
+            source_key = self.selected_capture_rule_source()
+            rules = self.application.capture_source_rules(source_key[0]) if source_key else ()
+            if source_key is None or row < 0 or not 0 <= row + movement < len(rules):
                 return
             try:
-                self.application.move_capture_structure_rule(row, movement)
+                self.application.move_capture_source_rule(source_key[0], source_key[1], row, movement)
                 self.refresh_capture_workspace()
-                self.refresh_rule_preview()
                 self.refresh_rules('structure', row + movement)
             except Exception as exc:
                 self.note('抽出規則の順序を変更できません: ' + str(exc))
@@ -1109,28 +1147,31 @@ def run_gui(session_driver=None) -> int:
             self.move_structure_rule(1)
 
         def add_structure_rule(self):
+            source_key = self.selected_capture_rule_source()
+            if source_key is None:
+                self.note('整形する取得元を一覧から選んでください')
+                return
             row = self.selected_editor_row(self.structure_table)
             try:
                 rule = StructureRule(self.structure_pattern.text().strip(),
                                      self.structure_condition.text().strip(),
                                      self.structure_enabled.isChecked())
-                self.application.save_capture_structure_rule(row if row >= 0 else None, rule)
+                self.application.save_capture_source_rule(
+                    source_key[0], source_key[1], row if row >= 0 else None, rule)
                 self.refresh_capture_workspace()
-                self.refresh_rule_preview()
                 self.refresh_rules('structure', row if row >= 0 else 0)
             except Exception as exc:
-                self.note('抽出規則を保存できません: ' + str(exc))
-                self.refresh_rule_preview()
+                self.note('抽出規則を適用できません: ' + str(exc))
 
         def remove_structure_rule(self):
+            source_key = self.selected_capture_rule_source()
             row = self.selected_editor_row(self.structure_table)
-            if row < 0:
-                self.note('削除する抽出規則を一覧から選んでください')
+            if source_key is None or row < 0:
+                self.note('削除する取得元の抽出規則を選んでください')
                 return
             try:
-                self.application.delete_capture_structure_rule(row)
+                self.application.delete_capture_source_rule(source_key[0], source_key[1], row)
                 self.refresh_capture_workspace()
-                self.refresh_rule_preview()
                 self.refresh_rules()
                 self.clear_structure_editor()
             except Exception as exc:
@@ -1277,10 +1318,8 @@ def run_gui(session_driver=None) -> int:
             self.note('試聴が終了しました' if success else '試聴: ' + reason)
 
         def preview_from_control(self, control):
-            if control in (self.structure_pattern, self.structure_condition, self.structure_enabled):
-                self._preview_edit_kind = 'structure'
-            elif control in (self.replace_pattern, self.replace_value, self.replace_target,
-                             self.replace_regex, self.replace_enabled):
+            if control in (self.replace_pattern, self.replace_value, self.replace_target,
+                           self.replace_regex, self.replace_enabled):
                 self._preview_edit_kind = 'replacement'
             self.refresh_rule_preview()
 
@@ -1291,22 +1330,12 @@ def run_gui(session_driver=None) -> int:
             if p is None:
                 self.editor_preview.setPlainText('作品を選択してください。')
                 return
-            base = self.capture_draft_profile() or p
-            draft = copy.deepcopy(self.catalog.effective_profile(base))
+            draft = copy.deepcopy(self.catalog.effective_profile(p))
             draft.default_tts = self.default_tts.isChecked()
             draft.default_voice = self.default_voice.currentText().strip()
             kind = getattr(self, '_preview_edit_kind', None)
-            row = -1
             try:
-                if kind == 'structure' and self.structure_pattern.text().strip():
-                    rule = StructureRule(self.structure_pattern.text().strip(),
-                        self.structure_condition.text().strip(), self.structure_enabled.isChecked())
-                    row = self.selected_editor_row(self.structure_table)
-                    if row >= 0:
-                        draft.structure_rules[row] = rule
-                    else:
-                        draft.structure_rules.insert(0, rule)
-                elif kind == 'replacement' and self.replace_pattern.text():
+                if kind == 'replacement' and self.replace_pattern.text():
                     rule = ReplacementRule(self.replace_pattern.text(), self.replace_value.text(),
                         self.replace_regex.isChecked(), self.replace_target.currentData(),
                         self.replace_enabled.isChecked())
@@ -1315,21 +1344,22 @@ def run_gui(session_driver=None) -> int:
                         draft.replacements[row] = rule
                     else:
                         draft.replacements.append(rule)
-                raw = self.example_raw.toPlainText()
+                body = self.example_raw.toPlainText()
+                speaker = ''
+                assembly = self.application.capture_view().assembly
+                if assembly and not self.example_raw.hasFocus():
+                    speaker = assembly[-1].speaker
                 trace = []
-                u = interpret(raw, draft, session=0, line=0, source='preview', sequence=0, trace=trace)
+                u = interpret(body, draft, session=0, line=0, source='preview', sequence=0,
+                              speaker_override=speaker, body_override=body, trace=trace)
                 tts_result = (f'TTS: Voice {u.voice or "未設定"}' if u.use_tts else 'TTS: 使用しない')
                 self.editor_preview.setPlainText(
-                    f'話者: {u.speaker or "（未判別）"}\n'
-                    f'表示本文: {u.text}\n'
                     f'{tts_result}\n'
                     f'TTS読み上げ: {u.reading}\n'
                     f'原音照合: {u.match_text}')
                 self._preview_utterance = u
-                self.btn_edit_detected_speaker.setEnabled(bool(u.speaker))
             except (ValueError, re.error, IndexError) as exc:
                 self._preview_utterance = None
-                self.btn_edit_detected_speaker.setEnabled(False)
                 self.editor_preview.setPlainText('編集中の規則は適用できません: ' + str(exc))
 
         def reveal_section(self, section: str, page: str = 'game'):
@@ -1391,7 +1421,7 @@ def run_gui(session_driver=None) -> int:
             if not u:
                 self.note('台詞を取得してから編集を始めてください')
                 return
-            self.example_raw.setPlainText(u.raw)
+            self.example_raw.setPlainText(u.text)
             self.tabs.setCurrentIndex(self.game_tab_index)
 
         def duplicate_profile(self):
@@ -1687,18 +1717,18 @@ def run_gui(session_driver=None) -> int:
             self._capture_output_timer.stop()
             self.application.clear_capture_observations()
             self.source_table.setRowCount(0)
-            self.route_table.setRowCount(0)
-            self.route_table.hide()
-            self.capture_dialogue_preview.clear()
+            self.capture_result_table.setRowCount(0)
+            self.source_extraction_preview.setRowCount(0)
             self.capture_problem.hide()
             self.hook_preview.clear()
             self.hook_technical_info.clear()
+            self.capture_format_source.setText('取得元を選択してください')
             self.refresh_capture_hint()
 
         def source_from_candidate_row(self, row: int):
             if row < 0 or row >= self.source_table.rowCount():
                 return None
-            item = self.source_table.item(row, 1)
+            item = self.source_table.item(row, 0)
             identity = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
             if not isinstance(identity, (tuple, list)) or len(identity) != 2:
                 return None
@@ -1720,47 +1750,116 @@ def run_gui(session_driver=None) -> int:
             has_output = bool(view.candidates)
             self.capture_hint.setVisible(not has_output)
             if not has_output:
-                self.capture_hint.setText(
-                    'ゲームで台詞を進めると、取得候補が自動的に追加されます。')
+                self.capture_hint.setText('ゲームで台詞を進めると、取得候補が自動的に追加されます。')
+
+        def refresh_source_extraction_preview(self, candidate=None):
+            if candidate is None:
+                source = self.chosen_source()
+                candidate = (self.application.capture_candidate(source.identity, source.address)
+                             if source else None)
+            self.source_extraction_preview.setRowCount(0)
+            if candidate is None:
+                self.capture_format_source.setText('取得元を選択してください')
+                return
+            self.capture_format_source.setText(candidate.latest[:120] or candidate.identity)
+            index = self.capture_format.findData(candidate.preset)
+            blocked = self.capture_format.blockSignals(True)
+            self.capture_format.setCurrentIndex(index if index >= 0 else 0)
+            self.capture_format.blockSignals(blocked)
+            self.source_extraction_preview.setRowCount(len(candidate.samples))
+            for row, sample in enumerate(candidate.samples):
+                self.source_extraction_preview.setItem(row, 0, QTableWidgetItem(sample.raw))
+                self.source_extraction_preview.setItem(row, 1, QTableWidgetItem(sample.speaker))
+                self.source_extraction_preview.setItem(row, 2, QTableWidgetItem(sample.body))
 
         def refresh_candidate_actions(self, *_):
             source = self.chosen_source()
             candidate = (self.application.capture_candidate(source.identity, source.address)
                          if source else None)
-            history = candidate.history if candidate else ()
-            if history and self.example_raw.toPlainText() != history[-1]:
-                blocked = self.example_raw.blockSignals(True)
-                self.example_raw.setPlainText(history[-1])
-                self.example_raw.blockSignals(blocked)
-                self.refresh_rule_preview()
+            self.refresh_source_extraction_preview(candidate)
+            self.refresh_rules()
 
-        def set_capture_role(self, identity: str, address: int, role: str | None):
-            if getattr(self, '_refreshing_hook_rows', False):
+        def capture_format_changed(self, *_):
+            if getattr(self, '_refreshing_capture_controls', False):
+                return
+            source = self.chosen_source()
+            if source is None:
                 return
             try:
-                self.application.set_capture_role(identity, address, role)
+                self.application.set_capture_extraction_preset(
+                    source.identity, source.address, self.capture_format.currentData())
                 self.refresh_capture_workspace()
             except Exception as exc:
-                self.note('会話取得を変更できません: ' + str(exc))
+                self.note('取得文の整形を変更できません: ' + str(exc))
+
+        def _capture_combo_value(self, combo):
+            data = combo.currentData()
+            if isinstance(data, (tuple, list)) and len(data) == 2:
+                return data[0], int(data[1])
+            return None, None
+
+        def capture_body_source_changed(self, *_):
+            if getattr(self, '_refreshing_capture_controls', False):
+                return
+            identity, address = self._capture_combo_value(self.capture_body_source)
+            if identity is None:
+                return
+            try:
+                self.application.set_capture_field_source('body', identity, address)
                 self.refresh_capture_workspace()
+            except Exception as exc:
+                self.note('本文の取得元を変更できません: ' + str(exc))
+
+        def capture_speaker_source_changed(self, *_):
+            if getattr(self, '_refreshing_capture_controls', False):
+                return
+            identity, address = self._capture_combo_value(self.capture_speaker_source)
+            try:
+                self.application.set_capture_field_source('speaker', identity, address)
+                self.refresh_capture_workspace()
+            except Exception as exc:
+                self.note('話者の取得元を変更できません: ' + str(exc))
+
+        def _fill_capture_source_combos(self, view):
+            self._refreshing_capture_controls = True
+            try:
+                self.capture_body_source.blockSignals(True)
+                self.capture_speaker_source.blockSignals(True)
+                self.capture_body_source.clear()
+                self.capture_speaker_source.clear()
+                self.capture_body_source.addItem('本文の取得元を選択', None)
+                self.capture_speaker_source.addItem('本文と同じ取得元（自動）', None)
+                body_index = 0
+                speaker_index = 0
+                for candidate in view.candidates:
+                    label = candidate.latest[:70] or candidate.identity
+                    data = (candidate.identity, candidate.address)
+                    self.capture_body_source.addItem(label, data)
+                    self.capture_speaker_source.addItem(label, data)
+                    if candidate.identity == view.body_source:
+                        body_index = self.capture_body_source.count() - 1
+                    if candidate.identity == view.speaker_source:
+                        speaker_index = self.capture_speaker_source.count() - 1
+                self.capture_body_source.setCurrentIndex(body_index)
+                self.capture_speaker_source.setCurrentIndex(speaker_index)
+            finally:
+                self.capture_body_source.blockSignals(False)
+                self.capture_speaker_source.blockSignals(False)
+                self._refreshing_capture_controls = False
 
         def refresh_capture_workspace(self):
             view = self.application.capture_view()
             profile = self.current_profile()
             if profile and profile.source == 'ocr':
                 self.source_table.setRowCount(0)
-                self.route_table.setRowCount(0)
-                self.route_table.hide()
+                self.capture_body_source.clear()
+                self.capture_speaker_source.clear()
+                self.capture_result_table.setRowCount(0)
                 dialogue = self.application.play_view().dialogue
-                if dialogue is None:
-                    self.capture_dialogue_preview.clear()
-                else:
-                    heading = dialogue.speaker
-                    if dialogue.use_tts:
-                        voice = dialogue.voice or 'Voice未設定'
-                        heading = f'{heading} · {voice}' if heading else voice
-                    self.capture_dialogue_preview.setPlainText(
-                        (f'{heading}\n' if heading else '') + dialogue.text)
+                if dialogue is not None:
+                    self.capture_result_table.setRowCount(1)
+                    self.capture_result_table.setItem(0, 0, QTableWidgetItem(dialogue.speaker))
+                    self.capture_result_table.setItem(0, 1, QTableWidgetItem(dialogue.text))
                 issue = self.application.play_view().issue
                 if issue and issue.action == 'open_capture':
                     self.capture_problem.setText(issue.message)
@@ -1771,56 +1870,41 @@ def run_gui(session_driver=None) -> int:
                 self.capture_recovery_action.hide()
                 self.refresh_source_workspace_mode('ocr')
                 return
+
             self.refresh_source_workspace_mode('hook')
-            self._refreshing_hook_rows = True
+            selected_key = None
+            source = self.chosen_source()
+            if source is not None:
+                selected_key = (source.identity, source.address)
             self.source_table.blockSignals(True)
             self.source_table.setRowCount(len(view.candidates))
             self.source_rows.clear()
-            self._capture_role_buttons.clear()
             try:
                 for row, candidate in enumerate(view.candidates):
-                    self.source_rows[(candidate.identity, candidate.address)] = row
-                    role_widget = QWidget()
-                    role_layout = QHBoxLayout(role_widget)
-                    role_layout.setContentsMargins(0, 0, 0, 0)
-                    role_layout.setSpacing(2)
-                    group = QButtonGroup(role_widget)
-                    group.setExclusive(True)
-                    buttons = {}
-                    for label, role in (('—', None), ('台詞', 'text'), ('話者', 'speaker')):
-                        button = QToolButton()
-                        button.setText(label)
-                        button.setCheckable(True)
-                        button.setEnabled(not candidate.ambiguous)
-                        group.addButton(button)
-                        role_layout.addWidget(button)
-                        buttons[role] = button
-                        button.clicked.connect(
-                            lambda _=False, ident=candidate.identity, addr=candidate.address, value=role:
-                            self.set_capture_role(ident, addr, value))
-                    buttons[candidate.role].setChecked(True)
-                    self._capture_role_buttons[(candidate.identity, candidate.address)] = buttons
-                    self.source_table.setCellWidget(row, 0, role_widget)
+                    key = (candidate.identity, candidate.address)
+                    self.source_rows[key] = row
                     sample = QTableWidgetItem(candidate.latest)
-                    sample.setData(Qt.ItemDataRole.UserRole, (candidate.identity, candidate.address))
+                    sample.setData(Qt.ItemDataRole.UserRole, key)
                     if candidate.ambiguous:
                         sample.setToolTip('同じ識別子を持つ複数の取得元があり、この候補は使用できません')
-                    self.source_table.setItem(row, 1, sample)
+                    self.source_table.setItem(row, 0, sample)
+                    labels = []
+                    if 'body' in candidate.used_for:
+                        labels.append('本文')
+                    if 'speaker' in candidate.used_for:
+                        labels.append('話者')
+                    self.source_table.setItem(row, 1, QTableWidgetItem('・'.join(labels) if labels else '—'))
+                    if key == selected_key:
+                        self.source_table.selectRow(row)
             finally:
                 self.source_table.blockSignals(False)
-                self._refreshing_hook_rows = False
 
-            lines = []
-            for preview in view.previews:
-                heading = preview.speaker
-                if preview.use_tts:
-                    voice = preview.voice or 'Voice未設定'
-                    heading = f'{heading} · {voice}' if heading else voice
-                if heading:
-                    lines.append(heading)
-                lines.append(preview.text)
-                lines.append('')
-            self.capture_dialogue_preview.setPlainText('\n'.join(lines).rstrip())
+            self._fill_capture_source_combos(view)
+            self.capture_result_table.setRowCount(len(view.assembly))
+            for row, preview in enumerate(view.assembly):
+                self.capture_result_table.setItem(row, 0, QTableWidgetItem(preview.speaker))
+                self.capture_result_table.setItem(row, 1, QTableWidgetItem(preview.body))
+
             if view.problem:
                 self.capture_problem.setText(view.problem.message)
                 self.capture_problem.show()
@@ -1830,45 +1914,11 @@ def run_gui(session_driver=None) -> int:
             self.capture_recovery_action.setVisible(
                 bool(view.problem and view.problem.action == 'open_capture_recovery'))
             self.btn_commit_capture.setEnabled(view.dirty and view.can_commit)
-            self.refresh_capture_routes()
             self.refresh_capture_hint()
-
-        def refresh_capture_routes(self):
-            routes = self.application.capture_view().routes
-            self.route_table.setVisible(bool(routes))
-            if not routes:
-                self.route_table.setRowCount(0)
-                return
-            self.route_table.setRowCount(len(routes))
-            for row, route in enumerate(routes):
-                self.route_table.setItem(row, 0, QTableWidgetItem(route.text_label))
-                combo = QComboBox()
-                combo.addItem('話者なし', '')
-                for speaker_identity, label in route.speaker_options:
-                    combo.addItem(label, speaker_identity)
-                combo.setCurrentIndex(max(0, combo.findData(route.speaker_identity or '')))
-                combo.currentIndexChanged.connect(
-                    lambda _=0, text_id=route.text_identity, control=combo:
-                    self.set_capture_pair(text_id, control.currentData() or None))
-                self.route_table.setCellWidget(row, 1, combo)
-                order = QWidget(); order_layout = QHBoxLayout(order); order_layout.setContentsMargins(0,0,0,0)
-                up = QToolButton(); up.setText('↑'); down = QToolButton(); down.setText('↓')
-                up.setEnabled(row > 0); down.setEnabled(row < len(routes)-1)
-                up.clicked.connect(lambda _=False, identity=route.text_identity: self.move_capture_route(identity, -1))
-                down.clicked.connect(lambda _=False, identity=route.text_identity: self.move_capture_route(identity, 1))
-                order_layout.addWidget(up); order_layout.addWidget(down)
-                self.route_table.setCellWidget(row, 2, order)
-
-        def set_capture_pair(self, text_identity: str, speaker_identity: str | None):
-            try:
-                self.application.pair_capture_sources(text_identity, speaker_identity)
-                self.refresh_capture_workspace()
-            except Exception as exc:
-                self.note('話者ソースを対応付けできません: ' + str(exc))
-
-        def move_capture_route(self, identity: str, offset: int):
-            self.application.move_dialogue_source(identity, offset)
-            self.refresh_capture_workspace()
+            if self.source_table.currentRow() < 0 and self.source_table.rowCount():
+                self.source_table.selectRow(0)
+            else:
+                self.refresh_candidate_actions()
 
         def commit_capture_workspace(self):
             if self.current_profile() is None:
@@ -2023,7 +2073,7 @@ def run_gui(session_driver=None) -> int:
                     f'{u.character_count}文字 / {u.text_wait_ms} ms')
             if not self.example_raw.hasFocus():
                 blocked = self.example_raw.blockSignals(True)
-                self.example_raw.setPlainText(u.raw)
+                self.example_raw.setPlainText(u.text)
                 self.example_raw.blockSignals(blocked)
                 self.refresh_rule_preview()
             self.validation_trace.emit('utterance', session=token.session, line=token.line,

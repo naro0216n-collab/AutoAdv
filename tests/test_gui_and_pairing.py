@@ -8,16 +8,19 @@ from unittest.mock import Mock, patch
 
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import HookSelection, Profile
+from autoadv.model import HookSelection, Profile, SPEAKER_ONLY_RULE, BODY_ONLY_RULE
 
 
 class HookPairingTests(unittest.TestCase):
-    def test_selected_speaker_link_applies_only_within_synchronized_outputs(self):
-        p = Profile('id', 'paired')
-        p.hooks = [HookSelection('T', 1, 2, 'text'),
-                   HookSelection('S1', 3, 4, 'speaker'),
-                   HookSelection('S2', 5, 6, 'speaker')]
-        p.speaker_links = {p.hooks[0].identity: p.hooks[2].identity}
+    def test_body_and_speaker_fields_are_independently_composed_within_one_synchronized_batch(self):
+        p = Profile('id', 'composed')
+        p.hooks = [HookSelection('T', 1, 2),
+                   HookSelection('S1', 3, 4),
+                   HookSelection('S2', 5, 6)]
+        p.body_sources = [p.hooks[0].identity]
+        p.speaker_sources = [p.hooks[2].identity]
+        p.source_rules[p.hooks[0].identity] = [BODY_ONLY_RULE]
+        p.source_rules[p.hooks[2].identity] = [SPEAKER_ONLY_RULE]
         c = Controller(lambda *_: None, lambda _: True)
         c.begin(p, Target(123, 456), 'generation', 1)
 
@@ -28,16 +31,16 @@ class HookPairingTests(unittest.TestCase):
         token = c.observe_group([e(p.hooks[1], 1, 'wrong'), e(p.hooks[2], 2, '花子'),
                                  e(p.hooks[0], 3, '台詞')])
         self.assertIsNotNone(token)
-        self.assertEqual(c.utterance.speaker, '花子')
+        self.assertEqual((c.utterance.speaker, c.utterance.text), ('花子', '台詞'))
         c.permit(True)
         self.assertIsNone(c.observe_group([e(p.hooks[2], 4, '古い')]))
         self.assertTrue(c.authorized)
         c.observe_group([e(p.hooks[0], 5, '次')])
         self.assertEqual(c.utterance.speaker, '')
 
-    def test_invalid_speaker_link_is_rejected_in_one_profile_config(self):
+    def test_provider_must_reference_a_selected_source(self):
         p = Profile('id', 'invalid', hooks=[HookSelection('T', 1, 2)])
-        p.speaker_links = {p.hooks[0].identity: 'nonexistent|2|3'}
+        p.body_sources = ['nonexistent|2|3']
         with self.assertRaises(ValueError):
             p.validate()
 
@@ -84,6 +87,25 @@ class GuiSourceArchitectureTests(unittest.TestCase):
             self.assertNotIn(legacy_status, source)
         self.assertIn('diagnostics_snapshot', source)
         self.assertIn("('home', 'プレイ'), ('game', 'ゲーム'), ('settings', '設定')", source)
+
+    def test_capture_workspace_exposes_format_preview_and_independent_final_fields(self):
+        source = Path('autoadv/gui.py').read_text(encoding='utf-8')
+        self.assertIn("QLabel('1. 取得元')", source)
+        self.assertIn("QLabel('2. 選択した取得元の整形')", source)
+        self.assertIn("QLabel('3. 会話の組み立て')", source)
+        self.assertIn("['原文', '話者候補', '本文候補']", source)
+        self.assertIn("QLabel('最終結果プレビュー')", source)
+        self.assertIn('self.capture_body_source', source)
+        self.assertIn('self.capture_speaker_source', source)
+        self.assertIn("('話者 + 括弧情報 + 本文', 'metadata')", source)
+        self.assertIn("('原文全体を本文候補にする', 'body')", source)
+        self.assertIn("('原文全体を話者候補にする', 'speaker')", source)
+        self.assertIn("assembly_form.addRow('本文を使う取得元'", source)
+        self.assertIn("assembly_form.addRow('話者を使う取得元'", source)
+        self.assertNotIn("QLabel('完成する会話')", source)
+        self.assertNotIn('_capture_role_buttons', source)
+        self.assertNotIn('route_table', source)
+        self.assertNotIn('speaker_links', source)
 
     def test_normal_hook_output_updates_capture_application_without_refresh_command(self):
         source = Path('autoadv/gui.py').read_text(encoding='utf-8')
@@ -135,7 +157,7 @@ class GuiSourceArchitectureTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'Windows GUI dependencies not installed')
 class WindowsGuiInitialization(unittest.TestCase):
-    def test_multiple_speakers_and_rule_preview_are_editable_in_the_same_game_workspace(self):
+    def test_speaker_voice_edit_is_downstream_from_capture_extraction(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
@@ -153,18 +175,19 @@ class WindowsGuiInitialization(unittest.TestCase):
                 self.assertEqual([window.tabs.tabText(i) for i in range(window.tabs.count())],
                                  ['プレイ', 'ゲーム', '設定'])
                 self.assertEqual(window.speaker_table.rowCount(), 2)
-                window.example_raw.setPlainText('大和「おはよう」')
-                self.assertIn('話者: 大和', window.editor_preview.toPlainText())
+                capture = ThreadSource(101, 1, 1, 2, 'HOOK', 'HOOK')
+                window.application.observe_capture(capture, '大和「おはよう」', sequence=1)
+                window.application.set_capture_field_source('body', capture.identity, capture.address)
+                window.refresh_capture_workspace()
+                window.example_raw.setPlainText('おはよう')
                 self.assertIn('TTS: Voice v2', window.editor_preview.toPlainText())
                 row = next(i for i in range(window.speaker_table.rowCount())
                            if window.speaker_table.item(i, 0).text() == '大和')
                 window.speaker_table.cellWidget(row, 2).setEditText('v3')
                 self.assertEqual(window.current_profile().speaker_voices['大和'], 'v3')
                 self.assertIn('TTS: Voice v3', window.editor_preview.toPlainText())
-                window.clear_structure_editor()
-                window.structure_pattern.setText(r'^(?P<speaker>[^「」]+)「(?P<body>.+)」$')
-                window.add_structure_rule()
-                self.assertEqual(window.structure_table.item(0, 0).text(), '1')
+                self.assertEqual(window.ui_sections['speakers'].title(), '話者・音声')
+                self.assertIsNot(window.ui_sections['source_format'], window.ui_sections['speakers'])
             finally:
                 window.close()
             return 0
@@ -259,7 +282,8 @@ class TaskOrientedGuiContracts(unittest.TestCase):
         catalog = Catalog()
         game = catalog.create_game('作品', 'C:/Game.exe')
         profile = game.profiles[game.default_profile]
-        profile.hooks = [HookSelection('HOOK-1', 1, 2, 'text')]
+        profile.hooks = [HookSelection('HOOK-1', 1, 2)]
+        profile.body_sources = [profile.hooks[0].identity]
 
         def inspect(*_):
             window = next(w for w in QApplication.topLevelWidgets()
@@ -292,7 +316,7 @@ class TaskOrientedGuiContracts(unittest.TestCase):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
-    def test_current_dialogue_edit_stays_in_game_workspace_and_does_not_authorize_input(self):
+    def test_capture_formatting_and_speaker_voice_settings_are_separate_workflows(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
@@ -304,12 +328,11 @@ class TaskOrientedGuiContracts(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                window.example_raw.setPlainText('京「おはよう」')
-                window.btn_edit_detected_speaker.click()
-                self.assertEqual(window.new_speaker_name.text(), '京')
-                self.assertEqual(window.tabs.currentIndex(), 1)
-                window.btn_fix_extraction.click()
+                self.assertFalse(hasattr(window, 'btn_edit_detected_speaker'))
+                self.assertFalse(hasattr(window, 'btn_fix_extraction'))
+                window.btn_advanced_extraction.click()
                 self.assertTrue(window.section_toggles['extraction'].isChecked())
+                self.assertIn('話者・音声', window.ui_sections['speakers'].title())
                 self.assertFalse(window.application.runtime_state().authorized)
                 self.assertFalse(hasattr(window, 'btn_monitor'))
             finally:

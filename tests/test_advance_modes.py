@@ -15,7 +15,7 @@ SOURCE = SimpleNamespace(hook_code='H', context=1, context2=2)
 
 
 def make_profile(mode=AdvanceMode.TEXT, tts=False, fallback=False):
-    return Profile('p', 'game', hooks=[HookSelection('H', 1, 2)], advance_mode=mode,
+    return Profile('p', 'game', hooks=[HookSelection('H', 1, 2)], body_sources=['H|1|2'], advance_mode=mode,
                    default_tts=tts, default_voice='v0', uncertain_text_fallback=fallback,
                    reading_ms=350, per_character_wait_ms=180)
 
@@ -57,15 +57,15 @@ class ReadingCharacters(unittest.TestCase):
 
     def test_rule_preview_trace_is_the_actual_interpretation_path(self):
         p = make_profile(tts=True)
-        p.structure_rules.insert(0, StructureRule(r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」$'))
-        p.structure_rules.insert(0, StructureRule(r'(?P<body>notmatched)', enabled=False))
+        p.source_rules['hook'] = [StructureRule(r'(?P<body>notmatched)', enabled=False),
+                                  StructureRule(r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」$')]
         p.name_readings['京'] = 'みやこ'
         p.replacements = [ReplacementRule('みやこ', 'ミヤコ', target='tts'),
                           ReplacementRule('京', '京都', target='asr')]
         p.speaker_tts['大和'] = False
         p.speaker_voices['大和'] = 'v2'
         raw = '大和「京さん」'
-        match, index = matching_structure_rule(raw, p)
+        match, index, _ = matching_structure_rule(raw, p.source_rules['hook'])
         self.assertIsNotNone(match)
         self.assertEqual(index, 1)
         trace = []

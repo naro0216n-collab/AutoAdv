@@ -9,7 +9,7 @@ SOURCE = SimpleNamespace(hook_code='H/A', context=3, context2=4, identity='H/A|3
 
 def profile():
     return Profile('profile-1', 'Default', hooks=[HookSelection('H/A', 3, 4)],
-                   advance_mode=AdvanceMode.TEXT, reading_ms=10)
+                   body_sources=['H/A|3|4'], advance_mode=AdvanceMode.TEXT, reading_ms=10)
 
 
 class DialogueContractTests(unittest.TestCase):
@@ -159,9 +159,9 @@ class DialogueContractTests(unittest.TestCase):
         self.assertFalse(c.authorized)
         self.assertEqual(c.reason, 'advance_not_authorized')
 
-    def test_unique_hook_role(self):
+    def test_duplicate_selected_hook_is_rejected(self):
         p = profile()
-        p.hooks.append(HookSelection('H/A', 3, 4, 'speaker'))
+        p.hooks.append(HookSelection('H/A', 3, 4))
         with self.assertRaises(ValueError):
             p.validate()
 

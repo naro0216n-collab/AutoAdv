@@ -50,9 +50,9 @@ def inspect_legacy(path: Path) -> tuple[LegacyGame, ...]:
             text = row.get('text') or {}
             if not isinstance(text, dict):
                 raise ValueError('Invalid previous text configuration')
-            if 'structure_rules' in text:
-                profile.structure_rules = [StructureRule(r['pattern'], r.get('condition', ''),
+            legacy_structure_rules = ([StructureRule(r['pattern'], r.get('condition', ''),
                                         r.get('enabled', True)) for r in text['structure_rules']]
+                                      if 'structure_rules' in text else list(DEFAULT_STRUCTURE_RULES))
             profile.replacements = [ReplacementRule(**item) for item in text.get('replacements', [])]
             profile.name_readings = dict(text.get('name_readings', {}))
             if text.get('default_voice'):
@@ -90,6 +90,8 @@ def inspect_legacy(path: Path) -> tuple[LegacyGame, ...]:
             if not isinstance(hooks, list):
                 raise ValueError('Invalid previous selected HOOK list')
             profile.hooks = [HookSelection(h['code'], h['context'], h['context2']) for h in hooks]
+            profile.body_sources = [hook.identity for hook in profile.hooks]
+            profile.source_rules = {hook.identity: list(legacy_structure_rules) for hook in profile.hooks}
             profile.inserted_hooks = list(row.get('inserted_hooks', []))
             monitor = row.get('monitor') or {}
             if not isinstance(monitor, dict):

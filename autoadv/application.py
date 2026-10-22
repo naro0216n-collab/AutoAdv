@@ -23,7 +23,7 @@ from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
 from .model import (HookSelection, OCRSettings, Profile, ReplacementRule, StructureRule,
-                    Utterance, interpret)
+                    Utterance, EXTRACTION_PRESETS, extract_source_fields, interpret)
 from .native_audio import NativeAudio
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
@@ -33,25 +33,31 @@ from .windows_input import WindowsAdvancementInput
 
 
 @dataclass(frozen=True)
+class CaptureSampleView:
+    raw: str
+    speaker: str
+    body: str
+
+
+@dataclass(frozen=True)
 class CaptureCandidateView:
     identity: str
     address: int
     latest: str
     history: tuple[str, ...]
-    role: str | None
+    samples: tuple[CaptureSampleView, ...]
+    used_for: tuple[str, ...]
+    preset: str
     ambiguous: bool
 
 
 @dataclass(frozen=True)
-class DialoguePreviewView:
+class CaptureAssemblyView:
     sequence: int
-    raw: str
     speaker: str
-    text: str
-    reading: str
-    match_text: str
-    use_tts: bool
-    voice: str
+    body: str
+    body_source: str
+    speaker_source: str | None
 
 
 @dataclass(frozen=True)
@@ -61,18 +67,11 @@ class CaptureProblemView:
 
 
 @dataclass(frozen=True)
-class CaptureRouteView:
-    text_identity: str
-    text_label: str
-    speaker_identity: str | None
-    speaker_options: tuple[tuple[str, str], ...]
-
-
-@dataclass(frozen=True)
 class CaptureWorkspaceView:
     candidates: tuple[CaptureCandidateView, ...]
-    previews: tuple[DialoguePreviewView, ...]
-    routes: tuple[CaptureRouteView, ...]
+    assembly: tuple[CaptureAssemblyView, ...]
+    body_source: str | None
+    speaker_source: str | None
     dirty: bool
     can_commit: bool
     problem: CaptureProblemView | None
@@ -92,7 +91,7 @@ class RuntimeState:
     ocr_blank: bool
     source_generation: str
     connection_generation: int
-    active_text_source: str | None
+    active_body_source: str | None
     presentation_reason: str | None
     pause_reason: str | None
 
@@ -186,9 +185,8 @@ _PLAY_ISSUES = {
     'target_not_foreground': ('ゲームが前面にないため、この台詞の自動送りを保留しています。', None),
     'next_line_timeout': ('送り後に次の台詞を取得できません。会話取得を確認してください。', 'open_capture'),
     'ambiguous_identical_line': ('同じ本文が続き、次の台詞か判断できないため自動送りを保留しています。', 'open_capture'),
-    'ambiguous_multihook_lines': ('複数の台詞ソースの対応を確定できないため自動送りを保留しています。', 'open_capture'),
-    'ambiguous_multihook_speakers': ('複数の話者ソースの対応を確定できないため自動送りを保留しています。', 'open_capture'),
-    'unpaired_speaker_output': ('話者ソースに対応する台詞を確定できないため自動送りを保留しています。', 'open_capture'),
+    'ambiguous_multihook_lines': ('同じ本文取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
+    'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ocr_unverified_change': ('OCRの変化を次の台詞と確認できないため自動送りを保留しています。', 'open_capture'),
     'ocr_failure': ('OCRで台詞を取得できないため、自動送りを保留しています。', 'open_capture'),
     'native_inconclusive_hold': ('原音の終了を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
@@ -203,7 +201,6 @@ _PLAY_ISSUES_WITHOUT_AUTO = {
     'ambiguous_identical_line',
     'ambiguous_multihook_lines',
     'ambiguous_multihook_speakers',
-    'unpaired_speaker_output',
     'ocr_unverified_change',
     'ocr_failure',
     'tts_playback_failed',
@@ -219,7 +216,7 @@ class _ObservedSource:
 
 
 class CaptureWorkspace:
-    """Draft one conversation acquisition recipe against real observed output."""
+    """Draft one field-based conversation capture recipe against real output."""
 
     def __init__(self, profile: Profile, resolve: Callable[[Profile], Profile] | None = None):
         self._base = deepcopy(profile)
@@ -235,9 +232,10 @@ class CaptureWorkspace:
     @property
     def dirty(self) -> bool:
         return (self._draft.hooks != self._base.hooks or
-                self._draft.speaker_links != self._base.speaker_links or
-                self._draft.inserted_hooks != self._base.inserted_hooks or
-                self._draft.structure_rules != self._base.structure_rules)
+                self._draft.body_sources != self._base.body_sources or
+                self._draft.speaker_sources != self._base.speaker_sources or
+                self._draft.source_rules != self._base.source_rules or
+                self._draft.inserted_hooks != self._base.inserted_hooks)
 
     def reset(self, profile: Profile) -> None:
         self._base = deepcopy(profile)
@@ -303,26 +301,39 @@ class CaptureWorkspace:
 
     def output_identities(self) -> tuple[str, ...]:
         identities = []
-        seen = set()
-        for hook in self._draft.hooks:
-            if hook.role != 'text' or hook.identity in seen:
-                continue
-            if self.has_output(hook.identity):
-                identities.append(hook.identity)
-                seen.add(hook.identity)
+        for identity in self._draft.body_sources:
+            if identity not in identities and self.has_output(identity):
+                identities.append(identity)
         return tuple(identities)
 
     def has_hook_code(self, code: str) -> bool:
         return any(record.source.hook_code == code for record in self._observed.values())
+
+    def _preset_for(self, identity: str) -> str:
+        configured = tuple(self._draft.source_rules.get(identity, ()))
+        if not configured:
+            return 'auto'
+        for name, rules in EXTRACTION_PRESETS.items():
+            if configured == tuple(rules):
+                return name
+        return 'custom'
 
     def candidate(self, identity: str, address: int) -> CaptureCandidateView | None:
         record = self._observed.get((identity, address))
         if record is None:
             return None
         history = tuple(text for _, text in record.history)
-        hook = next((item for item in self._draft.hooks if item.identity == identity), None)
+        samples = tuple(CaptureSampleView(raw, *(lambda fields: (fields.speaker, fields.body))(
+            extract_source_fields(raw, self._draft, identity))) for raw in history)
+        used_fields = []
+        if identity in self._draft.body_sources:
+            used_fields.append('body')
+        if identity in self._draft.speaker_sources or (not self._draft.speaker_sources and
+                                                        identity in self._draft.body_sources):
+            used_fields.append('speaker')
+        used = tuple(used_fields)
         return CaptureCandidateView(identity, address, history[-1] if history else '', history,
-                                    hook.role if hook else None, record.ambiguous)
+                                    samples, used, self._preset_for(identity), record.ambiguous)
 
     def _source(self, identity: str, address: int) -> ThreadSource:
         record = self._observed.get((identity, address))
@@ -330,188 +341,131 @@ class CaptureWorkspace:
             raise ValueError('取得元を利用できません')
         return record.source
 
-    def role_for(self, identity: str) -> str | None:
-        return next((hook.role for hook in self._draft.hooks if hook.identity == identity), None)
+    def _ensure_hook(self, source: ThreadSource) -> HookSelection:
+        existing = next((hook for hook in self._draft.hooks if hook.matches(source)), None)
+        if existing is not None:
+            return existing
+        hook = HookSelection(source.hook_code, source.context, source.context2)
+        self._draft.hooks.append(hook)
+        return hook
 
-    def set_role(self, identity: str, address: int, role: str | None) -> None:
-        """Assign a source in the language of the user's task.
-
-        Pairing is automatic while the recipe is unambiguous: one dialogue source
-        plus one speaker source requires no separate "pair" control.
-        """
-        if role not in (None, 'text', 'speaker'):
-            raise ValueError('invalid capture role')
-        source = self._source(identity, address)
-        existing = next((h for h in self._draft.hooks if h.matches(source)), None)
-        insertion = self._draft.hooks.index(existing) if existing else len(self._draft.hooks)
-        if existing:
-            self._draft.hooks.remove(existing)
-            self._draft.speaker_links = {
-                text: speaker for text, speaker in self._draft.speaker_links.items()
-                if text != existing.identity and speaker != existing.identity
-            }
-        if role is not None:
-            self._draft.hooks.insert(
-                insertion,
-                HookSelection(source.hook_code, source.context, source.context2, role),
-            )
-        self._resolve_obvious_pairing()
-
-    def move_dialogue_source(self, identity: str, offset: int) -> None:
-        hooks = self._draft.hooks
-        index = next((i for i, h in enumerate(hooks) if h.identity == identity and h.role == 'text'), -1)
-        if index < 0:
+    def set_field_source(self, field: str, identity: str | None, address: int | None = None) -> None:
+        if field not in ('body', 'speaker'):
+            raise ValueError('invalid dialogue field')
+        providers = self._draft.body_sources if field == 'body' else self._draft.speaker_sources
+        providers.clear()
+        if identity is None:
             return
-        text_positions = [i for i, h in enumerate(hooks) if h.role == 'text']
-        order = text_positions.index(index)
-        new_order = order + offset
-        if not 0 <= new_order < len(text_positions):
-            return
-        other_index = text_positions[new_order]
-        hooks[index], hooks[other_index] = hooks[other_index], hooks[index]
-
-    def pair(self, text_identity: str, speaker_identity: str | None) -> None:
-        roles = {h.identity: h.role for h in self._draft.hooks}
-        if roles.get(text_identity) != 'text':
-            raise ValueError('台詞ソースを選択してください')
-        if speaker_identity is None:
-            self._draft.speaker_links.pop(text_identity, None)
-        elif roles.get(speaker_identity) != 'speaker':
-            raise ValueError('話者ソースを選択してください')
+        if address is None:
+            record = self._record_for_identity(identity)
+            if record is None:
+                raise ValueError('取得元を利用できません')
+            source = record.source
         else:
-            self._draft.speaker_links[text_identity] = speaker_identity
+            source = self._source(identity, address)
+        hook = self._ensure_hook(source)
+        providers.append(hook.identity)
 
-    def _resolve_obvious_pairing(self) -> None:
-        texts = [h for h in self._draft.hooks if h.role == 'text']
-        speakers = [h for h in self._draft.hooks if h.role == 'speaker']
-        valid_text = {h.identity for h in texts}
-        valid_speakers = {h.identity for h in speakers}
-        self._draft.speaker_links = {
-            text: speaker for text, speaker in self._draft.speaker_links.items()
-            if text in valid_text and speaker in valid_speakers
-        }
-        if len(texts) == 1 and len(speakers) == 1:
-            self._draft.speaker_links[texts[0].identity] = speakers[0].identity
+    def set_extraction_preset(self, identity: str, address: int, preset: str) -> None:
+        if preset not in EXTRACTION_PRESETS:
+            raise ValueError('不明な整形方式です')
+        source = self._source(identity, address)
+        hook = self._ensure_hook(source)
+        if preset == 'auto':
+            self._draft.source_rules.pop(hook.identity, None)
+        else:
+            self._draft.source_rules[hook.identity] = list(EXTRACTION_PRESETS[preset])
+
+    def set_source_rules(self, identity: str, address: int, rules: Sequence[StructureRule]) -> None:
+        source = self._source(identity, address)
+        hook = self._ensure_hook(source)
+        self._draft.source_rules[hook.identity] = [deepcopy(rule) for rule in rules]
+
+    def source_rules(self, identity: str) -> tuple[StructureRule, ...]:
+        configured = self._draft.source_rules.get(identity)
+        return tuple(configured) if configured is not None else tuple(EXTRACTION_PRESETS['auto'])
 
     def _record_for_identity(self, identity: str) -> _ObservedSource | None:
         matches = [record for (candidate_identity, _), record in self._observed.items()
                    if candidate_identity == identity]
         return matches[0] if len(matches) == 1 and not matches[0].ambiguous else None
 
-    def _preview_from_group(self, events: tuple[HookEvent, ...], profile: Profile,
-                            text_identity: str) -> DialoguePreviewView | None:
-        roles = {hook.identity: hook.role for hook in self._draft.hooks}
-        matching = [event for event in events if event.source and event.source.identity in roles]
-        if not matching:
+    def _assembly_from_events(self, events: Sequence[HookEvent]) -> CaptureAssemblyView | None:
+        if not self._draft.body_sources:
             return None
-        chosen = next((hook for hook in self._draft.hooks
-                       if hook.role == 'text' and hook.identity == text_identity), None)
-        if chosen is None:
+        body_identity = self._draft.body_sources[0]
+        body_events = [event for event in events if event.source and
+                       event.source.identity == body_identity and event.text.strip()]
+        body_values = [(event, extract_source_fields(event.text, self._draft, body_identity))
+                       for event in body_events]
+        body_values = [(event, fields) for event, fields in body_values if fields.body]
+        if len(body_values) != 1:
             return None
-        primary = [event for event in matching if event.source.identity == chosen.identity]
-        if len(primary) != 1:
-            return None
-        text_event = primary[0]
-        speaker_identity = self._draft.speaker_links.get(chosen.identity, '')
-        if not speaker_identity:
-            speakers = [hook.identity for hook in self._draft.hooks if hook.role == 'speaker']
-            speaker_identity = speakers[0] if len(speakers) == 1 else ''
-        speaker_events = [event for event in matching
-                          if speaker_identity and event.source.identity == speaker_identity]
-        if len(speaker_events) > 1:
-            return None
-        side_speaker = speaker_events[0].text.strip() if speaker_events else ''
-        utterance = interpret(
-            text_event.text, profile, session=0, line=0, source=chosen.identity,
-            sequence=text_event.sequence, side_speaker=side_speaker)
-        return DialoguePreviewView(
-            sequence=text_event.sequence, raw=utterance.raw, speaker=utterance.speaker,
-            text=utterance.text, reading=utterance.reading, match_text=utterance.match_text,
-            use_tts=utterance.use_tts, voice=utterance.voice)
-
-    def _previews(self) -> tuple[DialoguePreviewView, ...]:
-        texts = [hook for hook in self._draft.hooks if hook.role == 'text']
-        speakers = [hook for hook in self._draft.hooks if hook.role == 'speaker']
-        profile = self._resolve(deepcopy(self._draft))
-        previews: list[DialoguePreviewView] = []
-        # Runtime selects one dialogue owner from the saved priority order and
-        # never mixes lower-priority fallback text into the same session.  The
-        # Workspace preview must model that same contract instead of presenting
-        # a synthetic conversation made from every selected text source.
-        active = next((hook for hook in texts if self.has_output(hook.identity)), None)
-        if active is None:
-            return ()
-        # Multi-HOOK preview must use outputs observed in the same bounded batch;
-        # a speaker from a later line is never painted onto older dialogue.
-        if speakers:
-            for group in self._groups:
-                preview = self._preview_from_group(group, profile, active.identity)
-                if preview is not None:
-                    previews.append(preview)
+        body_event, body_fields = body_values[0]
+        speaker_source: str | None = None
+        speaker = ''
+        if self._draft.speaker_sources:
+            speaker_source = self._draft.speaker_sources[0]
+            speaker_events = [event for event in events if event.source and
+                              event.source.identity == speaker_source and event.text.strip()]
+            values = [(event, extract_source_fields(event.text, self._draft, speaker_source))
+                      for event in speaker_events]
+            values = [(event, fields) for event, fields in values if fields.speaker]
+            if len(values) > 1:
+                return None
+            if values:
+                speaker = values[0][1].speaker
         else:
-            record = self._record_for_identity(active.identity)
+            speaker = body_fields.speaker
+            speaker_source = body_identity if speaker else None
+        return CaptureAssemblyView(body_event.sequence, speaker, body_fields.body,
+                                   body_identity, speaker_source)
+
+    def _assembly(self) -> tuple[CaptureAssemblyView, ...]:
+        if not self._draft.body_sources:
+            return ()
+        body_identity = self._draft.body_sources[0]
+        speaker_identity = self._draft.speaker_sources[0] if self._draft.speaker_sources else body_identity
+        assembled: list[CaptureAssemblyView] = []
+        if speaker_identity != body_identity:
+            for group in self._groups:
+                value = self._assembly_from_events(group)
+                if value is not None:
+                    assembled.append(value)
+        else:
+            record = self._record_for_identity(body_identity)
             if record is not None:
                 for sequence, raw in record.history:
-                    utterance = interpret(
-                        raw, profile, session=0, line=0, source=active.identity, sequence=sequence)
-                    previews.append(DialoguePreviewView(
-                        sequence=sequence, raw=utterance.raw, speaker=utterance.speaker,
-                        text=utterance.text, reading=utterance.reading, match_text=utterance.match_text,
-                        use_tts=utterance.use_tts, voice=utterance.voice))
-        previews.sort(key=lambda item: item.sequence)
-        return tuple(previews[-12:])
-
-    def _routes(self) -> tuple[CaptureRouteView, ...]:
-        texts = [hook for hook in self._draft.hooks if hook.role == 'text']
-        speakers = [hook for hook in self._draft.hooks if hook.role == 'speaker']
-        if len(texts) <= 1 and len(speakers) <= 1:
-            return ()
-
-        def label(identity: str, fallback: str) -> str:
-            record = self._record_for_identity(identity)
-            return record.history[-1][1][:60] if record and record.history else fallback
-
-        speaker_options = tuple(
-            (hook.identity, label(hook.identity, hook.code)[:40]) for hook in speakers)
-        return tuple(CaptureRouteView(
-            text_identity=hook.identity,
-            text_label=label(hook.identity, hook.code),
-            speaker_identity=self._draft.speaker_links.get(hook.identity) or None,
-            speaker_options=speaker_options,
-        ) for hook in texts)
+                    fields = extract_source_fields(raw, self._draft, body_identity)
+                    if fields.body:
+                        speaker = fields.speaker if (not self._draft.speaker_sources or
+                                  body_identity in self._draft.speaker_sources) else ''
+                        assembled.append(CaptureAssemblyView(
+                            sequence, speaker, fields.body, body_identity,
+                            body_identity if speaker else None))
+        assembled.sort(key=lambda item: item.sequence)
+        return tuple(assembled[-12:])
 
     def view(self) -> CaptureWorkspaceView:
-        hooks = {h.identity: h for h in self._draft.hooks}
         candidates = []
         for (_, address), record in self._observed.items():
-            history = tuple(text for _, text in record.history)
-            if not history:
+            if not record.history:
                 continue
-            hook = hooks.get(record.source.identity)
-            candidates.append(CaptureCandidateView(
-                identity=record.source.identity,
-                address=address,
-                latest=history[-1],
-                history=history,
-                role=hook.role if hook else None,
-                ambiguous=record.ambiguous,
-            ))
-        selected = [h for h in self._draft.hooks if h.role == 'text']
+            candidate = self.candidate(record.source.identity, address)
+            if candidate is not None:
+                candidates.append(candidate)
+        providers = set(self._draft.body_sources) | set(self._draft.speaker_sources)
         ambiguous_selected = any(
-            candidate.ambiguous and candidate.role is not None for candidate in candidates
-        )
+            candidate.ambiguous and candidate.identity in providers for candidate in candidates)
         problem = None
         if ambiguous_selected:
             problem = CaptureProblemView('選択した取得元を一意に識別できません。別の取得元を選択してください。')
-        can_commit = bool(selected) and not ambiguous_selected
+        can_commit = bool(self._draft.body_sources) and not ambiguous_selected
         return CaptureWorkspaceView(
-            candidates=tuple(candidates),
-            previews=self._previews(),
-            routes=self._routes(),
-            dirty=self.dirty,
-            can_commit=can_commit,
-            problem=problem,
-        )
+            candidates=tuple(candidates), assembly=self._assembly(),
+            body_source=self._draft.body_sources[0] if self._draft.body_sources else None,
+            speaker_source=self._draft.speaker_sources[0] if self._draft.speaker_sources else None,
+            dirty=self.dirty, can_commit=can_commit, problem=problem)
 
     def adopt_inserted_hook(self, code: str) -> None:
         code = code.strip()
@@ -529,7 +483,7 @@ class CaptureWorkspace:
 
     def rebase_settings(self, profile: Profile) -> None:
         """Refresh non-capture settings without discarding a capture draft."""
-        capture_fields = {'hooks', 'speaker_links', 'inserted_hooks', 'structure_rules'}
+        capture_fields = {'hooks', 'body_sources', 'speaker_sources', 'source_rules', 'inserted_hooks'}
         for field in profile.__dataclass_fields__:
             if field in capture_fields or field in ('id', 'name'):
                 continue
@@ -538,9 +492,24 @@ class CaptureWorkspace:
 
     def committed_profile(self) -> Profile:
         if not self.view().can_commit:
-            raise ValueError('台詞として使用する取得元を選択してください')
-        self._draft.validate()
-        return deepcopy(self._draft)
+            raise ValueError('本文として使用する取得元を選択してください')
+        candidate = deepcopy(self._draft)
+        used = set(candidate.body_sources) | set(candidate.speaker_sources)
+        candidate.hooks = [hook for hook in candidate.hooks if hook.identity in used]
+        candidate.source_rules = {identity: rules for identity, rules in candidate.source_rules.items()
+                                  if identity in used or identity == 'ocr'}
+        # Recovery-search insertions are provisional until a source backed by
+        # that hook code is part of the committed assembly.  Keep codes that
+        # already existed before this workspace, but never persist a newly
+        # trialled code merely because it produced one sample during editing.
+        base_codes = set(self._base.inserted_hooks)
+        used_codes = {hook.code for hook in candidate.hooks}
+        candidate.inserted_hooks = [
+            code for code in candidate.inserted_hooks
+            if code in base_codes or code in used_codes
+        ]
+        candidate.validate()
+        return candidate
 
     def mark_committed(self, profile: Profile) -> None:
         self._base = deepcopy(profile)
@@ -551,7 +520,7 @@ class AutoAdvApplication:
     """Application facade for user-level configuration actions.
 
     The application owns controller and LunaHost lifecycles.  The UI never
-    reconstructs a Profile from widget types, edits HookSelection/speaker_links
+    reconstructs a Profile from widget types, edits capture provider storage
     directly, or translates Controller reasons into user-facing status text.
     """
 
@@ -690,7 +659,7 @@ class AutoAdvApplication:
             utterance=c.utterance, authorized=c.authorized, sent=c.sent,
             completed=c.completed, native_playing=c.native_playing, ocr_blank=c.ocr_blank,
             source_generation=c.source_generation, connection_generation=c.connection_generation,
-            active_text_source=c.active_text_source,
+            active_body_source=c.active_body_source,
             presentation_reason=c.presentation_reason, pause_reason=c.pause_reason)
 
     def stage_runtime_profile(self, profile: Profile) -> None:
@@ -701,7 +670,9 @@ class AutoAdvApplication:
         if active is None or active.id != profile.id:
             return False
         if not (active.source == profile.source and active.hooks == profile.hooks and
-                active.speaker_links == profile.speaker_links and
+                active.body_sources == profile.body_sources and
+                active.speaker_sources == profile.speaker_sources and
+                active.source_rules == profile.source_rules and
                 not (profile.source == 'ocr' and active.ocr != profile.ocr)):
             return False
         if active.advance_mode != profile.advance_mode:
@@ -912,7 +883,7 @@ class AutoAdvApplication:
 
     def request_saved_monitor_resume(self, profile: Profile | None) -> None:
         self._resume_saved_monitor = bool(
-            profile and profile.source == 'hook' and any(h.role == 'text' for h in profile.hooks))
+            profile and profile.source == 'hook' and bool(profile.body_sources))
 
     def cancel_saved_monitor_resume(self) -> None:
         self._resume_saved_monitor = False
@@ -1014,7 +985,7 @@ class AutoAdvApplication:
             return False
         if event.kind != 'output' or event.source is None or not event.text.strip():
             return False
-        selected = next((h for h in profile.hooks if h.role == 'text' and h.matches(event.source)), None)
+        selected = next((h for h in profile.hooks if h.identity in profile.body_sources and h.matches(event.source)), None)
         if selected is None:
             return False
         state = self.runtime_state()
@@ -1035,7 +1006,7 @@ class AutoAdvApplication:
             self.stop_monitoring('session_changed')
             return False
         if profile.source == 'hook':
-            if not any(h.role == 'text' for h in profile.hooks):
+            if not profile.body_sources:
                 self.stop_monitoring('settings_changed')
                 return False
             if not self._hook_connection.connected:
@@ -1511,10 +1482,15 @@ class AutoAdvApplication:
                 profiles.append(self.capture.profile)
             seen: set[str] = set()
             for profile in profiles:
-                for hook in profile.hooks if len(profile.hooks) > 1 else ():
-                    if hook.identity not in seen:
+                provider_ids = list(dict.fromkeys([*profile.body_sources, *profile.speaker_sources]))
+                if len(provider_ids) <= 1:
+                    continue
+                by_identity = {hook.identity: hook for hook in profile.hooks}
+                for identity in provider_ids:
+                    hook = by_identity.get(identity)
+                    if hook is not None and identity not in seen:
                         selected.append(hook)
-                        seen.add(hook.identity)
+                        seen.add(identity)
 
         desired: dict[tuple[int, int, int, int], ThreadSource] = {}
         for source in self.capture_sources():
@@ -1768,9 +1744,8 @@ class AutoAdvApplication:
         if not self.capture:
             return False
         return any(
-            h.role == 'text' and not self.capture.identity_is_ambiguous(h.identity)
-            and self.capture.has_output(h.identity)
-            for h in profile.hooks)
+            not self.capture.identity_is_ambiguous(identity) and self.capture.has_output(identity)
+            for identity in profile.body_sources)
 
     def capture_output_identities(self) -> tuple[str, ...]:
         return self.capture.output_identities() if self.capture else ()
@@ -1781,7 +1756,7 @@ class AutoAdvApplication:
             return CaptureHostEventOutcome()
         identity = event.source.identity
         if event.kind == 'removed':
-            active_removed = self.runtime_state().active_text_source == identity
+            active_removed = self.runtime_state().active_body_source == identity
             self.remove_capture_source(identity, event.source.address)
             resumed = False
             if active_removed:
@@ -1899,35 +1874,68 @@ class AutoAdvApplication:
         if code:
             self._trial_hook_codes.add(code)
 
-    def set_capture_role(self, identity: str, address: int, role: str | None) -> None:
+    def set_capture_field_source(self, field: str, identity: str | None, address: int | None = None) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
-        source = self.capture.source(identity, address)
-        if source is None:
-            raise ValueError('取得元を利用できません')
-        self.capture.set_role(identity, address, role)
-        if role is not None and source.hook_code in self._trial_hook_codes:
+        source = self.capture.source(identity, address) if identity is not None and address is not None else None
+        self.capture.set_field_source(field, identity, address)
+        if source is not None and source.hook_code in self._trial_hook_codes:
             self.capture.adopt_inserted_hook(source.hook_code)
         self._reconcile_hook_sync()
 
-    def move_dialogue_source(self, identity: str, offset: int) -> None:
-        if self.capture:
-            self.capture.move_dialogue_source(identity, offset)
-
-    def pair_capture_sources(self, text_identity: str, speaker_identity: str | None) -> None:
+    def set_capture_extraction_preset(self, identity: str, address: int, preset: str) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
-        self.capture.pair(text_identity, speaker_identity)
+        self.capture.set_extraction_preset(identity, address, preset)
+        self._reconcile_hook_sync()
+
+    def save_capture_source_rule(self, identity: str, address: int, index: int | None,
+                                 rule: StructureRule) -> None:
+        if not self.capture:
+            raise ValueError('作品を選択してください')
+        rules = list(self.capture.source_rules(identity))
+        if index is not None and 0 <= index < len(rules):
+            rules[index] = deepcopy(rule)
+        else:
+            rules.insert(0, deepcopy(rule))
+        self.capture.set_source_rules(identity, address, rules)
+
+    def move_capture_source_rule(self, identity: str, address: int, index: int, movement: int) -> None:
+        if not self.capture:
+            raise ValueError('作品を選択してください')
+        rules = list(self.capture.source_rules(identity))
+        if not 0 <= index < len(rules):
+            raise ValueError('変更する抽出規則を選択してください')
+        destination = index + movement
+        if not 0 <= destination < len(rules):
+            return
+        rules[index], rules[destination] = rules[destination], rules[index]
+        self.capture.set_source_rules(identity, address, rules)
+
+    def delete_capture_source_rule(self, identity: str, address: int, index: int) -> None:
+        if not self.capture:
+            raise ValueError('作品を選択してください')
+        rules = list(self.capture.source_rules(identity))
+        if not 0 <= index < len(rules):
+            raise ValueError('削除する抽出規則を選択してください')
+        rules.pop(index)
+        self.capture.set_source_rules(identity, address, rules)
+
+    def capture_source_rules(self, identity: str) -> tuple[StructureRule, ...]:
+        if not self.capture:
+            return ()
+        return self.capture.source_rules(identity)
 
     def capture_view(self) -> CaptureWorkspaceView:
         if not self.capture:
-            return CaptureWorkspaceView((), (), (), False, False, self._runtime_capture_problem)
+            return CaptureWorkspaceView((), (), None, None, False, False, self._runtime_capture_problem)
         view = self.capture.view()
         if view.problem is not None or self._runtime_capture_problem is None:
             return view
         return CaptureWorkspaceView(
-            candidates=view.candidates, previews=view.previews, routes=view.routes, dirty=view.dirty,
-            can_commit=view.can_commit, problem=self._runtime_capture_problem)
+            candidates=view.candidates, assembly=view.assembly, body_source=view.body_source,
+            speaker_source=view.speaker_source, dirty=view.dirty, can_commit=view.can_commit,
+            problem=self._runtime_capture_problem)
 
     def report_capture_problem(self, message: str, action: str = 'open_capture_recovery') -> None:
         message = message.strip()
@@ -1953,11 +1961,11 @@ class AutoAdvApplication:
              ' audio=' + str(target.audio_pid or '-') +
              ' input=' + str(target.input_pid or '-') +
              ' hwnd=' + (hex(target.hwnd) if target.hwnd else '-')),
-            f'Capture: candidates={len(capture.candidates)} routes={len(capture.routes)} dirty={capture.dirty}',
+            f'Capture: candidates={len(capture.candidates)} assembly={len(capture.assembly)} dirty={capture.dirty}',
             ('Saved sources: ' + str(len(profile.hooks)) if profile else 'Saved sources: -'),
             ('Runtime: session=' + str(runtime.session) +
              ' source=' + (runtime.profile.source if runtime.profile else '-') +
-             ' active=' + (runtime.active_text_source or '-') +
+             ' active=' + (runtime.active_body_source or '-') +
              ' token=' + (f'{runtime.token.session}:{runtime.token.line}' if runtime.token else '-') +
              ' sent=' + str(runtime.sent) + ' completed=' + str(runtime.completed)),
             ('Runtime reason: presentation=' + (runtime.presentation_reason or '-') +
@@ -2011,7 +2019,7 @@ class AutoAdvApplication:
         self.capture.mark_committed(updated)
         self._reconcile_hook_sync()
         self._apply_persisted_profile_change(previous, updated)
-        if (self.runtime_state().profile is None and any(h.role == 'text' for h in updated.hooks)
+        if (self.runtime_state().profile is None and updated.body_sources
                 and self._hook_connection.connected):
             self.request_saved_monitor_resume(updated)
             self.try_resume_saved_monitor(updated)
@@ -2023,7 +2031,7 @@ class AutoAdvApplication:
             raise ValueError('作品を選択してください')
         updated = deepcopy(current)
         mutate(updated)
-        capture_transaction_fields = ('hooks', 'speaker_links', 'inserted_hooks', 'structure_rules')
+        capture_transaction_fields = ('hooks', 'body_sources', 'speaker_sources', 'source_rules', 'inserted_hooks')
         changed_capture_fields = [
             field for field in capture_transaction_fields
             if getattr(updated, field) != getattr(current, field)
@@ -2184,33 +2192,6 @@ class AutoAdvApplication:
     def delete_reading(self, word: str) -> Profile:
         return self._update_profile(lambda profile: profile.name_readings.pop(word, None))
 
-    def save_capture_structure_rule(self, index: int | None, rule: StructureRule) -> None:
-        def change(profile: Profile) -> None:
-            if index is not None and 0 <= index < len(profile.structure_rules):
-                profile.structure_rules[index] = deepcopy(rule)
-            else:
-                profile.structure_rules.insert(0, deepcopy(rule))
-        self._update_capture_recipe(change)
-
-    def move_capture_structure_rule(self, index: int, movement: int) -> None:
-        profile = self.capture_profile_snapshot()
-        if profile is None or not 0 <= index < len(profile.structure_rules):
-            raise ValueError('変更する抽出規則を選択してください')
-        destination = index + movement
-        if not 0 <= destination < len(profile.structure_rules):
-            return
-
-        def change(draft: Profile) -> None:
-            draft.structure_rules[index], draft.structure_rules[destination] = (
-                draft.structure_rules[destination], draft.structure_rules[index])
-        self._update_capture_recipe(change)
-
-    def delete_capture_structure_rule(self, index: int) -> None:
-        profile = self.capture_profile_snapshot()
-        if profile is None or not 0 <= index < len(profile.structure_rules):
-            raise ValueError('削除する抽出規則を選択してください')
-        self._update_capture_recipe(lambda draft: draft.structure_rules.pop(index))
-
     def set_profile_setting(self, name: str, value) -> Profile:
         """Persist one user-visible setting without reconstructing a form.
 
@@ -2219,7 +2200,7 @@ class AutoAdvApplication:
         internal to the application; the GUI never toggles an inheritance field.
         """
         if (name not in Profile.__dataclass_fields__ or
-                name in {'id', 'name', 'hooks', 'speaker_links', 'inserted_hooks', 'structure_rules'}):
+                name in {'id', 'name', 'hooks', 'body_sources', 'speaker_sources', 'source_rules', 'inserted_hooks'}):
             raise ValueError('unsupported profile setting')
 
         def change(profile: Profile) -> None:
