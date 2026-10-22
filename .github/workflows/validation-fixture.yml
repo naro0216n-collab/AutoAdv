@@ -51,8 +51,11 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x "$RENPY_SDK/renpy.sh"
+          source="$GITHUB_WORKSPACE/validation/real_game/renpy"
+          project="$RUNNER_TEMP/renpy-project"
+          cp -a "$source" "$project"
           (cd "$RENPY_SDK" && ./renpy.sh launcher distribute \
-            "$GITHUB_WORKSPACE/validation/real_game/renpy" \
+            "$project" \
             --destination "$RUNNER_TEMP/dists" --package win --no-update)
           archive="$(find "$RUNNER_TEMP/dists" -maxdepth 1 -type f -iname '*win.zip' | head -n 1)"
           [[ -n "$archive" ]]
@@ -67,10 +70,11 @@ jobs:
           python -m validation.real_game.fixture_runtime manifest \
             --runtime "$runtime" \
             --executable "$runtime/AutoAdvValidationGame.exe" \
+            --source "$source" \
             --renpy-version "$RENPY_VERSION" \
             --sdk-sha256 "$RENPY_SDK_SHA256"
-          python -m validation.real_game.fixture_runtime verify --runtime "$runtime"
-          digest="$(python -m validation.real_game.fixture_runtime source-digest)"
+          python -m validation.real_game.fixture_runtime verify --runtime "$runtime" --source "$source"
+          digest="$(python -m validation.real_game.fixture_runtime source-digest --source "$source")"
           asset="$RUNNER_TEMP/autoadv-validation-game-${digest}.zip"
           (cd "$runtime" && zip -qr "$asset" .)
           printf 'FIXTURE_ASSET=%s\n' "$asset" >> "$GITHUB_ENV"
