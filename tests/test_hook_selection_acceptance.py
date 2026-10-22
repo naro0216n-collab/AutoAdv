@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
@@ -112,6 +112,79 @@ class SelectedHookContracts(unittest.TestCase):
 
 @unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'PySide6 required for native GUI acceptance')
 class HookCandidateGuiAcceptance(unittest.TestCase):
+    def test_native_and_search_results_share_one_list_and_one_choice(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        from PySide6.QtWidgets import QApplication
+        from autoadv.gui import run_gui
+
+        catalog = Catalog()
+        catalog.create_game('Unified HOOK candidates')
+        verified = []
+
+        def check_widgets(*_):
+            window = next(w for w in QApplication.topLevelWidgets()
+                          if w.windowTitle().startswith('AutoAdv') and getattr(w, 'catalog', None) is catalog)
+            try:
+                window.pid.setValue(101)
+                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                existing = source('A', 1)
+                window.on_hook(HookEvent('output', 'host', 7, 2, 200,
+                                         process_id=101, source=existing, text='台詞A'))
+                window.on_hook(HookEvent('hook_found', 'host', 7, 3, 300,
+                                         process_id=101, text='探索例文', detail='B'))
+                self.assertEqual(window.source_table.rowCount(), 2)
+                self.assertEqual(window.source_table.item(0, 3).text(), '受信中')
+                self.assertEqual(window.source_table.item(1, 3).text(), '探索候補（未追加）')
+                self.assertFalse(hasattr(window, 'found_hooks'))
+                window.source_table.selectRow(1)
+                self.assertEqual(window.selected_search_code(), 'B')
+                self.assertIsNone(window.chosen_source())
+                self.assertEqual(window.hook_preview.toPlainText(), '探索例文')
+                self.assertEqual(window.text_hook.text(), 'この探索候補をゲームへ追加')
+                self.assertFalse(window.speaker_hook.isEnabled())
+                fake_host = SimpleNamespace(command=Mock())
+                window.hook_host = fake_host
+                window.select_hook('text')
+                fake_host.command.assert_called_once_with('insert_hook', pid=101, code='B')
+                self.assertEqual(window.source_table.item(1, 3).text(), '追加要求済み（本文待ち）')
+                self.assertEqual(window.current_profile().inserted_hooks, ['B'])
+                self.assertEqual(window.current_profile().hooks, [])
+                self.assertFalse(window.manual_hook.text())
+                # The discovered code becomes a real Luna source after injection.
+                found = source('B', 5)
+                window.on_hook(HookEvent('created', 'host', 7, 4, 400,
+                                         process_id=101, source=found))
+                self.assertEqual(window.source_table.rowCount(), 2)
+                self.assertNotIn('B', window.search_rows)
+                self.assertEqual(window.source_table.item(1, 3).text(), 'HOOK生成済み')
+                window.on_hook(HookEvent('output', 'host', 7, 5, 500,
+                                         process_id=101, source=found, text='台詞B'))
+                window.source_table.selectRow(1)
+                self.assertEqual(window.text_hook.text(), 'この候補を本文に使用')
+                window.select_hook('text')
+                self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
+                # A supplementary rescan clears only uninserted search rows.
+                window.on_hook(HookEvent('hook_found', 'host', 7, 6, 600,
+                                         process_id=101, text='探索C', detail='C'))
+                self.assertEqual(window.source_table.rowCount(), 3)
+                window.clear_search_candidates()
+                self.assertEqual(window.source_table.rowCount(), 2)
+                self.assertEqual(len(window.sources), 2)
+                # Stale results from an earlier host session must be ignored.
+                window.on_hook(HookEvent('hook_found', 'other-host', 8, 7, 700,
+                                         process_id=101, text='古い', detail='OLD'))
+                self.assertEqual(window.source_table.rowCount(), 2)
+                verified.append('unified')
+            finally:
+                window.hook_host = None
+                window.close()
+            return 0
+
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+            with patch.object(QApplication, 'exec', check_widgets):
+                self.assertEqual(run_gui(), 0)
+        self.assertEqual(verified, ['unified'])
+
     def test_compare_choose_save_reorder_and_restore_in_real_widgets(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication

@@ -37,7 +37,7 @@ def run_gui(session_driver=None) -> int:
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
                                    QLabel, QPushButton, QComboBox, QFileDialog,
                                    QSpinBox, QGroupBox, QMessageBox, QCheckBox, QScrollArea, QInputDialog,
-                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView)
+                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu)
 
     class SignalBridge(QObject):
         hook = Signal(object)
@@ -87,6 +87,9 @@ def run_gui(session_driver=None) -> int:
             self.source_samples: dict[str, deque[str]] = {}
             self.ambiguous_sources: set[str] = set()
             self.source_rows: dict[tuple[str, int], int] = {}
+            self.search_rows: dict[str, int] = {}
+            self.search_samples: dict[str, str] = {}
+            self.search_insert_requested: set[str] = set()
             self.game_id = ''
             self.profile_id = ''
             self.server: IrodoriServer | None = None
@@ -249,7 +252,7 @@ def run_gui(session_driver=None) -> int:
                 game_details.addRow(button)
                 button.clicked.connect(handler)
 
-            capture = group('HOOKを選び、本文を確認', page='hook')
+            capture = group('HOOK候補・本文の確認と選択', page='hook')
             hook_details = group('HOOKと入力対象の詳細指定', page='settings')
             self.hook_target = QLabel('まず「ゲーム・自動進行」で実行中のゲームを選択してください')
             capture.addRow(self.hook_target)
@@ -295,8 +298,8 @@ def run_gui(session_driver=None) -> int:
             self.ocr_stability = QSpinBox()
             self.ocr_stability.setRange(1, 10)
             hook_details.addRow('OCRの安定確認回数', self.ocr_stability)
-            self.source_table = QTableWidget(0, 6)
-            self.source_table.setHorizontalHeaderLabels(['取得した本文', '用途', 'HOOK名', 'PID', 'Context', 'Thread'])
+            self.source_table = QTableWidget(0, 7)
+            self.source_table.setHorizontalHeaderLabels(['本文・探索サンプル', '割当', 'HOOKコード・名称', '状態', 'PID', 'Context', 'Thread'])
             self.source_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.source_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.source_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -305,7 +308,7 @@ def run_gui(session_driver=None) -> int:
             self.source_table.setColumnWidth(1, 120)
             self.source_table.setColumnWidth(2, 160)
             self.source_table.itemSelectionChanged.connect(self.show_hook_preview)
-            capture.addRow('取得中のHOOKと実際の本文（行を選択）', self.source_table)
+            capture.addRow('候補一覧（通常取得・追加探索を同じ一覧に表示）', self.source_table)
             self.hook_preview = QPlainTextEdit()
             self.hook_preview.setReadOnly(True)
             self.hook_preview.setMaximumHeight(130)
@@ -321,15 +324,19 @@ def run_gui(session_driver=None) -> int:
             row.addWidget(self.text_hook)
             row.addWidget(self.speaker_hook)
             capture.addRow(row)
-            self.btn_find = QPushButton('HOOK候補を追加探索')
-            self.btn_find.clicked.connect(self.find_hooks)
-            capture.addRow(self.btn_find)
-            self.btn_pc_hooks = QPushButton('標準文字APIのHOOKを追加（候補が出ない場合）')
-            self.btn_pc_hooks.clicked.connect(self.insert_pc_hooks)
-            capture.addRow(self.btn_pc_hooks)
+            self.btn_recovery = QToolButton()
+            self.btn_recovery.setText('候補が表示されない場合 ▾')
+            self.btn_recovery.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            recovery_menu = QMenu(self.btn_recovery)
+            self.btn_find = recovery_menu.addAction('通常候補以外も探索する')
+            self.btn_find.triggered.connect(self.find_hooks)
+            self.btn_pc_hooks = recovery_menu.addAction('Win32汎用HOOKを追加する')
+            self.btn_pc_hooks.triggered.connect(self.insert_pc_hooks)
+            self.btn_recovery.setMenu(recovery_menu)
+            capture.addRow(self.btn_recovery)
+            capture.addRow(QLabel('ゲームで台詞を表示し、本文が出た行を選択します。追加探索の結果もここに表示されます。'))
             self.insert_pc_hooks_on_attach = QCheckBox('この作品では接続時にWin32汎用HOOKを追加する')
-            capture.addRow(self.insert_pc_hooks_on_attach)
-            capture.addRow(QLabel('接続後にゲームで台詞を表示してください。HOOK追加・探索は候補の選択を自動化しません。'))
+            hook_details.addRow(self.insert_pc_hooks_on_attach)
             self.hook_capture_status = QLabel('HOOK取得: 未接続')
             capture.addRow(self.hook_capture_status)
             self.manual_hook = QLineEdit()
@@ -338,17 +345,6 @@ def run_gui(session_driver=None) -> int:
             self.btn_insert = QPushButton('詳細操作: HOOKコードを手動追加')
             self.btn_insert.clicked.connect(self.insert_hook)
             hook_details.addRow(self.btn_insert)
-            self.found_hooks = QTableWidget(0, 2)
-            self.found_hooks.setHorizontalHeaderLabels(['HOOKコード', '探索サンプル'])
-            self.found_hooks.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            self.found_hooks.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-            self.found_hooks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.found_hooks.setMinimumHeight(110)
-            self.found_hooks.horizontalHeader().setStretchLastSection(True)
-            capture.addRow('追加探索で見つかった候補', self.found_hooks)
-            self.btn_found = QPushButton('選んだ探索候補をHOOKに追加')
-            self.btn_found.clicked.connect(self.insert_found)
-            capture.addRow(self.btn_found)
             self.btn_unselect_hook = QPushButton('選択済みHOOKの割当を解除')
             self.btn_unselect_hook.clicked.connect(self.unselect_hook)
             hook_details.addRow(self.btn_unselect_hook)
@@ -370,11 +366,11 @@ def run_gui(session_driver=None) -> int:
             capture.addRow(self.active_hook_status)
             self.paired_text_hook = QComboBox()
             self.paired_speaker_hook = QComboBox()
-            capture.addRow('本文HOOK', self.paired_text_hook)
-            capture.addRow('対応する話者HOOK', self.paired_speaker_hook)
+            hook_details.addRow('本文HOOK', self.paired_text_hook)
+            hook_details.addRow('対応する話者HOOK', self.paired_speaker_hook)
             self.btn_pair = QPushButton('本文HOOKと話者HOOKを対応づける')
             self.btn_pair.clicked.connect(self.pair_hooks)
-            capture.addRow(self.btn_pair)
+            hook_details.addRow(self.btn_pair)
             self.btn_monitor = QPushButton('選択したHOOKで監視開始')
             self.btn_monitor.clicked.connect(self.begin_monitor)
             capture.addRow(self.btn_monitor)
@@ -1376,7 +1372,7 @@ def run_gui(session_driver=None) -> int:
                     or not self.host_generation):
                 self.note('HOOKの接続完了後に探索できます。接続状態と診断を確認してください。')
                 return
-            self.found_hooks.setRowCount(0)
+            self.clear_search_candidates()
             try:
                 game = self.catalog.games.get(self.game_id)
                 module = Path(game.executable).name if game and game.executable else ''
@@ -1394,28 +1390,27 @@ def run_gui(session_driver=None) -> int:
             except (OSError, RuntimeError, ValueError) as exc:
                 self.note('PC用HOOK追加に失敗: ' + str(exc))
 
-        def insert_found(self):
-            row = self.found_hooks.currentRow()
-            code = self.found_hooks.item(row, 0).text() if row >= 0 and self.found_hooks.item(row, 0) else ''
-            if code:
-                self.manual_hook.setText(code)
-                self.insert_hook()
-
-        def insert_hook(self):
+        def insert_hook_code(self, code: str):
             p = self.current_profile()
-            code = self.manual_hook.text().strip()
             if not p or not code:
                 return
             try:
-                if not self.hook_host:
-                    raise RuntimeError('attach the game before inserting HOOK')
+                if (not self.hook_host or not self.host_generation or
+                        self.attached_pid != self.pid.value()):
+                    raise RuntimeError('先にゲームへLunaHookを接続してください')
                 self.hook_host.command('insert_hook', pid=self.pid.value(), code=code)
                 if code not in p.inserted_hooks:
                     p.inserted_hooks.append(code)
                 self.persist()
-                self.note('Manual HOOK saved and inserted: ' + code)
+                if code in self.search_rows:
+                    self.search_insert_requested.add(code)
+                    self.add_search_candidate(code, self.search_samples.get(code, ''))
+                self.note('HOOKの追加を要求しました。実際の本文を取得したら用途を選んでください: ' + code)
             except Exception as exc:
-                self.note(str(exc))
+                self.note('HOOKの追加に失敗: ' + str(exc))
+
+        def insert_hook(self):
+            self.insert_hook_code(self.manual_hook.text().strip())
 
         def start_server(self):
             self.persist()
@@ -1657,10 +1652,19 @@ def run_gui(session_driver=None) -> int:
             self.source_samples.clear()
             self.ambiguous_sources.clear()
             self.source_rows.clear()
+            self.search_rows.clear()
+            self.search_samples.clear()
+            self.search_insert_requested.clear()
             self.source_table.setRowCount(0)
             self.hook_preview.clear()
             self.hook_capture_status.setText('HOOK取得: 未接続または候補なし')
             self.refresh_hook_connection()
+
+        def selected_search_code(self) -> str | None:
+            row = self.source_table.currentRow()
+            item = self.source_table.item(row, 2) if row >= 0 else None
+            value = item.data(256) if item is not None else None
+            return value[1] if isinstance(value, tuple) and len(value) == 2 and value[0] == 'search' else None
 
         def chosen_source(self):
             row = self.source_table.currentRow()
@@ -1673,7 +1677,77 @@ def run_gui(session_driver=None) -> int:
             source = self.sources.get(key)
             return source if source and source.address == address and key not in self.ambiguous_sources else None
 
+        def remove_candidate_row(self, row: int):
+            self.source_table.removeRow(row)
+            self.source_rows = {key: index - (index > row) for key, index in self.source_rows.items()
+                                if index != row}
+            self.search_rows = {code: index - (index > row) for code, index in self.search_rows.items()
+                                if index != row}
+
+        def clear_search_candidates(self):
+            for row in sorted(self.search_rows.values(), reverse=True):
+                self.remove_candidate_row(row)
+            self.search_samples.clear()
+            self.search_insert_requested.clear()
+            self.refresh_candidate_actions()
+            self.refresh_capture_status()
+
+        def add_search_candidate(self, code: str, sample: str):
+            if not code:
+                return
+            # Native creation/output is the definitive selectable source. Never
+            # replace a live source with a search-only code or guess a thread.
+            if any(src.hook_code == code for src in self.sources.values()):
+                return
+            if code not in self.search_rows:
+                row = self.source_table.rowCount()
+                self.source_table.insertRow(row)
+                self.search_rows[code] = row
+            row = self.search_rows[code]
+            self.search_samples[code] = sample
+            state = '追加要求済み（本文待ち）' if code in self.search_insert_requested else '探索候補（未追加）'
+            values = (sample or '（探索サンプルなし）', '未割当', code, state,
+                      str(self.pid.value()), '—', '—')
+            for col, value in enumerate(values):
+                item = self.source_table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.source_table.setItem(row, col, item)
+                item.setText(value)
+                if col == 2:
+                    item.setData(256, ('search', code))
+            self.refresh_candidate_actions()
+            self.refresh_capture_status()
+
+        def refresh_capture_status(self):
+            if self.attached_pid and self.host_generation:
+                received = sum(bool(values) for values in self.source_samples.values())
+                self.hook_capture_status.setText(
+                    f'PID {self.attached_pid}: 受信HOOK {len(self.sources)}件（本文あり {received}件） / '
+                    f'追加探索 {len(self.search_rows)}件')
+
+        def refresh_candidate_actions(self, *_):
+            search_code = self.selected_search_code()
+            source = self.chosen_source()
+            if search_code:
+                label = 'HOOK追加を再要求' if search_code in self.search_insert_requested else 'この探索候補をゲームへ追加'
+                self.text_hook.setText(label)
+                self.text_hook.setEnabled(True)
+                self.speaker_hook.setEnabled(False)
+                self.btn_test_hook_text.setEnabled(bool(self.search_samples.get(search_code)))
+            else:
+                self.text_hook.setText('この候補を本文に使用')
+                self.text_hook.setEnabled(source is not None)
+                self.speaker_hook.setEnabled(source is not None)
+                self.btn_test_hook_text.setEnabled(bool(source and self.source_samples.get(source.identity)))
+
         def update_candidate(self, source: ThreadSource, sample: str | None):
+            code = source.hook_code
+            if code in self.search_rows:
+                row = self.search_rows[code]
+                self.remove_candidate_row(row)
+                self.search_samples.pop(code, None)
+                self.search_insert_requested.discard(code)
             key = (source.identity, source.address)
             if key not in self.source_rows:
                 row = self.source_table.rowCount()
@@ -1682,22 +1756,22 @@ def run_gui(session_driver=None) -> int:
             else:
                 row = self.source_rows[key]
             profile = self.current_profile()
-            role = 'candidate'
+            role = '未割当'
             if profile:
                 for i, hook in enumerate(profile.hooks):
                     if hook.matches(source):
                         role = f'{hook.role} #{1 + sum(h.role == hook.role for h in profile.hooks[:i])}'
                         break
             if source.identity in self.ambiguous_sources:
-                role = 'AMBIGUOUS'
+                role = '識別衝突（使用不可）'
             if sample is not None:
                 history = self.source_samples.setdefault(source.identity, deque(maxlen=4))
                 if not history or history[-1] != sample:
                     history.append(sample)
             latest = self.source_samples.get(source.identity, ())
             values = (latest[-1] if latest else '（本文未受信）', role,
-                      f'{source.hook_code} / {source.hook_name}', str(source.process_id),
-                      f'{source.context} / {source.context2}', hex(source.address))
+                      f'{source.hook_code} / {source.hook_name}', '受信中' if latest else 'HOOK生成済み',
+                      str(source.process_id), f'{source.context} / {source.context2}', hex(source.address))
             for col, value in enumerate(values):
                 item = self.source_table.item(row, col)
                 if item is None:
@@ -1708,6 +1782,8 @@ def run_gui(session_driver=None) -> int:
                     item.setData(256, key)
             if self.source_table.currentRow() == row:
                 self.show_hook_preview()
+            self.refresh_candidate_actions()
+            self.refresh_capture_status()
 
         def refresh_selected_hooks(self):
             profile = self.current_profile()
@@ -1755,24 +1831,22 @@ def run_gui(session_driver=None) -> int:
                 f'{len(absent)} waiting; {len(ambiguous)} ambiguous. Missing selections require user review.')
 
         def on_hook(self, event: HookEvent):
-            if event.kind == 'hook_found' and event.process_id == self.pid.value():
-                row = self.found_hooks.rowCount()
-                self.found_hooks.insertRow(row)
-                self.found_hooks.setItem(row, 0, QTableWidgetItem(event.detail))
-                self.found_hooks.setItem(row, 1, QTableWidgetItem(event.text))
-                self.note('HOOK found: ' + event.detail)
+            if (event.kind == 'hook_found' and event.process_id == self.attached_pid
+                    and event.host_generation == self.host_generation
+                    and event.connection_generation == self.connection_generation):
+                self.add_search_candidate(event.detail, event.text)
+                self.note('追加探索候補: ' + event.detail)
             if event.kind == 'connected' and event.process_id == self.pid.value():
                 if self.connection_generation != event.connection_generation or self.host_generation != event.host_generation:
                     self.stop_session()
                     self.clear_hook_observations()
-                    self.found_hooks.setRowCount(0)
                 self.host_generation = event.host_generation
                 self.connection_generation = event.connection_generation
                 self.attached_pid = event.process_id
                 self.validation_trace.emit('hook_connected', pid=event.process_id,
                     generation=event.host_generation, connection=event.connection_generation)
                 self.host_status.setText(f'LunaHook connected: PID {event.process_id}')
-                self.hook_capture_status.setText(f'PID {event.process_id}: 接続済み・本文HOOKは未観測')
+                self.refresh_capture_status()
                 p = self.current_profile()
                 if p and p.source == 'hook':
                     if p.insert_pc_hooks:
@@ -1795,14 +1869,12 @@ def run_gui(session_driver=None) -> int:
                 if self.controller.active_text_source == key:
                     self.stop_session()
                     self.note('Active dialogue HOOK disappeared; restart monitoring after checking sources')
-                row = self.source_rows.pop((key, event.source.address), None)
+                row = self.source_rows.get((key, event.source.address))
                 if row is not None:
-                    self.source_table.removeRow(row)
-                    for k, r in tuple(self.source_rows.items()):
-                        if r > row:
-                            self.source_rows[k] = r - 1
+                    self.remove_candidate_row(row)
                 self.source_samples.pop(key, None)
                 self.refresh_hook_connection()
+                self.refresh_capture_status()
             if (event.kind in ('created', 'output') and event.source and event.process_id == self.pid.value()
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation):
@@ -1819,9 +1891,7 @@ def run_gui(session_driver=None) -> int:
                     self.sources[key] = source
                 self.update_candidate(source, event.text if event.kind == 'output' else None)
                 self.refresh_hook_connection()
-                self.hook_capture_status.setText(
-                    f'PID {event.process_id}: HOOK候補 {len(self.sources)}件 / '
-                    f'本文あり {sum(bool(values) for values in self.source_samples.values())}件')
+                self.refresh_capture_status()
                 if event.kind == 'created':
                     self.validation_trace.emit('hook_candidate_created', pid=event.process_id,
                         generation=event.host_generation, connection=event.connection_generation,
@@ -1884,9 +1954,13 @@ def run_gui(session_driver=None) -> int:
 
         def select_hook(self, role: str):
             p = self.current_profile()
+            search_code = self.selected_search_code()
+            if search_code:
+                self.insert_hook_code(search_code)
+                return
             source = self.chosen_source()
             if not p or not source:
-                self.note('Observe and select a Hook source first')
+                self.note('本文の出力を確認できたHOOK候補を選択してください')
                 return
             self.stop_session()
             selection = HookSelection(source.hook_code, source.context, source.context2, role)
@@ -1931,17 +2005,23 @@ def run_gui(session_driver=None) -> int:
 
         def show_hook_preview(self, *_):
             source = self.chosen_source()
-            history = self.source_samples.get(source.identity, ()) if source else ()
-            self.hook_preview.setPlainText('\n── Previous output ──\n'.join(reversed(history)))
+            code = self.selected_search_code()
+            if code:
+                self.hook_preview.setPlainText(self.search_samples.get(code, ''))
+            else:
+                history = self.source_samples.get(source.identity, ()) if source else ()
+                self.hook_preview.setPlainText('\n── Previous output ──\n'.join(reversed(history)))
+            self.refresh_candidate_actions()
 
 
         def use_selected_hook_as_example(self):
             source = self.chosen_source()
             samples = self.source_samples.get(source.identity, ()) if source else ()
-            if not samples:
-                self.note('台詞が取得されているHOOK候補を選択してください')
+            sample = samples[-1] if samples else self.search_samples.get(self.selected_search_code() or '', '')
+            if not sample:
+                self.note('本文または探索サンプルのある候補を選択してください')
                 return
-            self.example_raw.setPlainText(samples[-1])
+            self.example_raw.setPlainText(sample)
             self.tabs.setCurrentIndex(self.text_tab_index)
 
         def begin_monitor(self):
