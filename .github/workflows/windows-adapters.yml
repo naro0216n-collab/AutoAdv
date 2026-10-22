@@ -27,7 +27,7 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Validate Windows GUI, targeted input and G2P adapters
         run: |
-          python -c "from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().pronunciations('えっ嘘でしょ。'); print('Windows adapters available')"
+          python -c "from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().candidates('えっ嘘でしょ。'); print('Windows adapters available')"
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
