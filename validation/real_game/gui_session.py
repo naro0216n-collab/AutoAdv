@@ -236,7 +236,7 @@ class SessionDriver:
                     raise RuntimeError('product process audio did not become ready within 30 seconds')
             elif self.state == 'activate':
                 if self.options['phase'] != 'hook':
-                    self.product.set_auto_advance(True)
+                    self.w.permit()
                     if not self.product.runtime_state().authorized:
                         raise RuntimeError('AutoAdv not authorized to send')
                 self._focus_game()

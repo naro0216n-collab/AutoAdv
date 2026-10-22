@@ -68,15 +68,15 @@ class LiveGuiSessionContract(unittest.TestCase):
             ('field', ('speaker', None)),
         ])
 
-    def test_focus_activation_uses_application_authorization(self):
+    def test_focus_activation_uses_gui_authorization_action_and_application_state(self):
         clock = [0.0]
         runtime = SimpleNamespace(authorized=False)
-        product = SimpleNamespace(
-            set_auto_advance=lambda enabled: setattr(runtime, 'authorized', enabled),
-            runtime_state=lambda: runtime,
-        )
-        window = SimpleNamespace(application=product)
+        product = SimpleNamespace(runtime_state=lambda: runtime)
         actions = []
+        def permit():
+            actions.append('permit')
+            runtime.authorized = True
+        window = SimpleNamespace(application=product, permit=permit)
         driver = SessionDriver(window, SimpleNamespace(),
                                {'timeout_seconds': 30, 'phase': 'native'},
                                clock=lambda: clock[0])
@@ -92,7 +92,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         clock[0] = 0.3
         driver.tick()
         self.assertEqual(driver.state, 'running')
-        self.assertEqual(actions, ['.monitoring'])
+        self.assertEqual(actions, ['permit', '.monitoring'])
 
     def test_actual_product_handoff_ends_run_without_fake_game_input(self):
         actions = []
@@ -154,7 +154,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             'self.product.select_primary_target(', 'self.product.activate_selected_target()',
             'self.product.hook_connection_state()', 'self.product.capture_view()',
             'self.product.set_capture_field_source(', 'self.product.commit_capture()',
-            'self.product.runtime_state()', 'self.product.set_auto_advance(True)',
+            'self.product.runtime_state()', 'self.w.permit()',
         ):
             self.assertIn(api, source)
 
