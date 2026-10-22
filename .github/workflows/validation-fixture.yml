@@ -1,13 +1,13 @@
 name: Validation Fixture Runtime
 
 # Fixture source identity normalizes text line endings; audio remains byte-exact.
+# Building is an explicit validation action: edit the non-merging develop -> main
+# validation PR title to include [BUILD AUTOADV FIXTURE]. Routine develop publish
+# and Fast CI never construct the Windows game fixture.
 on:
-  push:
-    branches: [develop]
-    paths:
-      - 'validation/real_game/renpy/**'
-      - 'validation/real_game/fixture_runtime.py'
-      - '.github/workflows/validation-fixture.yml'
+  pull_request:
+    branches: [main]
+    types: [edited]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,13 @@ concurrency:
 
 jobs:
   build-fixture:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.changes.title != null &&
+           contains(github.event.pull_request.title, '[BUILD AUTOADV FIXTURE]') &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref == 'develop' &&
+           github.event.pull_request.base.ref == 'main') }}
     name: Build precompiled validation game
     runs-on: ubuntu-latest
     timeout-minutes: 20
