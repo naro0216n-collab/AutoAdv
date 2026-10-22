@@ -112,25 +112,28 @@ class SelectedHookContracts(unittest.TestCase):
 
 @unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'PySide6 required for native GUI acceptance')
 class HookCandidateGuiAcceptance(unittest.TestCase):
-    def test_recovery_codes_do_not_look_like_received_dialogue(self):
+    def test_all_acquisition_routes_feed_one_live_dialogue_list(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
 
         catalog = Catalog()
-        catalog.create_game('Native dialogue and technical recovery')
+        catalog.create_game('Native dialogue and extended discovery')
         verified = []
 
         def check_widgets(*_):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                self.assertEqual(window.tabs.count(), 3)
-                self.assertEqual(window.tabs.tabText(0), 'プレイ')
-                self.assertEqual(window.tabs.tabText(1), '台詞取得')
-                self.assertEqual(window.tabs.tabText(2), '台詞・音声')
-                self.assertFalse(window.section_toggles['hook_details'].isChecked())
+                self.assertEqual([window.tabs.tabText(i) for i in range(3)],
+                                 ['プレイ', '台詞取得', '台詞・音声'])
+                self.assertEqual(window.attach.parentWidget().isVisible(), False)
+                self.assertFalse(hasattr(window, 'search_code_choice'))
+                self.assertFalse(hasattr(window, 'btn_insert_search'))
+                self.assertFalse(window.btn_find.isHidden())
                 window.pid.setValue(101)
+                commands = Mock()
+                window.hook_host = SimpleNamespace(command=commands)
                 window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 existing = source('A', 1)
                 window.on_hook(HookEvent('created', 'host', 7, 2, 200,
@@ -138,45 +141,53 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 self.assertEqual(window.source_table.rowCount(), 0)
                 window.on_hook(HookEvent('output', 'host', 7, 3, 300,
                                          process_id=101, source=existing, text='台詞A'))
+                window.find_hooks()
+                commands.assert_any_call('find_hooks', pid=101, boundary_module='',
+                                         parameters={'maxRecords': 64})
                 window.on_hook(HookEvent('hook_found', 'host', 7, 4, 400,
-                                         process_id=101, text='探索例文', detail='B'))
+                                         process_id=101, text='探索サンプル（使わない）', detail='B'))
+                commands.assert_any_call('insert_hook', pid=101, code='B')
                 self.assertEqual(window.source_table.rowCount(), 1)
-                self.assertIn('台詞A', window.source_table.item(0, 0).text())
-                self.assertNotIn('探索例文', window.source_table.item(0, 0).text())
-                window.btn_recovery.click()
-                self.assertTrue(window.section_toggles['hook_details'].isChecked())
-                self.assertEqual(window.search_code_choice.count(), 1)
-                self.assertEqual(window.search_code_choice.currentData(), 'B')
-                fake_host = SimpleNamespace(command=Mock())
-                window.hook_host = fake_host
-                window.btn_insert_search.click()
-                fake_host.command.assert_called_once_with('insert_hook', pid=101, code='B')
-                self.assertEqual(window.current_profile().inserted_hooks, ['B'])
-                self.assertEqual(window.current_profile().hooks, [])
-                # Native creation is not yet game dialogue.
+                self.assertEqual(window.current_profile().inserted_hooks, [])
+                # A repeat native notification does not issue a second insert.
+                before = commands.call_count
+                window.on_hook(HookEvent('hook_found', 'host', 7, 5, 500,
+                                         process_id=101, text='sample again', detail='B'))
+                self.assertEqual(commands.call_count, before)
+                # Search trials are ephemeral until real output and user choice.
                 found = source('B', 5)
-                window.on_hook(HookEvent('created', 'host', 7, 5, 500,
+                window.on_hook(HookEvent('created', 'host', 7, 6, 600,
                                          process_id=101, source=found))
                 self.assertEqual(window.source_table.rowCount(), 1)
-                self.assertEqual(window.search_code_choice.count(), 0)
-                window.on_hook(HookEvent('output', 'host', 7, 6, 600,
+                window.on_hook(HookEvent('output', 'host', 7, 7, 700,
                                          process_id=101, source=found, text='台詞B'))
                 self.assertEqual(window.source_table.rowCount(), 2)
+                self.assertNotIn('探索サンプル', window.source_table.item(1, 0).text())
                 window.source_table.selectRow(1)
                 window.select_hook('text')
                 self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
-                window.on_hook(HookEvent('hook_found', 'host', 7, 7, 700,
-                                         process_id=101, text='探索例文C', detail='C'))
+                self.assertEqual(window.current_profile().inserted_hooks, ['B'])
+                # Unselected trials are not persisted.
+                window.on_hook(HookEvent('hook_found', 'host', 7, 8, 800,
+                                         process_id=101, text='sample C', detail='C'))
+                commands.assert_any_call('insert_hook', pid=101, code='C')
+                self.assertNotIn('C', window.current_profile().inserted_hooks)
                 self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertEqual(window.search_code_choice.count(), 1)
-                window.clear_search_candidates()
-                self.assertEqual(window.source_table.rowCount(), 2)
-                self.assertEqual(window.search_code_choice.count(), 0)
-                # Old connection's late search response cannot pollute a new session.
-                window.on_hook(HookEvent('hook_found', 'other-host', 8, 8, 800,
+                # The adopted search HOOK is inserted again on reconnect,
+                # while the other search-only trial is never restored.
+                window.on_hook(HookEvent('disconnected', 'host', 7, 9, 850, process_id=101))
+                commands.reset_mock()
+                window.on_hook(HookEvent('connected', 'new-host', 8, 10, 900, process_id=101))
+                commands.assert_any_call('insert_hook', pid=101, code='B')
+                self.assertFalse(any(call.args == ('insert_hook',) and
+                                     call.kwargs.get('code') == 'C' for call in commands.call_args_list))
+                # Events from an obsolete Host connection are ignored.
+                before = commands.call_count
+                window.on_hook(HookEvent('hook_found', 'other-host', 7, 11, 920,
                                          process_id=101, text='古い', detail='OLD'))
-                self.assertEqual(window.search_code_choice.count(), 0)
-                verified.append('native-only')
+                self.assertEqual(commands.call_count, before)
+                self.assertNotIn('OLD', window._searched_codes)
+                verified.append('one-acquisition-list')
             finally:
                 window.hook_host = None
                 window.close()
@@ -185,7 +196,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
         with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
-        self.assertEqual(verified, ['native-only'])
+        self.assertEqual(verified, ['one-acquisition-list'])
 
     def test_compare_choose_save_reorder_and_restore_in_real_widgets(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'

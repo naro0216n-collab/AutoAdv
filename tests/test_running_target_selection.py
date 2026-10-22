@@ -1,7 +1,7 @@
 """User-driven source discovery, independent of existing profile data."""
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from autoadv.game_windows import ProcessCandidate, WindowCandidate, find_game_windows, find_game_processes
 from autoadv.running_target_dialog import available_targets
 
@@ -49,6 +49,7 @@ class RunningTargetGuiTests(unittest.TestCase):
     def test_picker_registers_unregistered_executable_and_recovers_it(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         from PySide6.QtWidgets import QApplication
+        from types import SimpleNamespace
         from autoadv.gui import run_gui
         from autoadv.storage import Catalog
         catalog = Catalog()
@@ -59,15 +60,40 @@ class RunningTargetGuiTests(unittest.TestCase):
                           if getattr(w, 'catalog', None) is catalog)
             try:
                 self.assertEqual(window.tabs.currentIndex(), 0)
+                commands = Mock()
+                starts = []
+                def fake_host_start():
+                    starts.append('host-start')
+                    window._connecting_pid = 0
+                    window.attached_pid = 0
+                    window.hook_host = SimpleNamespace(
+                        command=commands, child=SimpleNamespace(poll=lambda: None))
+                window.start_host = fake_host_start
                 window.use_running_target(candidate)
                 self.assertEqual(window.tabs.currentIndex(), 1)
+                commands.assert_any_call('connect', pid=candidate.pid)
+                self.assertEqual(len(starts), 1)
                 self.assertEqual(window.pid.value(), candidate.pid)
                 self.assertEqual(window.hwnd.text(), hex(candidate.hwnd))
                 self.assertEqual(window.catalog.games[window.game_id].executable, candidate.executable)
                 gid = window.game_id
+                commands.reset_mock()
                 window.use_running_target(candidate)
                 self.assertEqual(window.game_id, gid)
                 self.assertEqual(len(window.catalog.games), 1)
+                self.assertEqual(len(starts), 1)
+                commands.assert_not_called()  # already connecting to this PID
+                next_target = WindowCandidate(136, 9888, '作品タイトル', candidate.executable)
+                window.use_running_target(next_target)
+                self.assertEqual(len(starts), 2)
+                commands.assert_any_call('connect', pid=next_target.pid)
+                self.assertEqual(window._connecting_pid, next_target.pid)
+                self.assertFalse(window.controller.authorized)
+                # Delayed signals from an old worker must not change the new game.
+                window._host_epoch = 4
+                window.on_host_closed(3, 'old native Host exit')
+                self.assertEqual(window._connecting_pid, next_target.pid)
+                self.assertEqual(window.hook_host.child.poll(), None)
             finally:
                 window.close()
             return 0

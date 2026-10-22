@@ -40,9 +40,9 @@ def run_gui(session_driver=None) -> int:
                                    QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu)
 
     class SignalBridge(QObject):
-        hook = Signal(object)
-        closed = Signal(str)
-        host_error = Signal(str)
+        hook = Signal(int, object)
+        closed = Signal(int, str)
+        host_error = Signal(int, str)
         voice = Signal(object, bool, str)
         server = Signal(object)
         ocr = Signal(int, int, int, str)
@@ -59,9 +59,9 @@ def run_gui(session_driver=None) -> int:
             self.resize(1150, 950)
             self.catalog = load()
             self.bridge = SignalBridge()
-            self.bridge.hook.connect(self.on_hook)
-            self.bridge.closed.connect(self.on_closed)
-            self.bridge.host_error.connect(self.on_host_error)
+            self.bridge.hook.connect(self.on_host_hook)
+            self.bridge.closed.connect(self.on_host_closed)
+            self.bridge.host_error.connect(self.on_host_error_from_host)
             self.bridge.voice.connect(self.on_voice)
             self.bridge.server.connect(self.on_server)
             self.bridge.ocr.connect(self.on_ocr)
@@ -80,6 +80,7 @@ def run_gui(session_driver=None) -> int:
             self.controller = Controller(self.send_input, self.preflight)
             self.validation_trace = ValidationTrace()
             self.hook_host: HookHost | None = None
+            self._host_epoch = 0
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
@@ -88,10 +89,12 @@ def run_gui(session_driver=None) -> int:
             self.source_samples: dict[str, deque[str]] = {}
             self.ambiguous_sources: set[str] = set()
             self.source_rows: dict[tuple[str, int], int] = {}
-            # Advanced search results are candidate HOOK codes, not dialogue
-            # samples and never enter the live dialogue candidate list.
-            self.search_codes: set[str] = set()
-            self.search_insert_requested: set[str] = set()
+            # Advanced search results are transient acquisition inputs. Native
+            # output, not discovery provenance or search samples, is what a
+            # player chooses; trial codes become persistent only when selected.
+            self._searched_codes: set[str] = set()
+            self._trial_hook_codes: set[str] = set()
+            self._connecting_pid = 0
             self.game_id = ''
             self.profile_id = ''
             self.server: IrodoriServer | None = None
@@ -322,9 +325,9 @@ def run_gui(session_driver=None) -> int:
             target_details.addRow('音声出力プロセスPID（未指定ならHOOK）', self.audio_pid)
             target_details.addRow('入力先プロセスPID（未指定ならHOOK）', self.input_pid)
             target_details.addRow('入力先ウィンドウ識別子（HWND）', self.hwnd)
-            self.attach = QPushButton('選択したゲームにLunaHookを接続')
+            self.attach = QPushButton('HOOK接続を再試行')
             self.attach.clicked.connect(self.connect_game)
-            capture.addRow(self.attach)
+            hook_details.addRow(self.attach)
             capture.addRow(self.host_status)
             self.btn_discover = QPushButton('Find windows matching registered game executable')
             self.btn_discover.clicked.connect(self.detect_game)
@@ -378,21 +381,15 @@ def run_gui(session_driver=None) -> int:
             row.addWidget(self.text_hook)
             row.addWidget(self.speaker_hook)
             capture.addRow(row)
-            self.btn_recovery = QPushButton('取得できない・文字化けする場合の調整')
+            self.btn_find = QPushButton('ほかの取得候補を探す')
+            self.btn_find.clicked.connect(self.find_hooks)
+            capture.addRow(self.btn_find)
+            self.btn_recovery = QPushButton('文字化け・接続などの取得条件を調整')
             self.btn_recovery.clicked.connect(lambda: self.reveal_section('hook_details', 'hook'))
             capture.addRow(self.btn_recovery)
-            self.btn_find = QPushButton('別のHOOKを探索する')
-            self.btn_find.clicked.connect(self.find_hooks)
-            hook_details.addRow(self.btn_find)
             self.btn_pc_hooks = QPushButton('Win32汎用HOOKを追加する')
             self.btn_pc_hooks.clicked.connect(self.insert_pc_hooks)
             hook_details.addRow(self.btn_pc_hooks)
-            hook_details.addRow(QLabel('高度なHOOK探索の結果は本文候補としては扱いません。実際の出力が確認できた時点で上の一覧に現れます。'))
-            self.search_code_choice = QComboBox()
-            hook_details.addRow('追加探索で検出したコード（本文ではない）', self.search_code_choice)
-            self.btn_insert_search = QPushButton('このコードで本文の取得を試す')
-            self.btn_insert_search.clicked.connect(self.insert_selected_search)
-            hook_details.addRow(self.btn_insert_search)
             capture.addRow(QLabel('ゲーム内で台詞を表示すると、実際に受信された本文が並びます。'))
             self.insert_pc_hooks_on_attach = QCheckBox('この作品では接続時にWin32汎用HOOKを追加する')
             hook_details.addRow(self.insert_pc_hooks_on_attach)
@@ -845,12 +842,14 @@ def run_gui(session_driver=None) -> int:
         def choose_game(self, *_):
             self._resume_monitor_requested = False
             self.stop_session()
+            self._host_epoch += 1
             if self.hook_host:
                 self.hook_host.close()
                 self.hook_host = None
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
+            self._connecting_pid = 0
             self.clear_hook_observations()
             self.host_status.setText('LunaHook: 未接続')
             self.pid.setValue(0)
@@ -1580,15 +1579,19 @@ def run_gui(session_driver=None) -> int:
         def find_hooks(self):
             if (not self.hook_host or self.attached_pid != self.pid.value()
                     or not self.host_generation):
-                self.note('HOOKの接続完了後に探索できます。接続状態と診断を確認してください。')
+                self.note('接続が完了していません。接続状態と診断を確認してください。')
                 return
-            self.clear_search_candidates()
             try:
                 game = self.catalog.games.get(self.game_id)
                 module = Path(game.executable).name if game and game.executable else ''
-                self.hook_host.command('find_hooks', pid=self.pid.value(), boundary_module=module)
+                # Search is an alternate way to *acquire the same dialogue*, not
+                # another UI category. Limit upstream records so automatic trials
+                # cannot flood the target with unlimited inserts.
+                self.hook_host.command('find_hooks', pid=self.pid.value(), boundary_module=module,
+                                       parameters={'maxRecords': 64})
+                self.note('追加の取得元を探索しています。台詞を表示すると、取得できた本文が同じ一覧に現れます。')
             except Exception as exc:
-                self.note(str(exc))
+                self.note('HOOK探索を開始できません: ' + str(exc))
 
         def insert_pc_hooks(self):
             try:
@@ -1612,9 +1615,6 @@ def run_gui(session_driver=None) -> int:
                 if code not in p.inserted_hooks:
                     p.inserted_hooks.append(code)
                 self.persist()
-                if code in self.search_codes:
-                    self.search_insert_requested.add(code)
-                    self.refresh_search_codes()
                 self.note('HOOKの追加を要求しました。実際の本文を取得したら用途を選んでください: ' + code)
             except Exception as exc:
                 self.note('HOOKの追加に失敗: ' + str(exc))
@@ -1654,16 +1654,23 @@ def run_gui(session_driver=None) -> int:
         def start_host(self):
             self.stop_session()
             self.persist()
+            # Signals from the old Host can arrive after a new process was
+            # selected. They must not reset or populate the current session.
+            self._host_epoch += 1
+            epoch = self._host_epoch
             if self.hook_host:
                 self.hook_host.close()
             self.host_generation = ''
             self.connection_generation = 0
             self.attached_pid = 0
+            self._connecting_pid = 0
             self.clear_hook_observations()
             try:
                 runtime = adopted_runtime()
-                self.hook_host = HookHost(runtime.host, self.bridge.hook.emit,
-                                          self.bridge.closed.emit, self.bridge.host_error.emit)
+                self.hook_host = HookHost(runtime.host,
+                    lambda event: self.bridge.hook.emit(epoch, event),
+                    lambda reason: self.bridge.closed.emit(epoch, reason),
+                    lambda message: self.bridge.host_error.emit(epoch, message))
                 self.hook_host.start()
                 self.host_status.setText('LunaHook Host: launched')
             except Exception as exc:
@@ -1716,11 +1723,10 @@ def run_gui(session_driver=None) -> int:
             self.pid.setValue(target.pid)
             self.hwnd.setText(hex(target.hwnd) if target.hwnd else '')
             self.hook_target.setText(f'{target.title or "(ウィンドウなし)"} — PID {target.pid} / {target.executable}')
-            if target.hwnd:
-                self.note(f'対象選択: {target.title} / PID {target.pid}。HOOKタブで接続してください。')
-            else:
-                self.note(f'PID {target.pid} をHOOK対象に選択。自動送りには別途ゲームウィンドウの選択が必要です。')
+            if not target.hwnd:
+                self.note(f'PID {target.pid}: 自動送りにはゲームウィンドウの指定が必要です。')
             self.tabs.setCurrentIndex(1)
+            self.connect_game()
 
         def detect_game(self):
             game = self.catalog.games.get(self.game_id)
@@ -1745,7 +1751,7 @@ def run_gui(session_driver=None) -> int:
                 self.pid.setValue(windows[index].pid)
                 self.hwnd.setText(hex(windows[index].hwnd))
                 self.hook_target.setText(options[index])
-                self.note('Selected game window: ' + options[index])
+                self.connect_game()
             except Exception as exc:
                 self.note('Game identification failed: ' + str(exc))
 
@@ -1779,7 +1785,7 @@ def run_gui(session_driver=None) -> int:
                 self.pid.setValue(window.pid)
                 self.hwnd.setText(hex(window.hwnd))
                 self.hook_target.setText(labels[index])
-                self.note('Selected registered game: ' + labels[index])
+                self.connect_game()
             except Exception as exc:
                 self.note('Registered-game discovery failed: ' + str(exc))
 
@@ -1896,14 +1902,26 @@ def run_gui(session_driver=None) -> int:
             if not self.pid.value():
                 self.note('実行中のゲーム・プロセスを選択してください')
                 return
-            if not self.current_profile():
+            profile = self.current_profile()
+            if not profile:
                 self.note('作品を登録してください')
                 return
-            # Connecting a game is not authorization to save draft voice,
-            # advancement or text settings. Commit only capture controls.
+            if profile.source == 'ocr':
+                self.host_status.setText('取得方法: OCR（LunaHook接続は不要）')
+                return
+            if (self.hook_host and self.hook_host.child is not None and
+                    self.hook_host.child.poll() is None and
+                    (self.attached_pid == self.pid.value() and self.host_generation or
+                     self._connecting_pid == self.pid.value())):
+                return
+            # The capture settings alone are saved at connection time. Neither
+            # voice nor advancement drafts are committed or auto-authorized.
             if not self.save_acquisition_settings():
                 return
-            if not self.hook_host or self.hook_host.child is None or self.hook_host.child.poll() is not None:
+            if (not self.hook_host or self.hook_host.child is None or
+                    self.hook_host.child.poll() is not None or
+                    (self.attached_pid and self.attached_pid != self.pid.value()) or
+                    (self._connecting_pid and self._connecting_pid != self.pid.value())):
                 self.start_host()
             if not self.hook_host or self.hook_host.child is None:
                 self.note('LunaHook Hostの起動に失敗しました')
@@ -1921,29 +1939,26 @@ def run_gui(session_driver=None) -> int:
                 self.hook_host.command('settings', flush_ms=p.hook_flush_ms,
                     codepage=p.hook_codepage, max_buffer=p.hook_max_buffer, max_history=p.hook_max_history)
                 self.hook_host.command('connect', pid=self.pid.value())
-                self.note('LunaHookへの接続を要求しました。接続完了または診断結果を確認してください。')
+                self._connecting_pid = self.pid.value()
+                self.host_status.setText('LunaHook: 接続中…')
+                self.note('ゲームを選択しました。LunaHook接続を開始しています。')
             except Exception as exc:
-                self.note(str(exc))
+                self._connecting_pid = 0
+                self.note('LunaHook接続失敗: ' + str(exc))
 
         def clear_hook_observations(self):
             self.sources.clear()
             self.source_samples.clear()
             self.ambiguous_sources.clear()
             self.source_rows.clear()
-            self.search_codes.clear()
-            self.search_insert_requested.clear()
+            self._searched_codes.clear()
+            self._trial_hook_codes.clear()
             self.source_table.setRowCount(0)
-            self.search_code_choice.clear()
             self.hook_preview.clear()
             self.hook_technical_info.setText('取得元を選択すると識別情報を表示します')
             self.refresh_candidate_actions()
             self.hook_capture_status.setText('取得: 未接続または本文未受信')
             self.refresh_hook_connection()
-
-        def insert_selected_search(self):
-            code = self.search_code_choice.currentData()
-            if code:
-                self.insert_hook_code(code)
 
         def chosen_source(self):
             row = self.source_table.currentRow()
@@ -1964,28 +1979,26 @@ def run_gui(session_driver=None) -> int:
             self.source_rows = {key: index - (index > row) for key, index in self.source_rows.items()
                                 if index != row}
 
-        def clear_search_candidates(self):
-            self.search_codes.clear()
-            self.search_insert_requested.clear()
-            self.refresh_search_codes()
+        def try_discovered_hook(self, code: str):
+            """Use Luna's discovered code immediately, without another choice UI.
 
-        def add_search_candidate(self, code: str, _sample: str = ''):
-            if not code or any(source.hook_code == code for source in self.sources.values()):
+            Search callbacks are not proof of dialogue. Only native output may
+            appear in the candidate list, and only a user-selected trial is
+            persisted for the next game session.
+            """
+            if not code or code in self._searched_codes:
                 return
-            self.search_codes.add(code)
-            self.refresh_search_codes()
-
-        def refresh_search_codes(self):
-            previous = self.search_code_choice.currentData()
-            self.search_code_choice.blockSignals(True)
-            self.search_code_choice.clear()
-            for code in sorted(self.search_codes):
-                label = ('試用要求済み: ' if code in self.search_insert_requested else '未追加: ') + code
-                self.search_code_choice.addItem(label, code)
-            if previous in self.search_codes:
-                self.search_code_choice.setCurrentIndex(self.search_code_choice.findData(previous))
-            self.search_code_choice.blockSignals(False)
-            self.btn_insert_search.setEnabled(bool(self.search_codes))
+            self._searched_codes.add(code)
+            if any(src.hook_code == code for src in self.sources.values()):
+                return
+            if (not self.hook_host or not self.host_generation or
+                    self.attached_pid != self.pid.value()):
+                return
+            try:
+                self.hook_host.command('insert_hook', pid=self.attached_pid, code=code)
+                self._trial_hook_codes.add(code)
+            except (RuntimeError, OSError, ValueError) as exc:
+                self.note('探索したHOOKを試用できません: ' + str(exc))
 
         def refresh_capture_status(self):
             if self.attached_pid and self.host_generation:
@@ -2005,10 +2018,6 @@ def run_gui(session_driver=None) -> int:
 
         def update_candidate(self, source: ThreadSource, sample: str | None):
             code = source.hook_code
-            if code in self.search_codes:
-                self.search_codes.discard(code)
-                self.search_insert_requested.discard(code)
-                self.refresh_search_codes()
             key = (source.identity, source.address)
             if sample is not None and sample.strip():
                 history = self.source_samples.setdefault(source.identity, deque(maxlen=4))
@@ -2092,13 +2101,18 @@ def run_gui(session_driver=None) -> int:
             self.hook_reconnect.setText(f'Saved HOOKs: {len(ready)}/{len(profile.hooks)} observed; '
                 f'{len(absent)} waiting; {len(ambiguous)} ambiguous. Missing selections require user review.')
 
+        def on_host_hook(self, epoch: int, event: HookEvent):
+            if epoch == self._host_epoch:
+                self.on_hook(event)
+
         def on_hook(self, event: HookEvent):
             if (event.kind == 'hook_found' and event.process_id == self.attached_pid
                     and event.host_generation == self.host_generation
                     and event.connection_generation == self.connection_generation):
-                self.add_search_candidate(event.detail, event.text)
-                self.note('追加探索: HOOKコードを検出しました（取得方法を調整から試用できます）')
-            if event.kind == 'connected' and event.process_id == self.pid.value():
+                self.try_discovered_hook(event.detail)
+            if (event.kind == 'connected' and event.process_id == self.pid.value() and
+                    (not self._connecting_pid or self._connecting_pid == event.process_id)):
+                self._connecting_pid = 0
                 if self.connection_generation != event.connection_generation or self.host_generation != event.host_generation:
                     self.stop_session()
                     self.clear_hook_observations()
@@ -2119,6 +2133,7 @@ def run_gui(session_driver=None) -> int:
             elif event.kind == 'disconnected' and event.process_id == self.pid.value():
                 self.stop_session()
                 self.attached_pid = 0
+                self._connecting_pid = 0
                 self.host_generation = ''
                 self.connection_generation = 0
                 self.clear_hook_observations()
@@ -2215,6 +2230,8 @@ def run_gui(session_driver=None) -> int:
                 # connection facts. Suppressing them masked a genuine failure.
                 if event.detail in ('existing_luna_injection_detected', 'cannot_attach_to_host_process'):
                     self._resume_monitor_requested = False
+                    if event.process_id == self._connecting_pid:
+                        self._connecting_pid = 0
                 if event.detail == 'existing_luna_injection_detected':
                     self.host_status.setText('対象には既にLunaHookが注入されています。ゲームを再起動して再接続してください。')
                 elif event.detail == 'cannot_attach_to_host_process':
@@ -2235,6 +2252,10 @@ def run_gui(session_driver=None) -> int:
                     self.note('This HOOK already has another role; remove it before reassigning')
                     return
                 p.hooks.append(selection)
+            # Trial inserts from a search are session-only until the player has
+            # actually seen and selected their real native dialogue output.
+            if source.hook_code in self._trial_hook_codes and source.hook_code not in p.inserted_hooks:
+                p.inserted_hooks.append(source.hook_code)
             self.persist()
             self.refresh_selected_hooks()
 
@@ -2659,13 +2680,22 @@ def run_gui(session_driver=None) -> int:
             if hasattr(self, 'status'):
                 self.refresh_status()
 
+        def on_host_error_from_host(self, epoch: int, message: str):
+            if epoch == self._host_epoch:
+                self.on_host_error(message)
+
         def on_host_error(self, message):
             self.note('LunaHost native error: ' + message)
+
+        def on_host_closed(self, epoch: int, reason: str):
+            if epoch == self._host_epoch:
+                self.on_closed(reason)
 
         def on_closed(self, reason):
             self._resume_monitor_requested = False
             self.stop_session()
             self.attached_pid = 0
+            self._connecting_pid = 0
             self.host_generation = ''
             self.connection_generation = 0
             self.host_status.setText(f'LunaHook Host stopped: {reason}')
