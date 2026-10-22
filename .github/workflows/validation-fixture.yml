@@ -51,9 +51,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x "$RENPY_SDK/renpy.sh"
-          "$RENPY_SDK/renpy.sh" launcher distribute \
+          (cd "$RENPY_SDK" && ./renpy.sh launcher distribute \
             "$GITHUB_WORKSPACE/validation/real_game/renpy" \
-            --destination "$RUNNER_TEMP/dists" --package win --no-update
+            --destination "$RUNNER_TEMP/dists" --package win --no-update)
           archive="$(find "$RUNNER_TEMP/dists" -maxdepth 1 -type f -iname '*win.zip' | head -n 1)"
           [[ -n "$archive" ]]
           stage="$RUNNER_TEMP/fixture-stage"
@@ -74,7 +74,7 @@ jobs:
           asset="$RUNNER_TEMP/autoadv-validation-game-${digest}.zip"
           (cd "$runtime" && zip -qr "$asset" .)
           printf 'FIXTURE_ASSET=%s\n' "$asset" >> "$GITHUB_ENV"
-      - name: Publish immutable validation fixture asset
+      - name: Publish validation fixture asset
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
