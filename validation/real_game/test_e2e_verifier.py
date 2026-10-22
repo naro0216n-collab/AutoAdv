@@ -236,7 +236,7 @@ class RealGameVerifierContract(unittest.TestCase):
                 record['evidence'] = 'vad_only'
         result = validate(records, phase='native')
         self.assertFalse(result['collection_valid'])
-        self.assertTrue(any('invalid native VAD endpoint evidence' in error
+        self.assertTrue(any('invalid native endpoint evidence' in error
                             for error in result['errors']))
 
     def test_obsolete_vad_only_session_trace_is_not_a_valid_product_path(self):
@@ -316,8 +316,8 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(metrics['hook_to_utterance_ms']['count'], 3)
         self.assertEqual(metrics['input_to_next_hook_ms']['count'], 2)
         self.assertEqual(metrics['utterance_to_presentation_ms']['count'], 3)
-        self.assertEqual(metrics['vad_estimated_end_to_decision_ms']['count'], 2)
-        self.assertEqual(metrics['vad_estimated_end_to_input_ms']['count'], 2)
+        self.assertEqual(metrics['native_estimated_end_to_decision_ms']['count'], 2)
+        self.assertEqual(metrics['native_estimated_end_to_input_ms']['count'], 2)
         self.assertNotIn('asr_decode_ms', metrics)  # Older traces cannot invent inference speed.
         # Optional real measurements must not convert a valid input sequence into FAIL.
         at = records[-1]['at_ns'] + 100

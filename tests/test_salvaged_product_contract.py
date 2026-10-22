@@ -13,7 +13,7 @@ from autoadv.model import (Profile, AdvanceMode, StructureRule, ReplacementRule,
 from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
-from autoadv.audio_match import TargetMatcher, phonetic_key, VADDecision
+from autoadv.audio_match import TargetMatcher, VADDecision
 from autoadv.audio_buffer import PCMChunk
 from autoadv.native_audio import NativeAudio
 

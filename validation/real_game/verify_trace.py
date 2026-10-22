@@ -53,7 +53,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       attempts: dict, sent: dict, reasons: dict,
                       reference_start: int | None, scenario: Sequence[dict], *,
                       game_pid_by_session: dict, presentation_at: dict,
-                      vad_end_estimates: dict, source_outputs: dict,
+                      native_end_estimates: dict, source_outputs: dict,
                       max_voice_hold_ms: int | None = None) -> dict:
     """Compare actual game playback/dismissal with actual AutoAdv inputs.
 
@@ -203,8 +203,8 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 if (decision := presentation_at.get(key)) is not None:
                     result['latencies'].setdefault('game_voice_end_to_decision_ms', []).append(
                         _signed_elapsed_ms(observed['at_ns'], decision))
-                if (estimated := vad_end_estimates.get(key)) is not None:
-                    result['latencies'].setdefault('game_voice_end_to_vad_estimate_ms', []).append(
+                if (estimated := native_end_estimates.get(key)) is not None:
+                    result['latencies'].setdefault('game_voice_end_to_native_estimate_ms', []).append(
                         _signed_elapsed_ms(observed['at_ns'], estimated))
             active_at_dismiss = bool(dismissal and dismissal.get('voice_active'))
             if active_at_dismiss or (end and actual_input < end['last_active_at_ns']):
@@ -305,7 +305,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     presentation_at: dict[tuple, int] = {}
     audio_started_at: dict[tuple, int] = {}
     audio_completed_at: dict[tuple, int] = {}
-    vad_end_estimates: dict[tuple, int] = {}
+    native_end_estimates: dict[tuple, int] = {}
     vad_onset_estimates: dict[tuple, int] = {}
     asr_counts: dict[tuple, int] = {}
     measured: dict[str, list[float]] = {
@@ -416,12 +416,12 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if (key not in utterances or type(estimate) is not int or
                     type(onset) is not int or onset > estimate or
                     estimate > at or estimate < 0 or onset < 0 or
-                    record.get('evidence') != 'asr_vad'):
-                errors.append(f'invalid native VAD endpoint evidence: {key}')
-            elif key in vad_end_estimates:
-                errors.append(f'duplicate native VAD endpoint: {key}')
+                    record.get('evidence') not in ('asr_vad', 'asr_timestamp')):
+                errors.append(f'invalid native endpoint evidence: {key}')
+            elif key in native_end_estimates:
+                errors.append(f'duplicate native endpoint: {key}')
             else:
-                vad_end_estimates[key] = estimate
+                native_end_estimates[key] = estimate
                 vad_onset_estimates[key] = onset
         elif event == 'tts_result':
             if record.get('success') is True:
@@ -560,11 +560,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         origin = (key[0], u.get('source'), u.get('hook_sequence'), u.get('raw_hash'))
         if (ms := _elapsed_ms(source_outputs.get(origin), timestamps.get(key))) is not None:
             durations.setdefault('hook_to_utterance_ms', []).append(ms)
-        if key in vad_end_estimates:
-            if (ms := _signed_elapsed_ms(vad_end_estimates[key], presentation_at.get(key))) is not None:
-                durations.setdefault('vad_estimated_end_to_decision_ms', []).append(ms)
-            if (ms := _signed_elapsed_ms(vad_end_estimates[key], attempts.get(key))) is not None:
-                durations.setdefault('vad_estimated_end_to_input_ms', []).append(ms)
+        if key in native_end_estimates:
+            if (ms := _signed_elapsed_ms(native_end_estimates[key], presentation_at.get(key))) is not None:
+                durations.setdefault('native_estimated_end_to_decision_ms', []).append(ms)
+            if (ms := _signed_elapsed_ms(native_end_estimates[key], attempts.get(key))) is not None:
+                durations.setdefault('native_estimated_end_to_input_ms', []).append(ms)
             if (onset := vad_onset_estimates.get(key)) is not None:
                 # Signed delta: negative means observed voice began before the HOOK.
                 source_time = source_outputs.get(origin)
@@ -597,7 +597,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         game_evidence = audit_game_oracle(
             oracle_records, utterance_order, utterances, attempts, sent, reasons,
             start, scenario, game_pid_by_session=game_pid_by_session,
-            presentation_at=presentation_at, vad_end_estimates=vad_end_estimates,
+            presentation_at=presentation_at, native_end_estimates=native_end_estimates,
             source_outputs=source_outputs, max_voice_hold_ms=max_voice_hold_ms,
         )
         errors.extend(game_evidence['errors'])
@@ -647,7 +647,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'capture_transport': capture_summaries.get(key),
             'native_judgement_started': key in audio_started_at,
             'native_judgement_completed': key in native,
-            'vad_end_estimate_ns': vad_end_estimates.get(key),
+            'native_end_estimate_ns': native_end_estimates.get(key),
             'input_attempted': key in attempts,
             'input_sent': key in sent,
             'next_hook_observed': key in links,

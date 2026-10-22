@@ -1,6 +1,6 @@
 """Lexical matching reports cues; acceptance needs audio timing and live evidence."""
 import unittest
-from autoadv.audio_match import TargetMatcher, phonetic_key
+from autoadv.audio_match import TargetMatcher, surface_key
 from autoadv.conversation import Controller, Target
 from autoadv.model import Profile, AdvanceMode, HookSelection
 
@@ -50,7 +50,7 @@ class ASRCues(unittest.TestCase):
         matcher = TargetMatcher('東京へ行く')
         progress = matcher.observe('とうきょうへいく')
         self.assertLess(progress.coverage, 1)
-        self.assertEqual(phonetic_key('「……」'), '')
+        self.assertEqual(surface_key('「……」'), '')
         # Unlike fabricated fixtures, a phonetic mismatch is inconclusive;
         # the explicit option permits time-based continuation at the deadline.
         p = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,

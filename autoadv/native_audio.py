@@ -1,19 +1,39 @@
 """Process-scoped native audio recognition for non-TTS audio-judgment utterances.
 
 Actual audio is captured by a Windows Process Loopback helper, then analyzed in
-one worker. Only matched ASR + VAD evidence for the active Utterance can report
-native completion. Neither capture silence nor a timer asserts voice absence.
+one worker. Matched pronunciation, ASR timing/stability and acoustic evidence for the active
+Utterance are combined for native completion. Global mix silence is not required;
+neither capture silence nor a timer asserts voice absence.
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import RLock
 from typing import Callable
+from dataclasses import dataclass
 import time
 from .audio_buffer import AudioHistory, PCMChunk
 from .audio_match import TargetMatcher, VoiceActivity
 from .conversation import Token
 from .process_audio import ProcessCapture, CaptureHealth
+
+
+@dataclass(frozen=True)
+class ASRResult:
+    text: str
+    tokens: tuple[str, ...] = ()
+    timestamps: tuple[float, ...] = ()
+
+
+def _coerce_asr_result(value) -> ASRResult:
+    if isinstance(value, ASRResult):
+        return value
+    if isinstance(value, str):
+        return ASRResult(value)
+    text = str(getattr(value, 'text', ''))
+    tokens = tuple(str(x) for x in (getattr(value, 'tokens', ()) or ()))
+    timestamps = tuple(float(x) for x in (getattr(value, 'timestamps', ()) or ()))
+    return ASRResult(text, tokens, timestamps)
 
 
 class JapaneseASR:
@@ -24,10 +44,10 @@ class JapaneseASR:
         self.engine = sherpa_onnx.OfflineRecognizer.from_sense_voice(
             model=str(model), tokens=str(tokens), num_threads=2, use_itn=True, debug=False)
 
-    def recognize(self, chunks: tuple[PCMChunk, ...]) -> str:
+    def recognize(self, chunks: tuple[PCMChunk, ...]) -> ASRResult:
         import numpy as np
         if not chunks:
-            return ''
+            return ASRResult('')
         if any((c.sample_rate, c.channels, c.sample_width_bytes) != (48000, 2, 4) for c in chunks):
             raise ValueError('ASR requires 48 kHz stereo float32 PCM')
         stereo = np.concatenate([np.frombuffer(c.frames, dtype='<f4').reshape(-1, 2) for c in chunks])
@@ -35,7 +55,10 @@ class JapaneseASR:
         stream = self.engine.create_stream()
         stream.accept_waveform(48000, mono)
         self.engine.decode_stream(stream)
-        return stream.result.text
+        result = stream.result
+        return ASRResult(str(result.text),
+                         tuple(str(x) for x in (getattr(result, 'tokens', ()) or ())),
+                         tuple(float(x) for x in (getattr(result, 'timestamps', ()) or ())))
 
 
 class NativeAudio:
@@ -54,6 +77,11 @@ class NativeAudio:
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=10000)
         self.asr = recognizer if recognizer is not None else JapaneseASR(model, tokens)
+        if recognizer is None:
+            from .g2p import HaqumeiG2P
+            self.g2p = HaqumeiG2P()
+        else:
+            self.g2p = None
         self.activity = activity or VoiceActivity()
         self._lock = RLock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='autoadv-asr')
@@ -93,6 +121,8 @@ class NativeAudio:
         self._deadline_grace_from_ms = -1
         self._quiet_notified = False
         self._tail_decoded = False
+        self._best_match_coverage = 0.0
+        self._last_matching_asr_ms = -1
 
     def start(self):
         # Capture starts before the first HOOK: retain the first voice's PCM.
@@ -137,6 +167,8 @@ class NativeAudio:
         self._deadline_grace_from_ms = -1
         self._quiet_notified = False
         self._tail_decoded = False
+        self._best_match_coverage = 0.0
+        self._last_matching_asr_ms = -1
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
         self._capture_stereo_peak = 0.0
@@ -157,7 +189,7 @@ class NativeAudio:
             self._inflight = False
             self._inflight_generation = None
             self.token = token
-            self.matcher = TargetMatcher(match_text)
+            self.matcher = TargetMatcher(match_text, g2p=self.g2p)
             self.start_ms = self.clock()
             if replay_from_ms is not None:
                 self.window_start_ms = max(0, int(replay_from_ms))
@@ -202,9 +234,11 @@ class NativeAudio:
         1000ms window is a freshness bound only, not an end-of-speech threshold.
         """
         with self._lock:
+            now = self.clock()
             return bool(token == self.token and self.attributed and self._last_vad
-                        and self._last_active_ms >= 0
-                        and self.clock() - self._last_active_ms <= 1000)
+                        and self._last_active_ms >= 0 and self._last_matching_asr_ms >= 0
+                        and now - self._last_active_ms <= 1000
+                        and now - self._last_matching_asr_ms <= 1200)
 
     def holds_deadline(self, token: Token) -> bool:
         """Only positive correlated activity or a bounded pending ASR analysis
@@ -386,49 +420,96 @@ class NativeAudio:
             item = self._consume_locked(chunk)
         self._dispatch(item)
 
+    @staticmethod
+    def _timestamp_endpoint(samples, result: ASRResult) -> tuple[int, float]:
+        """Estimate the last recognized-token time and trailing captured audio.
+
+        SenseVoice timestamps are relative to the decode window. PCMChunk.at_ms
+        is packet receipt/end time, so reconstruct the first packet start. The
+        timestamp is supporting evidence only, never an audio-device truth.
+        """
+        if (not samples or not result.tokens or not result.timestamps
+                or len(result.tokens) != len(result.timestamps)):
+            return -1, 0.0
+        usable = list(result.timestamps)
+        if (any(t < 0 for t in usable) or
+                any(right < left for left, right in zip(usable, usable[1:]))):
+            return -1, 0.0
+        window_start = samples[0].at_ms - samples[0].duration_ms
+        window_ms = max(0.0, samples[-1].at_ms - window_start)
+        if max(usable) * 1000 > window_ms + 100:
+            return -1, 0.0
+        endpoint_ms = int(round(window_start + max(usable) * 1000))
+        trailing_ms = max(0.0, samples[-1].at_ms - endpoint_ms)
+        return endpoint_ms, trailing_ms
+
     def _infer(self, token, generation, samples, submitted_ns=0,
                submitted_tail_ms=None, submitted_end_ms=None):
         started_ns = time.perf_counter_ns() if self.on_inference else 0
         if not submitted_ns:
             submitted_ns = started_ns
         try:
-            hypothesis = self.asr.recognize(samples)
+            result = _coerce_asr_result(self.asr.recognize(samples))
             decoded_ns = time.perf_counter_ns() if self.on_inference else 0
             events = []
+            endpoint_ms, trailing_after_token_ms = self._timestamp_endpoint(samples, result)
             with self._lock:
                 if (self._closed or self._generation != generation or token != self.token
                         or not self.matcher or not self.history.healthy):
                     return
-                progress = self.matcher.observe(hypothesis)
+                progress = self.matcher.observe(result.text)
                 recent = self.rise_ms >= self.window_start_ms
-                if (not self.attributed and recent and
-                        progress.matched_chars >= min(3, len(self.matcher.target)) and
-                        progress.onset_score >= .80 and
-                        progress.edit_count <= max(1, progress.matched_chars // 6)):
+                if (progress.attribution_score >= .72
+                        and progress.phonetic_coverage > self._best_match_coverage + .02):
+                    self._best_match_coverage = progress.phonetic_coverage
+                    self._last_matching_asr_ms = self.clock()
+                if (not self.attributed and recent
+                        and progress.matched_phonemes >= min(4, max(1, len(self.matcher.target)))
+                        and progress.attribution_score >= .78
+                        and progress.contradiction_score <= .30):
                     self.attributed = True
                     self._last_active_ms = self.clock()
+                    self._last_matching_asr_ms = self.clock()
                     self._unattributed_since_ms = -1
                     events.append('started')
-                # A complete lexical match plus observed trailing silence is
-                # sufficient. Requiring a second identical ASR decode wastes
-                # latency and can turn a valid first final recognition into a
-                # hold when background speech contaminates the next window.
-                # Never apply *later* VAD silence to an earlier ASR sample.
-                # This snapshot belongs to exactly the PCM supplied for decode.
+
+                # Endpoint evidence is scored rather than gated by global mix
+                # silence. BGM may keep VAD active after the target voice ends.
+                # A SenseVoice token timestamp followed by captured audio is a
+                # strong target-local cue; VAD silence and repeated stable ASR
+                # are independent bonuses, not mandatory conditions.
                 tail_at_decode = self.tail_ms if submitted_tail_ms is None else submitted_tail_ms
+                timestamp_score = (min(1.0, max(0.0, trailing_after_token_ms - 120.0) / 300.0)
+                                   if endpoint_ms >= 0 else 0.0)
+                vad_score = min(1.0, max(0, tail_at_decode) / 320.0)
+                stability_score = min(1.0, progress.tail_confidence)
+                endpoint_score = max(timestamp_score, .85 * vad_score, .70 * stability_score)
+                evidence_score = max(0.0, min(1.0,
+                    .82 * progress.completion_score + .18 * endpoint_score
+                    - .12 * progress.contradiction_score))
                 if (self.attributed and progress.terminal_candidate
-                        and tail_at_decode >= 300):
+                        and endpoint_score >= .35 and evidence_score >= .78):
                     self.completed = True
                     events.append('completed')
-                    voice_end_estimate = (self.voice_end_estimate_ms if submitted_end_ms is None
-                                          else submitted_end_ms)
+                    # Prefer target-local ASR time. VAD is only a fallback metric
+                    # when the recognizer does not expose token timestamps.
+                    if endpoint_ms >= 0:
+                        voice_end_estimate = endpoint_ms
+                        endpoint_source = 'asr_timestamp'
+                    else:
+                        voice_end_estimate = (self.voice_end_estimate_ms if submitted_end_ms is None
+                                              else submitted_end_ms)
+                        endpoint_source = 'asr_vad' if voice_end_estimate >= 0 else 'asr_stability'
                 else:
                     voice_end_estimate = -1
+                    endpoint_source = ''
             if self.on_voice_end and 'completed' in events and voice_end_estimate >= 0:
                 try:
-                    self.on_voice_end(token, {'estimated_end_ms': voice_end_estimate, 'estimated_onset_ms': self.rise_ms, 'source': 'asr_vad'})
+                    self.on_voice_end(token, {'estimated_end_ms': voice_end_estimate,
+                                              'estimated_onset_ms': self.rise_ms,
+                                              'source': endpoint_source})
                 except Exception:
-                    pass  # Optional metrics cannot change the product decision.
+                    pass
             if self.on_inference:
                 audio_ms = sum(chunk.duration_ms for chunk in samples)
                 measurements = {
@@ -436,17 +517,28 @@ class NativeAudio:
                     'decode_ms': round(max(0, decoded_ns - started_ns) / 1_000_000, 3),
                     'audio_ms': round(audio_ms, 3),
                     'coverage': round(progress.coverage, 4),
+                    'phonetic_coverage': round(progress.phonetic_coverage, 4),
+                    'attribution_score': round(progress.attribution_score, 4),
+                    'completion_score': round(progress.completion_score, 4),
+                    'contradiction_score': round(progress.contradiction_score, 4),
+                    'endpoint_score': round(endpoint_score, 4),
+                    'evidence_score': round(evidence_score, 4),
+                    'asr_token_timestamp_count': len(result.timestamps),
+                    'trailing_after_token_ms': round(trailing_after_token_ms, 3),
                     'monotonic': progress.monotonic,
                     'tail_confidence': progress.tail_confidence,
                     'matched_chars': progress.matched_chars,
+                    'matched_phonemes': progress.matched_phonemes,
                     'edit_count': progress.edit_count,
+                    'phonetic_edit_count': progress.phonetic_edit_count,
                     'length_ratio': round(progress.length_ratio, 4),
+                    'reading_rank': progress.reading_rank,
                     'terminal_candidate': progress.terminal_candidate,
                 }
                 try:
                     self.on_inference(token, measurements)
                 except Exception:
-                    pass  # Optional diagnostics must never affect speech recognition.
+                    pass
             for event in events:
                 self.notify(token, event, '')
         except Exception as exc:

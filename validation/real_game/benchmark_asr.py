@@ -13,8 +13,9 @@ import time
 import wave
 
 from autoadv.audio_buffer import PCMChunk
-from autoadv.audio_match import phonetic_key
+from autoadv.audio_match import TargetMatcher, surface_key
 from autoadv.native_audio import JapaneseASR
+from autoadv.g2p import default_g2p
 from .verify_trace import _summary
 from .prepare_asr_model import MODEL_DIR
 
@@ -84,6 +85,7 @@ def run(model: Path, tokens: Path, *, conditions: tuple[str, ...], rounds: int, 
     bgm = _load_bgm() if 'bgm' in conditions else None
     started = time.perf_counter_ns()
     recognizer = JapaneseASR(model, tokens)
+    g2p = default_g2p()
     load_ms = (time.perf_counter_ns() - started) / 1_000_000
     results = []
     for condition in conditions:
@@ -96,15 +98,21 @@ def run(model: Path, tokens: Path, *, conditions: tuple[str, ...], rounds: int, 
             audio_ms = chunk.duration_ms
             for repetition in range(rounds):
                 start = time.perf_counter_ns()
-                recognized = recognizer.recognize((chunk,))
+                raw_result = recognizer.recognize((chunk,))
+                recognized = raw_result.text if hasattr(raw_result, 'text') else str(raw_result)
                 elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
-                expected = phonetic_key(sample['text'])
-                actual = phonetic_key(recognized)
+                expected = surface_key(sample['text'])
+                actual = surface_key(recognized)
+                progress = TargetMatcher(sample['text'], g2p=g2p).observe(recognized)
                 results.append({
                     'id': sample['id'], 'condition': condition, 'round': repetition + 1,
                     'audio_ms': round(audio_ms, 3), 'decode_ms': round(elapsed_ms, 3),
                     'rtf': round(elapsed_ms / audio_ms, 4),
                     'cer': round(_edit_distance(expected, actual) / max(1, len(expected)), 4),
+                    'phonetic_coverage': round(progress.phonetic_coverage, 4),
+                    'attribution_score': round(progress.attribution_score, 4),
+                    'completion_score': round(progress.completion_score, 4),
+                    'terminal_candidate': progress.terminal_candidate,
                     'recognized_hash': hashlib.sha256(actual.encode('utf-8')).hexdigest(),
                 })
     by_condition = {}
@@ -114,6 +122,8 @@ def run(model: Path, tokens: Path, *, conditions: tuple[str, ...], rounds: int, 
             'decode_ms': _summary([row['decode_ms'] for row in rows]),
             'rtf': _summary([row['rtf'] for row in rows]),
             'cer': _summary([row['cer'] for row in rows]),
+            'phonetic_coverage': _summary([row['phonetic_coverage'] for row in rows]),
+            'completion_score': _summary([row['completion_score'] for row in rows]),
             'normalized_exact': sum(row['cer'] == 0 for row in rows),
             'runs': len(rows),
         }
