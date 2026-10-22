@@ -661,6 +661,22 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
                 line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
         line_results.append(line_result)
+    collection_valid = not errors
+    advancement_observed = bool(links)
+    voice_safety_verified = (game_evidence is not None and
+        game_evidence['confirmed_voice_safe_inputs'] > 0 and
+        not game_evidence['early_inputs'] and
+        not game_evidence['unverified_voice_ends'] and
+        not game_evidence['indeterminate_voice_end'] and
+        not game_evidence['misattributions'] and
+        not game_evidence['unaligned_lines'] and
+        len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None
+    if phase in ('hook', 'stress'):
+        accepted = collection_valid
+    elif needs_oracle:
+        accepted = collection_valid and advancement_observed and voice_safety_verified is True
+    else:
+        accepted = collection_valid and advancement_observed
     return {
         'performance': performance,
         'evaluation_scope': ('stress_observation_not_automatic_success' if phase == 'stress'
@@ -668,17 +684,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                              else 'product_hook_source_only' if phase == 'hook'
                              else 'product_presentation_input_and_next_hook'),
         'game_observer': ('required' if needs_oracle else 'optional'),
-        'ok': not errors, 'phase': phase,
-        'collection_valid': not errors,
-        'advancement_observed': bool(links),
-        'voice_safety_verified': (game_evidence is not None and
-            game_evidence['confirmed_voice_safe_inputs'] > 0 and
-            not game_evidence['early_inputs'] and
-            not game_evidence['unverified_voice_ends'] and
-            not game_evidence['indeterminate_voice_end'] and
-            not game_evidence['misattributions'] and
-            not game_evidence['unaligned_lines'] and
-            len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None,
+        'ok': accepted, 'phase': phase,
+        'collection_valid': collection_valid,
+        'advancement_observed': advancement_observed,
+        'voice_safety_verified': voice_safety_verified,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
         'confirmed_native_asr': len(confirmed_native),

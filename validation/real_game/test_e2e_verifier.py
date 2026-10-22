@@ -82,6 +82,7 @@ class RealGameVerifierContract(unittest.TestCase):
                 self.assertEqual(result['game_observer'], 'optional')
         native = _validate(contract_records(9, 12), phase='native')
         self.assertTrue(native['collection_valid'], native['errors'])
+        self.assertFalse(native['ok'])
         self.assertFalse(native['voice_safety_verified'])
         self.assertEqual(native['game_observer'], 'required')
 
@@ -109,6 +110,7 @@ class RealGameVerifierContract(unittest.TestCase):
 
     def test_each_line_is_reported_without_hiding_unadvanced_dialogue(self):
         result = _validate(contract_records(0, 3, mode='reading'), phase='reading')
+        self.assertTrue(result['ok'])
         self.assertEqual([line['outcome'] for line in result['line_results']],
                          ['next_hook_observed', 'next_hook_observed', 'no_autoadv_input'])
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
