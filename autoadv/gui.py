@@ -633,6 +633,8 @@ def run_gui(session_driver=None) -> int:
             self.per_character_wait_ms = QSpinBox()
             self.per_character_wait_ms.setRange(1, 600000)
             advance.addRow('記号除外の1文字あたり待機時間（ms）', self.per_character_wait_ms)
+            self.reading_ms = QSpinBox()
+            self.reading_ms.setRange(1, 600000)
             advance.addRow('最低表示時間（ms）', self.reading_ms)
             self.wait_preview = QLabel('計数: - / 待機時間: -')
             advance.addRow('現在台詞の計数と確定時間', self.wait_preview)
