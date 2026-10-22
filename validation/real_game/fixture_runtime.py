@@ -17,6 +17,7 @@ SCHEMA = 'autoadv-validation-fixture-v1'
 
 _IGNORED_SOURCE_PARTS = {'cache', 'saves', '__pycache__'}
 _IGNORED_SOURCE_SUFFIXES = {'.rpyc', '.pyc', '.log'}
+_NORMALIZED_TEXT_SUFFIXES = {'.rpy', '.txt'}
 
 
 def _iter_source_files(root: Path):
@@ -29,11 +30,21 @@ def _iter_source_files(root: Path):
         yield relative, path
 
 
+def _digest_bytes(path: Path) -> bytes:
+    data = path.read_bytes()
+    if path.suffix.lower() in _NORMALIZED_TEXT_SUFFIXES:
+        # Fixture identity is content identity, not checkout-platform identity.
+        # Git/zip tools may materialize CRLF on Windows; normalize only the
+        # known text inputs while leaving licensed audio byte-exact.
+        data = data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+    return data
+
+
 def _tree_digest(entries) -> str:
     digest = hashlib.sha256()
     for relative, path in entries:
         name = relative.as_posix().encode('utf-8')
-        data = path.read_bytes()
+        data = _digest_bytes(path)
         digest.update(len(name).to_bytes(4, 'big'))
         digest.update(name)
         digest.update(len(data).to_bytes(8, 'big'))

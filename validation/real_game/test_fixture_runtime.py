@@ -26,6 +26,26 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
             (game / 'script.rpy').write_text('label start:\n    "changed"\n', encoding='utf-8')
             self.assertNotEqual(first, source_digest(root))
 
+
+    def test_source_digest_normalizes_windows_text_line_endings_but_not_audio(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / 'game'
+            audio = game / 'audio'
+            audio.mkdir(parents=True)
+            script = game / 'script.rpy'
+            credits = root / 'CREDITS.txt'
+            voice = audio / 'voice.wav'
+            script.write_bytes(b'label start:\n    return\n')
+            credits.write_bytes(b'credits\nline2\n')
+            voice.write_bytes(b'RIFF\r\nBINARY')
+            lf = source_digest(root)
+            script.write_bytes(b'label start:\r\n    return\r\n')
+            credits.write_bytes(b'credits\r\nline2\r\n')
+            self.assertEqual(lf, source_digest(root))
+            voice.write_bytes(b'RIFF\nBINARY')
+            self.assertNotEqual(lf, source_digest(root))
+
     def test_manifest_binds_ready_runtime_to_current_fixture_source(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

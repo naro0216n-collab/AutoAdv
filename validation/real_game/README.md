@@ -49,13 +49,15 @@ Live検証は**既に構築済みのWindowsゲーム**から開始する。`run_
 
 音声判断用のProcess Loopback helper、ASR model、tokensは製品経路の実依存物なので、Live実行より前に用意する。`run_live_check.ps1` 自身はそれらをビルド・取得しない。ゲーム入力は常にAutoAdvのControllerとWindows入力が担当し、検証driverは入力を代行しない。
 
+ローカルWindows検証の配布用 `AutoAdv-Windows-Validate.cmd` は検証実装を内蔵しない。起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。prebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、各phase実行、Issueへの結果送信はGit側のPowerShellが所有する。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
+
 ## Prebuilt validation game
 
 `validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。Fixture Runtime workflowはfixture構築入力が`develop`で変わったときだけRen'Py SDKを取得して配布物を生成する。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
 
 Live Advancement workflowは現行fixtureソースSHA-256と一致するassetだけを取得し、`fixture-manifest.json` の以下を `validation.real_game.fixture_runtime` で検証してからゲームを起動する。
 
-- 現行 `renpy/game` ソースのSHA-256
+- 現行 `renpy` fixture入力の正規化SHA-256（`.rpy`/`.txt` の改行差は同一内容として扱う）
 - 展開済みruntime全体のSHA-256
 - Ren'Py版と固定SDK SHA-256
 - 起動対象Windows executable
