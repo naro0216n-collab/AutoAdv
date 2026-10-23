@@ -35,6 +35,7 @@ class AudioHistory:
         self.target_pid: int | None = None
         self.fail_reason: str | None = "not_started"
         self._last_ms: int | None = None
+        self._retained_from_ms: int | None = None
 
     def reset(self, reason: str = "capture_reset") -> None:
         with self._lock:
@@ -42,6 +43,7 @@ class AudioHistory:
             self.healthy = False
             self.fail_reason = reason
             self._last_ms = None
+            self._retained_from_ms = None
 
     def start(self, target_pid: int) -> None:
         if target_pid <= 0:
@@ -65,10 +67,35 @@ class AudioHistory:
                 return
             self._last_ms = chunk.at_ms
             self._chunks.append(chunk)
-            while self._chunks and chunk.at_ms - self._chunks[0].at_ms > self.horizon_ms:
-                self._chunks.popleft()
+            self._trim_locked()
             self.healthy = True
             self.fail_reason = None
+
+    def _trim_locked(self) -> None:
+        if self._last_ms is None:
+            return
+        cutoff = self._last_ms - self.horizon_ms
+        if self._retained_from_ms is not None:
+            # The rolling history exists for bounded pre-HOOK replay.  A bound
+            # Utterance may be longer than that window, so preserve its exact
+            # observation interval until NativeAudio no longer needs full-line
+            # ASR.  Never keep packets older than the retained interval merely
+            # because the line is active.
+            cutoff = min(cutoff, self._retained_from_ms)
+        while self._chunks and self._chunks[0].at_ms < cutoff:
+            self._chunks.popleft()
+
+    def retain_from(self, at_ms: int) -> None:
+        if at_ms < 0:
+            raise ValueError('audio retention boundary must be nonnegative')
+        with self._lock:
+            self._retained_from_ms = int(at_ms)
+            self._trim_locked()
+
+    def release_retention(self) -> None:
+        with self._lock:
+            self._retained_from_ms = None
+            self._trim_locked()
 
     def since(self, at_ms: int) -> tuple[PCMChunk, ...]:
         with self._lock:

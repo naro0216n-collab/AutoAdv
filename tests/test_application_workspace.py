@@ -1080,9 +1080,24 @@ def test_application_owns_uncertain_audio_fallback_policy():
     assert token is not None
     app.set_auto_advance(True)
     assert len(scheduled) == 1
+    class RetainedNative:
+        pid = 101
+        def __init__(self):
+            self.released = []
+        def holds_deadline(self, _token):
+            return False
+        def release_line_retention(self, released_token):
+            self.released.append(released_token)
+            return True
+        def capture_status(self):
+            return {}
+
+    retained = RetainedNative()
+    app._native_audio = retained
     scheduled.pop(0)[1]()
     assert app.runtime_state().pause_reason == 'native_inconclusive_hold'
     assert not app.runtime_state().sent
+    assert retained.released == [token]
 
 def test_application_auto_advance_can_complete_without_gui_runtime_policy():
     app, _ = app_with_game()

@@ -771,8 +771,21 @@ class AutoAdvApplication:
             self._schedule(200, lambda t=token: self._fallback_due(t))
             return
         self._runtime_presentation_event(token, 'fallback_elapsed')
+        # The deadline has now resolved either to an explicit uncertain-text
+        # completion or to an inconclusive hold. Full-line PCM is no longer
+        # needed; keep only bounded rolling history for any genuinely late
+        # observation and for the next external transition.
+        if self._native_audio is not None:
+            self._native_audio.release_line_retention(token)
         if self.runtime_state().pause_reason == 'native_inconclusive_hold':
             self._emit_native_capture_summary(token)
+
+    @staticmethod
+    def _native_replay_lookback_ms(profile: Profile) -> int:
+        # Luna flush delay plus the bounded multi-source assembly window is the
+        # only pre-HOOK interval that may be reconsidered after external
+        # progression. Keep this formula shared by capture retention and replay.
+        return max(100, profile.hook_flush_ms + 100)
 
     def _start_presentation(self, token: Token) -> int:
         """Start every presentation effect for the current immutable Utterance.
@@ -796,7 +809,7 @@ class AutoAdvApplication:
             if self.native_audio_available:
                 replay_from_ms = None
                 if external_ns and state.profile is not None:
-                    lookback_ms = max(100, state.profile.hook_flush_ms + 100)
+                    lookback_ms = self._native_replay_lookback_ms(state.profile)
                     replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
                 self._begin_native_audio(token, utterance.match_text, replay_from_ms=replay_from_ms)
             self._schedule(utterance.text_wait_ms, lambda t=token: self._fallback_due(t))
@@ -1184,6 +1197,12 @@ class AutoAdvApplication:
                     not now.completed and now.utterance.advance_mode.value == 'audio' and
                     not now.utterance.use_tts):
                 native.begin(now.token, now.utterance.match_text)
+                # If the line already reached its uncertainty deadline before
+                # NativeAudio became ready, there is no full-line interval to
+                # preserve retroactively. Continue observing from bounded
+                # rolling history without pinning an already-held dialogue.
+                if now.pause_reason == 'native_inconclusive_hold':
+                    native.release_line_retention(now.token)
             self._emit_runtime_event('native_ready', None, session=session, ready=True,
                                      reason='', audio_pid=pid)
 
@@ -1203,6 +1222,7 @@ class AutoAdvApplication:
                 native = NativeAudio(
                     pid, Path(profile.native_helper), Path(profile.asr_model), Path(profile.asr_tokens),
                     publish_event,
+                    replay_lookback_ms=self._native_replay_lookback_ms(profile),
                     on_pcm=publish_pcm,
                     on_inference=publish_inference,
                     on_voice_end=publish_voice_end)
@@ -1251,6 +1271,8 @@ class AutoAdvApplication:
         if utterance.advance_mode.value != 'audio' or utterance.use_tts:
             return False
         if event == 'error':
+            if self._native_audio is not None:
+                self._native_audio.release_line_retention(token)
             completed = self._runtime_presentation_event(token, 'native_failed')
             if not utterance.uncertain_text_fallback:
                 self._emit_native_capture_summary(token)

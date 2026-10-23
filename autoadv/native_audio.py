@@ -70,9 +70,12 @@ class NativeAudio:
     COMPLETION_EVIDENCE_THRESHOLD = .60
     ENDPOINT_EVIDENCE_THRESHOLD = .45
     STABILITY_ENDPOINT_WEIGHT = .35
+    DEFAULT_REPLAY_HISTORY_MS = 10000
+    CAPTURE_HISTORY_MARGIN_MS = 1000
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
                  *, recognizer=None, activity=None, g2p=None, clock=None,
+                 replay_lookback_ms: int = DEFAULT_REPLAY_HISTORY_MS,
                  on_pcm: Callable[[Token, int], None] | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None,
                  on_voice_end: Callable[[Token, dict], None] | None = None):
@@ -82,7 +85,15 @@ class NativeAudio:
         self.on_inference = on_inference
         self.on_voice_end = on_voice_end
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
-        self.history = AudioHistory(horizon_ms=10000)
+        if replay_lookback_ms < 0:
+            raise ValueError('native replay lookback must be nonnegative')
+        # Rolling history exists only to recover bounded audio immediately
+        # before an externally observed HOOK. The active Utterance interval is
+        # retained separately below and therefore is never truncated to this
+        # replay window.
+        self.history = AudioHistory(horizon_ms=max(
+            self.DEFAULT_REPLAY_HISTORY_MS,
+            int(replay_lookback_ms) + self.CAPTURE_HISTORY_MARGIN_MS))
         self.asr = recognizer if recognizer is not None else JapaneseASR(model, tokens)
         if g2p is not None:
             self.g2p = g2p
@@ -136,8 +147,11 @@ class NativeAudio:
 
     def start(self):
         # Capture starts before the first HOOK: retain the first voice's PCM.
+        # ProcessCapture.start() initializes AudioHistory, so restore the
+        # already-established observation boundary immediately afterwards.
         self.boundary()
         self._capture.start()
+        self.history.retain_from(self.window_start_ms)
 
     def boundary(self, at_ms: int | None = None):
         """An observed advance opens the next interval without restarting capture.
@@ -160,6 +174,7 @@ class NativeAudio:
             self._awaiting_hook = True
             self._last_processed_ms = -1
             self._last_processed_chunk = None
+            self.history.retain_from(self.window_start_ms)
             self._reset_observation()
 
     def _reset_observation(self):
@@ -207,6 +222,11 @@ class NativeAudio:
             self._awaiting_hook = False
             self._last_processed_ms = -1
             self._last_processed_chunk = None
+            # The rolling pre-HOOK history is deliberately short, but once a
+            # line is admitted its ASR window owns the complete interval. This
+            # prevents a long voiced line from silently losing its target
+            # prefix after the replay horizon expires.
+            self.history.retain_from(self.window_start_ms)
             self._reset_observation()
             # ProcessCapture pushes a packet before calling feed(). Replaying
             # under this lock makes an in-flight packet idempotent.
@@ -288,6 +308,21 @@ class NativeAudio:
             self._inflight_generation = None
             self.token = None
             self.matcher = None
+            self.history.release_retention()
+
+    def release_line_retention(self, token: Token) -> bool:
+        """Return the active line to bounded rolling history without cancelling it.
+
+        A finalized fallback/hold no longer needs unbounded full-line PCM. Any
+        already submitted inference keeps its immutable sample tuple, while a
+        genuinely late voice can still be observed from the normal replay
+        window.
+        """
+        with self._lock:
+            if token != self.token:
+                return False
+            self.history.release_retention()
+            return True
 
     def health(self, status: CaptureHealth):
         with self._lock:
@@ -534,6 +569,7 @@ class NativeAudio:
             endpoint_source = ''
             trailing_after_target_ms = 0.0
             timestamp_score = 0.0
+            release_retention = False
             with self._lock:
                 if (self._closed or self._generation != generation or token != self.token
                         or not self.matcher or not self.history.healthy):
@@ -584,6 +620,7 @@ class NativeAudio:
                         and endpoint_score >= self.ENDPOINT_EVIDENCE_THRESHOLD
                         and evidence_score >= self.COMPLETION_EVIDENCE_THRESHOLD):
                     self.completed = True
+                    release_retention = True
                     events.append('completed')
                     vad_end = (self.voice_end_estimate_ms if submitted_end_ms is None
                                else submitted_end_ms)
@@ -600,6 +637,8 @@ class NativeAudio:
                             endpoint_source = 'asr_timestamp'
                 else:
                     voice_end_estimate = -1
+            if release_retention:
+                self.release_line_retention(token)
             if self.on_voice_end and 'completed' in events and voice_end_estimate >= 0:
                 try:
                     self.on_voice_end(token, {'estimated_end_ms': voice_end_estimate,

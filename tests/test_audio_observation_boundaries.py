@@ -131,6 +131,67 @@ class PacketVadBoundaryTests(unittest.TestCase):
         history.push(current, target_pid=11)
         self.assertEqual(history.since(1000), (current,))
 
+    def test_active_utterance_retention_outlives_rolling_replay_window(self):
+        history = AudioHistory(horizon_ms=1000)
+        history.start(11)
+        history.retain_from(1000)
+        for when in (1000, 1500, 2000, 2500, 3000):
+            history.push(PCMChunk(when, bytes(8), 48000, 2, 4), target_pid=11)
+        self.assertEqual([chunk.at_ms for chunk in history.since(0)],
+                         [1000, 1500, 2000, 2500, 3000])
+
+        history.release_retention()
+        self.assertEqual([chunk.at_ms for chunk in history.since(0)],
+                         [2000, 2500, 3000])
+
+    def test_native_audio_keeps_full_active_line_in_every_decode_then_returns_to_rolling_history(self):
+        decoded_windows = []
+
+        class Recognizer:
+            def recognize(self, chunks):
+                decoded_windows.append((chunks[0].at_ms, chunks[-1].at_ms))
+                return ASRResult('')
+
+        class Quiet:
+            def reset(self):
+                pass
+            def observe_float32_stereo(self, _frames):
+                return VADDecision(False, 0, frames_analyzed=True)
+
+        clock = [1000]
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
+            recognizer=Recognizer(), activity=Quiet(), clock=lambda: clock[0],
+            replay_lookback_ms=0)
+        # Make the distinction visible without waiting ten real seconds. The
+        # retention contract is independent of the rolling horizon size.
+        native.history.horizon_ms = 1000
+        try:
+            native.history.start(11)
+            token = Token(1, 1)
+            native.begin(token, '長い台詞')
+            for when in (1000, 1500, 2000, 2500, 3000):
+                clock[0] = when
+                chunk = PCMChunk(when, bytes(8), 48000, 2, 4)
+                native.history.push(chunk, target_pid=11)
+                native.feed(chunk)
+                end = time.monotonic() + 1
+                while time.monotonic() < end:
+                    with native._lock:
+                        busy = native._inflight
+                    if not busy:
+                        break
+                    time.sleep(.001)
+                self.assertFalse(busy)
+            self.assertTrue(decoded_windows)
+            self.assertEqual(decoded_windows[-1], (1000, 3000))
+
+            self.assertTrue(native.release_line_retention(token))
+            self.assertEqual([chunk.at_ms for chunk in native.history.since(0)],
+                             [2000, 2500, 3000])
+        finally:
+            native.close()
+
     def test_vad_input_amplitude_is_observation_not_speech_attribution(self):
         import numpy as np
         vad = SimpleNamespace(is_speech=lambda *_: False)
