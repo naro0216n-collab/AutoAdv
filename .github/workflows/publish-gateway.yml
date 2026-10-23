@@ -84,6 +84,24 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/actions/workflows/validation-fixture.yml/dispatches" \
             -f ref="${TARGET_BRANCH}"
 
+      - name: Dispatch Windows runtime asset build when helper source changed
+        if: env.TARGET_BRANCH == 'develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$TARGET_BEFORE" "$PUBLISH_COMMIT" -- \
+            integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj \
+            integrations/windows-loopback/Program.cs; then
+            echo 'Process Loopback helper source unchanged; no runtime asset build requested.'
+            exit 0
+          fi
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/runtime-assets.yml/dispatches" \
+            -f ref="${TARGET_BRANCH}"
+
       - name: Dispatch Fast CI for published branch
         env:
           GH_TOKEN: ${{ github.token }}

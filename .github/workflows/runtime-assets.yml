@@ -1,0 +1,71 @@
+name: Windows Runtime Assets
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: autoadv-runtime-assets
+  cancel-in-progress: false
+
+jobs:
+  process-loopback:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Publish self-contained Process Loopback helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $digest = (& python -c "from autoadv.native_runtime import helper_source_digest; print(helper_source_digest())").Trim()
+          if ($LASTEXITCODE -ne 0 -or $digest -notmatch '^[a-f0-9]{64}$') { throw 'Cannot compute helper source digest' }
+          $base = "AutoAdv.ProcessLoopback-$digest-win-x64"
+          $publish = Join-Path $env:RUNNER_TEMP 'process-loopback'
+          & dotnet publish integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj `
+            --configuration Release --nologo --runtime win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=None -p:DebugSymbols=false --output $publish
+          if ($LASTEXITCODE -ne 0) { throw 'Process Loopback publish failed' }
+          $source = Join-Path $publish 'AutoAdv.ProcessLoopback.exe'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Published helper executable is missing' }
+          $asset = Join-Path $env:RUNNER_TEMP ($base + '.exe')
+          Copy-Item -LiteralPath $source -Destination $asset
+          $sha = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $asset).Length
+          $manifest = [ordered]@{
+            schema = 'autoadv-process-loopback-runtime-v1'
+            source_digest = $digest
+            filename = [IO.Path]::GetFileName($asset)
+            sha256 = $sha
+            size_bytes = $size
+          }
+          $manifestPath = Join-Path $env:RUNNER_TEMP ($base + '.json')
+          [IO.File]::WriteAllText($manifestPath, (ConvertTo-Json $manifest -Compress), [Text.UTF8Encoding]::new($false))
+          "RUNTIME_HELPER_ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RUNTIME_HELPER_MANIFEST=$manifestPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Publish fixed runtime assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'autoadv-runtime-assets'
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            & gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA `
+              --title 'AutoAdv managed Windows runtime assets' `
+              --notes 'Machine-maintained fixed runtime assets used by the standard AutoAdv Windows runtime.'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot create runtime-assets release' }
+          }
+          & gh release upload $tag $env:RUNTIME_HELPER_ASSET $env:RUNTIME_HELPER_MANIFEST `
+            --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot publish Process Loopback runtime assets' }
