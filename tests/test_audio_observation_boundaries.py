@@ -500,6 +500,53 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             release.set()
             native.close()
 
+    def test_partial_asr_can_complete_with_independent_vad_endpoint_evidence(self):
+        events = []
+        metrics = []
+        clock = [1000]
+        decisions = iter((
+            VADDecision(True, 0, contains_speech=True),
+            VADDecision(False, 400, contains_speech=False),
+        ))
+
+        class Recognizer:
+            def recognize(self, chunks):
+                # Four of six normalized target characters are recognized.
+                # This is intentionally not a matcher terminal candidate.
+                return ASRResult('えっ嘘で')
+
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: next(decisions),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
+        try:
+            native.history.start(11)
+            native.begin(Token(1, 1), 'えっ嘘でしょ')
+            for when in (1100, 1600):
+                clock[0] = when
+                pcm = PCMChunk(when, bytes(4800 * 8), 48000, 2, 4)
+                native.history.push(pcm, target_pid=11)
+                native.feed(pcm)
+                end = time.monotonic() + 2
+                while time.monotonic() < end:
+                    with native._lock:
+                        busy = native._inflight
+                    if not busy:
+                        break
+                    time.sleep(.005)
+                self.assertFalse(busy, 'partial ASR inference did not finish')
+            self.assertIn('started', events)
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertFalse(metrics[-1]['terminal_candidate'])
+            self.assertAlmostEqual(metrics[-1]['phonetic_coverage'], 4 / 6, places=3)
+            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .70)
+            self.assertGreaterEqual(metrics[-1]['evidence_score'], .72)
+        finally:
+            native.close()
+
     def test_token_timestamps_can_complete_target_while_vad_stays_active(self):
         events = []
         metrics = []

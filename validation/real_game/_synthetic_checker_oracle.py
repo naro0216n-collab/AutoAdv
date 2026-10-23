@@ -11,7 +11,7 @@ import json
 HERE = Path(__file__).parent
 
 
-def synthetic_game_observations(records, *, phase='mixed'):
+def synthetic_game_observations(records, *, phase='mixed', start_line=None):
     from validation.real_game.verify_trace import scenario_for_phase
     scenario = scenario_for_phase(phase)
     utterances = [r for r in records if r['event'] == 'utterance']
@@ -19,7 +19,11 @@ def synthetic_game_observations(records, *, phase='mixed'):
         return []
     hashes = [r.get('body_hash') for r in utterances]
     from autoadv.validation_trace import text_digest
-    indexes = [j for j in range(len(scenario) - len(hashes) + 1)
+    if start_line is not None:
+        candidates = [start_line - 1] if 1 <= start_line <= len(scenario) else []
+    else:
+        candidates = range(len(scenario) - len(hashes) + 1)
+    indexes = [j for j in candidates
                if [text_digest(x['text']) for x in scenario[j:j+len(hashes)]] == hashes]
     if len(indexes) != 1:
         return []  # verifier must reject ambiguous selection, not select one

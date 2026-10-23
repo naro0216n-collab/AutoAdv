@@ -60,6 +60,7 @@ class ASRProgress:
     contradiction_score: float = 0.0
     reading_rank: int = 0
     target_units: int = 0
+    pronunciation_length_ratio: float = 0.0
     observed_token_count: int = 0
 
 
@@ -165,7 +166,7 @@ class TargetMatcher:
             matched, key, errors, surface_length_ratio, terminal,
             phonetic_coverage, matched_phonemes, phonetic_errors,
             attribution_score, completion_score, contradiction_score,
-            reading_rank, phone_target_len, 0)
+            reading_rank, phone_target_len, phonetic_ratio, 0)
 
     @staticmethod
     def _rank(progress: ASRProgress, token_count: int):

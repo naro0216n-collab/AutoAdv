@@ -119,8 +119,7 @@ function Upload-Result([string] $root, [string] $sha) {
         Get-ChildItem -LiteralPath $root -File | Where-Object {
             $_.Name -eq 'validation-summary.json' -or
             $_.Name -match '^autoadv-(reading|native)(\.result)?\.jsonl?$' -or
-            $_.Name -match '^autoadv-game-[a-z0-9-]+\.jsonl$' -or
-            $_.Name -match '^autoadv-native-[a-z0-9-]+\.jsonl$'
+            $_.Name -match '^autoadv-game-[a-f0-9]+\.jsonl$'
         } | Sort-Object Name
     )
     if ($files.Count -eq 0) { throw 'No verification summary or trace exists to upload' }
@@ -216,105 +215,6 @@ try {
     } finally { Pop-Location }
 
     foreach ($currentPhase in $phaseNames) {
-        if ($currentPhase -eq 'native') {
-            $stage = 'validate-native-matrix'
-            Push-Location $repo
-            try {
-                $caseLines = @(& python -m validation.real_game.case_matrix)
-                if ($LASTEXITCODE -ne 0 -or $caseLines.Count -ne 1) {
-                    throw 'Cannot enumerate the RealAudio case matrix'
-                }
-                $nativeCases = @(([string]$caseLines[0] | ConvertFrom-Json))
-            } finally { Pop-Location }
-            if ($nativeCases.Count -eq 0) { throw 'RealAudio case matrix is empty' }
-
-            $caseResults = New-Object 'System.Collections.Generic.List[object]'
-            foreach ($nativeCase in $nativeCases) {
-                $caseId = [string]$nativeCase.id
-                $caseStartLine = [int]$nativeCase.start_line
-                if ($caseId -notmatch '^[a-z0-9-]+$' -or $caseStartLine -lt 1) {
-                    throw "Invalid RealAudio case descriptor: $caseId / $caseStartLine"
-                }
-                $stage = "validate-native-$caseId"
-                $trace = Join-Path $session "autoadv-native-$caseId.jsonl"
-                $caseReport = Join-Path $session "autoadv-native-$caseId.result.json"
-                $oracle = Join-Path $session "autoadv-game-$caseId.jsonl"
-                $caseError = $null
-                Push-Location $repo
-                try {
-                    $arguments = @(
-                        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',
-                        (Join-Path $repo 'validation\real_game\run_live_check.ps1'),
-                        '-Phase','native', '-NativeCase',$caseId, '-StartLine',[string]$caseStartLine,
-                        '-GameExecutable',$gameExecutable, '-Automated',
-                        '-Trace',$trace, '-Oracle',$oracle, '-Report',$caseReport,
-                        '-TimeoutSeconds','90',
-                        '-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens
-                    )
-                    & powershell.exe @arguments
-                    if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
-                } catch {
-                    # A failed ASR attribution/completion is a case result, not
-                    # permission to skip the remaining independent cases.
-                    $caseError = [string]$_.Exception.Message
-                    Write-Warning "Native case ${caseId}: $caseError"
-                } finally { Pop-Location }
-
-                $measurement = $null
-                if (Test-Path -LiteralPath $caseReport -PathType Leaf) {
-                    try { $measurement = Get-Content -LiteralPath $caseReport -Raw -Encoding UTF8 | ConvertFrom-Json }
-                    catch { $caseError = "Verification report cannot be parsed: $($_.Exception.Message)" }
-                }
-                $caseResults.Add([pscustomobject]@{
-                    id = $caseId
-                    start_line = $caseStartLine
-                    report_present = [bool]$measurement
-                    runner_error = $caseError
-                    ok = if ($measurement) { $measurement.ok } else { $false }
-                    collection_valid = if ($measurement) { $measurement.collection_valid } else { $null }
-                    advancement_observed = if ($measurement) { $measurement.advancement_observed } else { $null }
-                    voice_safety_verified = if ($measurement) { $measurement.voice_safety_verified } else { $null }
-                    measurement = $measurement
-                })
-            }
-
-            $caseArray = @($caseResults.ToArray())
-            $missingReports = @($caseArray | Where-Object { -not $_.report_present })
-            $failedCases = @($caseArray | Where-Object { $_.ok -ne $true })
-            $nativeAggregate = [ordered]@{
-                schema = 'autoadv-realaudio-matrix-v1'
-                phase = 'native'
-                ok = ($failedCases.Count -eq 0 -and $caseArray.Count -eq $nativeCases.Count)
-                case_count = $nativeCases.Count
-                completed_case_count = @($caseArray | Where-Object { $_.report_present }).Count
-                passing_cases = @($caseArray | Where-Object { $_.ok -eq $true } | ForEach-Object { $_.id })
-                failing_cases = @($failedCases | ForEach-Object { $_.id })
-                collection_valid = ($missingReports.Count -eq 0 -and
-                    @($caseArray | Where-Object { $_.collection_valid -ne $true }).Count -eq 0)
-                advancement_observed = ($missingReports.Count -eq 0 -and
-                    @($caseArray | Where-Object { $_.advancement_observed -ne $true }).Count -eq 0)
-                voice_safety_verified = ($missingReports.Count -eq 0 -and
-                    @($caseArray | Where-Object { $_.voice_safety_verified -ne $true }).Count -eq 0)
-                cases = $caseArray
-            }
-            $aggregateReport = Join-Path $session 'autoadv-native.result.json'
-            [IO.File]::WriteAllText(
-                $aggregateReport,
-                (ConvertTo-Json -InputObject $nativeAggregate -Depth 20),
-                [Text.UTF8Encoding]::new($false))
-            $results.Add([pscustomobject]@{
-                phase = 'native'
-                collection_valid = $nativeAggregate.collection_valid
-                advancement_observed = $nativeAggregate.advancement_observed
-                voice_safety_verified = $nativeAggregate.voice_safety_verified
-                report_present = $true
-                runner_error = if ($missingReports.Count) {
-                    "$($missingReports.Count) RealAudio case(s) produced no verification report"
-                } else { $null }
-            })
-            continue
-        }
-
         $stage = "validate-$currentPhase"
         $trace = Join-Path $session "autoadv-$currentPhase.jsonl"
         $report = Join-Path $session "autoadv-$currentPhase.result.json"
@@ -327,8 +227,11 @@ try {
                 '-Phase',$currentPhase,
                 '-GameExecutable',$gameExecutable,
                 '-Automated','-Trace',$trace,'-Report',$report,
-                '-TimeoutSeconds','120'
+                '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '180' })
             )
+            if ($currentPhase -eq 'native') {
+                $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens)
+            }
             & powershell.exe @arguments
             if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
         } catch {
@@ -360,7 +263,6 @@ try {
             break
         }
     }
-
 } catch {
     $errorText = "Stage ${stage}: $($_.Exception.Message)"
     Write-Warning $errorText

@@ -11,13 +11,17 @@ from validation.real_game._synthetic_checker_oracle import synthetic_game_observ
 def validate(records, *, phase='mixed', **kwargs):
     # Both inputs are deliberately synthetic and used ONLY to unit-test the
     # verifier's error handling. Not an AutoAdv/Windows acceptance result.
+    if phase == 'native' and 'start_line' not in kwargs:
+        kwargs['start_line'] = 1
     return _validate(records, phase=phase,
-                     oracle_records=synthetic_game_observations(records, phase=phase),
+                     oracle_records=synthetic_game_observations(
+                         records, phase=phase, start_line=kwargs.get('start_line')),
                      **kwargs)
 
 
 SCENARIO = json.loads((Path(__file__).parent / 'SCENARIO.json').read_text(encoding='utf-8'))['lines']
 MIXED_SCENARIO = scenario_for_phase('mixed')
+NATIVE_SCENARIO = scenario_for_phase('native')
 
 
 def contract_records(first: int, last: int, *, mode=None, advance=True, lines=None):
@@ -60,6 +64,17 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
     return records
 
 
+class NativeScenarioContractTests(unittest.TestCase):
+    def test_native_phase_contains_all_foreground_voice_cases_in_one_sequence(self):
+        scenario = scenario_for_phase('native')
+        self.assertEqual(len(scenario), 16)
+        self.assertEqual(scenario[0]['id'], 'normal-001')
+        self.assertEqual(scenario[-1]['id'], 'normal-035')
+        self.assertTrue(all(line.get('foreground_voice') for line in scenario))
+        self.assertTrue(all(line.get('advance_mode') == 'audio' and not line.get('use_tts')
+                            for line in scenario))
+
+
 class RealGameVerifierContract(unittest.TestCase):
     def test_hook_phase_accepts_real_source_provenance_without_auto_input(self):
         # Hook acquisition by itself needs neither ASR, Irodori nor advance input.
@@ -80,7 +95,7 @@ class RealGameVerifierContract(unittest.TestCase):
                 self.assertTrue(result['ok'], result['errors'])
                 self.assertIsNone(result['game_evidence'])
                 self.assertEqual(result['game_observer'], 'optional')
-        native = _validate(contract_records(9, 12), phase='native')
+        native = _validate(contract_records(0, 3, lines=NATIVE_SCENARIO), phase='native')
         self.assertTrue(native['collection_valid'], native['errors'])
         self.assertFalse(native['ok'])
         self.assertFalse(native['voice_safety_verified'])
@@ -116,14 +131,14 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
 
     def test_nonadvancement_reports_controller_handoff_and_fallback_setting(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         target = next(r for r in records if r.get('event') == 'utterance' and r['line'] == 3)
         target['uncertain_text_fallback'] = False
         records.append({'event': 'controller_handoff', 'seq': len(records),
                         'at_ns': records[-1]['at_ns'] + 1,
                         'session': 1, 'line': 3,
                         'reason': 'native_inconclusive_manual_handoff'})
-        result = _validate(records, phase='native', start_line=10)
+        result = _validate(records, phase='native')
         self.assertEqual(result['line_results'][2]['stop_reason'], 'native_inconclusive_manual_handoff')
         self.assertIs(result['line_results'][2]['fallback_enabled'], False)
         self.assertEqual(result['line_results'][2]['outcome'], 'no_autoadv_input')
@@ -187,7 +202,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
 
     def test_audio_evidence_fields_report_unobserved_inference_without_fabrication(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         for record in records:
             if record['event'] == 'native_event' and record['line'] == 1:
                 record['status'] = 'started'
@@ -202,7 +217,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertFalse(first['native_judgement_completed'])
 
     def test_observation_without_asr_success_remains_a_valid_measurement(self):
-        records = contract_records(9, 10, advance=False)
+        records = contract_records(0, 1, lines=NATIVE_SCENARIO, advance=False)
         result = validate(records, phase='native')
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertEqual(result['confirmed_native_asr'], 0)
@@ -213,7 +228,7 @@ class RealGameVerifierContract(unittest.TestCase):
     def test_capture_transport_diagnosis_does_not_fake_audio_recognition(self):
         # A real helper may be alive without providing process PCM. Its
         # counters explain the product handoff; they must not certify audio.
-        records = contract_records(9, 10, advance=False)
+        records = contract_records(0, 1, lines=NATIVE_SCENARIO, advance=False)
         for record in records:
             if record['event'] == 'native_event':
                 record['status'] = 'started'
@@ -228,7 +243,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_native_asr'], 0)
 
     def test_vad_alone_never_confirms_a_matching_native_utterance(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         for record in records:
             if record['event'] == 'native_event':
                 record['method'] = 'vad'
@@ -240,7 +255,7 @@ class RealGameVerifierContract(unittest.TestCase):
                             for error in result['errors']))
 
     def test_obsolete_vad_only_session_trace_is_not_a_valid_product_path(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         for record in records:
             if record['event'] == 'native_ready':
                 record['vad_only'] = True
@@ -249,7 +264,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(any('removed VAD-only' in e for e in result['errors']))
 
     def test_native_requires_pcm_and_real_asr_not_only_adapter_ready_or_vad(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         self.assertTrue(validate(records, phase='native')['ok'])
         without_pcm = [r for r in records if not (r['event'] == 'native_pcm' and r['line'] == 1)]
         self.assertFalse(validate(without_pcm, phase='native')['ok'])
@@ -308,7 +323,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(validate(positive, phase='reading')['ok'])
 
     def test_performance_numbers_are_observations_not_extra_acceptance_thresholds(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         from validation.real_game.verify_trace import _summary
         self.assertEqual(_summary([100, 200, 500])['p95'], 500)
         self.assertTrue(validate(records, phase='native')['ok'])
@@ -316,7 +331,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(metrics['hook_to_utterance_ms']['count'], 3)
         self.assertEqual(metrics['input_to_next_hook_ms']['count'], 2)
         self.assertEqual(metrics['utterance_to_presentation_ms']['count'], 3)
-        self.assertEqual(metrics['native_estimated_end_to_decision_ms']['count'], 2)
+        self.assertEqual(metrics['native_estimated_end_to_decision_ms']['count'], 3)
         self.assertEqual(metrics['native_estimated_end_to_input_ms']['count'], 2)
         self.assertNotIn('asr_decode_ms', metrics)  # Older traces cannot invent inference speed.
         # Optional real measurements must not convert a valid input sequence into FAIL.
@@ -330,7 +345,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['performance']['asr_decode_ms']['count'], 1)
 
     def test_voice_timing_cannot_be_fabricated_or_misclassified(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         self.assertTrue(validate(records, phase='native')['ok'])
         wrong = [dict(r, estimated_at_ns=r['at_ns'] + 1) if
                  r['event'] == 'native_voice_end_estimate' and r['line'] == 1 else r
@@ -340,22 +355,25 @@ class RealGameVerifierContract(unittest.TestCase):
         # A pre-HOOK onset must appear as a negative signed interval, not be
         # silently discarded by an unsigned-duration helper.
         early = [dict(r) for r in records]
-        event = next(r for r in early if r['event'] == 'native_voice_end_estimate' and r['line'] == 2)
-        hook = next(r for r in early if r['event'] == 'hook_output' and r['hook_sequence'] == 11)
-        event['onset_estimated_at_ns'] = hook['received_ns'] - 50_000_000
+        for line, hook_sequence in ((1, 1), (2, 2)):
+            event = next(r for r in early
+                         if r['event'] == 'native_voice_end_estimate' and r['line'] == line)
+            hook = next(r for r in early
+                        if r['event'] == 'hook_output' and r['hook_sequence'] == hook_sequence)
+            event['onset_estimated_at_ns'] = hook['received_ns'] - 50_000_000
         metric = validate(early, phase='native')
         self.assertTrue(metric['ok'], metric['errors'])
         self.assertLess(metric['performance']['hook_to_native_onset_ms']['p50'], 0)
 
     def test_timestamp_endpoint_does_not_require_vad_onset(self):
-        records = contract_records(9, 12)
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         endpoint = next(r for r in records
                         if r['event'] == 'native_voice_end_estimate' and r['line'] == 1)
         endpoint['evidence'] = 'asr_timestamp'
         endpoint['onset_estimated_at_ns'] = None
         result = validate(records, phase='native')
         self.assertTrue(result['ok'], result['errors'])
-        self.assertEqual(result['performance']['hook_to_native_onset_ms']['count'], 1)
+        self.assertEqual(result['performance']['hook_to_native_onset_ms']['count'], 2)
 
     def test_wrong_origin_and_wrong_dialogue_cannot_claim_success(self):
         records = contract_records(0, 3, mode='reading')

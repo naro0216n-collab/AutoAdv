@@ -45,18 +45,17 @@ HostedのAutoAdv Live Advancementは**既に構築済みのWindowsゲーム**か
 
 ### 4. Windows実機RealAudio経路
 
-RealAudioはGitHub hosted runnerでは実行せず、実際にAutoAdvを利用する対話可能なWindows実機でのみ検収する。明示的な局所診断では次のようにNative 1ケースを指定できる。全件検収は後述の `AutoAdv-Windows-Validate.cmd` を使う。
+RealAudioはGitHub hosted runnerでは実行せず、実際にAutoAdvを利用する対話可能なWindows実機でのみ検収する。明示的な局所実行では次のNative phaseを使える。
 
 ```powershell
 .\validation\real_game\run_live_check.ps1 -Phase native `
   -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated `
-  -NativeCase normal-001 -StartLine 6 `
   -ProcessLoopbackHelper C:\path\to\AutoAdv.ProcessLoopback.dll `
   -AsrModel C:\path\to\model.int8.onnx `
   -AsrTokens C:\path\to\tokens.txt
 ```
 
-通常の実機検収は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。`native` は `SCENARIO.json` のTTS非使用・原音ありケースを全件列挙し、各ケースを別ゲーム／別AutoAdvセッションとして実行する。一件がASR不一致や安全保留になってもその結果を保持して次ケースへ進み、検証driverが入力を代行して同一ゲーム内を突破しない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
+通常の実機検収は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行し、AutoAdv自身の送りから次Hookへ遷移し続けることを検収する。検証側は停止地点を入力代行やケース別再起動で迂回しない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
 
 RealAudioはFast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／Fullテストへ含めない。Hosted runnerの音声endpoint有無を製品のNativeAudio成否に読み替えない。
 
@@ -83,11 +82,11 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 ## 実ゲームphase
 
-`reading` は文字時間による通常送り、通常の実機検収における `native` はTTS非使用かつ原音ファイルを持つ全ケースを独立ケース行列として実行する。各ケースでは対象台詞と、そのAutoAdv入力後に到達する次Hookまでを観測し、対象台詞が保留された場合はそのケースだけを失敗として終了する。`tts` は実IrodoriサーバーとVoiceを必要とする。`mixed` は原音・TTS・文字待機の混在、`stress` は背景発話、非言語発声、誤帰属、不確実状態を扱う。
+`reading` は文字時間による通常送り、`native` はTTS非使用の原音16件を同一セッションで連続実行する。説明文と手動選択肢はnative専用fixture条件では表示せず、各原音台詞はAutoAdvの通常Controller入力だけで次へ進む。`tts` は実IrodoriサーバーとVoiceを必要とする。`mixed` は原音・TTS・文字待機の混在、`stress` は背景発話、非言語発声、誤帰属、不確実状態を扱う。
 
 `native` / `mixed` / `stress` ではゲーム側oracleによる音声エンジン上の原音再生終了の独立観測を必要とする。物理出力の可聴性は要求しない。`hook` / `reading` / `tts` では原音終了oracleを合否条件にしない。ゲーム側oracleは `autoadv_oracle.rpy` にあり、台詞表示、再生状態、dismissalを記録するだけでゲーム進行を変更しない。
 
-原音が不確実なケースでテスト側が入力して後続場面へ進めることは禁止する。同一実行内の未到達台詞を検査済み扱いせず、通常RealAudioでは次ケースを新しいゲームプロセスから開始して独立に採取する。`line_results` の `no_autoadv_input` や外部dismissalを製品成功へ読み替えない。
+原音が不確実なケースでテスト側が入力して後続場面へ進めることは禁止する。安全停止した時点で未到達の後続台詞を検査済み扱いしない。`line_results` の `no_autoadv_input` や外部dismissalを製品成功へ読み替えない。
 
 ## ASRモデルの準備
 

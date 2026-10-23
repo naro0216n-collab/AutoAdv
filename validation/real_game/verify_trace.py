@@ -243,6 +243,16 @@ def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json')
     if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
         scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
     scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
+    if phase == 'native' and scenario_path == HERE / 'SCENARIO.json':
+        # RealAudio is one uninterrupted product session containing every
+        # foreground native-voice case. Fixture-only explanatory text and the
+        # manual menu are omitted from that scene; no case is independently
+        # launched and the checker never advances the game on AutoAdv's behalf.
+        scenario = [line for line in scenario if
+                    line.get('advance_mode') == 'audio'
+                    and not line.get('use_tts')
+                    and line.get('foreground_voice') is True
+                    and line.get('foreground_file')]
     if phase == 'mixed' and scenario_path == HERE / 'SCENARIO.json':
         # The same Ren'Py game terminates before its interactive menu when
         # launched with AUTOADV_VALIDATION_SCENARIO=mixed.

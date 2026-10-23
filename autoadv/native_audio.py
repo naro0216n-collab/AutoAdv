@@ -448,6 +448,18 @@ class NativeAudio:
             consumed += duration
         return None
 
+    @staticmethod
+    def _length_evidence(progress) -> float:
+        """Score target-relative ASR length without requiring exact wording.
+
+        Surface length is useful when orthography is preserved; pronunciation
+        length is more reliable across kanji/kana spelling changes.  Length is
+        supporting evidence only and can never attribute unrelated speech.
+        """
+        ratios = (progress.length_ratio, progress.pronunciation_length_ratio)
+        return max((max(0.0, min(1.0, 1.0 - abs(ratio - 1.0)))
+                    for ratio in ratios if ratio > 0), default=0.0)
+
     @classmethod
     def _timestamp_endpoint(cls, samples, result: ASRResult,
                             observed_token_count: int) -> tuple[int, float, float]:
@@ -531,13 +543,26 @@ class NativeAudio:
                 stability_score = min(1.0, progress.tail_confidence)
                 # Silence is a useful bonus, never a global-mix requirement.
                 endpoint_score = max(timestamp_score, .75 * vad_score, .65 * stability_score)
+                length_score = self._length_evidence(progress)
+                # ASR is one source of evidence, not a transcription acceptance
+                # test.  Target-relative progress/length, token timing or VAD,
+                # and recognition consistency can jointly establish completion.
+                # ``terminal_candidate`` remains diagnostic and deliberately is
+                # not a hard gate: a bounded partial transcript may be enough
+                # when independent endpoint evidence is strong.
                 evidence_score = max(0.0, min(1.0,
-                    .76 * progress.completion_score
-                    + .14 * progress.attribution_score
-                    + .10 * endpoint_score
-                    - .12 * progress.contradiction_score))
-                if (self.attributed and progress.terminal_candidate
-                        and endpoint_score >= .45 and evidence_score >= .76):
+                    .50 * progress.completion_score
+                    + .18 * progress.attribution_score
+                    + .16 * endpoint_score
+                    + .10 * length_score
+                    + .06 * float(progress.monotonic)
+                    - .14 * progress.contradiction_score))
+                sufficient_progress = (
+                    max(progress.phonetic_coverage, progress.coverage) >= .55
+                    and progress.matched_phonemes >= min(4, max(1, progress.target_units))
+                )
+                if (self.attributed and sufficient_progress
+                        and endpoint_score >= .45 and evidence_score >= .72):
                     self.completed = True
                     events.append('completed')
                     if endpoint_ms >= 0:
@@ -570,6 +595,7 @@ class NativeAudio:
                     'completion_score': round(progress.completion_score, 4),
                     'contradiction_score': round(progress.contradiction_score, 4),
                     'endpoint_score': round(endpoint_score, 4),
+                    'length_score': round(length_score, 4),
                     'evidence_score': round(evidence_score, 4),
                     'asr_token_timestamp_count': len(result.timestamps),
                     'target_token_count': progress.observed_token_count,
