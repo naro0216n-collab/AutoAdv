@@ -169,10 +169,14 @@ class LiveGuiSessionContract(unittest.TestCase):
         driver.state = 'running'
         driver.tick()
         self.assertEqual(recoveries, [])
+        self.assertEqual(actions, [])
+        clock[0] = 1.7
+        driver.tick()
         self.assertEqual(actions, ['close', 'quit'])
 
-    def test_dialogue_after_collection_target_closes_without_processing_recovery(self):
+    def test_dialogue_after_collection_target_cannot_extend_collection_or_recovery(self):
         actions, recoveries = [], []
+        clock = [1.0]
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=4),
                                   pause_reason=None, sent=False)
         product = SimpleNamespace(runtime_state=lambda: runtime)
@@ -184,9 +188,15 @@ class LiveGuiSessionContract(unittest.TestCase):
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
              'force_continue_on_failure': True},
+            clock=lambda: clock[0],
             recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: None)
         driver.state = 'running'
+        driver.tick()
+        self.assertEqual(recoveries, [])
+        self.assertEqual(actions, [])
+        runtime.pause_reason = 'native_inconclusive_hold'
+        clock[0] = 1.7
         driver.tick()
         self.assertEqual(recoveries, [])
         self.assertEqual(actions, ['close', 'quit'])

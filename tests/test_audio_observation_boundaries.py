@@ -639,7 +639,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         finally:
             native.close()
 
-    def test_token_timestamps_do_not_complete_target_while_vad_stays_active(self):
+    def test_timestamp_endpoint_can_complete_with_post_target_pcm_while_vad_stays_active(self):
         events = []
         metrics = []
         end_observations = []
@@ -647,8 +647,9 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
 
         class Recognizer:
             def recognize(self, chunks):
-                # The current line ends at token 6; later recognized tokens are
-                # background speech from the same process mix.
+                # The selected target prefix is followed by process-mix speech.
+                # The following token bounds the target prefix in the decode
+                # waveform; 300ms of captured PCM follows that boundary.
                 return ASRResult(
                     'えっ嘘でしょ背景', tuple('えっ嘘でしょ背景'),
                     (0.05, 0.12, 0.20, 0.30, 0.38, 0.46, 0.70, 0.82))
@@ -668,9 +669,6 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             native.history.start(11)
             token = Token(1, 1)
             native.begin(token, 'えっ嘘でしょ')
-            # SenseVoice timestamps are token starts. Even a following
-            # background token cannot prove that the target's final acoustic
-            # realization has ended while the process mix remains active.
             clock[0] = 2000
             pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
             native.history.push(pcm, target_pid=11)
@@ -683,12 +681,56 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                     break
                 time.sleep(.005)
             self.assertIn('started', events)
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
+            self.assertGreaterEqual(metrics[-1]['timestamp_endpoint_score'], .45)
+            self.assertEqual(metrics[-1]['target_token_count'], 6)
+            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
+        finally:
+            native.close()
+
+    def test_short_post_target_timestamp_tail_does_not_complete_while_vad_stays_active(self):
+        events = []
+        metrics = []
+        clock = [1000]
+
+        class Recognizer:
+            def recognize(self, chunks):
+                # Only 80ms of captured PCM follows the next-token boundary.
+                # This reproduces the premature first-terminal inference seen in
+                # RealAudio without forbidding timestamp evidence altogether.
+                return ASRResult(
+                    'えっ嘘でしょ背', tuple('えっ嘘でしょ背'),
+                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46, 0.92))
+
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: VADDecision(
+                    True, 0, contains_speech=True),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
+        try:
+            native.history.start(11)
+            native.begin(Token(1, 1), 'えっ嘘でしょ')
+            clock[0] = 2000
+            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertFalse(busy, 'short-tail timestamp inference did not finish')
+            self.assertIn('started', events)
             self.assertNotIn('completed', events)
             self.assertFalse(native.completed)
-            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
-            self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
-            self.assertEqual(metrics[-1]['target_token_count'], 6)
-            self.assertEqual(end_observations, [])
+            self.assertAlmostEqual(metrics[-1]['trailing_after_target_ms'], 80.0, places=3)
+            self.assertLess(metrics[-1]['timestamp_endpoint_score'], .45)
         finally:
             native.close()
 
@@ -740,7 +782,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         finally:
             native.close()
 
-    def test_token_timestamps_do_not_complete_without_any_vad_endpoint(self):
+    def test_final_token_start_without_following_token_is_not_endpoint(self):
         events = []
         metrics = []
         end_observations = []
@@ -833,6 +875,27 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             self.assertEqual(end_observations[-1]['source'], 'asr_vad')
         finally:
             native.close()
+
+    def test_asr_timestamp_uses_pcm_duration_not_wall_clock_gap(self):
+        first = PCMChunk(1000, bytes(4800 * 8), 48000, 2, 4)
+        second = PCMChunk(2000, bytes(4800 * 8), 48000, 2, 4)
+        result = ASRResult('対象後', ('対象', '後'), (0.05, 0.18))
+        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
+            (first, second), result, observed_token_count=1, target_reached=True)
+        self.assertEqual(endpoint, 1980)
+        self.assertAlmostEqual(trailing, 20.0)
+        self.assertLess(score, .45)
+
+        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
+            (first, second), result, observed_token_count=1, target_reached=False)
+        self.assertEqual((endpoint, trailing, score), (-1, 0.0, 0.0))
+
+        # A final token start has no duration in SenseVoice and cannot be
+        # converted into an endpoint by adding a guessed token length.
+        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
+            (first, second), ASRResult('対象', ('対象',), (0.05,)),
+            observed_token_count=1, target_reached=True)
+        self.assertEqual((endpoint, trailing, score), (-1, 0.0, 0.0))
 
     def test_later_vad_state_cannot_retroactively_complete_decode_snapshot(self):
         from threading import Event

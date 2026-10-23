@@ -93,6 +93,7 @@ class SessionDriver:
         self.audio_deadline = None
         self.recovery_pending = None
         self.collection_target_emitted = False
+        self.collection_done_at = None
 
     def fail(self, why):
         candidates = self.product.capture_view().candidates
@@ -304,17 +305,24 @@ class SessionDriver:
                 self._release('.monitoring')
                 self.state = 'running'
             elif self.state == 'running':
+                now = self.clock()
+                if self.collection_done_at is not None:
+                    # Keep only a short observer flush after the requested final
+                    # outcome. A later fixture line cannot reset this latch or
+                    # trigger validation recovery/product-scope extension.
+                    if now - self.collection_done_at >= .6:
+                        self.w.close()
+                        self.qt_app.quit()
+                    return
                 runtime = self.product.runtime_state()
                 target_count = int(self.options.get('dialogues', 0))
                 line_no = runtime.token.line if runtime.token is not None else 0
                 final_line = target_count > 0 and line_no >= target_count
                 if target_count > 0 and line_no > target_count:
-                    # A following fixture line can arrive between the final
-                    # AutoAdv input and this polling tick. The requested
-                    # collection is already complete; do not keep the restarted
-                    # fixture alive as another product utterance.
-                    self.w.close()
-                    self.qt_app.quit()
+                    # The final line advanced between driver polls. Latch the
+                    # completed collection instead of following the restarted
+                    # fixture; retain the same bounded observer flush.
+                    self.collection_done_at = now
                     return
                 if runtime.token is not None and runtime.pause_reason:
                     # For RealAudio data collection, a product hold remains a
@@ -330,11 +338,7 @@ class SessionDriver:
                 else:
                     self.recovery_pending = None
                 if final_line and (runtime.sent or runtime.pause_reason):
-                    # The final requested line has reached a terminal product
-                    # outcome. Close immediately; waiting here only gives a
-                    # looping fixture time to create an out-of-scope Utterance.
-                    self.w.close()
-                    self.qt_app.quit()
+                    self.collection_done_at = now
                     return
         except Exception as error:
             self.fail(str(error))

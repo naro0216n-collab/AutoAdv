@@ -493,14 +493,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')
             # These are product-side process-loopback estimates, not known game
-            # source playback endpoints. SenseVoice timestamps are token starts,
-            # so the current product may report an endpoint estimate only from
-            # independently observed VAD acoustic evidence. Bounds are checked;
-            # an acoustic onset remains optional because VAD can miss whispers.
+            # source playback endpoints. ASR token timing and VAD are distinct
+            # product-side endpoint estimates; neither is the independent game
+            # oracle. Bounds are checked, and acoustic onset remains optional
+            # because VAD can miss whispers.
             if (key not in utterances or type(estimate) is not int or
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
-                    evidence != 'asr_vad'):
+                    evidence not in ('asr_timestamp', 'asr_vad')):
                 errors.append(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
                 errors.append(f'duplicate native endpoint: {key}')
