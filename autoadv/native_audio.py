@@ -127,7 +127,6 @@ class NativeAudio:
         self._vad_contains_speech = False
         self._pcm_reported = False
         self._latest_evidence: VoiceEvidence | None = None
-        self._last_target_prefix_units = 0
         self._last_target_matches = 0
         self._last_target_token_ms = -1
 
@@ -172,7 +171,6 @@ class NativeAudio:
         self.vad_end_ms = -1
         self.vad_tail_ms = 0
         self._latest_evidence = None
-        self._last_target_prefix_units = 0
         self._last_target_matches = 0
         self._last_target_token_ms = -1
         self._vad_positive_packets = 0
@@ -499,12 +497,9 @@ class NativeAudio:
                 target_progressed = bool(
                     target_last_ms is not None
                     and target_last_ms > self._last_target_token_ms
-                    and (alignment.phonetic_prefix_units > self._last_target_prefix_units
-                         or alignment.phonetic_matches > self._last_target_matches))
+                    and alignment.phonetic_matches > self._last_target_matches)
                 if target_last_ms is not None:
                     self._last_target_token_ms = max(self._last_target_token_ms, target_last_ms)
-                self._last_target_prefix_units = max(
-                    self._last_target_prefix_units, alignment.phonetic_prefix_units)
                 self._last_target_matches = max(
                     self._last_target_matches, alignment.phonetic_matches)
                 evidence = VoiceEvidence(

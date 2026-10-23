@@ -72,11 +72,11 @@ class TargetMatcher:
 
     @staticmethod
     def _alignment_rank(alignment: TargetAlignment) -> tuple:
-        """Choose the best prefix edit alignment; primary reading only breaks ties."""
+        """Choose by raw alignment facts; primary reading only breaks ties."""
         return (
-            alignment.phonetic_matches - alignment.phonetic_edits,
-            alignment.phonetic_prefix_units,
+            alignment.phonetic_matches,
             -alignment.phonetic_edits,
+            alignment.phonetic_prefix_units,
             -alignment.reading_rank,
         )
 
@@ -107,13 +107,6 @@ class TargetMatcher:
                 best = (rank, alignment)
         return best[1] if best is not None else TargetAlignment()
 
-    @classmethod
-    def _prefix_rank(cls, alignment: TargetAlignment, token_count: int) -> tuple:
-        # Prefer more target matches, then fewer edit operations.  Equal
-        # alignments choose the earliest ASR prefix so trailing background
-        # speech is not absorbed into the target observation.
-        return (*cls._alignment_rank(alignment), -token_count)
-
     def align(self, hypothesis: str, *, tokens=()) -> TargetAlignment:
         tokens = tuple(str(t) for t in (tokens or ()))
         if not tokens or surface_key(''.join(tokens)) != surface_key(hypothesis):
@@ -123,7 +116,9 @@ class TargetMatcher:
         for index, token in enumerate(tokens[:self.MAX_TOKEN_PREFIXES], 1):
             prefix += token
             alignment = replace(self._evaluate(prefix), observed_token_count=index)
-            rank = self._prefix_rank(alignment, index)
+            # Prefixes are visited earliest-first, so an equal alignment keeps
+            # the earlier ASR boundary without another ranking term.
+            rank = self._alignment_rank(alignment)
             if best is None or rank > best[0]:
                 best = (rank, alignment)
         return best[1] if best is not None else self._evaluate(hypothesis)
