@@ -203,6 +203,51 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 1)
         self.assertTrue(result['line_results'][0]['validation_recovery_input'])
 
+    def test_collection_target_excludes_fixture_restart_and_engine_utterance(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        target_at = next(i for i, r in enumerate(records) if r['event'] == 'native_ready') + 1
+        records[target_at:target_at] = [
+            {'event': 'validation_collection_target', 'phase': 'native', 'dialogues': 3,
+             'force_continue_on_failure': True},
+        ]
+        final_completion = next(r for r in records
+                                if r.get('event') == 'native_event'
+                                and r.get('status') == 'completed' and r.get('line') == 3)
+        records.remove(final_completion)
+        records = resequence(records)
+        oracle = synthetic_game_observations(records, phase='native', start_line=1)
+
+        # Ren'Py returns/restarts after the requested final case. The independent
+        # observer reuses line 1 and Luna sees unrelated engine text. Neither is
+        # part of the already-complete three-dialogue collection.
+        restart_at = max(r['at_ns'] for r in oracle) + 1_000_000_000
+        oracle.extend([
+            {'event': 'line_started', 'at_ns': restart_at, 'pid': 50, 'line': 1,
+             'body_hash': text_digest('fixture restarted')},
+            {'event': 'line_started', 'at_ns': restart_at + 1, 'pid': 50, 'line': 2,
+             'body_hash': text_digest('engine line')},
+        ])
+        records.extend([
+            {'event': 'hook_output', 'session': 1, 'pid': 50, 'generation': 'host-a',
+             'connection': 1, 'source': 'HOOK|1|2', 'address': 902,
+             'hook_sequence': 99, 'context': 1, 'context2': 2,
+             'raw_hash': text_digest('Cleaning stores took 0 ms')},
+            {'event': 'utterance', 'session': 1, 'line': 4, 'source': 'HOOK|1|2',
+             'hook_sequence': 99, 'raw_hash': text_digest('Cleaning stores took 0 ms'),
+             'body_hash': text_digest('Cleaning stores took 0 ms'), 'advance_mode': 'audio',
+             'use_tts': False, 'text_wait_ms': 500, 'characters': 20,
+             'uncertain_text_fallback': False, 'speaker': 'Cleaning stores took 0 ms'},
+            final_completion,
+        ])
+        records = resequence(records)
+        result = _validate(records, phase='native', start_line=1, oracle_records=oracle)
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertTrue(result['collection_complete'])
+        self.assertEqual(result['observed_lines'], 3)
+        self.assertEqual(len(result['line_results']), 3)
+        self.assertTrue(result['line_results'][-1]['native_judgement_completed'])
+        self.assertNotIn('invalid independent game line sequence', result['errors'])
+
     def test_json_report_preserves_success_and_failures(self):
         import contextlib
         from io import StringIO

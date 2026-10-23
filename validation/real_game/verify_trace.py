@@ -48,6 +48,34 @@ def _key(record: dict) -> tuple[object, object]:
     return record.get('session'), record.get('line')
 
 
+def _oracle_collection_prefix(oracle_records: Sequence[dict] | None,
+                              utterance_order: Sequence[tuple],
+                              utterances: dict) -> Sequence[dict] | None:
+    """Exclude fixture activity after the requested dialogue collection.
+
+    Native validation can return/restart the Ren'Py fixture immediately after
+    the final requested input. The oracle may then legitimately reuse line
+    numbers and Luna may observe engine text. Once every collected Utterance
+    body has been seen in order by the independent game observer, the next game
+    line belongs to a later fixture run and is outside this validation scope.
+    """
+    if not oracle_records or not utterance_order:
+        return oracle_records
+    expected = [utterances[key].get('body_hash') for key in utterance_order]
+    if any(not isinstance(value, str) or not value for value in expected):
+        return oracle_records
+    matched = 0
+    limited = []
+    for record in oracle_records:
+        if record.get('event') == 'line_started':
+            if matched >= len(expected):
+                break
+            if record.get('body_hash') == expected[matched]:
+                matched += 1
+        limited.append(record)
+    return limited if matched == len(expected) else oracle_records
+
+
 def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       utterance_order: Sequence[tuple], utterances: dict,
                       attempts: dict, sent: dict, reasons: dict,
@@ -331,6 +359,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     native_end_estimates: dict[tuple, int] = {}
     native_onset_estimates: dict[tuple, int] = {}
     asr_counts: dict[tuple, int] = {}
+    out_of_scope_utterances: set[tuple] = set()
     measured: dict[str, list[float]] = {
         name: [] for name in (
             'asr_decode_ms', 'asr_queue_ms', 'asr_rtf',
@@ -342,6 +371,18 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         event, session = record.get('event'), record.get('session')
         key = _key(record)
         at = record.get('at_ns', -1)
+        # ``validation_collection_target`` defines the requested acceptance
+        # scope. A fixture restart or engine string after that many real
+        # Utterances must not become an extra dialogue in this run. Keep
+        # scanning, though, because Qt-queued diagnostics for the final in-scope
+        # Utterance may be appended after the restarted fixture already emitted
+        # unrelated text.
+        if (event == 'utterance' and collection_target is not None
+                and len(utterance_order) >= collection_target):
+            out_of_scope_utterances.add(key)
+            continue
+        if key in out_of_scope_utterances:
+            continue
         if event == 'hook_connected':
             connections.add((record.get('pid'), record.get('generation'), record.get('connection')))
         elif event == 'monitor_started':
@@ -665,8 +706,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         key in sent and u.get('advance_mode') == 'audio' and not u.get('use_tts')
         for key, u in utterances.items()))
     if oracle_records is not None or needs_oracle:
+        scoped_oracle = _oracle_collection_prefix(
+            oracle_records, utterance_order, utterances)
         game_evidence = audit_game_oracle(
-            oracle_records, utterance_order, utterances, attempts, sent, reasons,
+            scoped_oracle, utterance_order, utterances, attempts, sent, reasons,
             start, scenario, game_pid_by_session=game_pid_by_session,
             presentation_at=presentation_at, native_end_estimates=native_end_estimates,
             source_outputs=source_outputs, recovery_inputs=recovery_inputs,

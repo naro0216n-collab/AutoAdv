@@ -259,7 +259,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
             release.set()
             audio.close()
 
-    def test_delayed_voice_uses_its_own_acoustic_window(self):
+    def test_later_vad_rise_does_not_discard_earlier_utterance_audio(self):
         heard = []
         signal = threading.Event()
         activity = SimpleNamespace(observe_float32_stereo=lambda _: VADDecision(True, 0),
@@ -279,7 +279,44 @@ class PacketVadBoundaryTests(unittest.TestCase):
                 audio.history.push(PCMChunk(at_ms, bytes(960 * 8), 48000, 2, 4), target_pid=11)
             audio.feed(PCMChunk(1600, bytes(960 * 8), 48000, 2, 4))
             self.assertTrue(signal.wait(2))
-            self.assertEqual(heard[0], (1500,))  # rise - 200ms = 1400ms
+            # The Utterance began at 1000ms. A later VAD rise at 1600ms is only
+            # acoustic evidence inside that line and must not redefine the ASR
+            # window or throw away the earlier 1100/1390ms speech.
+            self.assertEqual(heard[0], (1100, 1390, 1500))
+            self.assertEqual(audio._sample_start(), audio.window_start_ms)
+        finally:
+            audio.close()
+
+    def test_vad_reactivation_keeps_first_utterance_rise(self):
+        clock = [1000]
+        decisions = iter((
+            VADDecision(True, 0, contains_speech=True),
+            VADDecision(False, 300, contains_speech=False),
+            VADDecision(True, 0, contains_speech=True),
+        ))
+        audio = NativeAudio(
+            11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+            lambda *_: None,
+            recognizer=SimpleNamespace(recognize=lambda _: ''),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _: next(decisions), reset=lambda: None),
+            clock=lambda: clock[0])
+        try:
+            audio.history.start(11)
+            audio.begin(Token(1, 1), '長い台詞')
+            for when in (1100, 1500, 1900):
+                clock[0] = when
+                packet = PCMChunk(when, bytes(960 * 8), 48000, 2, 4)
+                audio.history.push(packet, target_pid=11)
+                audio.feed(packet)
+                for _ in range(200):
+                    with audio._lock:
+                        busy = audio._inflight
+                    if not busy:
+                        break
+                    time.sleep(.005)
+            self.assertEqual(audio.rise_ms, 1100)
+            self.assertEqual(audio._sample_start(), audio.window_start_ms)
         finally:
             audio.close()
 
@@ -648,6 +685,54 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         finally:
             native.close()
 
+    def test_partial_match_token_timestamps_do_not_turn_unrecognized_suffix_into_trailing_audio(self):
+        events = []
+        metrics = []
+        clock = [1000]
+        progress = ASRProgress(
+            coverage=.6957, onset_score=.78, tail_confidence=0.0, monotonic=True,
+            matched_chars=8, observed='途中まで', edit_count=2, length_ratio=.70,
+            terminal_candidate=False, phonetic_coverage=.7442, matched_phonemes=8,
+            phonetic_edit_count=2, attribution_score=.80, completion_score=.7403,
+            contradiction_score=.10, reading_rank=0, target_units=11,
+            pronunciation_length_ratio=.74, observed_token_count=4)
+
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event),
+            recognizer=SimpleNamespace(recognize=lambda _: ASRResult(
+                '途中まで背景', ('途', '中', 'ま', 'で', '背', '景'),
+                (0.05, 0.15, 0.25, 0.35, 0.55, 0.70))),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: VADDecision(
+                    True, 0, contains_speech=True),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
+        try:
+            native.history.start(11)
+            token = Token(1, 1)
+            native.begin(token, '途中まで続く対象台詞')
+            native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
+            clock[0] = 2000
+            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertFalse(busy, 'partial timestamp inference did not finish')
+            self.assertIn('started', events)
+            self.assertNotIn('completed', events)
+            self.assertFalse(native.completed)
+            self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
+            self.assertEqual(metrics[-1]['trailing_after_target_ms'], 0.0)
+        finally:
+            native.close()
+
     def test_token_timestamps_can_complete_without_any_vad_positive(self):
         events = []
         metrics = []
@@ -702,12 +787,16 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         second = PCMChunk(2000, bytes(4800 * 8), 48000, 2, 4)  # 100ms, 1900..2000
         result = ASRResult('対象後', ('対象', '後'), (0.05, 0.18))
         endpoint, trailing, score = NativeAudio._timestamp_endpoint(
-            (first, second), result, observed_token_count=1)
+            (first, second), result, observed_token_count=1, target_reached=True)
         # 180ms into concatenated PCM lies 80ms into the second packet, not
         # 180ms after the first packet's 900ms wall-clock start.
         self.assertEqual(endpoint, 1980)
         self.assertAlmostEqual(trailing, 20.0)
         self.assertLess(score, .60)
+
+        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
+            (first, second), result, observed_token_count=1, target_reached=False)
+        self.assertEqual((endpoint, trailing, score), (-1, 0.0, 0.0))
 
     def test_later_vad_state_cannot_retroactively_complete_decode_snapshot(self):
         from threading import Event

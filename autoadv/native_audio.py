@@ -319,12 +319,12 @@ class NativeAudio:
                         failure=self._capture_error)
 
     def _sample_start(self) -> int:
-        # The sender's interval is the earliest allowed observation. A voice
-        # starting late should not be decoded together with earlier chatter.
-        since = self.window_start_ms
-        if self.rise_ms >= self.start_ms + 500:
-            since = max(since, self.rise_ms - 200)
-        return since
+        # The Utterance boundary owns the ASR window. VAD may rise more than
+        # once inside one voiced line (pauses, whispering, BGM interaction), so
+        # a later rise must never redefine the line and discard earlier speech.
+        # Bounded pre-HOOK replay for external progression is already expressed
+        # by ``window_start_ms`` in begin().
+        return self.window_start_ms
 
     def _consume_locked(self, chunk: PCMChunk, *, replay: bool = False):
         # Caller owns the VAD/utterance lock. Only the active interval's PCM
@@ -356,7 +356,8 @@ class NativeAudio:
                 self._pcm_reported = True
                 pcm_frames = len(chunk.frames) // 8
             if activity.frames_analyzed:
-                if (activity.active or activity.contains_speech) and not self._last_vad:
+                if ((activity.active or activity.contains_speech) and not self._last_vad
+                        and self.rise_ms < 0):
                     self.rise_ms = chunk.at_ms
                 self._last_vad = activity.active
                 if activity.active or activity.contains_speech:
@@ -464,17 +465,22 @@ class NativeAudio:
 
     @classmethod
     def _timestamp_endpoint(cls, samples, result: ASRResult,
-                            observed_token_count: int) -> tuple[int, float, float]:
+                            observed_token_count: int, *,
+                            target_reached: bool) -> tuple[int, float, float]:
         """Return target-local endpoint estimate, trailing PCM, and confidence.
 
         SenseVoice exposes per-token timestamps in seconds. They are positions
         in the concatenated decode waveform, not device playback timestamps.
-        A following token bounds the target locally. If the target is last, a
-        conservative token-duration guard must itself be present in captured
-        PCM before it counts as endpoint evidence. Packet gaps never strengthen
-        this score.
+        A following token bounds the *selected ASR prefix* locally, but that
+        prefix is not necessarily the end of the target: ASR can omit an
+        unrecognized target suffix. Timestamp-derived trailing audio therefore
+        becomes target-end evidence only after lexical/phonetic matching says
+        the selected prefix plausibly reaches the target tail. If the target is
+        last, a conservative token-duration guard must itself be present in
+        captured PCM before it counts as endpoint evidence. Packet gaps never
+        strengthen this score.
         """
-        if (not samples or observed_token_count <= 0 or not result.timestamps
+        if (not target_reached or not samples or observed_token_count <= 0 or not result.timestamps
                 or observed_token_count > len(result.timestamps)):
             return -1, 0.0, 0.0
         usable = result.timestamps[:observed_token_count]
@@ -530,7 +536,9 @@ class NativeAudio:
                         events.append('started')
 
                 endpoint_ms, trailing_after_target_ms, timestamp_score = (
-                    self._timestamp_endpoint(samples, result, progress.observed_token_count))
+                    self._timestamp_endpoint(
+                        samples, result, progress.observed_token_count,
+                        target_reached=progress.terminal_candidate))
                 tail_at_decode = self.tail_ms if submitted_tail_ms is None else submitted_tail_ms
                 vad_score = min(1.0, max(0, tail_at_decode) / 400.0)
                 stability_score = min(1.0, progress.tail_confidence)
@@ -540,9 +548,10 @@ class NativeAudio:
                 # ASR is one source of evidence, not a transcription acceptance
                 # test.  Target-relative progress/length, token timing or VAD,
                 # and recognition consistency can jointly establish completion.
-                # ``terminal_candidate`` remains diagnostic and deliberately is
-                # not a hard gate: a bounded partial transcript may be enough
-                # when independent endpoint evidence is strong.
+                # ``terminal_candidate`` is not a completion gate: a bounded
+                # partial transcript may still complete when an independent VAD
+                # endpoint is strong. It only controls whether token timestamps
+                # can truthfully be interpreted as lying beyond the target tail.
                 evidence_score = max(0.0, min(1.0,
                     .50 * progress.completion_score
                     + .18 * progress.attribution_score
