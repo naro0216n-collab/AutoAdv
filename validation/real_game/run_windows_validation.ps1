@@ -203,6 +203,12 @@ try {
             Invoke-Checked 'python' @('-m','validation.real_game.prepare_asr_model','--directory',$modelRoot)
             $asrModel = Join-Path $modelRoot 'model.int8.onnx'
             $asrTokens = Join-Path $modelRoot 'tokens.txt'
+            # RealAudio-only media is never bundled in the prebuilt fixture.
+            # Cache each pinned individual file across runs, then hydrate this
+            # run's staged game directory after the immutable fixture is unpacked.
+            $mediaRoot = Join-Path $cache 'media'
+            Invoke-Checked 'python' @('-m','validation.real_game.prepare_real_audio_assets',
+                '--cache',$mediaRoot,'--runtime',$runtime)
         } finally { Pop-Location }
     }
 
@@ -219,7 +225,7 @@ try {
                 '-Phase',$currentPhase,
                 '-GameExecutable',$gameExecutable,
                 '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
-                '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '180' })
+                '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '300' })
             )
             if ($currentPhase -eq 'native') {
                 $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens)

@@ -2,7 +2,7 @@
 import unittest
 
 from validation.real_game.verify_trace import validate
-from validation.real_game.test_e2e_verifier import contract_records
+from validation.real_game.test_e2e_verifier import contract_records, NATIVE_SCENARIO
 from validation.real_game._synthetic_checker_oracle import synthetic_game_observations
 
 
@@ -10,12 +10,12 @@ class IndependentGameOracleContract(unittest.TestCase):
     def setUp(self):
         # Use audio-judgment lines; even a perfect ASR transcript must never
         # outweigh evidence of an unfinished game voice.
-        self.product = contract_records(9, 12)
-        self.game = synthetic_game_observations(self.product)
+        self.product = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        self.game = synthetic_game_observations(self.product, phase='native', start_line=1)
 
     def verify(self, product=None, game=None, **kwargs):
         return validate(product if product is not None else self.product,
-                        phase='native', start_line=10,
+                        phase='native', start_line=1,
                         oracle_records=game if game is not None else self.game, **kwargs)
 
     def test_absent_game_observer_is_never_real_acceptance(self):
@@ -188,19 +188,19 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_no_foreground_native_attribution_rejected_even_with_asr_completion(self):
         # Author-specified absence is NOT used as the only evidence: observer
         # must independently confirm the voice channel was never active.
-        product = contract_records(9, 12)
+        product = contract_records(0, 3, lines=NATIVE_SCENARIO)
         from pathlib import Path
         import json
-        path = Path(__file__).with_name('SCENARIO.json')
+        path = Path(__file__).with_name('REAL_AUDIO_SCENARIO.json')
         schema = json.loads(path.read_text('utf-8'))
-        schema['lines'][9]['foreground_voice'] = False
+        schema['lines'][0]['foreground_voice'] = False
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as directory:
             temp = Path(directory) / 'scenario.json'
             temp.write_text(json.dumps(schema, ensure_ascii=False), 'utf-8')
             game = [x for x in self.game if not (x.get('line') == 1 and
                      x['event'] in ('voice_started', 'voice_ended'))]
-            result = validate(product, phase='native', start_line=10,
+            result = validate(product, phase='native', start_line=1,
                               oracle_records=game, scenario_path=temp)
             self.assertTrue(result['collection_valid'], result['errors'])
             self.assertFalse(result['voice_safety_verified'])

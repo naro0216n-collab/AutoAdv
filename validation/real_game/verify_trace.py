@@ -276,17 +276,12 @@ def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json')
     # These are test-side expectations, never a source of AutoAdv decisions.
     if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
         scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
+    elif phase == 'native' and scenario_path == HERE / 'SCENARIO.json':
+        # Dedicated Windows RealAudio expectations deliberately differ from the
+        # redistributable fixture's ordinary mixed scene. Runtime media is
+        # hydrated outside Git before launch and remains test-side evidence only.
+        scenario_path = HERE / 'REAL_AUDIO_SCENARIO.json'
     scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
-    if phase == 'native' and scenario_path == HERE / 'SCENARIO.json':
-        # RealAudio is one uninterrupted product session containing every
-        # foreground native-voice case. Fixture-only explanatory text and the
-        # manual menu are omitted from that scene; no case is independently
-        # launched and the checker never advances the game on AutoAdv's behalf.
-        scenario = [line for line in scenario if
-                    line.get('advance_mode') == 'audio'
-                    and not line.get('use_tts')
-                    and line.get('foreground_voice') is True
-                    and line.get('foreground_file')]
     if phase == 'mixed' and scenario_path == HERE / 'SCENARIO.json':
         # The same Ren'Py game terminates before its interactive menu when
         # launched with AUTOADV_VALIDATION_SCENARIO=mixed.
@@ -788,10 +783,15 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             outcome = 'next_hook_observed'
         else:
             outcome = 'next_hook_not_observed'
-        scenario_id = (scenario[start + offset].get('id')
-                       if start is not None and start + offset < len(scenario) else None)
+        scenario_case = (scenario[start + offset]
+                         if start is not None and start + offset < len(scenario) else None)
+        scenario_id = scenario_case.get('id') if scenario_case is not None else None
         line_result = {
             'session': key[0], 'line': key[1], 'scenario': scenario_id,
+            'speaker_family': (scenario_case.get('speaker_family')
+                               if scenario_case is not None else None),
+            'audio_environment': (scenario_case.get('environment')
+                                  if scenario_case is not None else None),
             'advance_mode': utterance.get('advance_mode'),
             'use_tts': utterance.get('use_tts'),
             'completion_reason': reasons.get(key),

@@ -4,6 +4,8 @@
 define a = Character("明日香")
 define s = Character("栞")
 define p = Character("主人公")
+define b = Character("千夏")
+define c = Character("蓮")
 
 # The test runner selects an existing scene before the first dialogue.
 # This controls the game fixture only; it never sends an advance or supplies
@@ -25,14 +27,116 @@ label start:
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
         jump asr_stress
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
-        # Start with existing plain foreground voice, then reach BGM by the
-        # same Controller input. This isolates audio capture from mixing.
-        jump standard_voice
+        # Dedicated Windows RealAudio scene. Runtime-only media is hydrated by
+        # run_windows_validation.ps1 before the game starts; it is never part
+        # of the prebuilt fixture or an AutoAdv input.
+        jump real_audio_native
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "tts":
         jump standard_tts
     "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。"
     "通常のゲームと同じように、台詞表示・音声再生・選択肢・送り入力が動作します。"
     "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。"
+label real_audio_native:
+    # Fail visibly rather than silently falling back to the old bundled audio
+    # if runtime hydration did not happen.
+    python:
+        _adv_runtime_assets = [
+            "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
+            "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
+            "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
+            "audio/runtime/music/Heavenly Loop_0.ogg",
+            "audio/runtime/music/LofiLoop_2.ogg",
+            "audio/runtime/music/jvs_music_ver1_jvs001_modified_grouped.wav",
+            "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg",
+            "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg",
+            "audio/runtime/sfx/DOORWood_FrontDoorOpen_OS_01.ogg",
+            "audio/runtime/sfx/DSGNImpt_ImpactCreepyReverb_OS_01.ogg",
+        ]
+        _adv_missing_runtime_assets = [x for x in _adv_runtime_assets if not renpy.loadable(x)]
+    if _adv_missing_runtime_assets:
+        "RealAudio実行時素材が不足しています。検証runnerから起動してください。"
+        return
+
+    # Clean control spans the bundled regression speaker and three independent
+    # JVS speakers. The JVS sample deliberately keeps its native 24 kHz format;
+    # the game/Windows audio stack performs the same resampling a real game can.
+    voice "audio/voice/normal_001.wav"
+    a "えっ嘘でしょ。"
+    voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
+    a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
+    b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
+    c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+
+    # Two unrelated instrumental tracks persist across dialogue boundaries.
+    play music "audio/runtime/music/Heavenly Loop_0.ogg" loop volume 0.24
+    voice "audio/voice/normal_017.wav"
+    a "あっベルが鳴ってる。"
+    voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
+    a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    stop music fadeout 0.15
+
+    play music "audio/runtime/music/LofiLoop_2.ogg" loop volume 0.28
+    voice "audio/voice/normal_026.wav"
+    a "私はいつもミネラルウォーターを持ち歩いています。"
+    voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
+    b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    voice "audio/voice/whisper_001.wav"
+    s "えっ嘘でしょ。"
+    stop music fadeout 0.15
+
+    # A machine room is non-speech continuous energy: process-wide VAD silence
+    # should not be needed to finish the selected voice.
+    play sound "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg" loop volume 0.25
+    voice "audio/voice/normal_028.wav"
+    a "彼女はスタッフをまとめていけると思いますか？"
+    voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
+    c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    voice "audio/voice/whisper_017.wav"
+    s "あっベルが鳴ってる。"
+    stop sound fadeout 0.15
+
+    # Real crowd conversation is competing speech. It remains active through
+    # two foreground utterances and therefore outlasts the first one.
+    play sound "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg" loop volume 0.22
+    voice "audio/voice/normal_022.wav"
+    a "猫はにゃーにゃーと鳴く。"
+    voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
+    a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    stop sound fadeout 0.15
+
+    # Japanese singing is a stronger lexical distractor than instrumental BGM.
+    # Keep it across identical successive foreground text to exercise both
+    # acoustic attribution and Utterance-generation boundaries.
+    play music "audio/runtime/music/jvs_music_ver1_jvs001_modified_grouped.wav" loop volume 0.19
+    voice "audio/voice/normal_010.wav"
+    a "彼のあだ名は言い得て妙だよね。"
+    voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
+    b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    voice "audio/voice/normal_020.wav"
+    a "ヒューズが飛んだ。"
+    voice "audio/voice/normal_020.wav"
+    a "ヒューズが飛んだ。"
+    stop music fadeout 0.15
+
+    # One-shot game effects overlap foreground speech. The reverberant impact is
+    # longer than the short whisper, so the mix remains active after its end.
+    play sound "audio/runtime/sfx/DSGNImpt_ImpactCreepyReverb_OS_01.ogg" volume 0.32
+    voice "audio/voice/whisper_022.wav"
+    s "猫はにゃーにゃーと鳴く。"
+    play sound "audio/runtime/sfx/DOORWood_FrontDoorOpen_OS_01.ogg" volume 0.34
+    voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
+    c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+
+    # Finish clean to expose leaked background state or stale audio evidence.
+    stop music
+    stop sound
+    voice "audio/voice/normal_035.wav"
+    a "彼女は息子に家で行儀よくするように言った。"
+    return
+
+
 label standard_tts:
     p "これは無音声の台詞です。"
     p "この文章はIrodori TTSの確認に使用します。"

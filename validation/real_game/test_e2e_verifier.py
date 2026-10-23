@@ -80,9 +80,9 @@ def resequence(records):
 class NativeScenarioContractTests(unittest.TestCase):
     def test_native_phase_contains_all_foreground_voice_cases_in_one_sequence(self):
         scenario = scenario_for_phase('native')
-        self.assertEqual(len(scenario), 16)
-        self.assertEqual(scenario[0]['id'], 'normal-001')
-        self.assertEqual(scenario[-1]['id'], 'normal-035')
+        self.assertEqual(len(scenario), 21)
+        self.assertEqual(scenario[0]['id'], 'clean-local-short')
+        self.assertEqual(scenario[-1]['id'], 'clean-recovery')
         self.assertTrue(all(line.get('foreground_voice') for line in scenario))
         self.assertTrue(all(line.get('advance_mode') == 'audio' and not line.get('use_tts')
                             for line in scenario))
@@ -142,6 +142,8 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual([line['outcome'] for line in result['line_results']],
                          ['next_hook_observed', 'next_hook_observed', 'no_autoadv_input'])
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
+        self.assertTrue(all('speaker_family' in line and 'audio_environment' in line
+                            for line in result['line_results']))
 
     def test_nonadvancement_reports_controller_handoff_and_fallback_setting(self):
         records = contract_records(0, 3, lines=NATIVE_SCENARIO)

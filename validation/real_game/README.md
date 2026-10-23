@@ -82,7 +82,7 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 ## 実ゲームphase
 
-`reading` は文字時間による通常送り、`native` はTTS非使用の原音16件を同一セッションで連続実行する。説明文と手動選択肢はnative専用fixture条件では表示せず、各原音台詞はAutoAdvの通常Controller入力だけで次へ進む。`tts` は実IrodoriサーバーとVoiceを必要とする。`mixed` は原音・TTS・文字待機の混在、`stress` は背景発話、非言語発声、誤帰属、不確実状態を扱う。
+`reading` は文字時間による通常送り、`native` はTTS非使用の原音21件を同一セッションで連続実行する。native専用sceneは、既存のあみたろ音声だけでなくJVS公式の個別sample 3話者、性質の異なる器楽BGM、日本語歌唱、機械環境音、背景会話、door/impact SEを横断する。BGM・ambient・背景会話は複数台詞境界を跨いで継続し、process mix全体の末尾無音を前提にしない。説明文と手動選択肢はnative専用fixture条件では表示せず、各原音台詞はAutoAdvの通常Controller入力だけで次へ進む。`tts` は実IrodoriサーバーとVoiceを必要とする。`mixed` は配布fixtureだけで成立する原音・TTS・文字待機の通常統合、`stress` は原理的な誤帰属や非言語発声等の限界条件を扱う。
 
 `native` / `mixed` / `stress` ではゲーム側oracleによる音声エンジン上の原音再生終了の独立観測を必要とする。物理出力の可聴性は要求しない。`hook` / `reading` / `tts` では原音終了oracleを合否条件にしない。ゲーム側oracleは `autoadv_oracle.rpy` にあり、台詞表示と原音再生状態だけを記録し、ゲーム進行を変更しない。
 
@@ -93,6 +93,14 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 検証用モデルはGitワークツリーや通常利用設定へ格納せず、Windowsでは既定で `%LOCALAPPDATA%\AutoAdv\validation\asr` に隔離する。版とSHA-256は `ASR_MODEL.json` に固定し、不一致の既存ファイルは上書きせず失敗する。
 
 通常起動、Fast CI、Windows Adapter Validation、AutoAdv Live Advancementではモデルを新規取得しない。**固定manifestのASR model/tokensを検証キャッシュへ必要時取得するのは、明示的に起動したWindows実機RealAudio計測だけ**とする。これはASR品質ベンチマークではなく、実機NativeAudio経路が実際に使用するruntime依存物の準備である。
+
+### RealAudio実行時メディア
+
+`REAL_AUDIO_ASSETS.json` はWindows実機RealAudioだけで使う外部メディアを固定する。巨大corpus/archiveから数ファイルだけ抜き出す方式は採らず、JVS/JVS-MuSiCの公式個別sampleや、個別配布されるBGM・ambient・SEを直接取得する。各ファイルはURL、SHA-256、最大取得サイズ、runtime配置先、ライセンスをmanifestで固定する。
+
+`run_windows_validation.ps1` は初回だけこれらを永続的な検証cache（既定のWorkBaseでは`.autoadv-validation/cache/media`）へ取得し、以後はSHA-256が一致するcacheを再利用する。既存cacheがmanifestと一致しない場合は上書きや再取得で隠さず停止する。native開始前に検証済みcacheから、そのrunのstaged Ren'Py runtimeの`game/audio/runtime/`へだけcopyする。JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifact、Issue uploadへ含めない。
+
+外部素材は元形式のまま再生する。JVS sampleの24 kHz WAVやOGGを検証都合で48 kHz PCMへ事前統一せず、ゲーム/Windows音声系でのdecode・resampleを含めてProcess Loopback実経路として観測する。素材分類やscenarioの`environment`/`speaker_family`は検証結果の層別化用metadataであり、AutoAdvのNativeAudio判断へ入力しない。
 
 ローカルで明示準備する場合は次を使う。
 
