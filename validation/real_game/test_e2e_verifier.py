@@ -36,7 +36,6 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
     add('hook_connected', pid=50, generation='host-a', connection=1)
     add('monitor_started', session=1, source='hook', game_id='g', profile_id='p',
         hook_pid=50, audio_pid=50, input_pid=50, generation='host-a', connection=1)
-    add('permit_requested', session=1)
     add('native_ready', session=1, audio_pid=50)
     for i in range(first, last):
         line = lines[i]
@@ -192,7 +191,7 @@ class RealGameVerifierContract(unittest.TestCase):
         target_at = next(i for i, r in enumerate(records) if r['event'] == 'native_ready') + 1
         records[target_at:target_at] = [
             {'event': 'validation_collection_target', 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True},
+             'continue_collection': True},
         ]
         result = validate(resequence(records), phase='native')
         self.assertTrue(result['collection_valid'], result['errors'])
@@ -203,17 +202,44 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 1)
         self.assertTrue(result['line_results'][0]['validation_recovery_input'])
 
+    def test_measurement_mode_counts_early_input_instead_of_failing_the_suite(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        target_at = next(i for i, r in enumerate(records) if r['event'] == 'native_ready') + 1
+        records[target_at:target_at] = [{
+            'event': 'validation_collection_target', 'phase': 'native', 'dialogues': 3,
+            'continue_collection': True,
+        }]
+        records = resequence(records)
+        oracle = synthetic_game_observations(records, phase='native', start_line=1)
+        first = next(r for r in oracle if r['event'] == 'line_dismissed' and r['line'] == 1)
+        first['voice_active'] = True
+        result = _validate(records, phase='native', start_line=1, oracle_records=oracle,
+                           measurement_only=True)
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertEqual(result['game_evidence']['early_inputs'], 1)
+        self.assertEqual(result['quality']['early_input_rate'], 0.3333)
+        self.assertLess(result['quality']['safe_automatic_advance_rate'],
+                        result['quality']['automatic_advance_rate'])
+        self.assertTrue(any('still playing' in issue for issue in result['quality_issues']))
+
     def test_collection_target_excludes_fixture_restart_and_engine_utterance(self):
         records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         target_at = next(i for i, r in enumerate(records) if r['event'] == 'native_ready') + 1
         records[target_at:target_at] = [
             {'event': 'validation_collection_target', 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True},
+             'continue_collection': True},
         ]
         final_completion = next(r for r in records
                                 if r.get('event') == 'native_event'
                                 and r.get('status') == 'completed' and r.get('line') == 3)
         records.remove(final_completion)
+        final_presentation = next(i for i, r in enumerate(records)
+                                  if r.get('event') == 'presentation_complete'
+                                  and r.get('line') == 3)
+        records[final_presentation + 1:final_presentation + 1] = [
+            {'event': 'advance_attempt', 'session': 1, 'line': 3},
+            {'event': 'advance_input', 'session': 1, 'line': 3},
+        ]
         records = resequence(records)
         oracle = synthetic_game_observations(records, phase='native', start_line=1)
 
@@ -240,12 +266,17 @@ class RealGameVerifierContract(unittest.TestCase):
             final_completion,
         ])
         records = resequence(records)
-        result = _validate(records, phase='native', start_line=1, oracle_records=oracle)
+        result = _validate(records, phase='native', start_line=1, oracle_records=oracle,
+                           measurement_only=True)
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertTrue(result['collection_complete'])
         self.assertEqual(result['observed_lines'], 3)
         self.assertEqual(len(result['line_results']), 3)
         self.assertTrue(result['line_results'][-1]['native_judgement_completed'])
+        self.assertTrue(result['line_results'][-1]['next_hook_observed'])
+        self.assertEqual(result['confirmed_advance_to_next_hook'], 3)
+        self.assertEqual(result['performance']['input_to_next_hook_ms']['count'], 3)
+        self.assertEqual(result['quality']['automatic_advance_rate'], 1.0)
         self.assertNotIn('invalid independent game line sequence', result['errors'])
 
     def test_json_report_preserves_success_and_failures(self):
@@ -380,17 +411,14 @@ class RealGameVerifierContract(unittest.TestCase):
         wrong_audio_process = [dict(r, audio_pid=51) if r['event'] == 'native_pcm' else r for r in records]
         self.assertFalse(validate(wrong_audio_process, phase='native')['ok'])
 
-    def test_pause_without_reauthorization_cannot_send_input(self):
+    def test_legacy_pause_diagnostic_is_not_an_authorization_contract(self):
         records = contract_records(0, 3, mode='reading')
         point = next(i for i, r in enumerate(records) if r['event'] == 'advance_attempt')
         records.insert(point, {'event': 'pause_requested', 'session': 1})
-        for i, r in enumerate(records):
-            r['at_ns'] = i * 1_000_000_000 + 1
-            if r['event'] == 'hook_output':
-                r['received_ns'] = r['at_ns'] - 1
-            if i:
-                r['seq'] = i
-        self.assertFalse(validate(records, phase='reading')['ok'])
+        resequence(records)
+        result = validate(records, phase='reading')
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertTrue(result['advancement_observed'])
 
     def test_tts_requires_drain_and_next_hook(self):
         records = contract_records(3, 6)
@@ -526,18 +554,22 @@ class RealGameVerifierContract(unittest.TestCase):
                 record['seq'] = i
         self.assertFalse(validate(invalid, phase='hook')['ok'])
 
-    def test_mixed_stop_rejects_sending_while_paused(self):
-        records = contract_records(0, 20, lines=MIXED_SCENARIO)
-        point = next(i for i, record in enumerate(records)
-                     if record['event'] == 'advance_attempt')
-        records.insert(point, {'event': 'pause_requested', 'session': 1})
-        for i, record in enumerate(records):
-            record['at_ns'] = i * 1_000_000_000 + 1
-            if record['event'] == 'hook_output':
-                record['received_ns'] = record['at_ns'] - 1
-            if i:
-                record['seq'] = i
-        self.assertFalse(validate(records, phase='mixed')['ok'])
+    def test_measurement_mode_records_product_contract_issues_without_aborting_collection(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        target_at = next(i for i, r in enumerate(records) if r['event'] == 'native_ready') + 1
+        records[target_at:target_at] = [{
+            'event': 'validation_collection_target', 'phase': 'native', 'dialogues': 3,
+            'continue_collection': True,
+        }]
+        endpoint = next(r for r in records
+                        if r['event'] == 'native_voice_end_estimate' and r['line'] == 1)
+        endpoint['evidence'] = 'invented_endpoint'
+        result = validate(resequence(records), phase='native', measurement_only=True)
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertTrue(result['measurement_valid'])
+        self.assertTrue(result['collection_complete'])
+        self.assertTrue(any('invalid native endpoint evidence' in issue
+                            for issue in result['quality_issues']))
 
 
 class SignedLatencyContract(unittest.TestCase):

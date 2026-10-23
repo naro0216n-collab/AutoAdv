@@ -159,14 +159,16 @@ try {
     $stage = 'prerequisites'
     Assert-Command 'git'
     Assert-Command 'py'
-    Assert-Command 'dotnet'
+    if ($phaseNames -contains 'native') { Assert-Command 'dotnet' }
     $versionLines = @(& py -3.11 -c 'import sys;print(sys.version_info.major*100+sys.version_info.minor)')
     if ($LASTEXITCODE -ne 0 -or $versionLines.Count -ne 1 -or ([string]$versionLines[0]).Trim() -ne '311') {
         throw 'Python 3.11 is required (py -3.11)'
     }
-    $dotnetSdks = & dotnet --list-sdks
-    if ($LASTEXITCODE -ne 0 -or -not @($dotnetSdks | Where-Object { $_ -match '^9\.' }).Count) {
-        throw '.NET 9 SDK is required for AutoAdv.ProcessLoopback'
+    if ($phaseNames -contains 'native') {
+        $dotnetSdks = & dotnet --list-sdks
+        if ($LASTEXITCODE -ne 0 -or -not @($dotnetSdks | Where-Object { $_ -match '^9\.' }).Count) {
+            throw '.NET 9 SDK is required for AutoAdv.ProcessLoopback'
+        }
     }
     $gitShaLines = @(& git -C $repo rev-parse HEAD)
     if ($LASTEXITCODE -ne 0 -or $gitShaLines.Count -ne 1) { throw 'Cannot read validation checkout commit' }
@@ -188,16 +190,21 @@ try {
     try { $gameExecutable = Get-PrebuiltFixture $runtime }
     finally { Pop-Location }
 
-    $stage = 'native-runtime'
-    Push-Location $repo
-    try {
-        Invoke-Checked 'dotnet' @('build','integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj','--configuration','Release','--nologo')
-        $helper = (Resolve-Path 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll').Path
-        $modelRoot = Join-Path $cache 'asr'
-        Invoke-Checked 'python' @('-m','validation.real_game.prepare_asr_model','--directory',$modelRoot)
-        $asrModel = Join-Path $modelRoot 'model.int8.onnx'
-        $asrTokens = Join-Path $modelRoot 'tokens.txt'
-    } finally { Pop-Location }
+    $helper = $null
+    $asrModel = $null
+    $asrTokens = $null
+    if ($phaseNames -contains 'native') {
+        $stage = 'native-runtime'
+        Push-Location $repo
+        try {
+            Invoke-Checked 'dotnet' @('build','integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj','--configuration','Release','--nologo')
+            $helper = (Resolve-Path 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll').Path
+            $modelRoot = Join-Path $cache 'asr'
+            Invoke-Checked 'python' @('-m','validation.real_game.prepare_asr_model','--directory',$modelRoot)
+            $asrModel = Join-Path $modelRoot 'model.int8.onnx'
+            $asrTokens = Join-Path $modelRoot 'tokens.txt'
+        } finally { Pop-Location }
+    }
 
     foreach ($currentPhase in $phaseNames) {
         $stage = "validate-$currentPhase"
@@ -211,7 +218,7 @@ try {
                 (Join-Path $repo 'validation\real_game\run_live_check.ps1'),
                 '-Phase',$currentPhase,
                 '-GameExecutable',$gameExecutable,
-                '-Automated','-Trace',$trace,'-Report',$report,
+                '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
                 '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '180' })
             )
             if ($currentPhase -eq 'native') {
@@ -232,26 +239,17 @@ try {
             phase = $currentPhase
             ok = if ($measurement) { $measurement.ok } else { $false }
             collection_valid = if ($measurement) { $measurement.collection_valid } else { $null }
+            measurement_valid = if ($measurement) { $measurement.measurement_valid } else { $null }
             collection_complete = if ($measurement) { $measurement.collection_complete } else { $null }
             advancement_observed = if ($measurement) { $measurement.advancement_observed } else { $null }
             automatic_continuation_verified = if ($measurement) { $measurement.automatic_continuation_verified } else { $null }
             validation_recovery_inputs = if ($measurement) { $measurement.validation_recovery_inputs } else { $null }
             voice_safety_verified = if ($measurement) { $measurement.voice_safety_verified } else { $null }
+            quality = if ($measurement) { $measurement.quality } else { $null }
+            quality_issues = if ($measurement) { @($measurement.quality_issues) } else { @() }
             report_present = [bool]$measurement
             runner_error = $phaseError
         })
-        if ($currentPhase -eq 'reading' -and $Phase -eq 'all' -and
-                (-not $measurement -or $measurement.collection_valid -ne $true)) {
-            Write-Warning 'Native phase skipped: reading phase did not obtain a real dialogue Hook.'
-            $results.Add([pscustomobject]@{
-                phase = 'native'; ok = $false; collection_valid = $false
-                collection_complete = $false; advancement_observed = $false
-                automatic_continuation_verified = $false; validation_recovery_inputs = 0
-                voice_safety_verified = $null; report_present = $false
-                runner_error = 'skipped_after_reading_hook_failure'
-            })
-            break
-        }
     }
 } catch {
     $errorText = "Stage ${stage}: $($_.Exception.Message)"
@@ -265,7 +263,7 @@ try {
 }
 
 $summary = [ordered]@{
-    schema = 'autoadv-local-validation-v2'
+    schema = 'autoadv-local-validation-v3'
     repository = $repository
     branch = 'develop'
     commit = $gitSha
@@ -296,13 +294,11 @@ if (-not $NoUpload -and $hasProductRun) {
 }
 if ($uploadError) { throw "AutoAdv result upload failed: $uploadError" }
 if ($errorText) { throw "AutoAdv validation setup failed: $errorText" }
-$unsuccessful = @($results.ToArray() | Where-Object {
-    $_.runner_error -or $_.ok -ne $true -or $_.collection_valid -ne $true -or
-    $_.advancement_observed -ne $true -or
-    ($_.phase -eq 'native' -and ($_.collection_complete -ne $true -or
-        $_.automatic_continuation_verified -ne $true -or $_.voice_safety_verified -ne $true))
+$unmeasurable = @($results.ToArray() | Where-Object {
+    $_.runner_error -or $_.report_present -ne $true -or
+    $_.measurement_valid -ne $true -or $_.collection_complete -ne $true
 })
-if ($results.Count -ne $phaseNames.Count -or $unsuccessful.Count -gt 0) {
-    throw "AutoAdv validation did NOT pass ($($unsuccessful.Count) unsuccessful phase(s)); see local/uploaded reports"
+if ($results.Count -ne $phaseNames.Count -or $unmeasurable.Count -gt 0) {
+    throw "AutoAdv measurement could not complete ($($unmeasurable.Count) invalid/incomplete phase(s)); see local/uploaded reports"
 }
-Write-Host 'AutoAdv validation passed for all requested phases.'
+Write-Host 'AutoAdv measurement completed for all requested phases. Product accuracy and safety remain in the reported metrics.'

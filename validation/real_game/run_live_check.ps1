@@ -19,7 +19,8 @@ param(
     [string] $AsrTokens = '',
     [int] $TimeoutSeconds = 120,
     [int] $MaxVoiceHoldMs = 0,
-    [switch] $UncertainFallback
+    [switch] $UncertainFallback,
+    [switch] $MeasurementOnly
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -196,7 +197,7 @@ public static class AudioRenderProbe {
     $env:AUTOADV_VALIDATION_TRACE = $Trace
     Push-Location $repo
     try {
-        # Normal advancement remains in the production GUI Controller. Native RealAudio may use a separately traced recovery input only after a product hold/failure, solely to expose later collection cases.
+        # Normal advancement remains in the production GUI Controller. Native RealAudio may use a separately traced recovery input after a measured product hold, solely to expose later collection cases.
         if ($Automated) {
             $gameExe = $resolvedGameExe
             $config = @{
@@ -206,7 +207,7 @@ public static class AudioRenderProbe {
                     'hook' { 1 }; 'reading' { 3 }; 'native' { 16 };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
-                force_continue_on_failure = ($Phase -eq 'native');
+                continue_collection = ($Phase -eq 'native');
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool]$UncertainFallback
             }
@@ -235,6 +236,7 @@ public static class AudioRenderProbe {
         $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace,
                        '--phase', $Phase, '--report', $Report)
         if ($MaxVoiceHoldMs -gt 0) { $arguments += @('--max-voice-hold-ms', [string]$MaxVoiceHoldMs) }
+        if ($MeasurementOnly) { $arguments += '--measurement-only' }
         if ($Oracle) { $arguments += @('--oracle', $Oracle) }
         if ($StartLine -gt 0) { $arguments += @('--start-line', [string]$StartLine) }
         if (Test-Path -LiteralPath $Trace) {
@@ -251,9 +253,9 @@ public static class AudioRenderProbe {
         }
         $LASTEXITCODE = $auditExit
         if ($LASTEXITCODE -ne 0) {
-            throw "Real game evidence failed verification (phase=$Phase, trace=$Trace)"
+            throw "Real game measurement/verification could not complete (phase=$Phase, trace=$Trace)"
         }
-        Write-Host "Collected and audited AutoAdv product observations (phase=$Phase). Check report advancement_observed and voice_safety_verified independently."
+        Write-Host "Collected and audited AutoAdv product observations (phase=$Phase). Product quality is reported as measurements, independently from collection validity."
     } finally {
         Pop-Location
     }

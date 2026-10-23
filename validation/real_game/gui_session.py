@@ -1,10 +1,10 @@
 """Prepare and observe the ordinary AutoAdv GUI for live validation.
 
-Normal progression is owned entirely by the product Controller.  In native
-RealAudio collection only, after the product has already entered a recorded
-hold/failure, the validation driver may send one explicitly traced recovery
-input so later fixture cases remain observable.  Recovery is never product
-success and never reimplements Hook, presentation, or audio judgement policy.
+Normal progression is owned entirely by the product Controller. In native
+RealAudio measurement, a product hold is recorded as that case's outcome and
+the validation driver may then send one explicitly traced recovery input only
+to expose later fixture cases. Recovery is never product success and never
+reimplements Hook, presentation, or audio judgement policy.
 """
 from __future__ import annotations
 
@@ -14,14 +14,6 @@ from pathlib import Path
 import time
 
 CALIBRATION = 'AutoAdvフック校正専用'
-RECOVERABLE_VALIDATION_PAUSES = frozenset((
-    'native_inconclusive_hold',
-    'native_audio_failure',
-    'input_failure_no_retry',
-    'next_line_timeout',
-))
-
-
 def calibration_candidates(candidates):
     """Use the product's extraction preview, not raw substring matching.
 
@@ -64,9 +56,9 @@ def load_session(environment=None):
         raise ValueError('invalid validation phase')
     if int(options['timeout_seconds']) < 10:
         raise ValueError('validation session must have a finite reasonable timeout')
-    if ('force_continue_on_failure' in options and
-            type(options['force_continue_on_failure']) is not bool):
-        raise ValueError('force_continue_on_failure must be boolean')
+    if ('continue_collection' in options and
+            type(options['continue_collection']) is not bool):
+        raise ValueError('continue_collection must be boolean')
     return options
 
 
@@ -108,7 +100,7 @@ class SessionDriver:
             runtime_line=(runtime.token.line if runtime.token is not None else 0),
             runtime_pause=runtime.pause_reason or '',
         )
-        print('AutoAdv live test failed [' + self.state + ']: ' + why
+        print('AutoAdv live measurement stopped [' + self.state + ']: ' + why
               + ' | product state: ' + json.dumps(details, ensure_ascii=False), flush=True)
         self.trace.emit('validation_driver_failure', reason=why,
                                      stage=self.state, **details)
@@ -153,14 +145,13 @@ class SessionDriver:
         if token is None or not self.product.confirm_external_advance(token):
             raise RuntimeError('validation recovery lost the active utterance boundary')
 
-    def _recover_failed_line(self, runtime):
+    def _continue_collection_after_hold(self, runtime):
         token = runtime.token
         if token is None:
             return False
         key = (token.session, token.line)
         reason = runtime.pause_reason or ''
-        if (not self.options.get('force_continue_on_failure') or
-                reason not in RECOVERABLE_VALIDATION_PAUSES):
+        if not self.options.get('continue_collection') or not reason:
             return False
         # Give queued product diagnostics (handoff/capture summary) one GUI
         # turn to reach the trace before the validation-only recovery input.
@@ -295,8 +286,8 @@ class SessionDriver:
                     self.trace.emit(
                         'validation_collection_target', phase=self.options['phase'],
                         dialogues=int(self.options.get('dialogues', 0)),
-                        force_continue_on_failure=bool(
-                            self.options.get('force_continue_on_failure', False)))
+                        continue_collection=bool(
+                            self.options.get('continue_collection', False)))
                     self.collection_target_emitted = True
                 if self.options['phase'] != 'hook':
                     self.w.permit()
@@ -325,11 +316,10 @@ class SessionDriver:
                     self.collection_done_at = now
                     return
                 if runtime.token is not None and runtime.pause_reason:
-                    # For RealAudio data collection, a product hold remains a
-                    # failure but the harness may advance the fixture once so
-                    # later cases are still observed in this same product
-                    # session. Never do this after the final requested case.
-                    if not final_line and self._recover_failed_line(runtime):
+                    # A product hold is a measured outcome, not a suite stop.
+                    # Advance the fixture once only to expose later cases in the
+                    # same product session. Never do this after the final case.
+                    if not final_line and self._continue_collection_after_hold(runtime):
                         return
                     if not final_line:
                         self.w.close()

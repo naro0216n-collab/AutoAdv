@@ -30,7 +30,7 @@ python -m unittest `
   validation.real_game.test_stress_verifier -v
 ```
 
-`validation/real_game` 全体への一括 `unittest discover` をRealAudio検証として使用しない。検証器の単体契約が通っても、Windows実ゲーム検収済みとは扱わない。
+`validation/real_game` 全体への一括 `unittest discover` をRealAudio検証として使用しない。検証器の単体契約が通っても、Windows実ゲーム計測済みとは扱わない。
 
 ### 3. Hosted WindowsのHOOK・文字送り経路
 
@@ -41,21 +41,21 @@ HostedのAutoAdv Live Advancementは**既に構築済みのWindowsゲーム**か
   -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated
 ```
 
-Hosted検収のゲーム入力は常にAutoAdvのControllerとWindows入力が担当し、検証driverは入力を代行しない。Hostedでこの経路が成立してもRealAudioを検収済みとは扱わない。RealAudioだけは、製品が既に保留・失敗した台詞の後続ケースを観測するため、失敗を別記録した後の回復入力を許容する。この入力は製品成功へ算入しない。
+Hosted検収のゲーム入力は常にAutoAdvのControllerとWindows入力が担当し、検証driverは入力を代行しない。Hostedでこの経路が成立してもRealAudioを計測済みとは扱わない。RealAudioだけは、製品が自力で次ケースへ到達できない保留の後も全ケースの観測を続けるため、結果を記録した後の回復入力を許容する。この入力は製品成功へ算入しない。
 
-### 4. Windows実機RealAudio経路
+### 4. Windows実機RealAudio計測
 
-RealAudioはGitHub hosted runnerでは実行せず、実際にAutoAdvを利用する対話可能なWindows実機でのみ検収する。明示的な局所実行では次のNative phaseを使える。
+RealAudioはGitHub hosted runnerでは実行せず、実際にAutoAdvを利用する対話可能なWindows実機で自動進行精度を計測する。明示的な局所実行では次のNative phaseを使える。
 
 ```powershell
 .\validation\real_game\run_live_check.ps1 -Phase native `
-  -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated `
+  -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated -MeasurementOnly `
   -ProcessLoopbackHelper C:\path\to\AutoAdv.ProcessLoopback.dll `
   -AsrModel C:\path\to\model.int8.onnx `
   -AsrTokens C:\path\to\tokens.txt
 ```
 
-通常の実機検収は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行する。AutoAdv自身の送りが成立しない台詞ではその失敗を保持し、検証driverが`validation_recovery_input`を記録してから一度だけゲームを進め、後続ケースのPCM/ASR/VAD/Controller観測を継続する。回復入力後の次HookはAutoAdv成功に数えず、run全体の「データ収集完了」と「無介入連続自動進行成功」を分離して報告する。強制入力の直前に`confirm_external_advance()`で既知の境界だけを通知し、同一本文の後続ケースも収集可能にするが、AutoAdvの送り成功や音声判断へは算入しない。ケース別再起動は行わない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
+通常の実機計測は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。両phaseはmeasurement modeで実行し、一方の品質低下を理由に他方をskipしない。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行する。AutoAdv自身の送りが成立しない台詞ではその観測結果を保持し、検証driverが`validation_recovery_input`を記録してから一度だけゲームを進め、後続ケースのPCM/ASR/VAD/Controller観測を継続する。回復入力後の次HookはAutoAdv成功に数えず、要求ケース数に対する自動進行率、安全な自動進行率、回復率、早送り率、過剰保留率、誤帰属率を報告する。品質値に固定合格点は置かず、trace/oracle破損、実音声経路やfixtureの未成立、要求ケースの収集未完了など計測不能だけをrunner異常とする。強制入力の直前に`confirm_external_advance()`で既知の境界だけを通知し、同一本文の後続ケースも収集可能にするが、AutoAdvの送り成功や音声判断へは算入しない。ケース別再起動は行わない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
 
 RealAudioはFast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／Fullテストへ含めない。Hosted runnerの音声endpoint有無を製品のNativeAudio成否に読み替えない。
 
@@ -92,7 +92,7 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 検証用モデルはGitワークツリーや通常利用設定へ格納せず、Windowsでは既定で `%LOCALAPPDATA%\AutoAdv\validation\asr` に隔離する。版とSHA-256は `ASR_MODEL.json` に固定し、不一致の既存ファイルは上書きせず失敗する。
 
-通常起動、Fast CI、Windows Adapter Validation、AutoAdv Live Advancementではモデルを新規取得しない。**固定manifestのASR model/tokensを検証キャッシュへ必要時取得するのは、明示的に起動したWindows実機RealAudio検収だけ**とする。これはASR品質ベンチマークではなく、実機NativeAudio経路が実際に使用するruntime依存物の準備である。
+通常起動、Fast CI、Windows Adapter Validation、AutoAdv Live Advancementではモデルを新規取得しない。**固定manifestのASR model/tokensを検証キャッシュへ必要時取得するのは、明示的に起動したWindows実機RealAudio計測だけ**とする。これはASR品質ベンチマークではなく、実機NativeAudio経路が実際に使用するruntime依存物の準備である。
 
 ローカルで明示準備する場合は次を使う。
 
@@ -125,6 +125,6 @@ python -m validation.real_game.stress_asr `
 - 検証用draft PRの close → reopen: Windows Adapter Validation。
 - PRタイトルへ `[RUN LUNA NATIVE]` を付ける編集: Luna Native Source and ABI Validation。
 - PRタイトルを `[RUN AUTOADV LIVE]...` にする編集: AutoAdv Live Advancement。prebuilt fixtureを取得し、Hostedの`reading`実製品経路だけを実行する。
-- RealAudio: GitHub Actions外で`AutoAdv-Windows-Validate.cmd`を実際のWindowsデスクトップから明示実行し、`reading`と`native`を検収する。
+- RealAudio: GitHub Actions外で`AutoAdv-Windows-Validate.cmd`を実際のWindowsデスクトップから明示実行し、`reading`と`native`を計測する。
 
-検証用PRはマージしない。Fast CI、Windows adapter、Luna native、Hosted Live Advancement、Windows実機RealAudio、ASR品質測定は証拠階層が異なり、相互に合格を代用しない。
+検証用PRはマージしない。Fast CI、Windows adapter、Luna native、Hosted Live Advancement、Windows実機RealAudio、ASR品質測定は証拠階層が異なり、相互の証拠を代用しない。

@@ -102,7 +102,7 @@ class LiveGuiSessionContract(unittest.TestCase):
                                 actions.append(('trace', name, fields)))
         driver = SessionDriver(window, SimpleNamespace(),
                                {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 16,
-                                'force_continue_on_failure': True}, trace,
+                                'continue_collection': True}, trace,
                                clock=lambda: 0.0)
         driver.state = 'activate'
         driver._release = actions.append
@@ -115,7 +115,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         actions, traces, recoveries, boundaries = [], [], [], []
         clock = [1.0]
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
-                                  pause_reason='native_inconclusive_hold', sent=False,
+                                  pause_reason='target_unavailable', sent=False,
                                   target=SimpleNamespace(hwnd=77),
                                   profile=SimpleNamespace(input_key=13))
         product = SimpleNamespace(runtime_state=lambda: runtime)
@@ -125,7 +125,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         driver = SessionDriver(
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True}, trace,
+             'continue_collection': True}, trace,
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: (
                 boundaries.append(state.token.line), setattr(runtime, 'pause_reason', None)))
@@ -138,7 +138,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(boundaries, [1])
         self.assertEqual(actions, [])
         self.assertEqual(traces[-1][0], 'validation_recovery_input')
-        self.assertEqual(traces[-1][1]['reason'], 'native_inconclusive_hold')
+        self.assertEqual(traces[-1][1]['reason'], 'target_unavailable')
         clock[0] = 1.8
         driver.tick()
         self.assertEqual(recoveries, [1])
@@ -160,7 +160,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         driver = SessionDriver(
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True}, trace,
+             'continue_collection': True}, trace,
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: None)
         driver.state = 'running'
@@ -183,7 +183,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         driver = SessionDriver(
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True}, trace,
+             'continue_collection': True}, trace,
             clock=lambda: clock[0],
             recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: None)

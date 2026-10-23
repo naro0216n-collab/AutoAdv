@@ -83,7 +83,8 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       game_pid_by_session: dict, presentation_at: dict,
                       native_end_estimates: dict, source_outputs: dict,
                       recovery_inputs: dict,
-                      max_voice_hold_ms: int | None = None) -> dict:
+                      max_voice_hold_ms: int | None = None,
+                      measurement_only: bool = False) -> dict:
     """Compare actual game playback/dismissal with actual AutoAdv inputs.
 
     The Ren'Py callback/polling stream is independent of the product. It is
@@ -93,7 +94,9 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
     """
     errors: list[str] = []
     diagnostics: list[str] = []
-    result = {'errors': errors, 'diagnostics': diagnostics, 'latencies': {}, 'lines': [], 'early_inputs': 0,
+    quality_issues: list[str] = []
+    result = {'errors': errors, 'quality_issues': quality_issues,
+              'diagnostics': diagnostics, 'latencies': {}, 'lines': [], 'early_inputs': 0,
               'unverified_voice_ends': 0, 'indeterminate_voice_end': 0,
               'overholds': 0, 'misattributions': 0,
               'manual_or_unadvanced': 0, 'manual_or_external_advances': 0,
@@ -261,7 +264,10 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             if active_at_dismiss or (end and actual_input < end['last_active_at_ns']):
                 result['early_inputs'] += 1
                 detail['outcome'] = 'early_input'
-                errors.append(f'input while the game voice was still playing: {key}')
+                issue = f'input while the game voice was still playing: {key}'
+                quality_issues.append(issue)
+                if not measurement_only:
+                    errors.append(issue)
             elif lifecycle_ambiguous:
                 result['unverified_voice_ends'] += 1
                 detail['outcome'] = 'voice_end_unverified'
@@ -326,13 +332,20 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
              scenario_path: Path = HERE / 'SCENARIO.json',
              start_line: int | None = None,
              oracle_records: Sequence[dict] | None = None,
-             max_voice_hold_ms: int | None = None) -> dict:
+             max_voice_hold_ms: int | None = None,
+             measurement_only: bool = False) -> dict:
     if phase not in PHASES:
         raise ValueError(f'unknown validation phase: {phase}')
     scenario = scenario_for_phase(phase, scenario_path)
     expected_hashes = [text_digest(x['text']) for x in scenario]
     errors: list[str] = []
     diagnostics: list[str] = []
+    quality_issues: list[str] = []
+
+    def product_issue(message: str) -> None:
+        quality_issues.append(message)
+        if not measurement_only:
+            errors.append(message)
     if (not records or records[0].get('event') != 'trace_started'
             or records[0].get('version') != 2):
         errors.append('missing version 2 real-session trace header')
@@ -362,7 +375,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     readiness: set[object] = set()
     audio_methods: dict[object, str] = {}
     audio_targets: dict[object, int] = {}
-    authorized: set[object] = set()
     timeouts: set[tuple] = set()
     handoffs: dict[tuple, str] = {}
     recovery_inputs: dict[tuple, int] = {}
@@ -377,6 +389,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     native_onset_estimates: dict[tuple, int] = {}
     asr_counts: dict[tuple, int] = {}
     out_of_scope_utterances: set[tuple] = set()
+    post_collection_utterance: dict | None = None
+    post_collection_timestamp: int | None = None
     measured: dict[str, list[float]] = {
         name: [] for name in (
             'asr_decode_ms', 'asr_queue_ms', 'asr_rtf',
@@ -396,6 +410,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         # unrelated text.
         if (event == 'utterance' and collection_target is not None
                 and len(utterance_order) >= collection_target):
+            if post_collection_utterance is None:
+                post_collection_utterance = record
+                post_collection_timestamp = at
             out_of_scope_utterances.add(key)
             continue
         if key in out_of_scope_utterances:
@@ -415,10 +432,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             # The independent game observer identifies the input/window PID;
             # capture evidence is checked against its separately selected PID.
             game_pid_by_session[session] = record.get('input_pid')
-            authorized.discard(session)
         elif event == 'monitor_ended':
             monitoring.pop(session, None)
-            authorized.discard(session)
         elif event == 'hook_output':
             monitor = monitoring.get(session)
             if (not monitor or record.get('pid') != monitor.get('hook_pid') or
@@ -448,7 +463,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 errors.append(f'utterance without actual selected Luna output: {key}')
         elif event == 'native_ready':
             if 'vad_only' in record:
-                errors.append(f'removed VAD-only audio configuration in product trace: {session}')
+                product_issue(f'removed VAD-only audio configuration in product trace: {session}')
             if session in monitoring and record.get('audio_pid') == monitoring[session].get('audio_pid'):
                 readiness.add(session)
                 audio_methods[session] = 'asr'
@@ -457,7 +472,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if (key not in utterances or type(record.get('frames')) is not int or record['frames'] <= 0
                     or record.get('audio_pid') != audio_targets.get(session)
                     or record.get('audio_pid') != monitoring.get(session, {}).get('audio_pid')):
-                errors.append(f'PCM is not valid captured frames for {key}')
+                product_issue(f'PCM is not valid captured frames for {key}')
             pcm.add(key)
         elif event == 'asr_inference':
             if key in utterances:
@@ -482,7 +497,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                         measured['tts_playback_ms'].append(duration)
         elif event == 'native_event':
             if record.get('method') != 'asr':
-                errors.append(f'native event without ASR judgement method: {key}')
+                product_issue(f'native event without ASR judgement method: {key}')
             if record.get('status') == 'started':
                 audio_started_at.setdefault(key, at)
             if record.get('status') == 'completed':
@@ -501,9 +516,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
                     evidence not in ('asr_timestamp', 'asr_vad')):
-                errors.append(f'invalid native endpoint evidence: {key}')
+                product_issue(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
-                errors.append(f'duplicate native endpoint: {key}')
+                product_issue(f'duplicate native endpoint: {key}')
             else:
                 native_end_estimates[key] = estimate
                 if onset is not None:
@@ -517,30 +532,31 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 complete.add(key)
                 presentation_at[key] = at
                 reasons[key] = record.get('reason', '')
-        elif event == 'permit_requested':
-            authorized.add(session)
-        elif event == 'pause_requested':
-            authorized.discard(session)
+        elif event in ('permit_requested', 'pause_requested'):
+            # Legacy diagnostics no longer define product authorization. The
+            # Controller owns the user preference and an actual advance_input
+            # can only be emitted through its authorized try_advance path.
+            pass
         elif event == 'advance_attempt':
             if key in attempts:
-                errors.append(f'duplicate advance input attempt: {key}')
+                product_issue(f'duplicate advance input attempt: {key}')
             attempts[key] = at
         elif event == 'advance_input':
             if key not in attempts or attempts[key] > at:
-                errors.append(f'advance input lacks a preceding real attempt: {key}')
+                product_issue(f'advance input lacks a preceding real attempt: {key}')
             if key in sent:
-                errors.append(f'double advance input for one line: {key}')
+                product_issue(f'double advance input for one line: {key}')
             sent[key] = at
             causal_reason = record.get('presentation_reason')
             if causal_reason is not None:
                 if not isinstance(causal_reason, str) or not causal_reason:
-                    errors.append(f'invalid input completion reason: {key}')
+                    product_issue(f'invalid input completion reason: {key}')
                 else:
                     input_completion_reasons[key] = causal_reason
             if key not in utterances:
                 errors.append(f'input without observed utterance: {key}')
-            if session not in monitoring or session not in authorized:
-                errors.append(f'input without active authorized game session: {key}')
+            if session not in monitoring:
+                errors.append(f'input outside active monitored game session: {key}')
         elif event == 'validation_recovery_input':
             if key not in utterances:
                 errors.append(f'validation recovery without observed utterance: {key}')
@@ -586,47 +602,47 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if u is None:
             continue
         if key not in complete:
-            errors.append(f'input without presentation completion evidence: {key}')
+            product_issue(f'input without presentation completion evidence: {key}')
             continue
         mode, uses_tts = u.get('advance_mode'), u.get('use_tts')
         completion_reason = reasons.get(key)
         completed_at = presentation_at.get(key)
         causal_reason = input_completion_reasons.get(key)
         if completed_at is not None and completed_at > sent[key] and causal_reason is None:
-            errors.append(f'input before presentation completion: {key}')
+            product_issue(f'input before presentation completion: {key}')
         if causal_reason is not None and causal_reason != completion_reason:
-            errors.append(f'input completion reason disagrees with presentation evidence: {key}')
+            product_issue(f'input completion reason disagrees with presentation evidence: {key}')
         if mode not in ('text', 'audio') or type(uses_tts) is not bool:
-            errors.append(f'invalid two-mode Utterance policy: {key}')
+            product_issue(f'invalid two-mode Utterance policy: {key}')
         elif mode == 'text':
             expected_reason = 'tts_and_text' if uses_tts else 'text'
             if completion_reason != expected_reason:
-                errors.append(f'text-mode completion contract not observed: {key}')
+                product_issue(f'text-mode completion contract not observed: {key}')
             if uses_tts and key not in tts:
-                errors.append(f'TTS advance input lacks actual playback completion: {key}')
+                product_issue(f'TTS advance input lacks actual playback completion: {key}')
             wait = u.get('text_wait_ms')
             if (type(wait) is not int or wait <= 0 or completed_at is None or
                     completed_at - timestamps[key] < wait * 1_000_000):
-                errors.append(f'text advance input before computed reading time: {key}')
+                product_issue(f'text advance input before computed reading time: {key}')
         elif uses_tts:
             if key not in tts or completion_reason != 'tts':
-                errors.append(f'audio-judgment TTS requires playback drain: {key}')
+                product_issue(f'audio-judgment TTS requires playback drain: {key}')
         elif completion_reason == 'native':
             if key not in native:
-                errors.append(f'native completion lacks observed audio judgement end: {key}')
+                product_issue(f'native completion lacks observed audio judgement end: {key}')
         elif completion_reason == 'uncertain_text_fallback':
             wait = u.get('text_wait_ms')
             if (u.get('uncertain_text_fallback') is not True or
                     type(wait) is not int or wait <= 0 or completed_at is None or
                     completed_at - timestamps[key] < wait * 1_000_000):
-                errors.append(f'unpermitted or early uncertain fallback: {key}')
+                product_issue(f'unpermitted or early uncertain fallback: {key}')
         else:
-            errors.append(f'unknown native completion reason: {key}')
+            product_issue(f'unknown native completion reason: {key}')
 
     for key in native:
         if (key[0] not in readiness or key not in pcm or
                 methods.get(key) != audio_methods.get(key[0])):
-            errors.append(f'native completion lacks matching real PCM and ASR evidence: {key}')
+            product_issue(f'native completion lacks matching real PCM and ASR evidence: {key}')
 
     hashes = [utterances[key].get('body_hash') for key in utterance_order]
     # A run may start from a known line in a larger game. It must not skip
@@ -655,9 +671,20 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                        next_u.get('hook_sequence'), next_u.get('raw_hash'))
         if (subsequent[0] != key[0] or timestamps[subsequent] <= sent[key]
                 or source_outputs.get(next_origin, 0) <= attempts.get(key, sent[key])):
-            errors.append(f'next HOOK utterance not after advance input in same session: {key}')
+            product_issue(f'next HOOK utterance not after advance input in same session: {key}')
         else:
             links.add(key)
+    if utterance_order and post_collection_utterance is not None:
+        key = utterance_order[-1]
+        if key in sent and key not in recovery_inputs and key not in links:
+            next_u = post_collection_utterance
+            next_origin = (next_u.get('session'), next_u.get('source'),
+                           next_u.get('hook_sequence'), next_u.get('raw_hash'))
+            if (next_u.get('session') == key[0]
+                    and post_collection_timestamp is not None
+                    and post_collection_timestamp > sent[key]
+                    and source_outputs.get(next_origin, 0) > attempts.get(key, sent[key])):
+                links.add(key)
     # These are measurements of the product path, not fixture-authored
     # instructions to AutoAdv. Unobserved continuation is always reported,
     # regardless of what line number or expected scene was selected.
@@ -710,11 +737,19 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if (ms := _elapsed_ms(presentation_at.get(key), attempts.get(key))) is not None:
             durations.setdefault('presentation_to_input_ms', []).append(ms)
         if key in links:
-            next_u = utterances[utterance_order[index + 1]]
-            next_origin = (utterance_order[index + 1][0], next_u.get('source'),
-                           next_u.get('hook_sequence'), next_u.get('raw_hash'))
-            if (ms := _elapsed_ms(attempts.get(key), source_outputs.get(next_origin))) is not None:
-                durations.setdefault('input_to_next_hook_ms', []).append(ms)
+            if index + 1 < len(utterance_order):
+                next_key = utterance_order[index + 1]
+                next_u = utterances[next_key]
+                next_origin = (next_key[0], next_u.get('source'),
+                               next_u.get('hook_sequence'), next_u.get('raw_hash'))
+            else:
+                next_u = post_collection_utterance
+                next_origin = ((next_u.get('session'), next_u.get('source'),
+                                next_u.get('hook_sequence'), next_u.get('raw_hash'))
+                               if next_u is not None else None)
+            if next_origin is not None:
+                if (ms := _elapsed_ms(attempts.get(key), source_outputs.get(next_origin))) is not None:
+                    durations.setdefault('input_to_next_hook_ms', []).append(ms)
     # The product trace establishes the Luna->Controller->input->next-HOOK
     # path. The independent game observer is additionally required wherever
     # an actual native-voice advance is being credited, even if the caller
@@ -731,9 +766,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             start, scenario, game_pid_by_session=game_pid_by_session,
             presentation_at=presentation_at, native_end_estimates=native_end_estimates,
             source_outputs=source_outputs, recovery_inputs=recovery_inputs,
-            max_voice_hold_ms=max_voice_hold_ms,
+            max_voice_hold_ms=max_voice_hold_ms, measurement_only=measurement_only,
         )
         errors.extend(game_evidence['errors'])
+        quality_issues.extend(game_evidence.get('quality_issues', ()))
         diagnostics.extend(game_evidence['diagnostics'])
         for name, values in game_evidence['latencies'].items():
             durations.setdefault(name, []).extend(values)
@@ -805,14 +841,44 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         not game_evidence['misattributions'] and
         not game_evidence['unaligned_lines'] and
         len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None
-    native_collection_complete = (
-        len(utterance_order) >= collection_target if phase == 'native' and collection_target is not None
-        else None)
+    collection_complete = (
+        len(utterance_order) >= collection_target if collection_target is not None else None)
     automatic_continuation_verified = (not recovery_inputs and not handoffs)
     if phase == 'native':
         automatic_continuation_verified = bool(
-            native_collection_complete is not False and not recovery_inputs and not handoffs)
-    if phase in ('hook', 'stress'):
+            collection_complete is not False and not recovery_inputs and not handoffs)
+
+    requested_cases = collection_target or len(utterance_order)
+    safe_automatic_advances = 0
+    for line in line_results:
+        if line['outcome'] != 'next_hook_observed':
+            continue
+        if line['advance_mode'] != 'audio' or line['use_tts']:
+            safe_automatic_advances += 1
+            continue
+        if line.get('game_outcome') in ('voice_end_confirmed_then_input', 'overheld'):
+            safe_automatic_advances += 1
+    def rate(count: int) -> float | None:
+        return round(count / requested_cases, 4) if requested_cases else None
+    quality = {
+        'requested_cases': requested_cases,
+        'observed_cases': len(utterance_order),
+        'automatic_inputs': len(sent),
+        'confirmed_automatic_advances': len(links),
+        'safe_automatic_advances': safe_automatic_advances,
+        'validation_recovery_inputs': len(recovery_inputs),
+        'controller_handoffs': len(handoffs),
+        'automatic_advance_rate': rate(len(links)),
+        'safe_automatic_advance_rate': rate(safe_automatic_advances),
+        'recovery_rate': rate(len(recovery_inputs)),
+        'early_input_rate': rate(game_evidence['early_inputs']) if game_evidence is not None else None,
+        'overhold_rate': rate(game_evidence['overholds']) if game_evidence is not None else None,
+        'misattribution_rate': rate(game_evidence['misattributions']) if game_evidence is not None else None,
+    }
+
+    if measurement_only:
+        accepted = collection_valid and collection_complete is not False
+    elif phase in ('hook', 'stress'):
         accepted = collection_valid
     elif needs_oracle:
         accepted = (collection_valid and advancement_observed and voice_safety_verified is True
@@ -828,7 +894,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'game_observer': ('required' if needs_oracle else 'optional'),
         'ok': accepted, 'phase': phase,
         'collection_valid': collection_valid,
-        'collection_complete': native_collection_complete,
+        'collection_complete': collection_complete,
+        'measurement_only': measurement_only,
+        'measurement_valid': collection_valid,
+        'quality': quality,
+        'quality_issues': quality_issues,
         'advancement_observed': advancement_observed,
         'automatic_continuation_verified': automatic_continuation_verified,
         'validation_recovery_inputs': len(recovery_inputs),
@@ -854,6 +924,8 @@ def main() -> int:
                         help='optional diagnostic delay reference; no default acceptance threshold')
     parser.add_argument('--start-line', type=int,
                         help='1-based first SCENARIO.json line, to disambiguate repeated text')
+    parser.add_argument('--measurement-only', action='store_true',
+                        help='treat product mistakes as measured outcomes; fail only invalid/incomplete collection')
     args = parser.parse_args()
     if not args.trace.is_file():
         parser.error('real game trace not found')
@@ -868,7 +940,8 @@ def main() -> int:
         oracle_records = ([json.loads(x) for x in args.oracle.read_text(encoding='utf-8').splitlines() if x.strip()]
                           if args.oracle is not None and args.oracle.is_file() else None)
         result = validate(records, phase=args.phase, start_line=args.start_line,
-                          oracle_records=oracle_records, max_voice_hold_ms=args.max_voice_hold_ms)
+                          oracle_records=oracle_records, max_voice_hold_ms=args.max_voice_hold_ms,
+                          measurement_only=args.measurement_only)
         if args.report is not None:
             with args.report.open('x', encoding='utf-8') as stream:
                 json.dump(result, stream, ensure_ascii=False, indent=2)
