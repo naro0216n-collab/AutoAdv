@@ -48,8 +48,11 @@ jobs:
             echo "Expected exactly one active transport target, found ${#branches[@]}" >&2
             exit 1
           fi
-          echo "TARGET_BRANCH=${branches[0]}" >> "$GITHUB_ENV"
-          echo "TRANSPORT_DIR=.publish/transport/${branches[0]}" >> "$GITHUB_ENV"
+          target="${branches[0]}"
+          before="$(git rev-parse "refs/remotes/origin/${target}")"
+          echo "TARGET_BRANCH=${target}" >> "$GITHUB_ENV"
+          echo "TARGET_BEFORE=${before}" >> "$GITHUB_ENV"
+          echo "TRANSPORT_DIR=.publish/transport/${target}" >> "$GITHUB_ENV"
 
       - name: Validate local transport and bundle
         shell: bash
@@ -63,6 +66,23 @@ jobs:
           set -euo pipefail
           python scripts/publish_gateway_validate.py --verify-trusted-workflow
           git push origin "${PUBLISH_COMMIT}:refs/heads/${TARGET_BRANCH}"
+
+      - name: Dispatch validation fixture build when its inputs changed
+        if: env.TARGET_BRANCH == 'develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$TARGET_BEFORE" "$PUBLISH_COMMIT" -- \
+            validation/real_game/renpy validation/real_game/fixture_runtime.py; then
+            echo 'Validation fixture inputs unchanged; no fixture build requested.'
+            exit 0
+          fi
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/validation-fixture.yml/dispatches" \
+            -f ref="${TARGET_BRANCH}"
 
       - name: Dispatch Fast CI for published branch
         env:
