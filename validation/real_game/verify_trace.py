@@ -306,7 +306,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     audio_started_at: dict[tuple, int] = {}
     audio_completed_at: dict[tuple, int] = {}
     native_end_estimates: dict[tuple, int] = {}
-    vad_onset_estimates: dict[tuple, int] = {}
+    native_onset_estimates: dict[tuple, int] = {}
     asr_counts: dict[tuple, int] = {}
     measured: dict[str, list[float]] = {
         name: [] for name in (
@@ -410,19 +410,22 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 native.add(key)
         elif event == 'native_voice_end_estimate':
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
-            # These are process-loopback/VAD estimates, not known game source
-            # playback endpoints. Bounds are checked, but not against HOOK:
-            # the voice may have started and ended before the HOOK arrived.
+            evidence = record.get('evidence')
+            # These are product-side process-loopback estimates, not known game
+            # source playback endpoints. ASR timestamps are decode-window token
+            # positions; VAD/stability are supporting evidence. Bounds are
+            # checked, but an acoustic onset is optional when VAD never fires.
             if (key not in utterances or type(estimate) is not int or
-                    type(onset) is not int or onset > estimate or
-                    estimate > at or estimate < 0 or onset < 0 or
-                    record.get('evidence') not in ('asr_vad', 'asr_timestamp')):
+                    estimate > at or estimate < 0 or
+                    (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
+                    evidence not in ('asr_timestamp', 'asr_vad')):
                 errors.append(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
                 errors.append(f'duplicate native endpoint: {key}')
             else:
                 native_end_estimates[key] = estimate
-                vad_onset_estimates[key] = onset
+                if onset is not None:
+                    native_onset_estimates[key] = onset
         elif event == 'tts_result':
             if record.get('success') is True:
                 tts.add(key)
@@ -503,7 +506,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     for key in native:
         if (key[0] not in readiness or key not in pcm or
                 methods.get(key) != audio_methods.get(key[0])):
-            errors.append(f'native completion lacks matching real PCM and ASR/VAD evidence: {key}')
+            errors.append(f'native completion lacks matching real PCM and ASR evidence: {key}')
 
     hashes = [utterances[key].get('body_hash') for key in utterance_order]
     # A run may start from a known line in a larger game. It must not skip
@@ -565,11 +568,11 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 durations.setdefault('native_estimated_end_to_decision_ms', []).append(ms)
             if (ms := _signed_elapsed_ms(native_end_estimates[key], attempts.get(key))) is not None:
                 durations.setdefault('native_estimated_end_to_input_ms', []).append(ms)
-            if (onset := vad_onset_estimates.get(key)) is not None:
+            if (onset := native_onset_estimates.get(key)) is not None:
                 # Signed delta: negative means observed voice began before the HOOK.
                 source_time = source_outputs.get(origin)
                 if source_time is not None:
-                    durations.setdefault('hook_to_vad_onset_ms', []).append(
+                    durations.setdefault('hook_to_native_onset_ms', []).append(
                         round((onset - source_time) / 1_000_000, 3))
         if (ms := _elapsed_ms(timestamps.get(key), audio_started_at.get(key))) is not None:
             durations.setdefault('utterance_to_native_onset_ms', []).append(ms)

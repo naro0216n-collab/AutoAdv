@@ -116,7 +116,7 @@ python -m validation.real_game.stress_asr `
   --selection all --rounds 2 --output .\asr-stress.json
 ```
 
-背景発話が表示文と一致するケース、泣き声、叫び声等はモデルの認識率だけで安全性を断定しない。Process Loopbackの混合PCM、ASR対応、VAD末尾、Controller状態、実入力、ゲーム側独立観測を分けて評価する。
+背景発話が表示文と一致するケース、泣き声、叫び声等はモデルの認識率だけで安全性を断定しない。Process Loopbackの混合PCM、発音を含むASR対応、ASR token終端、VADの補助的音響証拠、Controller状態、実入力、ゲーム側独立観測を分けて評価する。VAD末尾無音は必須条件にしない。
 
 ## GitHub上の実行経路
 

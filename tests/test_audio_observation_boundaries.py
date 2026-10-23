@@ -462,99 +462,76 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             native.close()
         self.assertEqual(sent, ['input'])
 
-    def test_timestamp_endpoint_can_finish_while_background_vad_remains_active(self):
-        events = []
-        endpoints = []
-        class Recognizer:
+    def test_pending_real_pcm_asr_gets_bounded_fallback_grace_without_vad(self):
+        entered = threading.Event()
+        release = threading.Event()
+        now = [1000]
+
+        class SlowRecognizer:
             def recognize(self, chunks):
-                return ASRResult('えっ嘘でしょ。', tuple('えっ嘘でしょ。'),
-                                 (0.10, 0.18, 0.28, 0.36, 0.44, 0.52, 0.58))
-        class BackgroundActive:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError('test ASR was not released')
+                return ASRResult('別の話題')
+
+        class NeverActive:
             def observe_float32_stereo(self, frames):
-                return VADDecision(True, 0, contains_speech=True)
+                return VADDecision(False, 0, contains_speech=False)
             def reset(self):
                 pass
+
         native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=BackgroundActive(), clock=lambda: 2000,
-            on_voice_end=lambda _t, metrics: endpoints.append(metrics))
+            lambda *_: None, recognizer=SlowRecognizer(), activity=NeverActive(),
+            clock=lambda: now[0])
         try:
             native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ。')
-            # One second of captured mix: the target's final token is around
-            # 1.58s, while BGM/background activity continues through 2.0s.
-            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
+            token = Token(1, 1)
+            native.begin(token, 'えっ嘘でしょ')
+            now[0] = 1400
+            pcm = PCMChunk(1400, bytes(960 * 8), 48000, 2, 4)
             native.history.push(pcm, target_pid=11)
             native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertTrue(native._last_vad)
-            self.assertEqual(endpoints[0]['source'], 'asr_timestamp')
+            self.assertTrue(entered.wait(1))
+            now[0] = 1700
+            self.assertTrue(native.holds_deadline(token))
+            now[0] = 3401
+            self.assertFalse(native.holds_deadline(token))
         finally:
+            release.set()
             native.close()
 
-    def test_target_token_endpoint_can_finish_before_trailing_background_speech(self):
+    def test_token_timestamps_can_complete_target_while_vad_stays_active(self):
         events = []
         metrics = []
-        spoken = 'えっ嘘でしょ。まだ話す'
-        class Recognizer:
-            def recognize(self, chunks):
-                tokens = tuple(spoken)
-                timestamps = tuple(.10 + i * .08 for i in range(len(tokens)))
-                return ASRResult(spoken, tokens, timestamps)
-        class BackgroundActive:
-            def observe_float32_stereo(self, frames):
-                return VADDecision(True, 0, contains_speech=True)
-            def reset(self):
-                pass
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=BackgroundActive(), clock=lambda: 2500,
-            on_inference=lambda _t, values: metrics.append(values))
-        try:
-            native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ。')
-            pcm = PCMChunk(2500, bytes(48000 * 2 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertIn('completed', events)
-            self.assertTrue(native._last_vad)
-            self.assertTrue(metrics)
-            self.assertGreater(metrics[-1]['post_target_token_count'], 0)
-            self.assertGreater(metrics[-1]['target_token_prefix_count'], 0)
-        finally:
-            native.close()
+        end_observations = []
+        clock = [1000]
 
-    def test_malformed_token_timestamps_cannot_finish_active_background(self):
-        events = []
         class Recognizer:
             def recognize(self, chunks):
-                return ASRResult('えっ嘘でしょ。', tuple('えっ嘘でしょ。'), (0.1, 0.2))
-        class Active:
+                # The current line ends at token 6; later recognized tokens are
+                # background speech from the same process mix.
+                return ASRResult(
+                    'えっ嘘でしょ背景', tuple('えっ嘘でしょ背景'),
+                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46, 0.70, 0.82))
+
+        class AlwaysActive:
             def observe_float32_stereo(self, frames):
                 return VADDecision(True, 0, contains_speech=True)
             def reset(self):
                 pass
+
         native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
             lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=Active(), clock=lambda: 2000)
+            activity=AlwaysActive(), clock=lambda: clock[0],
+            on_inference=lambda _t, m: metrics.append(m),
+            on_voice_end=lambda _t, m: end_observations.append(m))
         try:
             native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ。')
+            token = Token(1, 1)
+            native.begin(token, 'えっ嘘でしょ')
+            # One 1-second packet: target endpoint is bounded by the first
+            # background token at 0.70s, with 300ms of captured mix after it.
+            clock[0] = 2000
             pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
             native.history.push(pcm, target_pid=11)
             native.feed(pcm)
@@ -565,11 +542,77 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                 if not busy:
                     break
                 time.sleep(.005)
-            self.assertNotIn('completed', events)
+            self.assertIn('started', events)
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
+            self.assertEqual(metrics[-1]['target_token_count'], 6)
+            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
         finally:
             native.close()
 
-    def test_worker_without_timestamp_stability_or_decoded_silence_does_not_finish(self):
+    def test_token_timestamps_can_complete_without_any_vad_positive(self):
+        events = []
+        metrics = []
+        end_observations = []
+        clock = [1000]
+
+        class Recognizer:
+            def recognize(self, chunks):
+                return ASRResult(
+                    'えっ嘘でしょ', tuple('えっ嘘でしょ'),
+                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46))
+
+        class NeverActive:
+            def observe_float32_stereo(self, frames):
+                return VADDecision(False, 0, contains_speech=False)
+            def reset(self):
+                pass
+
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
+            activity=NeverActive(), clock=lambda: clock[0],
+            on_inference=lambda _t, m: metrics.append(m),
+            on_voice_end=lambda _t, m: end_observations.append(m))
+        try:
+            native.history.start(11)
+            native.begin(Token(1, 1), 'えっ嘘でしょ')
+            # ASR is allowed to run after a bounded PCM window even if VAD
+            # never reports speech. The token endpoint and lexical evidence
+            # still identify and complete this utterance.
+            clock[0] = 2000
+            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertIn('started', events)
+            self.assertIn('completed', events)
+            self.assertEqual(native.capture_status()['vad_positive_packets'], 0)
+            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
+            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
+            self.assertIsNone(end_observations[-1]['estimated_onset_ms'])
+        finally:
+            native.close()
+
+    def test_asr_timestamp_uses_pcm_duration_not_wall_clock_gap(self):
+        first = PCMChunk(1000, bytes(4800 * 8), 48000, 2, 4)   # 100ms, 900..1000
+        second = PCMChunk(2000, bytes(4800 * 8), 48000, 2, 4)  # 100ms, 1900..2000
+        result = ASRResult('対象後', ('対象', '後'), (0.05, 0.18))
+        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
+            (first, second), result, observed_token_count=1)
+        # 180ms into concatenated PCM lies 80ms into the second packet, not
+        # 180ms after the first packet's 900ms wall-clock start.
+        self.assertEqual(endpoint, 1980)
+        self.assertAlmostEqual(trailing, 20.0)
+        self.assertLess(score, .60)
+
+    def test_later_vad_state_cannot_retroactively_complete_decode_snapshot(self):
         from threading import Event
         gate, release = Event(), Event()
         events = []

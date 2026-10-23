@@ -6,6 +6,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from autoadv.native_audio import ASRResult
+
 from validation.real_game import stress_asr
 from validation.real_game.stress_asr import STRESS, VOICE
 
@@ -74,7 +76,7 @@ class StressScenarios(unittest.TestCase):
             def __init__(self, *_):
                 pass
             def recognize(self, chunks):
-                return 'ヒューズが飛んだ。'
+                return ASRResult('ヒューズが飛んだ。')
         with TemporaryDirectory() as tmp:
             model, tokens = Path(tmp) / 'model', Path(tmp) / 'tokens'
             model.write_bytes(b'fake-model-only-for-checker')

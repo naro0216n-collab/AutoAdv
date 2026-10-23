@@ -13,7 +13,7 @@ from autoadv.model import (Profile, AdvanceMode, StructureRule, ReplacementRule,
 from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
-from autoadv.audio_match import TargetMatcher, VADDecision
+from autoadv.audio_match import TargetMatcher, surface_key, VADDecision
 from autoadv.audio_buffer import PCMChunk
 from autoadv.native_audio import NativeAudio
 
@@ -138,9 +138,9 @@ class AcquisitionAndInputTests(unittest.TestCase):
             Controller(lambda *_: None, lambda _: True).begin(p, Target(11, 22), 'h', 1)
 
     def test_target_matcher_does_not_complete_unrelated_or_unstable_voice(self):
-        m = TargetMatcher('おはようございます')
+        m = TargetMatcher('おはようございます', g2p=None)
         self.assertLess(m.observe('明日').coverage, .9)
-        m2 = TargetMatcher('おはよう')
+        m2 = TargetMatcher('おはよう', g2p=None)
         m2.observe('おは')
         a = m2.observe('おはよう')
         b = m2.observe('おはよう')

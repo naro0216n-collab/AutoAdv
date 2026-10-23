@@ -1,8 +1,9 @@
-"""Swappable Japanese grapheme-to-phoneme adapters used by native ASR matching."""
+"""Swappable Japanese grapheme-to-phoneme adapters for native ASR matching."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from threading import RLock
 from typing import Protocol
 import unicodedata
 
@@ -20,9 +21,11 @@ class G2PBackend(Protocol):
 class HaqumeiG2P:
     """Haqumei-backed G2P with bounded dictionary reading alternatives.
 
-    Haqumei's candidate delta is a morphological lattice cost, not a reading
-    probability, so AutoAdv uses only the documented candidate order. The
-    first candidate is the context-selected primary reading.
+    ``g2p_candidates`` is intended for downstream forced-alignment use. Its
+    candidate ``delta`` is a morphological lattice cost rather than a reading
+    probability, so AutoAdv uses only documented candidate ordering: the first
+    candidate is the context-selected primary reading and later candidates are
+    weaker alternatives. Arbitrary on/kun expansion is never synthesized.
     """
 
     def __init__(self, engine=None):
@@ -30,39 +33,45 @@ class HaqumeiG2P:
             from haqumei import Haqumei
             engine = Haqumei()
         self.engine = engine
+        # Target construction and ASR inference can briefly overlap across an
+        # utterance hand-off. Do not assume the native extension is re-entrant.
+        self._lock = RLock()
 
     @staticmethod
-    def _clean(phonemes) -> tuple[str, ...]:
-        # Punctuation/space pauses vary between displayed text and ASR ITN and
-        # are not speech identity. Unknown labels remain uncertainty evidence.
-        cleaned = tuple(str(p) for p in phonemes if str(p) not in {'pau', 'sp', ''})
-        # An unknown label has no acoustic identity. Treating two `unk` labels
-        # as equal would create false phonetic evidence for unrelated words.
-        return () if 'unk' in cleaned else cleaned
+    def _clean_word(word) -> tuple[str, ...]:
+        # Punctuation/space pauses vary between display text and ASR ITN and do
+        # not identify speech. A generic ``unk`` must not make two unrelated
+        # unknown proper nouns appear phonetically identical; retain its own
+        # normalized surface spelling as a conservative, text-specific unit.
+        phonemes = tuple(str(p) for p in word.phonemes if str(p) not in {'pau', 'sp', ''})
+        if getattr(word, 'is_unknown', False) or phonemes == ('unk',):
+            surface = unicodedata.normalize('NFKC', str(getattr(word, 'word', ''))).casefold()
+            return (f'unk:{surface}',) if surface else ()
+        return tuple(p for p in phonemes if p != 'unk')
 
     def candidates(self, text: str, *, max_candidates: int = 4) -> tuple[PronunciationCandidate, ...]:
         normalized = unicodedata.normalize('NFKC', text)
         if not normalized or max_candidates <= 0:
             return ()
-        got = self.engine.g2p_candidates(normalized)
+        with self._lock:
+            got = self.engine.g2p_candidates(normalized)
+            raw = tuple(got.candidates)[:max_candidates]
         sequences: list[tuple[str, ...]] = []
-        for candidate in list(got.candidates)[:max_candidates]:
-            phones = self._clean(
-                p for word in candidate.words for p in word.phonemes)
+        for candidate in raw:
+            phones = tuple(p for word in candidate.words for p in self._clean_word(word))
             if phones and phones not in sequences:
                 sequences.append(phones)
-        return tuple(PronunciationCandidate(p, rank=i)
-                     for i, p in enumerate(sequences))
+        return tuple(PronunciationCandidate(phones, rank=i)
+                     for i, phones in enumerate(sequences))
 
 
 @lru_cache(maxsize=1)
 def default_g2p() -> G2PBackend | None:
-    """Return Haqumei when the native extra is installed.
+    """Return Haqumei when installed, otherwise retain surface-only tooling.
 
-    Core/unit installs intentionally do not require the native wheel. Product
-    native-audio startup constructs Haqumei explicitly and therefore fails its
-    readiness path instead of silently degrading when the installed backend is
-    unusable.
+    The product native-audio path constructs Haqumei explicitly, so a missing
+    or broken native dependency fails readiness instead of silently degrading.
+    Core tests and non-native utilities may intentionally run without it.
     """
     try:
         return HaqumeiG2P()

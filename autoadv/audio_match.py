@@ -1,12 +1,15 @@
-"""Bounded lexical cues for associating ASR with the current utterance.
+"""Bounded lexical/pronunciation cues for associating ASR with an utterance.
 
-Recognition text is *not* an end-of-speech signal. Timing/voice activity and
-session ownership remain with NativeAudio; game-input authority remains with
-Controller.
+Recognition text is not an end-of-speech signal. Target attribution and target
+completion are scored here; timing/acoustic evidence and session ownership stay
+with NativeAudio, while game-input authority stays with Controller.
 """
 from __future__ import annotations
 from dataclasses import dataclass, replace
 import unicodedata
+
+
+_DEFAULT_G2P = object()
 
 
 def surface_key(text: str) -> str:
@@ -15,12 +18,12 @@ def surface_key(text: str) -> str:
 
 
 def _align(expected, observed):
-    """Bounded target-prefix edit alignment for characters or phonemes."""
+    """Target-prefix edit alignment; neither leading side can be skipped free."""
     n, m = len(expected), len(observed)
     if not n or not m:
         return 0, 0, max(n, m)
     row = [(j, 0) for j in range(m + 1)]
-    best = (0, 0, 0)
+    best = (0, 0, 0)  # exact matches, target-prefix length, edit distance
     for i, unit in enumerate(expected, 1):
         next_row = [(i, 0)]
         for j, found in enumerate(observed, 1):
@@ -56,23 +59,31 @@ class ASRProgress:
     completion_score: float = 0.0
     contradiction_score: float = 0.0
     reading_rank: int = 0
-    observed_units: int = 0
+    target_units: int = 0
+    observed_token_count: int = 0
 
 
 class TargetMatcher:
-    """Align ASR text using surface and Japanese pronunciation evidence.
+    """Align ASR using surface spelling and Japanese pronunciation evidence.
 
-    Surface spelling remains useful when ASR preserves the same orthography,
-    while G2P makes kanji/hiragana/katakana variants comparable. Alternative
-    Haqumei dictionary readings are bounded and slightly penalized; arbitrary
-    substring or arbitrary on/kun expansion is never allowed.
+    Surface spelling remains useful when ASR preserves orthography. A swappable
+    G2P backend makes kanji/hiragana/katakana variants comparable. Bounded
+    dictionary reading alternatives may rescue an on/kun/context mismatch, but
+    arbitrary readings and unrestricted substring/LCS matching are not allowed.
+
+    If ASR tokenization is available, prefixes are evaluated so speech after a
+    completed target can be treated as later/background material. Leading
+    unrelated speech is still charged as edit/contradiction evidence.
     """
     MAX_CHARS = 512
     MAX_PHONEMES = 1024
+    MAX_TOKEN_PREFIXES = 128
+    TERMINAL_LOOKAHEAD_TOKENS = 4
 
-    def __init__(self, target: str, g2p=None):
+    def __init__(self, target: str, g2p=_DEFAULT_G2P):
+        from .g2p import default_g2p
         self.target = surface_key(target)
-        self._g2p = g2p
+        self._g2p = default_g2p() if g2p is _DEFAULT_G2P else g2p
         self._target_pronunciations = ()
         if self._g2p is not None:
             self._target_pronunciations = self._g2p.candidates(target, max_candidates=4)
@@ -83,7 +94,7 @@ class TargetMatcher:
         key = surface_key(hypothesis)
         n, m = len(self.target), len(key)
         if not n or not m or n > self.MAX_CHARS or m > self.MAX_CHARS:
-            return ASRProgress(0, 0, 0, False, 0, key, observed_units=m)
+            return ASRProgress(0, 0, 0, False, 0, key)
 
         matched, prefix_len, errors = _align(self.target, key)
         surface_coverage = matched / max(n, m)
@@ -105,8 +116,6 @@ class TargetMatcher:
                         pcoverage = pm / max(pn, po)
                         ponset = pm / max(1, pprefix, po)
                         perror_ratio = perrors / max(1, pprefix, po)
-                        # Candidate ordering is meaningful; Haqumei's lattice
-                        # delta is explicitly not a probability/arc weight.
                         rank_penalty = min(.08, .025 * candidate.rank)
                         completion = max(0.0, min(1.0,
                             .92 * pcoverage + .08 * surface_coverage
@@ -115,7 +124,7 @@ class TargetMatcher:
                             .65 * perror_ratio + .35 * max(0.0, po / pn - 1.15)))
                         score = completion - .20 * contradiction
                         item = (score, pcoverage, ponset, pm, pprefix, perrors,
-                                po / pn, completion, contradiction, candidate.rank)
+                                po / pn, completion, contradiction, candidate.rank, pn)
                         if best_phone is None or item[0] > best_phone[0]:
                             best_phone = item
 
@@ -134,92 +143,94 @@ class TargetMatcher:
         else:
             (_, phonetic_coverage, phonetic_onset, matched_phonemes, phone_prefix,
              phonetic_errors, phonetic_ratio, completion_score,
-             contradiction_score, reading_rank) = best_phone
-            phone_target_len = len(self._target_pronunciations[reading_rank].phonemes)
+             contradiction_score, reading_rank, phone_target_len) = best_phone
 
         attribution_score = max(
-            surface_onset * .85,
+            surface_onset,
             phonetic_onset * .88 + surface_onset * .12 - .08 * contradiction_score)
 
-        # Short two-character acknowledgements remain intrinsically ambiguous.
         trailing_allowance = max(1, phone_target_len // 10)
         terminal = (
             len(self.target) >= 3
-            and matched_phonemes >= max(3, phone_target_len - trailing_allowance - max(1, phone_target_len // 8))
+            and matched_phonemes >= max(
+                3, phone_target_len - trailing_allowance - max(1, phone_target_len // 8))
             and phone_prefix >= phone_target_len - trailing_allowance
-            and phonetic_ratio >= .72
-            and phonetic_ratio <= 1.28
+            and .72 <= phonetic_ratio <= 1.28
             and phonetic_errors <= max(2, phone_target_len // 6)
             and completion_score >= .78
             and contradiction_score <= .35
         )
         return ASRProgress(
-            surface_coverage, surface_onset, 0.0, True,
+            surface_coverage, surface_onset, 0.0, False,
             matched, key, errors, surface_length_ratio, terminal,
             phonetic_coverage, matched_phonemes, phonetic_errors,
-            attribution_score, completion_score, contradiction_score, reading_rank, m)
+            attribution_score, completion_score, contradiction_score,
+            reading_rank, phone_target_len, 0)
 
-    def observe(self, hypothesis: str) -> ASRProgress:
-        progress = self._evaluate(hypothesis)
+    @staticmethod
+    def _rank(progress: ASRProgress, token_count: int):
+        # Completion is the desired endpoint; on ties choose the earliest ASR
+        # prefix so trailing background speech is not absorbed into the target.
+        return (
+            int(progress.terminal_candidate),
+            progress.completion_score - .18 * progress.contradiction_score,
+            progress.attribution_score,
+            progress.phonetic_coverage,
+            progress.matched_phonemes,
+            -progress.phonetic_edit_count,
+            -token_count,
+        )
+
+    def _select_token_prefix(self, hypothesis: str, tokens) -> ASRProgress:
+        tokens = tuple(str(t) for t in (tokens or ()))
+        if not tokens or surface_key(''.join(tokens)) != surface_key(hypothesis):
+            return self._evaluate(hypothesis)
+        best = None
+        first_terminal = None
+        prefix = ''
+        for index, token in enumerate(tokens[:self.MAX_TOKEN_PREFIXES], 1):
+            prefix += token
+            progress = replace(self._evaluate(prefix), observed_token_count=index)
+            if best is None or self._rank(progress, index) > self._rank(best, best.observed_token_count):
+                best = progress
+            if progress.terminal_candidate and first_terminal is None:
+                first_terminal = index
+            if first_terminal is not None and index >= first_terminal + self.TERMINAL_LOOKAHEAD_TOKENS:
+                break
+        return best if best is not None else self._evaluate(hypothesis)
+
+    def observe(self, hypothesis: str, *, tokens=()) -> ASRProgress:
+        progress = self._select_token_prefix(hypothesis, tokens)
         signature = (
-            'phonetic', round(progress.phonetic_coverage, 4),
-            progress.matched_phonemes, progress.phonetic_edit_count,
-            progress.reading_rank
-        ) if self._target_pronunciations else ('surface', progress.observed)
+            round(progress.phonetic_coverage, 4), progress.matched_phonemes,
+            progress.phonetic_edit_count, progress.reading_rank,
+            progress.observed_token_count, progress.observed,
+        )
         stable = progress.terminal_candidate and self._previous_signature == signature
         monotonic = progress.phonetic_coverage >= self._previous_coverage - .15
         self._previous_signature = signature
         self._previous_coverage = progress.phonetic_coverage
         return replace(progress, tail_confidence=float(stable), monotonic=monotonic)
 
-    def terminal_token_prefix(self, tokens: tuple[str, ...]) -> tuple[int, ASRProgress] | None:
-        """Find a bounded terminal target prefix in timestamped ASR tokens.
-
-        The prefix always starts at the beginning of the decode window. This
-        intentionally does not become arbitrary substring search: unrelated
-        speech before the target still incurs edit/length penalties. Trailing
-        tokens can, however, be left outside the target once a complete target
-        prefix has already been established, which is essential when a BGM or
-        background speaker continues after the foreground line.
-        """
-        if not tokens or len(tokens) > self.MAX_CHARS:
-            return None
-        best = None
-        text = ''
-        for index, token in enumerate(tokens, 1):
-            text += str(token)
-            progress = self._evaluate(text)
-            if not progress.terminal_candidate:
-                continue
-            score = (progress.completion_score
-                     - .20 * progress.contradiction_score
-                     + .04 * progress.attribution_score)
-            item = (score, -index, index, progress)
-            if best is None or item[:2] > best[:2]:
-                best = item
-        if best is None:
-            return None
-        return best[2], best[3]
-
 
 @dataclass(frozen=True)
 class VADDecision:
-    active: bool  # most recently analyzed frame, not any frame in the packet
+    active: bool
     tail_silence_ms: int
     frames_analyzed: bool = True
-    contains_speech: bool = False  # earlier speech in this packet, possibly now quiet
-    mono_peak: float = 0.0  # observed VAD input amplitude; never completion evidence
-    stereo_peak: float = 0.0  # original capture amplitude before channel averaging
+    contains_speech: bool = False
+    mono_peak: float = 0.0
+    stereo_peak: float = 0.0
 
 
 class VoiceActivity:
     """WebRTC VAD over 48kHz mono int16, fixed 20ms frames.
 
-    A VAD positive alone never attributes sound to the current line; a VAD
-    negative alone never verifies end or absence.
+    VAD is acoustic supporting evidence. It neither attributes mixed process
+    audio to the current line nor acts as a mandatory endpoint gate.
     """
     def __init__(self, mode: int = 2):
-        import webrtcvad  # optional module
+        import webrtcvad
         self.vad = webrtcvad.Vad(mode)
         self.tail_ms = 0
         self._pending = bytearray()
@@ -229,14 +240,11 @@ class VoiceActivity:
         self._pending.clear()
 
     def observe_float32_stereo(self, frames: bytes) -> VADDecision:
-        import numpy as np  # optional module
+        import numpy as np
         if not frames or len(frames) % 8:
             raise ValueError('invalid float32 stereo PCM')
         stereo = np.frombuffer(frames, dtype='<f4').reshape((-1, 2))
         mono = np.clip(stereo.mean(axis=1), -1, 1)
-        # This already-decoded PCM input is the exact signal seen by VAD.
-        # A low peak explains a missing VAD positive without inferring that
-        # a foreground voice or a game sound was absent.
         mono_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
         stereo_peak = float(np.max(np.abs(stereo))) if stereo.size else 0.0
         pcm = (mono * 32767).astype('<i2').tobytes()

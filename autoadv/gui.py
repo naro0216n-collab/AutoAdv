@@ -101,7 +101,8 @@ def run_gui(session_driver=None) -> int:
                     self.validation_trace.emit('native_voice_end_estimate',
                         session=token.session, line=token.line,
                         estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
-                        onset_estimated_at_ns=metrics['estimated_onset_ms'] * 1_000_000,
+                        onset_estimated_at_ns=(metrics['estimated_onset_ms'] * 1_000_000
+                            if metrics.get('estimated_onset_ms') is not None else None),
                         evidence=metrics['source']))
                     if self.validation_trace.path else None)
             self._loading_profile = False

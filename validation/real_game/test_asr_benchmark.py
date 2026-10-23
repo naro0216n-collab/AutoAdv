@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from autoadv.native_audio import ASRResult
+
 from validation.real_game.benchmark_asr import _degrade, _edit_distance, run
 from validation.real_game import prepare_asr_model
 
@@ -41,7 +43,7 @@ class OnDemandBenchmarkContracts(unittest.TestCase):
                 pass
             def recognize(self, samples):
                 self_test.assertTrue(samples)
-                return '認識不可'  # Measuring error is a valid result, not a test failure.
+                return ASRResult('認識不可')  # Measuring error is a valid result, not a test failure.
         self_test = self
         with TemporaryDirectory() as root:
             model, tokens = Path(root) / 'model', Path(root) / 'tokens'

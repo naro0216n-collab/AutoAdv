@@ -7,7 +7,7 @@ from autoadv.model import Profile, AdvanceMode, HookSelection
 
 class ASRCues(unittest.TestCase):
     def test_corrected_partial_transcript_can_recover(self):
-        matcher = TargetMatcher('おはようございます')
+        matcher = TargetMatcher('おはようございます', g2p=None)
         first = matcher.observe('おはおう')
         self.assertLess(first.coverage, .9)
         second = matcher.observe('おはようござ')
@@ -19,35 +19,35 @@ class ASRCues(unittest.TestCase):
         self.assertGreaterEqual(fourth.tail_confidence, .9)
 
     def test_single_omission_and_substitution_preserve_later_evidence(self):
-        deletion = TargetMatcher('えっ嘘でしょ')
+        deletion = TargetMatcher('えっ嘘でしょ', g2p=None)
         first = deletion.observe('え嘘でしょ')
         self.assertEqual(first.matched_chars, 5)
         self.assertEqual(first.edit_count, 1)
         self.assertTrue(first.terminal_candidate)
         self.assertEqual(first.tail_confidence, 0)
         self.assertEqual(deletion.observe('え嘘でしょ').tail_confidence, 1)
-        substitution = TargetMatcher('ヒューズが飛んだ').observe('シューズが飛んだ')
+        substitution = TargetMatcher('ヒューズが飛んだ', g2p=None).observe('シューズが飛んだ')
         self.assertEqual(substitution.edit_count, 1)
         self.assertTrue(substitution.terminal_candidate)
 
     def test_prefix_only_and_background_lead_in_do_not_complete(self):
-        partial = TargetMatcher('今日は晴れです')
+        partial = TargetMatcher('今日は晴れです', g2p=None)
         partial.observe('今日は')
         self.assertFalse(partial.observe('今日は').terminal_candidate)
         self.assertEqual(partial.observe('今日は').tail_confidence, 0)
-        noise = TargetMatcher('おはようございます')
+        noise = TargetMatcher('おはようございます', g2p=None)
         first = noise.observe('別の台詞ですおはようございます')
         self.assertFalse(first.terminal_candidate)
         self.assertLess(first.onset_score, .8)
 
     def test_short_ambiguous_voice_is_not_treated_as_proven_end(self):
-        short = TargetMatcher('はい')
+        short = TargetMatcher('はい', g2p=None)
         short.observe('はい')
         self.assertFalse(short.observe('はい').terminal_candidate)
         self.assertEqual(short.observe('はい').tail_confidence, 0)
 
-    def test_kana_kanji_difference_not_promoted_to_certain_end(self):
-        matcher = TargetMatcher('東京へ行く')
+    def test_surface_only_fallback_does_not_invent_kanji_reading(self):
+        matcher = TargetMatcher('東京へ行く', g2p=None)
         progress = matcher.observe('とうきょうへいく')
         self.assertLess(progress.coverage, 1)
         self.assertEqual(surface_key('「……」'), '')

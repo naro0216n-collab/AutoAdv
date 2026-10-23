@@ -16,7 +16,6 @@ import time
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_match import TargetMatcher, surface_key
 from autoadv.native_audio import JapaneseASR
-from autoadv.g2p import default_g2p
 from .benchmark_asr import _edit_distance, _load_pcm
 from .verify_trace import _summary
 HERE = Path(__file__).resolve().parent
@@ -89,7 +88,6 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
     cases, audio = _load_cases(selection=selection)  # fail, never skip missing vocalizations
     start = time.perf_counter_ns()
     recognizer = JapaneseASR(model, tokens)
-    g2p = default_g2p()
     loaded_ms = round((time.perf_counter_ns() - start) / 1e6, 3)
     observations = []
     for case in cases:
@@ -98,14 +96,13 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
         chunk = PCMChunk(0, frames, 48000, 2, 4)
         for repetition in range(rounds):
             started = time.perf_counter_ns()
-            raw_result = recognizer.recognize((chunk,))
-            hypothesis = raw_result.text if hasattr(raw_result, 'text') else str(raw_result)
+            hypothesis = recognizer.recognize((chunk,))
             duration = (time.perf_counter_ns() - started) / 1e6
-            transcript, target = surface_key(hypothesis), surface_key(case['display'])
-            progress = TargetMatcher(case['display'], g2p=g2p).observe(hypothesis)
-            # Product-like pronunciation matching is still only an attribution
-            # risk observation. A scenario label cannot prove which mixed voice
-            # produced the same recognized words.
+            transcript, target = surface_key(hypothesis.text), surface_key(case['display'])
+            progress = TargetMatcher(case['display']).observe(
+                hypothesis.text, tokens=hypothesis.tokens)
+            # A lexical match is only a lexical observation. A manually labelled
+            # 'background' cannot independently prove origin for same text.
             matching = bool(target) and progress.terminal_candidate and progress.attribution_score >= .78
             no_foreground = case['attribution'] == 'not_foreground'
             lexical = case['kind'] == 'lexical'
@@ -114,7 +111,7 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
                 'round': repetition + 1, 'audio_ms': round(chunk.duration_ms, 3),
                 'decode_ms': round(duration, 3), 'rtf': round(duration / chunk.duration_ms, 4),
                 'transcript_hash': hashlib.sha256(transcript.encode('utf-8')).hexdigest(),
-                'transcript': hypothesis,  # real recognizer output, not inferred from its hash
+                'transcript': hypothesis.text,  # real recognizer output, not inferred from its hash
                 'recognized_characters': len(transcript), 'matches_display_text': matching,
                 'phonetic_coverage': round(progress.phonetic_coverage, 4),
                 'attribution_score': round(progress.attribution_score, 4),

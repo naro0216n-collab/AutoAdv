@@ -14,6 +14,18 @@ class DictG2P:
         return tuple(self.values[text][:max_candidates])
 
 
+class RuleG2P:
+    """Small deterministic pronunciation oracle for matcher contract tests."""
+    _kata = str.maketrans(
+        'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン',
+        'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん')
+
+    def candidates(self, text, *, max_candidates=4):
+        normalized = text.translate(self._kata).replace('嘘', 'うそ')
+        phones = tuple(c for c in normalized if c.isalnum() or '\u3040' <= c <= '\u309f')
+        return (PronunciationCandidate(phones),) if phones and max_candidates else ()
+
+
 class HaqumeiAdapterTests(unittest.TestCase):
     def test_adapter_keeps_primary_and_bounded_reading_alternatives(self):
         primary = SimpleNamespace(words=[
@@ -22,19 +34,12 @@ class HaqumeiAdapterTests(unittest.TestCase):
         ])
         alternative = SimpleNamespace(words=[SimpleNamespace(phonemes=['a', 'n', 'o'])])
         engine = SimpleNamespace(
-            g2p_candidates=lambda _: SimpleNamespace(candidates=[primary, alternative]),
-            g2p=lambda _: ['unused'])
+            g2p_candidates=lambda _: SimpleNamespace(candidates=[primary, alternative]))
         got = HaqumeiG2P(engine).candidates('彼の', max_candidates=2)
         self.assertEqual(got, (
             PronunciationCandidate(('k', 'a', 'r', 'e'), 0),
             PronunciationCandidate(('a', 'n', 'o'), 1),
         ))
-
-    def test_unknown_phoneme_does_not_become_shared_pronunciation_evidence(self):
-        unknown = SimpleNamespace(words=[SimpleNamespace(phonemes=['unk'])])
-        engine = SimpleNamespace(
-            g2p_candidates=lambda _: SimpleNamespace(candidates=[unknown]))
-        self.assertEqual(HaqumeiG2P(engine).candidates('未知語'), ())
 
     @unittest.skipUnless(importlib.util.find_spec('haqumei'), 'haqumei native extra not installed')
     def test_installed_haqumei_matches_kanji_and_hiragana_pronunciation(self):
@@ -46,6 +51,7 @@ class HaqumeiAdapterTests(unittest.TestCase):
         self.assertEqual(kanji[0].phonemes, hiragana[0].phonemes)
 
 
+
 class PhoneticMatcherTests(unittest.TestCase):
     def test_kanji_hiragana_katakana_spelling_can_share_pronunciation(self):
         phones = ('t', 'o', 'o', 'k', 'y', 'o', 'o', 'e', 'i', 'k', 'u')
@@ -54,7 +60,7 @@ class PhoneticMatcherTests(unittest.TestCase):
             'とうきょうへいく': [PronunciationCandidate(phones)],
         })
         progress = TargetMatcher('東京へ行く', g2p=g2p).observe('とうきょうへいく')
-        self.assertLess(progress.coverage, .5)  # surface spelling still differs
+        self.assertLess(progress.coverage, .5)
         self.assertEqual(progress.phonetic_coverage, 1)
         self.assertGreater(progress.attribution_score, .85)
         self.assertTrue(progress.terminal_candidate)
@@ -70,33 +76,40 @@ class PhoneticMatcherTests(unittest.TestCase):
         self.assertEqual(progress.reading_rank, 1)
         self.assertEqual(progress.phonetic_coverage, 1)
         self.assertTrue(progress.terminal_candidate)
-        self.assertLess(progress.completion_score, 1)  # secondary reading is not free evidence
+        self.assertLess(progress.completion_score, 1)
 
-    def test_unrelated_lead_in_remains_contradictory_even_with_target_pronunciation(self):
-        target = ('o', 'h', 'a', 'y', 'o', 'o')
-        noisy = ('b', 'e', 't', 's', 'u', 'n', 'o') + target
-        g2p = DictG2P({
-            'おはよう': [PronunciationCandidate(target)],
-            '別のおはよう': [PronunciationCandidate(noisy)],
-        })
-        progress = TargetMatcher('おはよう', g2p=g2p).observe('別のおはよう')
-        self.assertFalse(progress.terminal_candidate)
-        self.assertGreater(progress.contradiction_score, .2)
-
-    def test_terminal_token_prefix_does_not_skip_unrelated_lead_in(self):
-        matcher = TargetMatcher('えっ嘘でしょ')
-        self.assertIsNone(matcher.terminal_token_prefix(tuple('別のえっ嘘でしょ')))
-
-    def test_terminal_token_prefix_can_leave_trailing_background_outside_target(self):
-        matcher = TargetMatcher('えっ嘘でしょ')
-        tokens = tuple('えっ嘘でしょまだ話す')
-        found = matcher.terminal_token_prefix(tokens)
-        self.assertIsNotNone(found)
-        count, progress = found
-        self.assertLess(count, len(tokens))
+    def test_trailing_background_is_excluded_by_asr_token_endpoint(self):
+        g2p = RuleG2P()
+        tokens = tuple('えっうそでしょ背景音')
+        matcher = TargetMatcher('えっ嘘でしょ', g2p=g2p)
+        progress = matcher.observe(''.join(tokens), tokens=tokens)
         self.assertTrue(progress.terminal_candidate)
-        self.assertGreaterEqual(progress.completion_score, .78)
+        self.assertEqual(progress.observed_token_count, len('えっうそでしょ'))
+        self.assertGreater(progress.phonetic_coverage, .9)
 
+    def test_unrelated_lead_in_remains_contradictory(self):
+        g2p = RuleG2P()
+        tokens = tuple('別のえっうそでしょ')
+        progress = TargetMatcher('えっ嘘でしょ', g2p=g2p).observe(''.join(tokens), tokens=tokens)
+        self.assertFalse(progress.terminal_candidate)
+        self.assertGreater(progress.contradiction_score, .15)
+
+
+
+    def test_haqumei_unknown_reading_keeps_surface_identity(self):
+        class Result:
+            def __init__(self, word):
+                self.candidates = [SimpleNamespace(words=[
+                    SimpleNamespace(word=word, phonemes=['unk'], is_unknown=True)
+                ])]
+        class Engine:
+            def g2p_candidates(self, text):
+                return Result(text)
+        backend = HaqumeiG2P(engine=Engine())
+        a = backend.candidates('霧羅')[0].phonemes
+        b = backend.candidates('綺良')[0].phonemes
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, ('unk:霧羅',))
 
 if __name__ == '__main__':
     unittest.main()
