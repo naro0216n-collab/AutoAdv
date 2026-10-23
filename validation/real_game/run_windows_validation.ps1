@@ -64,11 +64,6 @@ function Invoke-Checked([string] $file, [string[]] $commandArgs) {
     & $file @commandArgs
     if ($LASTEXITCODE -ne 0) { throw "$file failed (exit code $LASTEXITCODE)" }
 }
-function Sanitize-For-PublicIssue([string] $content) {
-    $content = [regex]::Replace($content, '(?i)[A-Z]:(?:\\){1,2}Users(?:\\){1,2}[^\\/\s\"'']+', '<USERPROFILE>')
-    $content = [regex]::Replace($content, '(?i)(gh[pousr]_[a-z0-9_]{12,}|github_pat_[a-z0-9_]{12,})', '<REDACTED-TOKEN>')
-    return $content
-}
 function Find-GitHubCli {
     $command = Get-Command 'gh.exe' -ErrorAction SilentlyContinue
     if ($command -and $command.Source) { return [string]$command.Source }
@@ -146,125 +141,14 @@ function Set-IssueComment($commentId, [string] $content) {
     Write-Host "Uploaded: $($response.html_url)"
     return $response
 }
-function Format-IssueMetric($value) {
-    if ($null -eq $value) { return '-' }
-    if ($value -is [bool]) { return $(if ($value) { 'yes' } else { 'no' }) }
-    return [string]$value
-}
-function Escape-IssueCell([string] $value) {
-    if ([string]::IsNullOrEmpty($value)) { return '-' }
-    return ($value -replace '\|', '\\|' -replace "`r?`n", ' ')
-}
-function Add-LimitedIssueItems($lines, [string] $heading, $items, [int] $limit = 12) {
-    $values = @($items | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-    if (-not $values.Count) { return }
-    $lines.Add('')
-    $lines.Add("**$heading**")
-    foreach ($item in @($values | Select-Object -First $limit)) {
-        $lines.Add("- $(Sanitize-For-PublicIssue ([string]$item))")
-    }
-    if ($values.Count -gt $limit) { $lines.Add("- … $($values.Count - $limit) more") }
-}
-function Format-IssueSnapshot([string] $root, [string] $sha) {
-    $summaryPath = Join-Path $root 'validation-summary.json'
-    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
-        throw 'No verification summary exists to upload'
-    }
-    try { $summary = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "Verification summary cannot be parsed for upload: $($_.Exception.Message)" }
-
-    $run = Split-Path $root -Leaf
-    $lines = [Collections.Generic.List[string]]::new()
-    $lines.Add("<!-- autoadv-validation-run:$run -->")
-    $lines.Add("### ``$run`` · ``$sha``")
-    $lines.Add("Requested: ``$($summary.phase_requested)`` · $($summary.started_utc) → $($summary.ended_utc)")
-    $lines.Add('')
-    $lines.Add('| phase | observed/requested | collection | measurement | auto | safe | recovery | early | overhold | misattr | error |')
-    $lines.Add('| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |')
-    foreach ($phase in @($summary.phases)) {
-        $quality = $phase.quality
-        $observed = if ($quality) { Format-IssueMetric $quality.observed_cases } else { '-' }
-        $requested = if ($quality) { Format-IssueMetric $quality.requested_cases } else { '-' }
-        $phaseName = Escape-IssueCell ([string]$phase.phase)
-        $collection = Format-IssueMetric $phase.collection_valid
-        $measurement = Format-IssueMetric $phase.measurement_valid
-        $automatic = if ($quality) { Format-IssueMetric $quality.automatic_advance_rate } else { '-' }
-        $safe = if ($quality) { Format-IssueMetric $quality.safe_automatic_advance_rate } else { '-' }
-        $recovery = if ($quality) { Format-IssueMetric $quality.recovery_rate } else { '-' }
-        $early = if ($quality) { Format-IssueMetric $quality.early_input_rate } else { '-' }
-        $overhold = if ($quality) { Format-IssueMetric $quality.overhold_rate } else { '-' }
-        $misattr = if ($quality) { Format-IssueMetric $quality.misattribution_rate } else { '-' }
-        $error = Escape-IssueCell ([string]$phase.runner_error)
-        $lines.Add("| $phaseName | $observed/$requested | $collection | $measurement | $automatic | $safe | $recovery | $early | $overhold | $misattr | $error |")
-    }
-    if (-not [string]::IsNullOrEmpty([string]$summary.launcher_error)) {
-        $lines.Add('')
-        $lines.Add("Launcher error: ``$(Escape-IssueCell ([string]$summary.launcher_error))``")
-    }
-
-    foreach ($phaseName in @('reading','native')) {
-        $reportPath = Join-Path $root "autoadv-$phaseName.result.json"
-        if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { continue }
-        try { $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-        catch { continue }
-        $lines.Add('')
-        $lines.Add("<details><summary>$phaseName diagnostics</summary>")
-        if ($report.performance) {
-            $lines.Add('')
-            $lines.Add('| metric | count | p50 | p95 | max |')
-            $lines.Add('| --- | ---: | ---: | ---: | ---: |')
-            foreach ($property in $report.performance.PSObject.Properties) {
-                $stats = $property.Value
-                $lines.Add("| $(Escape-IssueCell $property.Name) | $(Format-IssueMetric $stats.count) | $(Format-IssueMetric $stats.p50) | $(Format-IssueMetric $stats.p95) | $(Format-IssueMetric $stats.max) |")
-            }
-        }
-        if ($phaseName -eq 'native' -and $report.line_results) {
-            $lines.Add('')
-            $lines.Add('| case | speaker | environment | outcome | completion | ASR | game | end→input ms |')
-            $lines.Add('| --- | --- | --- | --- | --- | ---: | --- | ---: |')
-            foreach ($line in @($report.line_results)) {
-                $lines.Add("| $(Escape-IssueCell ([string]$line.scenario)) | $(Escape-IssueCell ([string]$line.speaker_family)) | $(Escape-IssueCell ([string]$line.audio_environment)) | $(Escape-IssueCell ([string]$line.outcome)) | $(Escape-IssueCell ([string]$line.completion_reason)) | $(Format-IssueMetric $line.asr_inference_count) | $(Escape-IssueCell ([string]$line.game_outcome)) | $(Format-IssueMetric $line.game_end_to_input_ms) |")
-            }
-        }
-        Add-LimitedIssueItems $lines 'Quality issues' $report.quality_issues
-        Add-LimitedIssueItems $lines 'Errors' $report.errors
-        Add-LimitedIssueItems $lines 'Diagnostics' $report.diagnostics 8
-        $lines.Add('')
-        $lines.Add('</details>')
-    }
-
-    $nativeSummary = @($summary.phases | Where-Object { $_.phase -eq 'native' } | Select-Object -First 1)
-    if ($nativeSummary.Count -and -not $nativeSummary[0].report_present) {
-        $logPath = Join-Path $root 'validation.log'
-        if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-            $diagnostic = @(Get-Content -LiteralPath $logPath -Encoding UTF8 | Where-Object {
-                $_ -match 'RealAudio media|Native setup failed|Traceback|RuntimeError|ValueError|Exception|警告|WARNING'
-            } | Select-Object -Last 80)
-            if ($diagnostic.Count) {
-                $lines.Add('')
-                $lines.Add('<details open><summary>setup diagnostics</summary>')
-                $lines.Add('')
-                $lines.Add('```text')
-                $lines.Add((Sanitize-For-PublicIssue ($diagnostic -join "`n")))
-                $lines.Add('```')
-                $lines.Add('</details>')
-            }
-        }
-    }
-    return [pscustomobject]@{ summary = $summary; run = $run; body = ($lines -join "`n") }
-}
-function Get-SlotMarker([int] $slot) { return "<!-- autoadv-validation-slot-$slot -->" }
-function Set-SlotMarker([string] $body, [string] $marker) {
-    $trimmed = $body -replace '^\s*<!-- autoadv-validation-(?:slot-\d+|baseline) -->\s*', ''
-    return "$marker`n$trimmed"
-}
+function Get-HistorySlotMarker([int] $slot) { return "<!-- autoadv-validation-slot-$slot -->" }
 function Find-IssueCommentByMarker($comments, [string] $marker) {
-    return @($comments | Where-Object { ([string]$_.body).Contains($marker) } | Select-Object -First 1)
+    return @($comments | Where-Object { ([string]$_.body).TrimStart().StartsWith($marker) } | Select-Object -First 1)
 }
 function Ensure-IssueHistorySlots {
     $comments = @(Get-IssueComments)
     foreach ($slot in 1..4) {
-        $marker = Get-SlotMarker $slot
+        $marker = Get-HistorySlotMarker $slot
         if (-not (Find-IssueCommentByMarker $comments $marker).Count) {
             [void](Set-IssueComment $null "$marker`n_No validation run stored yet._")
             $comments = @(Get-IssueComments)
@@ -277,42 +161,40 @@ function Ensure-IssueHistorySlots {
     }
     return $comments
 }
-function Test-NativeBaselineEligible($summary) {
-    $native = @($summary.phases | Where-Object { $_.phase -eq 'native' } | Select-Object -First 1)
-    if (-not $native.Count) { return $false }
-    $phase = $native[0]
-    return ($phase.report_present -eq $true -and
-        $phase.measurement_valid -eq $true -and
-        $phase.collection_complete -eq $true -and
-        $phase.validation_recovery_inputs -eq 0 -and
-        $phase.voice_safety_verified -eq $true -and
-        [string]::IsNullOrEmpty([string]$phase.runner_error))
+function Get-IssueUploadPlan([string] $root, [string] $sha, $comments) {
+    $commentsPath = Join-Path $session ('issue-comments-' + [Guid]::NewGuid().ToString('N') + '.json')
+    try {
+        $compact = @($comments | ForEach-Object {
+            [ordered]@{ id = [long]$_.id; body = [string]$_.body }
+        })
+        [IO.File]::WriteAllText(
+            $commentsPath,
+            (ConvertTo-Json -InputObject $compact -Depth 4),
+            ([Text.UTF8Encoding]::new($false)))
+        $planLines = @(& python -m validation.real_game.issue_reporting `
+            --root $root --sha $sha --comments $commentsPath)
+        if ($LASTEXITCODE -ne 0) { throw "Issue report planner failed (exit code $LASTEXITCODE)" }
+        $raw = $planLines -join "`n"
+        if ([string]::IsNullOrWhiteSpace($raw)) { throw 'Issue report planner returned no plan' }
+        return ($raw | ConvertFrom-Json)
+    } finally {
+        Remove-Item -LiteralPath $commentsPath -Force -ErrorAction SilentlyContinue
+    }
 }
 function Upload-Result([string] $root, [string] $sha) {
-    # Issue #2 retains four recent compact diagnostic snapshots plus the latest
-    # known-good native baseline. Existing comments are patched in place, so a
-    # validation run never adds unbounded issue history.
-    $snapshot = Format-IssueSnapshot $root $sha
+    # Four fixed comments form a bounded ring. One run overwrites only its
+    # existing slot or the oldest slot, avoiding a non-atomic 4-comment
+    # rotation. A newly eligible native baseline is the only optional second
+    # PATCH operation.
     $comments = @(Ensure-IssueHistorySlots)
-    $slots = @{}
-    foreach ($slot in 1..4) {
-        $match = Find-IssueCommentByMarker $comments (Get-SlotMarker $slot)
-        if (-not $match.Count) { throw "Validation history slot $slot is missing" }
-        $slots[$slot] = $match[0]
-    }
-    $runMarker = "<!-- autoadv-validation-run:$($snapshot.run) -->"
-    if (-not ([string]$slots[1].body).Contains($runMarker)) {
-        for ($slot = 4; $slot -ge 2; $slot--) {
-            $previous = [string]$slots[$slot - 1].body
-            [void](Set-IssueComment ([long]$slots[$slot].id) (Set-SlotMarker $previous (Get-SlotMarker $slot)))
+    $plan = Get-IssueUploadPlan $root $sha $comments
+    foreach ($operation in @($plan.operations)) {
+        [void](Set-IssueComment ([long]$operation.comment_id) ([string]$operation.body))
+        if ($operation.role -eq 'history') {
+            Write-Host "Validation history slot $($operation.slot) updated for run $($plan.run)"
+        } elseif ($operation.role -eq 'baseline') {
+            Write-Host "Validation baseline updated for run $($plan.run)"
         }
-    }
-    [void](Set-IssueComment ([long]$slots[1].id) ((Get-SlotMarker 1) + "`n" + $snapshot.body))
-
-    if (Test-NativeBaselineEligible $snapshot.summary) {
-        $baseline = Find-IssueCommentByMarker $comments '<!-- autoadv-validation-baseline -->'
-        if (-not $baseline.Count) { throw 'Validation baseline slot is missing' }
-        [void](Set-IssueComment ([long]$baseline[0].id) ("<!-- autoadv-validation-baseline -->`n" + $snapshot.body))
     }
 }
 function Get-PrebuiltFixture([string] $destination) {
