@@ -26,17 +26,17 @@ label start:
             $ renpy.pause(.1, hard=True)
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
         jump asr_stress
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
-        # Dedicated Windows RealAudio scene. Runtime-only media is hydrated by
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "accuracy":
+        # Dedicated Windows auto-advance accuracy scene. Runtime-only media is hydrated by
         # run_windows_validation.ps1 before the game starts; it is never part
         # of the prebuilt fixture or an AutoAdv input.
-        jump real_audio_native
+        jump advancement_accuracy
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "tts":
         jump standard_tts
     "AutoAdv検証用ゲームです。使用音声は、あみたろの声素材工房（https://amitaro.net/）によるものです。"
     "通常のゲームと同じように、台詞表示・音声再生・選択肢・送り入力が動作します。"
     "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。"
-label real_audio_native:
+label advancement_accuracy:
     # Fail visibly rather than silently falling back to the old bundled audio
     # if runtime hydration did not happen.
     python:
@@ -53,7 +53,7 @@ label real_audio_native:
         ]
         _adv_missing_runtime_assets = [x for x in _adv_runtime_assets if not renpy.loadable(x)]
     if _adv_missing_runtime_assets:
-        "RealAudio実行時素材が不足しています。検証runnerから起動してください。"
+        "自動進行精度計測用素材が不足しています。検証runnerから起動してください。"
         return
 
     # Clean control spans the bundled regression speaker and three independent
@@ -130,9 +130,17 @@ label real_audio_native:
     voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
     c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
 
-    # Finish clean to expose leaked background state or stale audio evidence.
+    # Real games also contain lines with no foreground voice. With the explicit
+    # uncertain-text fallback enabled for the accuracy suite, these should
+    # advance only by the text-time policy; ASR must not invent a native end.
     stop music
     stop sound
+    p "これは音声のない台詞です。"
+    play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
+    p "この台詞にも原音はありません。"
+    stop sound fadeout 0.15
+
+    # Finish clean to expose leaked background state or stale audio evidence.
     voice "audio/voice/normal_035.wav"
     a "彼女は息子に家で行儀よくするように言った。"
     return
@@ -178,7 +186,7 @@ label bgm_voice:
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
 
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "accuracy":
         jump continuation
 
     # Normal AutoAdv progression ends here in the test-run scene. The original
@@ -207,7 +215,7 @@ label continuation:
     a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
     voice "audio/voice/normal_035.wav"
     a "彼女は息子に家で行儀よくするように言った。"
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
+    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "accuracy":
         return
     "検証用シナリオを終了します。"
     return

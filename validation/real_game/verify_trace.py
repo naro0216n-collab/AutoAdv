@@ -14,10 +14,10 @@ from typing import Sequence
 from validation.real_game.trace import text_digest
 
 HERE = Path(__file__).resolve().parent
-PHASES = ('hook', 'reading', 'native', 'tts', 'mixed', 'stress')
+PHASES = ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')
 # The independent voice-channel observer is needed to judge *native* early
 # advances, not to prove that LunaHook received text or TTS drained.
-VOICE_ORACLE_PHASES = frozenset(('native', 'mixed', 'stress'))
+VOICE_ORACLE_PHASES = frozenset(('accuracy', 'mixed', 'stress'))
 
 
 def _summary(values: list[float]) -> dict | None:
@@ -208,10 +208,16 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         # The product's targeted input and following LunaHook verify the
         # advance. The fixture observer is retained solely to compare native
         # input timing with independently observed voice playback.
-        if want_voice is False and not voice_onsets and reasons.get(key) == 'native':
-            result['misattributions'] += 1
-            detail['outcome'] = 'background_voice_misattributed'
-            diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
+        if want_voice is False and not voice_onsets and actual_input is not None:
+            if reasons.get(key) == 'native':
+                result['misattributions'] += 1
+                detail['outcome'] = 'background_voice_misattributed'
+                diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
+            elif reasons.get(key) == 'uncertain_text_fallback':
+                detail['outcome'] = 'no_foreground_voice_fallback'
+            else:
+                detail['outcome'] = 'input_without_foreground_voice'
+                diagnostics.append(f'unexpected completion reason for no-foreground-voice line: {key}')
         elif actual_input is None:
             # Advancement without AutoAdv input is already represented by the
             # product trace (including explicit validation recovery). The game
@@ -276,11 +282,11 @@ def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json')
     # These are test-side expectations, never a source of AutoAdv decisions.
     if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
         scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
-    elif phase == 'native' and scenario_path == HERE / 'SCENARIO.json':
-        # Dedicated Windows RealAudio expectations deliberately differ from the
-        # redistributable fixture's ordinary mixed scene. Runtime media is
-        # hydrated outside Git before launch and remains test-side evidence only.
-        scenario_path = HERE / 'REAL_AUDIO_SCENARIO.json'
+    elif phase == 'accuracy' and scenario_path == HERE / 'SCENARIO.json':
+        # Dedicated Windows auto-advance accuracy expectations deliberately differ
+        # from the redistributable fixture's ordinary mixed scene. Runtime media
+        # is hydrated outside Git before launch and remains test-side evidence only.
+        scenario_path = HERE / 'ADVANCEMENT_ACCURACY_SCENARIO.json'
     scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
     if phase == 'mixed' and scenario_path == HERE / 'SCENARIO.json':
         # The same Ren'Py game terminates before its interactive menu when
@@ -834,7 +840,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     collection_complete = (
         len(utterance_order) >= collection_target if collection_target is not None else None)
     automatic_continuation_verified = (not recovery_inputs and not handoffs)
-    if phase == 'native':
+    if phase == 'accuracy':
         automatic_continuation_verified = bool(
             collection_complete is not False and not recovery_inputs and not handoffs)
 
@@ -846,7 +852,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if line['advance_mode'] != 'audio' or line['use_tts']:
             safe_automatic_advances += 1
             continue
-        if line.get('game_outcome') in ('voice_end_confirmed_then_input', 'overheld'):
+        if line.get('game_outcome') in ('voice_end_confirmed_then_input', 'overheld',
+                                              'no_foreground_voice_fallback'):
             safe_automatic_advances += 1
     def rate(count: int) -> float | None:
         return round(count / requested_cases, 4) if requested_cases else None
@@ -905,9 +912,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='Collect and audit real AutoAdv GUI-to-game HOOK observations')
     parser.add_argument('--trace', type=Path, required=True, help='fresh AUTOADV_VALIDATION_TRACE JSONL')
     parser.add_argument('--phase', choices=PHASES, required=True,
-                        help='hook / reading / native / tts / mixed / stress branch')
+                        help='hook / reading / accuracy / tts / mixed / stress branch')
     parser.add_argument('--oracle', type=Path,
-                        help='independent RenPy JSONL; required for native, mixed and stress')
+                        help='independent RenPy JSONL; required for accuracy, mixed and stress')
     parser.add_argument('--report', type=Path,
                         help='write measured per-line outcomes and timing as JSON, including failures')
     parser.add_argument('--max-voice-hold-ms', type=int,

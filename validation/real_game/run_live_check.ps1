@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('hook', 'reading', 'native', 'tts', 'mixed', 'stress')]
+    [ValidateSet('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')]
     [string] $Phase,
     [int] $StartLine = 0,
     [string] $Trace = '',
@@ -44,7 +44,7 @@ if (Test-Path -LiteralPath $Trace) {
 # Scene selection is an external fixture condition. It does not alter the
 # game's dialogue advancement or AutoAdv's Hook/audio/controller/input path.
 $scene = switch ($Phase) {
-    'native' { 'native' }
+    'accuracy' { 'accuracy' }
     'tts'    { 'tts' }
     'stress' { 'stress' }
     'mixed'  { 'mixed' }
@@ -52,7 +52,7 @@ $scene = switch ($Phase) {
 }
 if ($GameExecutable -and $StartLine -eq 0) {
     $StartLine = switch ($scene) {
-        'native' { 1 }
+        'accuracy' { 1 }
         'tts'    { 4 }
         default  { 1 }
     }
@@ -60,10 +60,10 @@ if ($GameExecutable -and $StartLine -eq 0) {
 # The independent game observer is required only where native voice playback
 # must be compared with AutoAdv input timing. Text advancement is established
 # by the product input followed by the next selected Hook, not game dismissal.
-if ($GameExecutable -and $Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
+if ($GameExecutable -and $Phase -in @('accuracy', 'mixed', 'stress') -and -not $Oracle) {
     $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
-if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
+if ($Phase -in @('accuracy', 'mixed', 'stress') -and -not $Oracle) {
     throw "Phase $Phase requires game voice observations. Supply -Oracle or launch the validation fixture."
 }
 if ($GameExecutable -and $Oracle -and (Test-Path -LiteralPath $Oracle)) {
@@ -87,7 +87,7 @@ try {
         $env:APPDATA = $settingsDir
         $env:AUTOADV_VALIDATION_CONTROL_FILE = $gate
     }
-    if ($Automated -and $Phase -eq 'native') {
+    if ($Automated -and $Phase -eq 'accuracy') {
         # The hosted Windows runner may have no usable render endpoint. Report
         # the OS prerequisite separately from game and AutoAdv acceptance.
         # This does not play audio, inspect game state, or alter the product path.
@@ -196,21 +196,21 @@ public static class AudioRenderProbe {
     $env:AUTOADV_VALIDATION_TRACE = $Trace
     Push-Location $repo
     try {
-        # Normal advancement remains in the production GUI Controller. Native RealAudio may use a separately traced recovery input after a measured product hold, solely to expose later collection cases.
+        # Normal advancement remains in the production GUI Controller. Advancement-accuracy measurement may use a separately traced recovery input after a measured product hold, solely to expose later collection cases.
         if ($Automated) {
             $gameExe = $resolvedGameExe
             $config = @{
                 oracle = $Oracle; gate = $gate; executable = $gameExe;
                 phase = $Phase; timeout_seconds = $TimeoutSeconds;
                 dialogues = $(switch ($Phase) {
-                    'hook' { 1 }; 'reading' { 3 }; 'native' { 21 };
+                    'hook' { 1 }; 'reading' { 3 }; 'accuracy' { 23 };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
-                continue_collection = ($Phase -eq 'native');
+                continue_collection = ($Phase -eq 'accuracy');
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool]$UncertainFallback
             }
-            if ($Phase -in @('native', 'mixed', 'stress')) {
+            if ($Phase -in @('accuracy', 'mixed', 'stress')) {
                 foreach ($dependency in @(
                     @{ name = 'Process Loopback helper'; path = $ProcessLoopbackHelper },
                     @{ name = 'ASR model'; path = $AsrModel },

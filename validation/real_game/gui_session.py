@@ -1,7 +1,7 @@
 """Prepare and observe the ordinary AutoAdv GUI for live validation.
 
-Normal progression is owned entirely by the product Controller. In native
-RealAudio measurement, a product hold is recorded as that case's outcome and
+Normal progression is owned entirely by the product Controller. In the Windows
+auto-advance accuracy measurement, a product hold is recorded as that case's outcome and
 the validation driver may then send one explicitly traced recovery input only
 to expose later fixture cases. Recovery is never product success and never
 reimplements Hook, presentation, or audio judgement policy.
@@ -52,7 +52,7 @@ def load_session(environment=None):
     for key in mandatory:
         if not options.get(key):
             raise ValueError('missing validation session option: ' + key)
-    if options['phase'] not in ('hook', 'reading', 'native', 'tts', 'mixed', 'stress'):
+    if options['phase'] not in ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress'):
         raise ValueError('invalid validation phase')
     if int(options['timeout_seconds']) < 10:
         raise ValueError('validation session must have a finite reasonable timeout')
@@ -206,7 +206,7 @@ class SessionDriver:
             hook_max_history=profile.hook_max_history,
         )
 
-        if self.options['phase'] in ('native', 'mixed', 'stress'):
+        if self.options['phase'] in ('accuracy', 'mixed', 'stress'):
             for field in ('helper', 'model', 'tokens'):
                 path = self.options.get(field, '')
                 if not path or not Path(path).is_file():
@@ -271,7 +271,7 @@ class SessionDriver:
                     self.state = 'calibration'
             elif self.state == 'calibration':
                 if self._select_calibration_source():
-                    if self.options['phase'] in ('native', 'mixed', 'stress'):
+                    if self.options['phase'] in ('accuracy', 'mixed', 'stress'):
                         self.audio_deadline = self.clock() + 30.0
                         self.state = 'await_audio'
                     else:

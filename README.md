@@ -6,13 +6,9 @@ The rebuilt `develop` application uses one `Controller` for dialogue identity, p
 
 ## Windowsでの起動と基本操作
 
-初回のみPython 3.11の環境へ必要な依存物をインストールする。
+Python 3.11を導入した後は、リポジトリ内の **`AutoAdv.cmd` をダブルクリック**して起動する。初回はAutoAdv専用runtimeを`%LOCALAPPDATA%\AutoAdv\runtime`へ自動準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定ASR model/tokensを配置する。Process Loopback helperは同じ管理領域へsource digest単位で配置し、成立済みの依存・モデル・helperを毎回再作成しない。
 
-```powershell
-py -3.11 -m pip install -e ".[gui,audio,ocr,native]"
-```
-
-以後はリポジトリ内の **`AutoAdv.cmd` をダブルクリック**してGUIを起動できる。ショートカットはこのファイルから通常のWindowsの操作で作成できる。GUIは別のコンソールを必要とせず、起動に失敗した場合はエラーダイアログと`%LOCALAPPDATA%\AutoAdv\startup-error.log`に内容を表示・記録する。`.pyw`のPython関連付けが設定済みなら`AutoAdv.pyw`も直接起動できる。従来どおり`py -3.11 -m autoadv`も使用可能。
+以後は同じ **`AutoAdv.cmd`** からGUIを起動できる。ショートカットはこのファイルから通常のWindowsの操作で作成できる。GUIは別のコンソールを必要とせず、起動に失敗した場合はエラーダイアログと`%LOCALAPPDATA%\AutoAdv\startup-error.log`に内容を表示・記録する。`.pyw`のPython関連付けが設定済みなら`AutoAdv.pyw`も直接起動できる。従来どおり`py -3.11 -m autoadv`も使用可能。
 
 1. **プレイ**：実行中のゲームを選択・登録するとLunaHookへの接続を自動的に開始する。保存済み作品では「保存した設定で接続・監視」から再開できる。監視開始後も自動送りは許可するまで停止している。
 2. **台詞取得**：ゲーム内の台詞を表示し、実際に取得できた本文（必要なら話者）を単一の一覧で比較・選択する。別の取得元が必要な場合は一覧の「ほかの取得候補を探す」を使う。探索で得たコードは自動的に試用され、本文を実際に受信した候補だけが同じ一覧に現れる。探索結果専用の選択画面はない。
@@ -21,13 +17,7 @@ py -3.11 -m pip install -e ".[gui,audio,ocr,native]"
 
 専用の雑多な「詳細・共通設定」タブはない。作品・HOOK取得・台詞調整・音声判断・入力それぞれの詳細項目は関連する操作領域から開く。GUIはLunaHostの診断を必要に応じて示すが、ゲームに関係する通常作業へ内部データを混入させない。
 
-LunaTranslator v12.1.2.12の固定Native/Host資産は`autoadv/luna_assets`に同梱される。起動時の再取得・再ビルドは行わない。Irodori TTSは既存サーバーや指定された環境を利用する。音声判断で原音を観測する場合のみ、Windows Process Loopback helperと対応するASRモデルが必要となる。OCRの利用時のみTesseractが必要である。
-
-.NET 9導入済みWindowsで任意にProcess Loopback helperをビルドする場合：
-
-```powershell
-dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Release
-```
+LunaTranslator v12.1.2.12の固定Native/Host資産は`autoadv/luna_assets`に同梱される。起動時の再取得・再ビルドは行わない。Irodori TTSは既存サーバーや指定された環境を利用する。音声判断のASR/G2P/Process LoopbackはAutoAdv管理runtimeを既定とし、個別パス指定は上書き用途に限る。Process Loopback helperを初めて生成する環境では.NET 9 SDKが必要である。OCR利用時のTesseract本体は別途必要となる。
 
 ## Validation scope
 
@@ -35,7 +25,7 @@ dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj -c Rel
 python -m unittest discover -s tests -v
 ```
 
-Local Linux tests verify domain contracts, import/storage, process-audio handling and generation invalidation, but do not certify Windows game compatibility. Windows CI validates Qt/adapter installation and the loopback helper build. Hosted Live validation covers the real LunaHook → text-decision → Windows-input → next-Hook path only. RealAudio acceptance is an explicit actual-Windows-machine test and is not part of Fast CI, Windows Adapter Validation, Hosted Live, or any broad/full test suite; unverified modes must never be described as universally supported.
+Local Linux tests verify domain contracts, import/storage, process-audio handling and generation invalidation, but do not certify Windows game compatibility. Windows CI validates Qt/adapter installation and the loopback helper build. Hosted Live validation covers the real LunaHook → text-decision → Windows-input → next-Hook path only. Auto-advance accuracy measurement is an explicit actual-Windows-machine suite and is not part of Fast CI, Windows Adapter Validation, Hosted Live, or any broad/full test suite. It measures voiced and unvoiced dialogue through the real product path; unverified modes must never be described as universally supported.
 
 Changes are published to `develop` via [Publish Gateway](docs/publish.md). `main` and the product version remain unchanged without explicit approval.
 

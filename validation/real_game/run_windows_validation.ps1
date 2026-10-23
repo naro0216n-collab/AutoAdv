@@ -3,8 +3,8 @@
 # Keep validation mechanics here so an existing bootstrap follows develop automatically.
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'reading', 'native')]
-    [string] $Phase = 'all',
+    [ValidateSet('accuracy')]
+    [string] $Phase = 'accuracy',
     [ValidateRange(1, 2147483647)]
     [int] $IssueNumber = 2,
     [switch] $NoUpload,
@@ -25,7 +25,6 @@ if (-not $WorkBase) {
 $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $session = Join-Path $WorkBase ('runs\' + $stamp + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $cache = Join-Path $WorkBase 'cache'
-$venv = Join-Path $session 'venv'
 $runtime = Join-Path $session 'validation-game'
 $oldPath = $env:PATH
 $oldVenv = $env:VIRTUAL_ENV
@@ -38,7 +37,7 @@ $results = New-Object 'System.Collections.Generic.List[object]'
 $stage = 'initialize'
 $errorText = $null
 $script:GitHubCli = $null
-$phaseNames = if ($Phase -eq 'all') { @('reading', 'native') } else { @($Phase) }
+$phaseNames = @('accuracy')
 $startedUtc = [DateTime]::UtcNow.ToString('o')
 $gitSha = $null
 New-Item -ItemType Directory -Force -Path $session, $cache | Out-Null
@@ -156,7 +155,7 @@ function Ensure-IssueHistorySlots {
     }
     $baselineMarker = '<!-- autoadv-validation-baseline -->'
     if (-not (Find-IssueCommentByMarker $comments $baselineMarker).Count) {
-        [void](Set-IssueComment $null "$baselineMarker`n_No successful native baseline stored yet._")
+        [void](Set-IssueComment $null "$baselineMarker`n_No successful accuracy baseline stored yet._")
         $comments = @(Get-IssueComments)
     }
     return $comments
@@ -184,7 +183,7 @@ function Get-IssueUploadPlan([string] $root, [string] $sha, $comments) {
 function Upload-Result([string] $root, [string] $sha) {
     # Four fixed comments form a bounded ring. One run overwrites only its
     # existing slot or the oldest slot, avoiding a non-atomic 4-comment
-    # rotation. A newly eligible native baseline is the only optional second
+    # rotation. A newly eligible accuracy baseline is the only optional second
     # PATCH operation.
     $comments = @(Ensure-IssueHistorySlots)
     $plan = Get-IssueUploadPlan $root $sha $comments
@@ -205,6 +204,24 @@ function Get-PrebuiltFixture([string] $destination) {
     }
     return ([string]$gameLines[0]).Trim()
 }
+function Remove-CompletedRunResidue([string] $runsRoot, [string] $currentSession) {
+    if (-not (Test-Path -LiteralPath $runsRoot -PathType Container)) { return }
+    foreach ($run in @(Get-ChildItem -LiteralPath $runsRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($run.FullName -eq $currentSession) { continue }
+        # A summary is written only after the measurement process has released
+        # its Python/game runtime. Preserve all evidence files and remove only
+        # reproducible legacy environments from completed runs.
+        if (-not (Test-Path -LiteralPath (Join-Path $run.FullName 'validation-summary.json') -PathType Leaf)) {
+            continue
+        }
+        foreach ($name in @('venv', 'validation-game')) {
+            $disposable = Join-Path $run.FullName $name
+            if (Test-Path -LiteralPath $disposable) {
+                Remove-Item -LiteralPath $disposable -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
 
 try {
     $stage = 'prerequisites'
@@ -219,14 +236,25 @@ try {
     $gitSha = ([string]$gitShaLines[0]).Trim()
     if ($gitSha -notmatch '^[a-f0-9]{40}$') { throw 'Cannot pin the validation checkout commit' }
 
-    $stage = 'dependencies'
-    Invoke-Checked 'py' @('-3.11','-m','venv',$venv)
-    $env:VIRTUAL_ENV = $venv
-    $env:PATH = (Join-Path $venv 'Scripts') + ';' + $oldPath
-    Push-Location $repo
-    try {
-        Invoke-Checked 'python' @('-m','pip','install','--disable-pip-version-check','.[gui]')
-    } finally { Pop-Location }
+    $stage = 'runtime'
+    $runtimeLines = @(& py -3.11 (Join-Path $repo 'scripts\prepare_windows_runtime.py') `
+        --repo $repo --require-native --json)
+    if ($LASTEXITCODE -ne 0 -or -not $runtimeLines.Count) {
+        throw 'Standard AutoAdv Windows runtime preparation failed'
+    }
+    try { $runtimeInfo = ($runtimeLines | Select-Object -Last 1) | ConvertFrom-Json }
+    catch { throw "Standard AutoAdv runtime result cannot be parsed: $($_.Exception.Message)" }
+    $python = [string]$runtimeInfo.python
+    $helper = [string]$runtimeInfo.native.paths.helper_dll
+    $asrModel = [string]$runtimeInfo.native.paths.asr_model
+    $asrTokens = [string]$runtimeInfo.native.paths.asr_tokens
+    foreach ($required in @($python, $helper, $asrModel, $asrTokens)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Standard AutoAdv runtime asset missing: $required"
+        }
+    }
+    $env:VIRTUAL_ENV = Split-Path -Parent (Split-Path -Parent $python)
+    $env:PATH = (Split-Path -Parent $python) + ';' + $oldPath
     $env:RUNNER_TEMP = $session
 
     $stage = 'fixture'
@@ -234,41 +262,22 @@ try {
     try { $gameExecutable = Get-PrebuiltFixture $runtime }
     finally { Pop-Location }
 
-    $helper = $null
-    $asrModel = $null
-    $asrTokens = $null
-
     foreach ($currentPhase in $phaseNames) {
         $trace = Join-Path $session "autoadv-$currentPhase.jsonl"
         $report = Join-Path $session "autoadv-$currentPhase.result.json"
         $phaseError = $null
 
-        # Native-only prerequisites and downloads are deliberately delayed until
-        # after the reading phase. A RealAudio setup failure must not erase the
-        # independent Hook/text-path measurement that can still run normally.
-        if ($currentPhase -eq 'native') {
-            $stage = 'prepare-native'
+        if ($currentPhase -eq 'accuracy') {
+            $stage = 'prepare-accuracy'
             Push-Location $repo
             try {
-                Assert-Command 'dotnet'
-                $dotnetSdks = & dotnet --list-sdks
-                if ($LASTEXITCODE -ne 0 -or -not @($dotnetSdks | Where-Object { $_ -match '^9\.' }).Count) {
-                    throw '.NET 9 SDK is required for AutoAdv.ProcessLoopback'
-                }
-                Invoke-Checked 'python' @('-m','pip','install','--disable-pip-version-check','.[native]')
-                Invoke-Checked 'dotnet' @('build','integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj','--configuration','Release','--nologo')
-                $helper = (Resolve-Path 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll').Path
-                $modelRoot = Join-Path $cache 'asr'
-                Invoke-Checked 'python' @('-m','validation.real_game.prepare_asr_model','--directory',$modelRoot)
-                $asrModel = Join-Path $modelRoot 'model.int8.onnx'
-                $asrTokens = Join-Path $modelRoot 'tokens.txt'
-                # Runtime-only media is cached across runs and hydrated only
-                # into this run's staged game. No external media enters Git.
+                # Only fixture media remains measurement-specific. Product ASR,
+                # G2P and Process Loopback come from the standard AutoAdv runtime.
                 $mediaRoot = Join-Path $cache 'media'
-                Invoke-Checked 'python' @('-m','validation.real_game.prepare_real_audio_assets',
+                Invoke-Checked 'python' @('-m','validation.real_game.prepare_accuracy_assets',
                     '--cache',$mediaRoot,'--runtime',$runtime)
             } catch {
-                $phaseError = "Native setup failed: $($_.Exception.Message)"
+                $phaseError = "Accuracy setup failed: $($_.Exception.Message)"
                 Write-Warning $phaseError
             } finally { Pop-Location }
         }
@@ -283,10 +292,10 @@ try {
                     '-Phase',$currentPhase,
                     '-GameExecutable',$gameExecutable,
                     '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
-                    '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '300' })
+                    '-TimeoutSeconds','360'
                 )
-                if ($currentPhase -eq 'native') {
-                    $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens)
+                if ($currentPhase -eq 'accuracy') {
+                    $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens,'-UncertainFallback')
                 }
                 & powershell.exe @arguments
                 if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
@@ -382,4 +391,8 @@ if ($transcriptStarted) {
     try { Stop-Transcript | Out-Null }
     catch { Write-Warning "Validation transcript could not be closed cleanly: $($_.Exception.Message)" }
 }
+# The staged game is reproducible from the shared fixture cache and is not
+# measurement evidence. Keep logs/traces/reports only in the run directory.
+Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue
+Remove-CompletedRunResidue (Join-Path $WorkBase 'runs') $session
 if ($finalError) { throw $finalError }

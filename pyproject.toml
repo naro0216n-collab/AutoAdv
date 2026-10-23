@@ -20,7 +20,7 @@ audio = ["sounddevice>=0.5,<1"]
 ocr = ["opencv-python>=4.8,<5", "mss>=9,<11", "numpy>=1.26,<3"]
 native = ["numpy>=1.26,<3", "webrtcvad-wheels>=2.0.11,<3", "sherpa-onnx>=1.11,<2", "haqumei>=0.12,<0.13"]
 dev = ["pytest>=8,<10"]
-gui = ["PySide6>=6.8,<7"]
+gui = ["PySide6-Essentials>=6.8,<7"]
 
 [tool.setuptools.packages.find]
 include = ["autoadv*"]

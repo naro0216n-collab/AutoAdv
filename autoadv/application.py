@@ -1143,9 +1143,13 @@ class AutoAdvApplication:
     def _start_native_audio(self, profile: Profile) -> bool:
         """Own process audio capture and publish only semantic/telemetry events."""
         self._close_native_audio()
-        if (profile.advance_mode.value != 'audio' or not profile.native_helper or
-                not profile.asr_model or not profile.asr_tokens):
+        if profile.advance_mode.value != 'audio':
             return False
+        from .native_runtime import managed_paths
+        managed = managed_paths()
+        native_helper = profile.native_helper or managed.helper_dll
+        asr_model = profile.asr_model or managed.asr_model
+        asr_tokens = profile.asr_tokens or managed.asr_tokens
         state = self.runtime_state()
         if state.target is None:
             return False
@@ -1220,7 +1224,7 @@ class AutoAdvApplication:
             native = None
             try:
                 native = NativeAudio(
-                    pid, Path(profile.native_helper), Path(profile.asr_model), Path(profile.asr_tokens),
+                    pid, Path(native_helper), Path(asr_model), Path(asr_tokens),
                     publish_event,
                     replay_lookback_ms=self._native_replay_lookback_ms(profile),
                     on_pcm=publish_pcm,

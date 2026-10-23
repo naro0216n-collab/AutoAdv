@@ -101,7 +101,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         trace = SimpleNamespace(emit=lambda name, **fields:
                                 actions.append(('trace', name, fields)))
         driver = SessionDriver(window, SimpleNamespace(),
-                               {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 21,
+                               {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 23,
                                 'continue_collection': True}, trace,
                                clock=lambda: 0.0)
         driver.state = 'activate'
@@ -124,7 +124,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
         driver = SessionDriver(
             window, qt_app,
-            {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
+            {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True}, trace,
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: (
@@ -159,7 +159,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
         driver = SessionDriver(
             window, qt_app,
-            {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
+            {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True}, trace,
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: None)
@@ -182,7 +182,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
         driver = SessionDriver(
             window, qt_app,
-            {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
+            {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True}, trace,
             clock=lambda: clock[0],
             recovery_send=lambda state: recoveries.append(state.token.line),
@@ -214,7 +214,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         window = SimpleNamespace(application=product, close=lambda: closed.append('window'))
         trace = SimpleNamespace(emit=lambda name, **kwargs: recorded.append((name, kwargs)))
         qt_app = SimpleNamespace(exit=lambda code: closed.append(code))
-        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native'}, trace)
+        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'accuracy'}, trace)
         driver.state = 'calibration'
         driver.fail('finite live-run timeout before requested validation collection completed')
         self.assertEqual(closed, ['window', 3])
@@ -247,8 +247,8 @@ class LiveGuiSessionContract(unittest.TestCase):
 
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(gate='session-gate', executable='validation-game.exe',
-                     phase='native', timeout_seconds=120)
-        self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(valid)})['phase'], 'native')
+                     phase='accuracy', timeout_seconds=120)
+        self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(valid)})['phase'], 'accuracy')
         for phase in ('hook', 'reading', 'tts'):
             options = dict(valid, phase=phase)
             self.assertEqual(load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(options)})['phase'], phase)

@@ -1,4 +1,4 @@
-"""Build bounded GitHub Issue diagnostics for Windows RealAudio validation.
+"""Build bounded GitHub Issue diagnostics for Windows auto-advance accuracy validation.
 
 The Windows runner owns GitHub authentication and HTTP mutation. This module owns
 only deterministic snapshot formatting and fixed-slot selection so the behavior
@@ -21,7 +21,7 @@ RUN_MARKER_RE = re.compile(
 TOKEN_RE = re.compile(r"(?i)(gh[pousr]_[a-z0-9_]{12,}|github_pat_[a-z0-9_]{12,})")
 USER_PATH_RE = re.compile(r"(?i)[A-Z]:(?:\\){1,2}Users(?:\\){1,2}[^\\/\s\"']+")
 DIAGNOSTIC_RE = re.compile(
-    r"RealAudio media|Native setup failed|Traceback|RuntimeError|ValueError|Exception|警告|WARNING"
+    r"Advancement accuracy media|Accuracy setup failed|Traceback|RuntimeError|ValueError|Exception|警告|WARNING"
 )
 
 
@@ -72,7 +72,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def baseline_eligible(summary: dict[str, Any]) -> bool:
-    phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "native"), None)
+    phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "accuracy"), None)
     if not isinstance(phase, dict):
         return False
     return (
@@ -123,7 +123,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
     if summary.get("launcher_error"):
         lines.extend(("", f"Launcher error: `{_cell(summary.get('launcher_error'))}`"))
 
-    for phase_name in ("reading", "native"):
+    for phase_name in ("accuracy",):
         report = _read_json(root / f"autoadv-{phase_name}.result.json")
         if report is None:
             continue
@@ -141,7 +141,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
                     f"| {_cell(name)} | {_metric(stats.get('count'))} | {_metric(stats.get('p50'))} | "
                     f"{_metric(stats.get('p95'))} | {_metric(stats.get('max'))} |"
                 )
-        if phase_name == "native" and isinstance(report.get("line_results"), list):
+        if phase_name == "accuracy" and isinstance(report.get("line_results"), list):
             lines.extend((
                 "",
                 "| case | speaker | environment | outcome | completion | ASR | game | end→input ms |",
@@ -161,8 +161,8 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         _limited_items(lines, "Diagnostics", report.get("diagnostics"), 8)
         lines.extend(("", "</details>"))
 
-    native_phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "native"), None)
-    if isinstance(native_phase, dict) and not native_phase.get("report_present"):
+    accuracy_phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "accuracy"), None)
+    if isinstance(accuracy_phase, dict) and not accuracy_phase.get("report_present"):
         log_path = root / "validation.log"
         if log_path.is_file():
             diagnostic = [

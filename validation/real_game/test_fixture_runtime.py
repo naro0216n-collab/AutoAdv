@@ -151,22 +151,23 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
         self.assertNotIn('prepare_asr_model', runner)
 
 
-    def test_real_audio_contract_is_not_a_broad_fixture_discovery_command(self):
+    def test_accuracy_contract_is_not_a_broad_fixture_discovery_command(self):
         readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')
         self.assertIn('python -m unittest validation.real_game.test_native_audio -v', readme)
-        self.assertIn('一括 `unittest discover` をRealAudio検証として使用しない', readme)
+        self.assertIn('一括 `unittest discover` を自動進行精度実機計測として使用しない', readme)
 
-    def test_hosted_live_excludes_real_audio_and_actual_machine_path_owns_it(self):
+    def test_hosted_live_excludes_accuracy_measurement_and_actual_machine_path_owns_it(self):
         live = Path('.github/workflows/live-advancement.yml').read_text(encoding='utf-8')
         launcher = Path('validation/real_game/run_windows_validation.ps1').read_text(encoding='utf-8')
         readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')
         self.assertIn('-Phase reading', live)
-        self.assertNotIn('-Phase native', live)
-        self.assertNotIn('prepare_asr_model', live)
+        self.assertNotIn('-Phase accuracy', live)
+        self.assertNotIn('prepare_accuracy_assets', live)
         self.assertNotIn('AutoAdv.ProcessLoopback.csproj', live)
-        self.assertIn('validation.real_game.prepare_asr_model', launcher)
-        self.assertIn('AutoAdv.ProcessLoopback.csproj', launcher)
-        self.assertIn('Windows実機RealAudio', readme)
+        self.assertIn('scripts\\prepare_windows_runtime.py', launcher)
+        self.assertIn('validation.real_game.prepare_accuracy_assets', launcher)
+        self.assertNotIn('AutoAdv.ProcessLoopback.csproj', launcher)
+        self.assertIn('Windows実機の自動進行精度計測', readme)
         self.assertIn('一括／Fullテストへ含めない', readme)
 
 

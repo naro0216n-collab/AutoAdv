@@ -27,9 +27,9 @@ AutoAdvはゲームのscript.rpyや下記manifestを実行時には読まず、
 LunaHookとWindows Process Loopbackで観測する必要があります。
 manifestは検証結果の照合用です。
 
-## Windows実機RealAudioの外部メディア
+## Windows実機自動進行精度計測の外部メディア
 
-RealAudioのnative専用sceneでは、既存fixtureへの過適合を避けるため、Gitへ同梱しない外部メディアも使用する。対象と取得先・SHA-256・runtime配置先は`REAL_AUDIO_ASSETS.json`を正本とする。これらはWindows実機でRealAudioを明示実行したときだけ個別取得してローカルcacheへ保存し、staged validation gameへ一時配置する。prebuilt fixtureやGitHub artifactへ再配布しない。
+自動進行精度計測のaccuracy専用sceneでは、既存fixtureへの過適合を避けるため、Gitへ同梱しない外部メディアも使用する。対象と取得先・SHA-256・runtime配置先は`ADVANCEMENT_ACCURACY_ASSETS.json`を正本とする。これらはWindows実機で自動進行精度計測を明示実行したときだけ個別取得してローカルcacheへ保存し、staged validation gameへ一時配置する。prebuilt fixtureやGitHub artifactへ再配布しない。
 
 - JVS corpus: 公式ページが公開する`sample_jvs001` / `sample_jvs002` / `sample_jvs003`の個別WAVだけを使用する。3.5 GBの全corpus ZIPは取得しない。利用条件上、音声の再配布は行わない。
 - OpenGameArt: `Lofi Hip Hop Loop` (omfgdude) と `Heavenly Loop` (isaiah658) の個別OGG。各素材ページでCC0とされているものをSHA-256固定で取得する。

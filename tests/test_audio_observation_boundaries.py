@@ -860,7 +860,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             def recognize(self, chunks):
                 # Only 80ms of captured PCM follows the next-token boundary.
                 # This reproduces the premature first-terminal inference seen in
-                # RealAudio without forbidding timestamp evidence altogether.
+                # actual-machine accuracy measurement without forbidding timestamp evidence altogether.
                 return ASRResult(
                     'えっ嘘でしょ背', tuple('えっ嘘でしょ背'),
                     (0.05, 0.12, 0.20, 0.30, 0.38, 0.46, 0.92))

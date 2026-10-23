@@ -21,7 +21,7 @@ from .verify_trace import _summary
 HERE = Path(__file__).resolve().parent
 STRESS = HERE / 'ASR_STRESS.json'
 VOICE = HERE / 'renpy' / 'game' / 'audio' / 'voice'
-from .prepare_asr_model import MODEL_DIR
+from autoadv.native_runtime import managed_paths
 
 
 def _load_cases(*, selection: str = 'all'):
@@ -141,8 +141,8 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='Real JapaneseASR stress evaluation; explicit, non-CI')
-    parser.add_argument('--model', type=Path, default=MODEL_DIR / 'model.int8.onnx')
-    parser.add_argument('--tokens', type=Path, default=MODEL_DIR / 'tokens.txt')
+    parser.add_argument('--model', type=Path, default=Path(managed_paths().asr_model))
+    parser.add_argument('--tokens', type=Path, default=Path(managed_paths().asr_tokens))
     parser.add_argument('--selection', choices=('all', 'background', 'nonlexical'), default='all')
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--output', type=Path)

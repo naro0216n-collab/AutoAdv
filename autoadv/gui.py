@@ -425,7 +425,12 @@ def run_gui() -> int:
 
             audio_details = group('音声判断環境', page='game', section='audio_details', detail=True)
             self.native_helper=QLineEdit(); self.asr_model=QLineEdit(); self.asr_tokens=QLineEdit()
-            audio_details.addRow('Process Loopback helper',setting_row('native_helper', self.native_helper)); audio_details.addRow('ASRモデル',setting_row('asr_model', self.asr_model)); audio_details.addRow('ASR語彙',setting_row('asr_tokens', self.asr_tokens))
+            from .native_runtime import managed_paths
+            managed_native = managed_paths()
+            self.native_helper.setPlaceholderText(managed_native.helper_dll)
+            self.asr_model.setPlaceholderText(managed_native.asr_model)
+            self.asr_tokens.setPlaceholderText(managed_native.asr_tokens)
+            audio_details.addRow('Process Loopback helper 上書き',setting_row('native_helper', self.native_helper)); audio_details.addRow('ASRモデル 上書き',setting_row('asr_model', self.asr_model)); audio_details.addRow('ASR語彙 上書き',setting_row('asr_tokens', self.asr_tokens))
 
             environment = group('Irodori', page='settings', section='irodori')
             self.irodori_path=QLineEdit(self.catalog.irodori_root); self.irodori_url=QLineEdit(self.catalog.irodori_url)

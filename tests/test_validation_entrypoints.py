@@ -14,8 +14,10 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('validation.real_game.fixture_runtime stage', source)
         self.assertNotIn('autoadv-validation-fixtures', source)
         self.assertNotIn('Invoke-WebRequest', source)
-        self.assertIn('validation.real_game.prepare_asr_model', source)
-        self.assertIn('AutoAdv.ProcessLoopback.csproj', source)
+        self.assertIn('scripts\\prepare_windows_runtime.py', source)
+        self.assertIn('--require-native', source)
+        self.assertNotIn('validation.real_game.prepare_asr_model', source)
+        self.assertNotIn('dotnet build', source)
         self.assertIn("'-GameExecutable',$gameExecutable", source)
         self.assertNotIn('RenPySdk', source)
         self.assertNotIn('renpy-8.4.1-sdk', source)
@@ -61,29 +63,32 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         for stale in ('RenPySdk', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
             self.assertNotIn(stale, source)
 
-    def test_realaudio_is_one_continuous_native_session_with_marked_post_failure_recovery(self):
+    def test_accuracy_measurement_is_one_continuous_product_session_with_silent_cases_and_recovery(self):
         orchestrator = (ROOT / 'validation' / 'real_game' / 'run_windows_validation.ps1').read_text(encoding='utf-8')
         live = (ROOT / 'validation' / 'real_game' / 'run_live_check.ps1').read_text(encoding='utf-8')
         fixture = (ROOT / 'validation' / 'real_game' / 'renpy' / 'game' / 'script.rpy').read_text(encoding='utf-8')
         self.assertNotIn('case_matrix', orchestrator)
         self.assertNotIn('NativeCase', live)
         self.assertNotIn('AUTOADV_VALIDATION_CASE', fixture)
-        self.assertIn("'native' { 21 }", live)
-        self.assertIn("continue_collection = ($Phase -eq 'native')", live)
+        self.assertIn("'accuracy' { 23 }", live)
+        self.assertIn("continue_collection = ($Phase -eq 'accuracy')", live)
         self.assertIn("if ($MeasurementOnly) { $arguments += '--measurement-only' }", live)
         self.assertIn("'-Automated','-MeasurementOnly'", orchestrator)
-        self.assertIn('prepare_real_audio_assets', orchestrator)
+        self.assertIn('validation.real_game.prepare_accuracy_assets', orchestrator)
         self.assertIn("Join-Path $cache 'media'", orchestrator)
+        self.assertIn(r'scripts\prepare_windows_runtime.py', orchestrator)
+        self.assertIn('--require-native', orchestrator)
+        self.assertIn("'-UncertainFallback'", orchestrator)
+        self.assertNotIn("'.[gui]'", orchestrator)
+        self.assertNotIn("'.[native]'", orchestrator)
+        self.assertNotIn("Assert-Command 'dotnet'", orchestrator)
+        self.assertNotIn('dotnet build', orchestrator)
+        self.assertNotIn('validation.real_game.prepare_asr_model', orchestrator)
+        self.assertIn('Remove-CompletedRunResidue', orchestrator)
+        self.assertIn("@('venv', 'validation-game')", orchestrator)
+        self.assertIn('validation-summary.json', orchestrator)
         self.assertIn('Start-Transcript -Path $transcriptPath', orchestrator)
         self.assertIn("Join-Path $WorkBase 'last-run.txt'", orchestrator)
-        # Native prerequisites and downloads must not block the independent
-        # reading measurement when Phase=all.
-        loop = orchestrator.index('foreach ($currentPhase in $phaseNames)')
-        native_prepare = orchestrator.index("$stage = 'prepare-native'")
-        self.assertGreater(native_prepare, loop)
-        self.assertGreater(orchestrator.index("Assert-Command 'dotnet'"), loop)
-        self.assertGreater(orchestrator.index("'.[native]'"), loop)
-        self.assertLess(orchestrator.index("'.[gui]'"), loop)
         self.assertNotIn('skipped_after_reading_hook_failure', orchestrator)
         self.assertIn('$_.measurement_valid -ne $true', orchestrator)
         self.assertNotIn('$_.voice_safety_verified -ne $true', orchestrator)
@@ -94,7 +99,8 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('collection_complete = if ($measurement)', orchestrator)
         self.assertIn('automatic_continuation_verified = if ($measurement)', orchestrator)
         self.assertIn('validation_recovery_inputs = if ($measurement)', orchestrator)
-        self.assertIn('jump continuation', fixture)
+        self.assertIn('これは音声のない台詞です。', fixture)
+        self.assertIn('この台詞にも原音はありません。', fixture)
         self.assertNotIn('autoadv_case_', fixture)
 
 
@@ -125,13 +131,13 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         ):
             self.assertNotIn(retired, methods)
 
-    def test_hosted_and_broad_ci_do_not_run_real_audio(self):
+    def test_hosted_and_broad_ci_do_not_run_accuracy_measurement(self):
         live = (ROOT / '.github' / 'workflows' / 'live-advancement.yml').read_text(encoding='utf-8')
         self.assertIn('-Phase reading', live)
         self.assertIn('validation.real_game.fixture_runtime stage', live)
         self.assertNotIn('gh release download', live)
         self.assertNotIn('autoadv-validation-fixtures', live)
-        for forbidden in ('-Phase native', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj'):
+        for forbidden in ('-Phase accuracy', 'prepare_accuracy_assets', 'AutoAdv.ProcessLoopback.csproj'):
             self.assertNotIn(forbidden, live)
 
         fixture = (ROOT / '.github' / 'workflows' / 'validation-fixture.yml').read_text(encoding='utf-8')

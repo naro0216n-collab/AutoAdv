@@ -1,4 +1,4 @@
-"""Provision runtime-only media for dedicated Windows RealAudio measurement.
+"""Provision runtime-only media for Windows auto-advance accuracy measurement.
 
 The manifest pins small individual downloads. Assets are cached outside the Git
 checkout and copied into an already staged Ren'Py runtime only for the native
@@ -22,9 +22,9 @@ import urllib.request
 
 HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[1]
-MANIFEST = HERE / 'REAL_AUDIO_ASSETS.json'
+MANIFEST = HERE / 'ADVANCEMENT_ACCURACY_ASSETS.json'
 USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-              'AppleWebKit/537.36 AutoAdv-RealAudio/1.0')
+              'AppleWebKit/537.36 AutoAdv-AdvancementAccuracy/1.0')
 
 
 def default_cache_directory() -> Path:
@@ -45,33 +45,33 @@ def _sha256(path: Path) -> str:
 
 def _load_manifest(path: Path = MANIFEST) -> dict:
     data = json.loads(path.read_text(encoding='utf-8'))
-    if data.get('schema') != 'autoadv-real-audio-assets-v1':
-        raise ValueError('unsupported RealAudio asset manifest')
+    if data.get('schema') != 'autoadv-advancement-accuracy-assets-v1':
+        raise ValueError('unsupported advancement-accuracy asset manifest')
     assets = data.get('assets')
     if not isinstance(assets, list) or not assets:
-        raise ValueError('RealAudio asset manifest has no assets')
+        raise ValueError('advancement-accuracy asset manifest has no assets')
     ids = set()
     runtime_paths = set()
     for asset in assets:
         required = ('id', 'filename', 'runtime_path', 'sha256', 'max_bytes',
                     'source_page', 'urls', 'license', 'redistributable')
         if any(key not in asset for key in required):
-            raise ValueError(f'incomplete RealAudio asset entry: {asset.get("id", "<unknown>")}')
+            raise ValueError(f'incomplete advancement-accuracy asset entry: {asset.get("id", "<unknown>")}')
         asset_id = str(asset['id'])
         runtime_path = str(asset['runtime_path']).replace('\\', '/')
         if asset_id in ids or runtime_path in runtime_paths:
-            raise ValueError('duplicate RealAudio asset id or runtime path')
+            raise ValueError('duplicate advancement-accuracy asset id or runtime path')
         if not runtime_path.startswith('game/audio/runtime/') or '..' in Path(runtime_path).parts:
-            raise ValueError(f'unsafe RealAudio runtime path: {runtime_path}')
+            raise ValueError(f'unsafe advancement-accuracy runtime path: {runtime_path}')
         if len(str(asset['sha256'])) != 64:
-            raise ValueError(f'invalid RealAudio asset digest: {asset_id}')
+            raise ValueError(f'invalid advancement-accuracy asset digest: {asset_id}')
         if not isinstance(asset['urls'], list) or not asset['urls']:
-            raise ValueError(f'RealAudio asset has no individual download URL: {asset_id}')
+            raise ValueError(f'advancement-accuracy asset has no individual download URL: {asset_id}')
         if int(asset['max_bytes']) <= 0 or int(asset['max_bytes']) > 16 * 1024 * 1024:
-            raise ValueError(f'RealAudio asset is not a bounded small download: {asset_id}')
+            raise ValueError(f'advancement-accuracy asset is not a bounded small download: {asset_id}')
         size = asset.get('size_bytes')
         if size is not None and (int(size) <= 0 or int(size) > int(asset['max_bytes'])):
-            raise ValueError(f'invalid RealAudio expected size: {asset_id}')
+            raise ValueError(f'invalid advancement-accuracy expected size: {asset_id}')
         ids.add(asset_id)
         runtime_paths.add(runtime_path)
     return data
@@ -83,7 +83,7 @@ def _assert_cache_outside_repository(destination: Path) -> Path:
         resolved.relative_to(REPOSITORY_ROOT.resolve())
     except ValueError:
         return resolved
-    raise ValueError('RealAudio media cache must be outside the repository')
+    raise ValueError('Advancement accuracy media cache must be outside the repository')
 
 
 class _DriveDownloadForm(HTMLParser):
@@ -137,7 +137,7 @@ def _write_response(response, destination: Path, max_bytes: int) -> tuple[int, s
                 break
             total += len(chunk)
             if total > max_bytes:
-                raise ValueError('RealAudio asset exceeded its pinned download size limit')
+                raise ValueError('advancement-accuracy asset exceeded its pinned download size limit')
             stream.write(chunk)
     return total, content_type
 
@@ -199,10 +199,10 @@ def _cache_path(cache: Path, asset: dict) -> Path:
 def _verify(path: Path, asset: dict) -> None:
     expected_size = asset.get('size_bytes')
     if expected_size is not None and path.stat().st_size != int(expected_size):
-        raise ValueError(f"RealAudio asset size mismatch: {asset['id']}")
+        raise ValueError(f"advancement-accuracy asset size mismatch: {asset['id']}")
     actual = _sha256(path)
     if actual != str(asset['sha256']).lower():
-        raise ValueError(f"RealAudio asset hash mismatch: {asset['id']}")
+        raise ValueError(f"advancement-accuracy asset hash mismatch: {asset['id']}")
 
 
 def prepare(destination: Path | None = None, *, allow_download: bool = True,
@@ -216,11 +216,11 @@ def prepare(destination: Path | None = None, *, allow_download: bool = True,
         target = _cache_path(cache, asset)
         if target.is_file():
             _verify(target, asset)
-            print(f"RealAudio media [{position}/{count}] {asset['id']}: cache")
+            print(f"Advancement accuracy media [{position}/{count}] {asset['id']}: cache")
             prepared.append({'id': asset['id'], 'source': 'cache', 'path': str(target)})
             continue
         if not allow_download:
-            raise FileNotFoundError(f"Pinned RealAudio asset is not cached: {asset['id']}")
+            raise FileNotFoundError(f"Pinned advancement-accuracy asset is not cached: {asset['id']}")
         errors = []
         for index, url in enumerate(asset['urls']):
             with tempfile.NamedTemporaryFile(
@@ -228,7 +228,7 @@ def prepare(destination: Path | None = None, *, allow_download: bool = True,
                 temporary = Path(handle.name)
             try:
                 host = urlparse(str(url)).hostname or '<unknown-host>'
-                print(f"RealAudio media [{position}/{count}] {asset['id']}: "
+                print(f"Advancement accuracy media [{position}/{count}] {asset['id']}: "
                       f"download {index + 1}/{len(asset['urls'])} from {host}")
                 downloader(str(url), temporary, int(asset['max_bytes']))
                 _verify(temporary, asset)
@@ -238,11 +238,11 @@ def prepare(destination: Path | None = None, *, allow_download: bool = True,
                 break
             except Exception as exc:
                 errors.append(f'{type(exc).__name__}: {exc}')
-                print(f"RealAudio media {asset['id']}: source {index + 1} failed: "
+                print(f"Advancement accuracy media {asset['id']}: source {index + 1} failed: "
                       f"{type(exc).__name__}: {exc}", file=sys.stderr)
                 temporary.unlink(missing_ok=True)
         else:
-            raise RuntimeError(f"Unable to acquire pinned RealAudio asset {asset['id']}: "
+            raise RuntimeError(f"Unable to acquire pinned advancement-accuracy asset {asset['id']}: "
                                + ' | '.join(errors))
     return {'cache': str(cache), 'assets': prepared}
 
@@ -258,13 +258,13 @@ def hydrate(runtime: Path, cache: Path | None = None, *,
     for asset in info['assets']:
         source = _cache_path(cache, asset)
         if not source.is_file():
-            raise FileNotFoundError(f"Pinned RealAudio asset is not cached: {asset['id']}")
+            raise FileNotFoundError(f"Pinned advancement-accuracy asset is not cached: {asset['id']}")
         _verify(source, asset)
         target = (runtime / str(asset['runtime_path'])).resolve()
         try:
             target.relative_to(runtime)
         except ValueError as exc:
-            raise ValueError(f"unsafe RealAudio runtime target: {asset['id']}") from exc
+            raise ValueError(f"unsafe advancement-accuracy runtime target: {asset['id']}") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name('.' + target.name + '.part')
         temporary.unlink(missing_ok=True)
@@ -277,7 +277,7 @@ def hydrate(runtime: Path, cache: Path | None = None, *,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Cache and hydrate pinned small media for Windows RealAudio measurement')
+        description='Cache and hydrate pinned small media for Windows auto-advance accuracy measurement')
     parser.add_argument('--cache', type=Path, default=default_cache_directory())
     parser.add_argument('--runtime', type=Path,
                         help='staged validation-game root; copies verified cached media into game/audio/runtime')

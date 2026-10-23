@@ -1,6 +1,6 @@
 {
-  "schema": "autoadv-real-audio-assets-v1",
-  "purpose": "Runtime-only media for dedicated Windows RealAudio measurement. These files are cached outside Git and hydrated into the staged Ren'Py runtime only for the native phase.",
+  "schema": "autoadv-advancement-accuracy-assets-v1",
+  "purpose": "Runtime-only media for Windows auto-advance accuracy measurement. These files are cached outside Git and hydrated into the staged Ren'Py runtime only for the accuracy phase.",
   "assets": [
     {
       "id": "jvs001-sample",

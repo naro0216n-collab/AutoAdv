@@ -1,4 +1,4 @@
-"""Contracts for runtime-only RealAudio media provisioning; no network access."""
+"""Contracts for runtime-only advancement-accuracy media provisioning; no network access."""
 from __future__ import annotations
 
 import hashlib
@@ -8,15 +8,15 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from validation.real_game import prepare_real_audio_assets as media
+from validation.real_game import prepare_accuracy_assets as media
 from validation.real_game.verify_trace import scenario_for_phase
 
 
-class RealAudioAssetProvisioningTests(unittest.TestCase):
+class AdvancementAccuracyAssetProvisioningTests(unittest.TestCase):
     def _manifest(self, root: Path, payload: bytes = b'fixture-audio') -> Path:
         manifest = root / 'manifest.json'
         manifest.write_text(json.dumps({
-            'schema': 'autoadv-real-audio-assets-v1',
+            'schema': 'autoadv-advancement-accuracy-assets-v1',
             'assets': [{
                 'id': 'sample', 'kind': 'foreground_voice', 'filename': 'sample.wav',
                 'runtime_path': 'game/audio/runtime/voice/sample.wav',
@@ -128,14 +128,18 @@ class RealAudioAssetProvisioningTests(unittest.TestCase):
         self.assertTrue(all(asset['size_bytes'] < 1024 * 1024 for asset in drive_assets))
 
 
-class RealAudioScenarioTests(unittest.TestCase):
-    def test_native_scene_spans_speakers_and_real_game_mix_classes(self):
-        scenario = scenario_for_phase('native')
-        self.assertEqual(len(scenario), 21)
+class AdvancementAccuracyScenarioTests(unittest.TestCase):
+    def test_accuracy_scene_spans_speakers_and_real_game_mix_classes(self):
+        scenario = scenario_for_phase('accuracy')
+        self.assertEqual(len(scenario), 23)
         self.assertEqual(scenario[0]['id'], 'clean-local-short')
         self.assertEqual(scenario[-1]['id'], 'clean-recovery')
         self.assertTrue(all(line['advance_mode'] == 'audio' and not line['use_tts']
-                            and line['foreground_voice'] for line in scenario))
+                            for line in scenario))
+        unvoiced = [line for line in scenario if not line['foreground_voice']]
+        self.assertEqual([line['id'] for line in unvoiced],
+                         ['unvoiced-clean', 'unvoiced-background-speech'])
+        self.assertTrue(all(line['speaker_family'] == 'unvoiced' for line in unvoiced))
         families = {line['speaker_family'] for line in scenario}
         self.assertTrue({'amitaro', 'amitaro_whisper', 'jvs001', 'jvs002', 'jvs003'} <= families)
         environments = {line['environment'] for line in scenario}
@@ -145,11 +149,12 @@ class RealAudioScenarioTests(unittest.TestCase):
             'background_conversation_outlasts_foreground', 'japanese_background_voice',
             'japanese_background_voice_same_text_boundary',
             'transient_sfx_outlasts_short_voice', 'door_sfx',
-            'clean_after_complex_mix',
+            'clean_after_complex_mix', 'no_foreground_voice_clean',
+            'no_foreground_voice_with_background_speech',
         }
         self.assertTrue(required <= environments)
 
-    def test_native_scene_uses_cached_jvs_speech_for_japanese_lexical_background(self):
+    def test_accuracy_scene_uses_cached_jvs_speech_for_japanese_lexical_background(self):
         script = (media.HERE / 'renpy/game/script.rpy').read_text(encoding='utf-8')
         self.assertNotIn('jvs_music_ver1', script)
         self.assertIn(
@@ -159,8 +164,8 @@ class RealAudioScenarioTests(unittest.TestCase):
     def test_every_external_foreground_file_is_backed_by_the_runtime_manifest(self):
         manifest_paths = {asset['runtime_path'].removeprefix('game/')
                           for asset in media._load_manifest()['assets']}
-        external = {line['foreground_file'] for line in scenario_for_phase('native')
-                    if line['foreground_file'].startswith('audio/runtime/')}
+        external = {line['foreground_file'] for line in scenario_for_phase('accuracy')
+                    if line.get('foreground_file', '').startswith('audio/runtime/')}
         self.assertTrue(external)
         self.assertTrue(external <= manifest_paths)
 

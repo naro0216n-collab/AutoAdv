@@ -1,9 +1,0 @@
-{
-  "purpose": "Opt-in ASR validation using the same sherpa-onnx SenseVoice INT8 model format as AutoAdv",
-  "repository": "twmht/sherpa-onnx-sense-voice-small",
-  "revision": "229c9743cc68c051d09a49aa07fa88b1d4463465",
-  "files": {
-    "model.int8.onnx": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
-    "tokens.txt": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
-  }
-}

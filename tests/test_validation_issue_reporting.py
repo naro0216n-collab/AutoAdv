@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "validation" / "real_game" / "run_windows_validation.ps1"
 
 
-def _phase(name: str, *, report_present: bool = True, eligible_native: bool = False) -> dict:
+def _phase(name: str, *, report_present: bool = True, eligible_accuracy: bool = False) -> dict:
     return {
         "phase": name,
         "collection_valid": True,
@@ -21,16 +21,16 @@ def _phase(name: str, *, report_present: bool = True, eligible_native: bool = Fa
         "advancement_observed": True,
         "automatic_continuation_verified": True,
         "validation_recovery_inputs": 0,
-        "voice_safety_verified": True if eligible_native else None,
+        "voice_safety_verified": True if eligible_accuracy else None,
         "quality": {
-            "requested_cases": 21 if name == "native" else 3,
-            "observed_cases": 21 if name == "native" else 3,
+            "requested_cases": 23 if name == "accuracy" else 3,
+            "observed_cases": 23 if name == "accuracy" else 3,
             "automatic_advance_rate": 1.0,
             "safe_automatic_advance_rate": 1.0,
             "recovery_rate": 0.0,
-            "early_input_rate": 0.0 if name == "native" else None,
-            "overhold_rate": 0.0 if name == "native" else None,
-            "misattribution_rate": 0.0 if name == "native" else None,
+            "early_input_rate": 0.0 if name == "accuracy" else None,
+            "overhold_rate": 0.0 if name == "accuracy" else None,
+            "misattribution_rate": 0.0 if name == "accuracy" else None,
         },
         "quality_issues": [],
         "report_present": report_present,
@@ -38,10 +38,10 @@ def _phase(name: str, *, report_present: bool = True, eligible_native: bool = Fa
     }
 
 
-def _write_summary(root: Path, *, native: dict | None = None) -> None:
-    phases = [_phase("reading")]
-    if native is not None:
-        phases.append(native)
+def _write_summary(root: Path, *, accuracy: dict | None = None) -> None:
+    phases = []
+    if accuracy is not None:
+        phases.append(accuracy)
     payload = {
         "schema": "autoadv-local-validation-v3",
         "repository": "naro0216n-collab/AutoAdv",
@@ -49,7 +49,7 @@ def _write_summary(root: Path, *, native: dict | None = None) -> None:
         "commit": "a" * 40,
         "started_utc": "2026-10-23T13:41:56Z",
         "ended_utc": "2026-10-23T13:45:00Z",
-        "phase_requested": "all",
+        "phase_requested": "accuracy",
         "phases": phases,
         "launcher_error": None,
     }
@@ -80,11 +80,11 @@ def _comments() -> list[dict]:
 
 
 class IssueReportingContract(unittest.TestCase):
-    def test_snapshot_accepts_missing_optional_native_line_fields(self):
+    def test_snapshot_accepts_missing_optional_accuracy_line_fields(self):
         with tempfile.TemporaryDirectory(prefix="20261023T134156Z-b10d6904-") as directory:
             root = Path(directory) / "20261023T134156Z-b10d6904"
             root.mkdir()
-            _write_summary(root, native=_phase("native"))
+            _write_summary(root, accuracy=_phase("accuracy"))
             report = {
                 "performance": {},
                 "line_results": [{
@@ -100,7 +100,7 @@ class IssueReportingContract(unittest.TestCase):
                 "errors": [],
                 "diagnostics": ["voice-end not independently observed"],
             }
-            (root / "autoadv-native.result.json").write_text(
+            (root / "autoadv-accuracy.result.json").write_text(
                 json.dumps(report, ensure_ascii=False), encoding="utf-8"
             )
 
@@ -110,20 +110,20 @@ class IssueReportingContract(unittest.TestCase):
             self.assertIn("| 4 | - | - |", snapshot.body)
             self.assertIn("voice-end not independently observed", snapshot.body)
 
-    def test_setup_failure_without_native_report_is_still_uploadable(self):
+    def test_setup_failure_without_accuracy_report_is_still_uploadable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "20261023T134156Z-b10d6904"
             root.mkdir()
-            native = _phase("native", report_present=False)
-            native["measurement_valid"] = None
-            native["collection_valid"] = None
-            native["collection_complete"] = None
-            native["runner_error"] = "Native setup failed: python failed (exit code 1)"
-            native["quality"] = None
-            _write_summary(root, native=native)
+            accuracy = _phase("accuracy", report_present=False)
+            accuracy["measurement_valid"] = None
+            accuracy["collection_valid"] = None
+            accuracy["collection_complete"] = None
+            accuracy["runner_error"] = "Accuracy setup failed: python failed (exit code 1)"
+            accuracy["quality"] = None
+            _write_summary(root, accuracy=accuracy)
             (root / "validation.log").write_text(
                 "noise\n"
-                "RealAudio media asset: cache\n"
+                "Advancement accuracy media asset: cache\n"
                 "WARNING token github_pat_1234567890abcdef path C:\\Users\\private\\x\n"
                 "RuntimeError: failed\n",
                 encoding="utf-8",
@@ -132,7 +132,7 @@ class IssueReportingContract(unittest.TestCase):
             snapshot = issue_reporting.format_snapshot(root, "b" * 40)
 
             self.assertIn("setup diagnostics", snapshot.body)
-            self.assertIn("RealAudio media asset: cache", snapshot.body)
+            self.assertIn("Advancement accuracy media asset: cache", snapshot.body)
             self.assertIn("<REDACTED-TOKEN>", snapshot.body)
             self.assertIn("<USERPROFILE>\\x", snapshot.body)
             self.assertNotIn("C:\\Users\\private", snapshot.body)
@@ -142,7 +142,7 @@ class IssueReportingContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "20261023T134156Z-b10d6904"
             root.mkdir()
-            _write_summary(root, native=_phase("native"))
+            _write_summary(root, accuracy=_phase("accuracy"))
 
             plan = issue_reporting.build_upload_plan(root, "c" * 40, _comments())
 
@@ -165,11 +165,11 @@ class IssueReportingContract(unittest.TestCase):
         )
         self.assertEqual((slot, comment_id), (3, 1003))
 
-    def test_eligible_native_run_adds_only_the_independent_baseline_patch(self):
+    def test_eligible_accuracy_run_adds_only_the_independent_baseline_patch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "20261023T134156Z-b10d6904"
             root.mkdir()
-            _write_summary(root, native=_phase("native", eligible_native=True))
+            _write_summary(root, accuracy=_phase("accuracy", eligible_accuracy=True))
 
             plan = issue_reporting.build_upload_plan(root, "d" * 40, _comments())
 
