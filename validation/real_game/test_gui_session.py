@@ -101,7 +101,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         trace = SimpleNamespace(emit=lambda name, **fields:
                                 actions.append(('trace', name, fields)))
         driver = SessionDriver(window, SimpleNamespace(),
-                               {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 23,
+                               {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 24,
                                 'continue_collection': True}, trace,
                                clock=lambda: 0.0)
         driver.state = 'activate'

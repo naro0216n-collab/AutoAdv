@@ -33,6 +33,6 @@ manifestは検証結果の照合用です。
 
 - JVS corpus: 公式ページが公開する`sample_jvs001` / `sample_jvs002` / `sample_jvs003`の個別WAVだけを使用する。3.5 GBの全corpus ZIPは取得しない。利用条件上、音声の再配布は行わない。
 - OpenGameArt: `Lofi Hip Hop Loop` (omfgdude) と `Heavenly Loop` (isaiah658) の個別OGG。各素材ページでCC0とされているものをSHA-256固定で取得する。
-- Meta Open Sound / Oculus Audio Pack 1: 個別OGGのmachine-room ambience、restaurant conversation、front-door open、reverberant impactをcommit SHAとファイルSHA-256で固定する。CC BY 4.0。Credit: "Oculus Audio Pack 01" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.
+- Meta Open Sound / Oculus Audio Pack 1: 個別OGGのmachine-room ambience、restaurant conversation、front-door open、garage-door closeをcommit SHAとファイルSHA-256で固定する。CC BY 4.0。Credit: "Oculus Audio Pack 01" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.
 
 外部素材のURLやライセンス情報をGitへ記録することと、素材データ自体を再配布することを区別する。cacheは検証専用で、AutoAdv製品の通常ゲーム資産・ユーザー設定・配布物にはしない。

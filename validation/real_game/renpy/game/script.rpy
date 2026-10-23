@@ -13,6 +13,23 @@ define c = Character("蓮")
 init python:
     import os as _autoadv_fixture_os
 
+# Independent game presentation channels used by the continuous accuracy scene.
+# They are ordinary Ren'Py audio channels and are never visible to AutoAdv.
+init -2 python:
+    renpy.music.register_channel("adv_ambient", "sfx", loop=True)
+    renpy.music.register_channel("adv_background", "sfx", loop=True)
+    renpy.music.register_channel("adv_sfx", "sfx", loop=False)
+
+image bg adv_room = Solid("#141922")
+image bg adv_cafe = Solid("#302525")
+image bg adv_street = Solid("#151b28")
+image bg adv_incident = Solid("#271518")
+image bg adv_machine = Solid("#17201d")
+image bg adv_quiet = Solid("#101418")
+
+screen adv_delayed_sfx(delay, filename, volume=1.0):
+    timer delay action Play("adv_sfx", filename, relative_volume=volume)
+
 label start:
     scene black
     # Optional fixture readiness barrier. Only the first unmeasured calibration
@@ -37,8 +54,11 @@ label start:
     "通常のゲームと同じように、台詞表示・音声再生・選択肢・送り入力が動作します。"
     "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。"
 label advancement_accuracy:
-    # Fail visibly rather than silently falling back to the old bundled audio
-    # if runtime hydration did not happen.
+    # One continuous ADV/novel-game playthrough. The game process, selected
+    # LunaHook, AutoAdv session, NativeAudio and ASR remain alive from the first
+    # measured line through the final recovery line. Scene transitions below
+    # are ordinary presentation only; no validation boundary or product reset
+    # is signalled to AutoAdv.
     python:
         _adv_runtime_assets = [
             "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
@@ -49,98 +69,100 @@ label advancement_accuracy:
             "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg",
             "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg",
             "audio/runtime/sfx/DOORWood_FrontDoorOpen_OS_01.ogg",
-            "audio/runtime/sfx/DSGNImpt_ImpactCreepyReverb_OS_01.ogg",
+            "audio/runtime/sfx/DOORMetl_GarageDoorClose_OS_01.ogg",
         ]
         _adv_missing_runtime_assets = [x for x in _adv_runtime_assets if not renpy.loadable(x)]
     if _adv_missing_runtime_assets:
         "自動進行精度計測用素材が不足しています。検証runnerから起動してください。"
         return
 
-    # Clean control spans the bundled regression speaker and three independent
-    # JVS speakers. The JVS sample deliberately keeps its native 24 kHz format;
-    # the game/Windows audio stack performs the same resampling a real game can.
+    # Scene 1: quiet room. Establish clean voiced and unvoiced behavior before
+    # any persistent mix exists.
+    scene bg adv_room with fade
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
     voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
     a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
-    b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
-    c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    p "これは音声のない台詞です。"
 
-    # Two unrelated instrumental tracks persist across dialogue boundaries.
-    play music "audio/runtime/music/Heavenly Loop_0.ogg" loop volume 0.24
+    # Scene 2: the same conversation continues while BGM fades in and remains
+    # across voiced, unvoiced and whispered lines.
+    play music "audio/runtime/music/Heavenly Loop_0.ogg" loop fadein 0.8 volume 0.24
     voice "audio/voice/normal_017.wav"
     a "あっベルが鳴ってる。"
-    voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
-    a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    stop music fadeout 0.15
-
-    play music "audio/runtime/music/LofiLoop_2.ogg" loop volume 0.28
-    voice "audio/voice/normal_026.wav"
-    a "私はいつもミネラルウォーターを持ち歩いています。"
-    voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
-    b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    p "返事をする前に、少し考えた。"
     voice "audio/voice/whisper_001.wav"
     s "えっ嘘でしょ。"
-    stop music fadeout 0.15
 
-    # A machine room is non-speech continuous energy: process-wide VAD silence
-    # should not be needed to finish the selected voice.
-    play sound "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg" loop volume 0.25
-    voice "audio/voice/normal_028.wav"
-    a "彼女はスタッフをまとめていけると思いますか？"
-    voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
-    c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    voice "audio/voice/whisper_017.wav"
-    s "あっベルが鳴ってる。"
-    stop sound fadeout 0.15
-
-    # Real crowd conversation is competing speech. It remains active through
-    # two foreground utterances and therefore outlasts the first one.
-    play sound "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg" loop volume 0.22
+    # Scene 3: enter a busy cafe without resetting the session. BGM continues;
+    # a door one-shot and crowd ambience overlap the first line.
+    scene bg adv_cafe with dissolve
+    play adv_sfx "audio/runtime/sfx/DOORWood_FrontDoorOpen_OS_01.ogg" volume 0.34
+    play adv_ambient "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg" loop fadein 0.4 volume 0.22
     voice "audio/voice/normal_022.wav"
     a "猫はにゃーにゃーと鳴く。"
-    voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
-    a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    stop sound fadeout 0.15
-
-    # A clearly intelligible Japanese voice on an independent game channel is
-    # a stronger lexical distractor than instrumental BGM. Reuse the already
-    # hydrated JVS sample instead of downloading a separate singing corpus.
-    # Keep it across identical successive foreground text to exercise both
-    # acoustic attribution and Utterance-generation boundaries.
-    play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
-    voice "audio/voice/normal_010.wav"
-    a "彼のあだ名は言い得て妙だよね。"
+    voice "audio/voice/normal_028.wav"
+    a "彼女はスタッフをまとめていけると思いますか？"
     voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
     b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    voice "audio/voice/normal_020.wav"
-    a "ヒューズが飛んだ。"
-    voice "audio/voice/normal_020.wav"
-    a "ヒューズが飛んだ。"
-    stop sound fadeout 0.15
+    p "人の多い店内で、主人公は黙って頷いた。"
 
-    # One-shot game effects overlap foreground speech. The reverberant impact is
-    # longer than the short whisper, so the mix remains active after its end.
-    play sound "audio/runtime/sfx/DSGNImpt_ImpactCreepyReverb_OS_01.ogg" volume 0.32
-    voice "audio/voice/whisper_022.wav"
-    s "猫はにゃーにゃーと鳴く。"
-    play sound "audio/runtime/sfx/DOORWood_FrontDoorOpen_OS_01.ogg" volume 0.34
+    # Scene 4: leave the crowd and change BGM as a normal scene transition.
+    # A Japanese voice then persists on an independent game channel, first
+    # behind a voiced line and then behind an unvoiced protagonist line.
+    stop adv_ambient fadeout 0.6
+    scene bg adv_street with fade
+    play music "audio/runtime/music/LofiLoop_2.ogg" loop fadeout 0.8 fadein 0.8 volume 0.28
+    voice "audio/voice/normal_026.wav"
+    a "私はいつもミネラルウォーターを持ち歩いています。"
+    play adv_background "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
+    voice "audio/voice/normal_010.wav"
+    a "彼のあだ名は言い得て妙だよね。"
+    p "この場面の主人公にも音声は付いていない。"
+    stop adv_background fadeout 0.2
+
+    # Identical successive foreground text remains inside the same BGM and
+    # product session. No test-only utterance boundary is inserted.
+    voice "audio/voice/normal_020.wav"
+    a "ヒューズが飛んだ。"
+    voice "audio/voice/normal_020.wav"
+    a "ヒューズが飛んだ。"
+
+    # Scene 5: emotional/incident sequence. Non-lexical voice is followed by a
+    # long normal line. A long one-shot effect starts *during* that voice on a
+    # separate channel and is intentionally allowed to remain into the next
+    # unvoiced narration line.
+    scene bg adv_incident with dissolve
+    voice "audio/voice/stress_cry.wav"
+    a "うっ……うう……"
+    show screen adv_delayed_sfx(0.8, "audio/runtime/sfx/DOORMetl_GarageDoorClose_OS_01.ogg", 0.32)
+    voice "audio/voice/normal_030.wav"
+    a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
+    hide screen adv_delayed_sfx
+    p "大きな音の余韻だけが、その場に残った。"
+    stop adv_sfx
+    voice "audio/voice/stress_scream.wav"
+    s "あああっ！"
+
+    # Scene 6: move into a machine room while the old BGM remains. The next
+    # line therefore sees old BGM + new ambience; the following whisper occurs
+    # while BGM fades out. Ambient noise then persists through unvoiced/voiced
+    # lines without any session reset.
+    scene bg adv_machine with fade
+    play adv_ambient "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg" loop fadein 0.4 volume 0.25
     voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
     c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    stop music fadeout 1.2
+    voice "audio/voice/whisper_017.wav"
+    s "あっベルが鳴ってる。"
+    p "機械音の中で、ナレーションだけが表示される。"
+    voice "audio/voice/normal_021.wav"
+    a "私はポピュラー音楽を聞きたい。"
 
-    # Real games also contain lines with no foreground voice. With the explicit
-    # uncertain-text fallback enabled for the accuracy suite, these should
-    # advance only by the text-time policy; ASR must not invent a native end.
-    stop music
-    stop sound
-    p "これは音声のない台詞です。"
-    play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
-    p "この台詞にも原音はありません。"
-    stop sound fadeout 0.15
-
-    # Finish clean to expose leaked background state or stale audio evidence.
+    # Scene 7: ordinary quiet transition and final clean recovery. The same
+    # process/session must prove no stale PCM/VAD/ASR/background state leaks.
+    stop adv_ambient fadeout 0.3
+    scene bg adv_quiet with fade
     voice "audio/voice/normal_035.wav"
     a "彼女は息子に家で行儀よくするように言った。"
     return

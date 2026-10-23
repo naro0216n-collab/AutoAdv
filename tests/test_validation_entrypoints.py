@@ -70,7 +70,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertNotIn('case_matrix', orchestrator)
         self.assertNotIn('NativeCase', live)
         self.assertNotIn('AUTOADV_VALIDATION_CASE', fixture)
-        self.assertIn("'accuracy' { 23 }", live)
+        self.assertIn("'accuracy' { 24 }", live)
         self.assertIn("continue_collection = ($Phase -eq 'accuracy')", live)
         self.assertIn("if ($MeasurementOnly) { $arguments += '--measurement-only' }", live)
         self.assertIn("'-Automated','-MeasurementOnly'", orchestrator)
@@ -109,7 +109,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('automatic_continuation_verified = if ($measurement)', orchestrator)
         self.assertIn('validation_recovery_inputs = if ($measurement)', orchestrator)
         self.assertIn('これは音声のない台詞です。', fixture)
-        self.assertIn('この台詞にも原音はありません。', fixture)
+        self.assertIn('この場面の主人公にも音声は付いていない。', fixture)
         self.assertNotIn('autoadv_case_', fixture)
 
 

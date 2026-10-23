@@ -23,12 +23,13 @@ def _phase(name: str, *, report_present: bool = True, eligible_accuracy: bool = 
         "validation_recovery_inputs": 0,
         "voice_safety_verified": True if eligible_accuracy else None,
         "quality": {
-            "requested_cases": 23 if name == "accuracy" else 3,
-            "observed_cases": 23 if name == "accuracy" else 3,
+            "requested_cases": 24 if name == "accuracy" else 3,
+            "observed_cases": 24 if name == "accuracy" else 3,
             "automatic_advance_rate": 1.0,
             "safe_automatic_advance_rate": 1.0,
             "process_audio_observation_rate": 1.0 if name == "accuracy" else None,
             "asr_observation_rate": 1.0 if name == "accuracy" else None,
+            "mix_environment_observation_rate": 1.0 if name == "accuracy" else None,
             "foreground_native_completion_rate": 1.0 if name == "accuracy" else None,
             "recovery_rate": 0.0,
             "early_input_rate": 0.0 if name == "accuracy" else None,
@@ -91,9 +92,9 @@ class IssueReportingContract(unittest.TestCase):
             report = {
                 "performance": {},
                 "line_results": [{
-                    "scenario": "clean-local-short",
+                    "scenario": "room-clean-short",
                     "speaker_family": "amitaro",
-                    "audio_environment": "clean",
+                    "audio_environment": "clean_room_short",
                     "outcome": "no_autoadv_input",
                     "completion_reason": None,
                     "pcm_observed": True,
@@ -110,7 +111,7 @@ class IssueReportingContract(unittest.TestCase):
 
             snapshot = issue_reporting.format_snapshot(root, "a" * 40)
 
-            self.assertIn("| clean-local-short | amitaro | clean | no_autoadv_input |", snapshot.body)
+            self.assertIn("| room-clean-short | - | amitaro | clean_room_short | - | no_autoadv_input |", snapshot.body)
             self.assertIn("| yes | 4 | - | - |", snapshot.body)
             self.assertIn("voice-end not independently observed", snapshot.body)
 
@@ -189,6 +190,18 @@ class IssueReportingContract(unittest.TestCase):
             _write_summary(root, accuracy=accuracy)
 
             plan = issue_reporting.build_upload_plan(root, "e" * 40, _comments())
+
+            self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
+
+    def test_missing_game_mix_coverage_cannot_replace_known_good_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "20261023T134156Z-b10d6904"
+            root.mkdir()
+            accuracy = _phase("accuracy", eligible_accuracy=True)
+            accuracy["quality"]["mix_environment_observation_rate"] = 0.9583
+            _write_summary(root, accuracy=accuracy)
+
+            plan = issue_reporting.build_upload_plan(root, "f" * 40, _comments())
 
             self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
 

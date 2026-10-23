@@ -24,6 +24,10 @@ MIXED_SCENARIO = scenario_for_phase('mixed')
 ACCURACY_SCENARIO = scenario_for_phase('accuracy')
 
 
+def accuracy_pos(case_id):
+    return next(i for i, line in enumerate(ACCURACY_SCENARIO) if line['id'] == case_id)
+
+
 def contract_records(first: int, last: int, *, mode=None, advance=True, lines=None):
     """Manufacture checker-only records, not an AutoAdv/game execution."""
     lines = SCENARIO if lines is None else lines
@@ -81,11 +85,11 @@ def resequence(records):
 class AccuracyScenarioContractTests(unittest.TestCase):
     def test_accuracy_phase_contains_voiced_and_unvoiced_cases_in_one_sequence(self):
         scenario = scenario_for_phase('accuracy')
-        self.assertEqual(len(scenario), 23)
-        self.assertEqual(scenario[0]['id'], 'clean-local-short')
-        self.assertEqual(scenario[-1]['id'], 'clean-recovery')
-        self.assertEqual(sum(line.get('foreground_voice') is True for line in scenario), 21)
-        self.assertEqual(sum(line.get('foreground_voice') is False for line in scenario), 2)
+        self.assertEqual(len(scenario), 24)
+        self.assertEqual(scenario[0]['id'], 'room-clean-short')
+        self.assertEqual(scenario[-1]['id'], 'quiet-recovery')
+        self.assertEqual(sum(line.get('foreground_voice') is True for line in scenario), 18)
+        self.assertEqual(sum(line.get('foreground_voice') is False for line in scenario), 6)
         self.assertTrue(all(line.get('advance_mode') == 'audio' and not line.get('use_tts')
                             for line in scenario))
 
@@ -147,94 +151,88 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(all('speaker_family' in line and 'audio_environment' in line
                             for line in result['line_results']))
 
-    def test_unvoiced_accuracy_cases_advance_only_by_explicit_text_fallback(self):
-        records = contract_records(20, 23, lines=ACCURACY_SCENARIO)
+    def _fallback_result_for_unvoiced_case(self, case_id, *, drop_audio=False):
+        index = accuracy_pos(case_id)
+        records = contract_records(index, index + 2, lines=ACCURACY_SCENARIO)
         rewritten = []
         for record in records:
-            if record.get('line') in (1, 2):
+            if record.get('line') == 1:
                 if record['event'] == 'utterance':
                     record = dict(record, uncertain_text_fallback=True)
-                if record.get('line') == 1 and record['event'] in (
-                        'native_pcm', 'native_event', 'asr_inference', 'native_voice_end_estimate'):
-                    continue
                 if record['event'] == 'native_voice_end_estimate':
                     continue
                 if record['event'] == 'native_event' and record.get('status') == 'completed':
                     continue
                 if record['event'] == 'presentation_complete':
                     record = dict(record, reason='uncertain_text_fallback')
+                if drop_audio and record['event'] in ('native_pcm', 'asr_inference'):
+                    continue
+                if not ACCURACY_SCENARIO[index]['process_audio_expected'] and record['event'] in (
+                        'native_pcm', 'native_event', 'asr_inference'):
+                    continue
             rewritten.append(record)
         records = resequence(rewritten)
-        oracle = synthetic_game_observations(records, phase='accuracy', start_line=21)
+        oracle = synthetic_game_observations(
+            records, phase='accuracy', start_line=index + 1)
+        return _validate(records, phase='accuracy', start_line=index + 1,
+                         oracle_records=oracle, measurement_only=True)
 
-        result = _validate(records, phase='accuracy', start_line=21,
-                           oracle_records=oracle, measurement_only=True)
+    def test_unvoiced_accuracy_cases_advance_only_by_explicit_text_fallback(self):
+        clean = self._fallback_result_for_unvoiced_case('room-clean-unvoiced')
+        interfered = self._fallback_result_for_unvoiced_case('street-background-unvoiced')
 
-        self.assertTrue(result['measurement_valid'], result['errors'])
-        self.assertEqual(result['game_evidence']['misattributions'], 0)
-        self.assertEqual(result['line_results'][0]['game_outcome'], 'no_foreground_voice_fallback')
-        self.assertEqual(result['line_results'][1]['game_outcome'], 'no_foreground_voice_fallback')
-        self.assertEqual(result['line_results'][0]['completion_reason'], 'uncertain_text_fallback')
-        self.assertEqual(result['line_results'][1]['completion_reason'], 'uncertain_text_fallback')
-        self.assertEqual(result['quality']['safe_automatic_advances'], 2)
-        self.assertEqual(result['quality']['process_audio_observation_rate'], 1.0)
-        self.assertEqual(result['quality']['asr_observation_rate'], 1.0)
-        self.assertFalse(result['line_results'][0]['process_audio_expected'])
-        self.assertTrue(result['line_results'][1]['process_audio_expected'])
-        self.assertEqual(result['line_results'][1]['asr_inference_count'], 1)
+        for result in (clean, interfered):
+            self.assertTrue(result['measurement_valid'], result['errors'])
+            self.assertEqual(result['game_evidence']['misattributions'], 0)
+            self.assertEqual(result['line_results'][0]['game_outcome'],
+                             'no_foreground_voice_fallback')
+            self.assertEqual(result['line_results'][0]['completion_reason'],
+                             'uncertain_text_fallback')
+        self.assertFalse(clean['line_results'][0]['process_audio_expected'])
+        self.assertTrue(interfered['line_results'][0]['process_audio_expected'])
+        self.assertGreater(interfered['line_results'][0]['asr_inference_count'], 0)
 
     def test_unvoiced_accuracy_case_native_completion_is_counted_as_misattribution(self):
-        # Target the background-speech/no-foreground case specifically. A
-        # native completion here means the mixed ASR path attributed background
-        # speech to the displayed line.
-        records = resequence(contract_records(21, 23, lines=ACCURACY_SCENARIO))
-        oracle = synthetic_game_observations(records, phase='accuracy', start_line=22)
+        index = accuracy_pos('street-background-unvoiced')
+        records = resequence(contract_records(index, index + 2, lines=ACCURACY_SCENARIO))
+        oracle = synthetic_game_observations(records, phase='accuracy', start_line=index + 1)
 
-        result = _validate(records, phase='accuracy', start_line=22,
+        result = _validate(records, phase='accuracy', start_line=index + 1,
                            oracle_records=oracle, measurement_only=True)
 
         self.assertEqual(result['game_evidence']['misattributions'], 1)
-        self.assertEqual(result['line_results'][0]['scenario'], 'unvoiced-background-speech')
-        self.assertEqual(result['line_results'][0]['game_outcome'], 'no_foreground_voice_misattributed')
-        self.assertEqual(result['quality']['safe_automatic_advances'], 0)
+        self.assertEqual(result['line_results'][0]['scenario'], 'street-background-unvoiced')
+        self.assertEqual(result['line_results'][0]['game_outcome'],
+                         'no_foreground_voice_misattributed')
         self.assertGreater(result['quality']['misattribution_rate'], 0)
 
     def test_safe_fallback_does_not_hide_missing_process_audio_or_asr_observation(self):
-        records = contract_records(20, 23, lines=ACCURACY_SCENARIO)
-        rewritten = []
-        for record in records:
-            if record.get('line') in (1, 2):
-                if record['event'] == 'utterance':
-                    record = dict(record, uncertain_text_fallback=True)
-                if record['event'] in ('native_voice_end_estimate',):
-                    continue
-                if record['event'] == 'native_event' and record.get('status') == 'completed':
-                    continue
-                if record['event'] == 'presentation_complete':
-                    record = dict(record, reason='uncertain_text_fallback')
-            # Simulate the exact regression the live suite must expose: the
-            # background-speech line still progresses by fallback, but neither
-            # Process Loopback PCM nor ASR inference reaches that Utterance.
-            if record.get('line') == 2 and record['event'] in ('native_pcm', 'asr_inference'):
-                continue
-            if record.get('line') == 1 and record['event'] in (
-                    'native_pcm', 'native_event', 'asr_inference'):
-                continue
-            rewritten.append(record)
-        records = resequence(rewritten)
-        oracle = synthetic_game_observations(records, phase='accuracy', start_line=21)
-
-        result = _validate(records, phase='accuracy', start_line=21,
-                           oracle_records=oracle, measurement_only=True)
+        result = self._fallback_result_for_unvoiced_case(
+            'street-background-unvoiced', drop_audio=True)
 
         self.assertTrue(result['measurement_valid'], result['errors'])
-        self.assertEqual(result['quality']['safe_automatic_advances'], 2)
-        self.assertEqual(result['quality']['process_audio_observation_rate'], 0.5)
-        self.assertEqual(result['quality']['asr_observation_rate'], 0.5)
-        self.assertTrue(any('expected process audio PCM not observed: unvoiced-background-speech'
+        self.assertLess(result['quality']['process_audio_observation_rate'], 1.0)
+        self.assertLess(result['quality']['asr_observation_rate'], 1.0)
+        self.assertTrue(any('expected process audio PCM not observed: street-background-unvoiced'
                             in issue for issue in result['quality_issues']))
-        self.assertTrue(any('expected ASR inference not observed: unvoiced-background-speech'
+        self.assertTrue(any('expected ASR inference not observed: street-background-unvoiced'
                             in issue for issue in result['quality_issues']))
+
+    def test_game_mix_observation_is_part_of_accuracy_measurement_validity(self):
+        index = accuracy_pos('incident-sfx-tail-unvoiced')
+        records = contract_records(index, index + 2, lines=ACCURACY_SCENARIO)
+        oracle = synthetic_game_observations(records, phase='accuracy', start_line=index + 1)
+        snapshot = next(record for record in oracle
+                        if record.get('event') == 'mix_snapshot' and record.get('line') == 1)
+        snapshot['channels'].pop('adv_sfx')
+
+        result = _validate(records, phase='accuracy', start_line=index + 1,
+                           oracle_records=oracle, measurement_only=True)
+
+        self.assertFalse(result['measurement_valid'])
+        self.assertFalse(result['line_results'][0]['mix_environment_verified'])
+        self.assertTrue(any('expected game mix not observed for incident-sfx-tail-unvoiced: adv_sfx'
+                            in error for error in result['errors']))
 
     def test_nonadvancement_reports_controller_handoff_and_fallback_setting(self):
         records = contract_records(0, 3, lines=ACCURACY_SCENARIO)

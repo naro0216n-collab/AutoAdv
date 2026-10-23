@@ -126,8 +126,31 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 errors.append('invalid independent game line sequence')
                 return result
             lines[number] = {'start': record, 'voice_onsets': [], 'voice_ends': [],
-                             'interruptions': []}
+                             'interruptions': [], 'mix_channels': set()}
             ordered.append(number)
+        elif event == 'mix_snapshot':
+            if number not in lines:
+                errors.append(f'game mix snapshot without a line: {number}')
+                return result
+            channels = record.get('channels')
+            if not isinstance(channels, dict) or any(
+                    not isinstance(channel, str) or not isinstance(filename, str) or not filename
+                    for channel, filename in channels.items()):
+                errors.append(f'invalid game mix snapshot: {number}')
+                return result
+            lines[number]['mix_channels'].update(channels)
+        elif event == 'mix_started':
+            # Mix changes during a dialogue (notably a delayed SFX) belong to
+            # that line. Changes during ordinary scene transitions have no
+            # current dialogue and are captured by the next mix_snapshot.
+            if number in lines:
+                channel = record.get('channel')
+                if not isinstance(channel, str) or not channel:
+                    errors.append(f'invalid game mix channel: {number}')
+                    return result
+                lines[number]['mix_channels'].add(channel)
+        elif event == 'mix_stopped':
+            pass
         elif event in ('voice_started', 'voice_ended', 'voice_interrupted'):
             if number not in lines:
                 errors.append(f'game event without a line: {number}')
@@ -198,11 +221,33 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             if (ms := _signed_elapsed_ms(voice_onsets[0]['at_ns'],
                                          source_outputs.get(origin))) is not None:
                 result['latencies'].setdefault('game_voice_onset_to_hook_ms', []).append(ms)
+        observed_mix = set(line.get('mix_channels', ()))
+        expected_mix = contract.get('expected_mix_channels')
+        forbidden_mix = contract.get('forbidden_mix_channels', ())
+        if not isinstance(expected_mix, list):
+            expected_mix = None
+        if not isinstance(forbidden_mix, list):
+            forbidden_mix = []
+        missing_mix = (set(expected_mix) - observed_mix) if expected_mix is not None else set()
+        forbidden_observed = set(forbidden_mix) & observed_mix
+        mix_verified = (expected_mix is not None and not missing_mix and not forbidden_observed)
         detail = {'scenario': contract.get('id'), 'game_line': game_number,
                   'completion_reason': reasons.get(key), 'sent': key in sent,
                   'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
+                  'mix_channels_observed': sorted(observed_mix),
+                  'mix_environment_verified': mix_verified if expected_mix is not None else None,
                   'validation_recovery_input': key in recovery_inputs,
                   'outcome': 'unadvanced'}
+        if missing_mix:
+            issue = (f'expected game mix not observed for {contract.get("id") or key}: ' +
+                     ','.join(sorted(missing_mix)))
+            errors.append(issue)
+            quality_issues.append(issue)
+        if forbidden_observed:
+            issue = (f'forbidden game mix remained active for {contract.get("id") or key}: ' +
+                     ','.join(sorted(forbidden_observed)))
+            errors.append(issue)
+            quality_issues.append(issue)
         if attempt is not None and key not in sent:
             diagnostics.append(f'input attempt has no confirmed advance input: {key}')
         # The product's targeted input and following LunaHook verify the
@@ -802,6 +847,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                                if scenario_case is not None else None),
             'audio_environment': (scenario_case.get('environment')
                                   if scenario_case is not None else None),
+            'scene': (scenario_case.get('scene') if scenario_case is not None else None),
             'advance_mode': utterance.get('advance_mode'),
             'use_tts': utterance.get('use_tts'),
             'completion_reason': reasons.get(key),
@@ -828,6 +874,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         }
         if game_evidence is not None and offset < len(game_evidence['lines']):
             line_result['game_outcome'] = game_evidence['lines'][offset]['outcome']
+            line_result['mix_channels_observed'] = game_evidence['lines'][offset].get(
+                'mix_channels_observed', [])
+            line_result['mix_environment_verified'] = game_evidence['lines'][offset].get(
+                'mix_environment_verified')
             if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
                 line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
         line_results.append(line_result)
@@ -886,6 +936,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         line.get('completion_reason') == 'uncertain_text_fallback' for line in unvoiced_lines)
     pcm_observed = sum(bool(line.get('pcm_observed')) for line in expected_audio_lines)
     asr_observed = sum(int(line.get('asr_inference_count') or 0) > 0 for line in expected_audio_lines)
+    mix_lines = [line for line in line_results if line.get('mix_environment_verified') is not None]
+    mix_verified = sum(line.get('mix_environment_verified') is True for line in mix_lines)
     quality = {
         'requested_cases': requested_cases,
         'observed_cases': len(utterance_order),
@@ -902,6 +954,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'asr_observed_cases': asr_observed,
         'process_audio_observation_rate': fraction(pcm_observed, len(expected_audio_lines)),
         'asr_observation_rate': fraction(asr_observed, len(expected_audio_lines)),
+        'mix_environment_cases': len(mix_lines),
+        'mix_environment_verified_cases': mix_verified,
+        'mix_environment_observation_rate': fraction(mix_verified, len(mix_lines)),
         'foreground_voice_cases': len(foreground_lines),
         'foreground_native_completion_rate': fraction(foreground_native, len(foreground_lines)),
         'foreground_fallback_rate': fraction(foreground_fallback, len(foreground_lines)),

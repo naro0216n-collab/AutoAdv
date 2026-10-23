@@ -42,8 +42,14 @@ def synthetic_game_observations(records, *, phase='mixed', start_line=None):
         case = scenario[indexes[0]+i]
         start = hook['at_ns'] - 100
         add('line_started', start, line=i+1, body_hash=u['body_hash'])
+        # Mirror only the authored external mix condition so verifier unit
+        # tests can exercise the game-observer contract. This is synthetic
+        # checker input and never substitutes for a live Ren'Py execution.
+        mix = {channel: f'synthetic/{channel}.ogg'
+               for channel in case.get('expected_mix_channels', ())}
+        add('mix_snapshot', start + 1, line=i+1, channels=mix)
         if case['foreground_voice']:
-            add('voice_started', start+1, line=i+1, file=case.get('foreground_file', 'unknown'))
+            add('voice_started', start+2, line=i+1, file=case.get('foreground_file', 'unknown'))
             end_at = ((sent['at_ns'] - 100) if sent else (u['at_ns'] + 1000))
             add('voice_ended', end_at, line=i+1, file=case.get('foreground_file', 'unknown'),
                 last_active_at_ns=end_at-2)

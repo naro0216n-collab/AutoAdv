@@ -84,6 +84,7 @@ def baseline_eligible(summary: dict[str, Any]) -> bool:
         and isinstance(phase.get("quality"), dict)
         and phase["quality"].get("process_audio_observation_rate") == 1.0
         and phase["quality"].get("asr_observation_rate") == 1.0
+        and phase["quality"].get("mix_environment_observation_rate") == 1.0
         and not phase.get("runner_error")
     )
 
@@ -108,8 +109,8 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         f"Requested: `{summary.get('phase_requested', '-')}` · "
         f"{summary.get('started_utc', '-')} → {summary.get('ended_utc', '-')}",
         "",
-        "| phase | observed/requested | collection | measurement | auto | safe | PCM | ASR | native fg | recovery | early | overhold | misattr | error |",
-        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| phase | observed/requested | collection | measurement | auto | safe | PCM | ASR | mix | native fg | recovery | early | overhold | misattr | error |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for phase in summary.get("phases", ()):
         quality = phase.get("quality") if isinstance(phase.get("quality"), dict) else {}
@@ -121,6 +122,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
             f"{_metric(quality.get('safe_automatic_advance_rate'))} | "
             f"{_metric(quality.get('process_audio_observation_rate'))} | "
             f"{_metric(quality.get('asr_observation_rate'))} | "
+            f"{_metric(quality.get('mix_environment_observation_rate'))} | "
             f"{_metric(quality.get('foreground_native_completion_rate'))} | "
             f"{_metric(quality.get('recovery_rate'))} | {_metric(quality.get('early_input_rate'))} | "
             f"{_metric(quality.get('overhold_rate'))} | {_metric(quality.get('misattribution_rate'))} | "
@@ -150,15 +152,16 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         if phase_name == "accuracy" and isinstance(report.get("line_results"), list):
             lines.extend((
                 "",
-                "| case | speaker | environment | outcome | completion | PCM | ASR | game | end→input ms |",
-                "| --- | --- | --- | --- | --- | --- | ---: | --- | ---: |",
+                "| case | scene | speaker | environment | mix | outcome | completion | PCM | ASR | game | end→input ms |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- | ---: |",
             ))
             for line in report["line_results"]:
                 if not isinstance(line, dict):
                     continue
                 lines.append(
-                    f"| {_cell(line.get('scenario'))} | {_cell(line.get('speaker_family'))} | "
-                    f"{_cell(line.get('audio_environment'))} | {_cell(line.get('outcome'))} | "
+                    f"| {_cell(line.get('scenario'))} | {_cell(line.get('scene'))} | "
+                    f"{_cell(line.get('speaker_family'))} | {_cell(line.get('audio_environment'))} | "
+                    f"{_cell(','.join(line.get('mix_channels_observed') or []))} | {_cell(line.get('outcome'))} | "
                     f"{_cell(line.get('completion_reason'))} | {_metric(line.get('pcm_observed'))} | "
                     f"{_metric(line.get('asr_inference_count'))} | "
                     f"{_cell(line.get('game_outcome'))} | {_metric(line.get('game_end_to_input_ms'))} |"

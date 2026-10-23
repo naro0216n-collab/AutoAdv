@@ -65,7 +65,9 @@
       "size_bytes": 1430666,
       "max_bytes": 3145728,
       "source_page": "https://opengameart.org/content/lofi-hip-hop-loop",
-      "urls": ["https://opengameart.org/sites/default/files/LofiLoop_2.ogg"],
+      "urls": [
+        "https://opengameart.org/sites/default/files/LofiLoop_2.ogg"
+      ],
       "license": "CC0-1.0",
       "redistributable": true
     },
@@ -78,7 +80,9 @@
       "size_bytes": 1224922,
       "max_bytes": 3145728,
       "source_page": "https://opengameart.org/content/heavenly-loop",
-      "urls": ["https://opengameart.org/sites/default/files/Heavenly%20Loop_0.ogg"],
+      "urls": [
+        "https://opengameart.org/sites/default/files/Heavenly%20Loop_0.ogg"
+      ],
       "license": "CC0-1.0",
       "redistributable": true
     },
@@ -90,7 +94,9 @@
       "sha256": "20bf4881955a03135e15ea9421a549c45b0055a9cb2790f943a9d0b7d629f5c2",
       "max_bytes": 8388608,
       "source_page": "https://github.com/facebookincubator/Meta-open-sound/tree/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack",
-      "urls": ["https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/AMBInd_RoomToneMachineRoom_LOOP_01.ogg"],
+      "urls": [
+        "https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/AMBInd_RoomToneMachineRoom_LOOP_01.ogg"
+      ],
       "license": "CC-BY-4.0",
       "attribution": "\"Oculus Audio Pack 01\" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.",
       "redistributable": true
@@ -103,7 +109,9 @@
       "sha256": "8c39aac1aa71f09ca56492199a65fa187b779967db36ad32c2c5a501f3b63d9a",
       "max_bytes": 8388608,
       "source_page": "https://github.com/facebookincubator/Meta-open-sound/tree/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack",
-      "urls": ["https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/CRWDConv_Restaurant_LOOP_01.ogg"],
+      "urls": [
+        "https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/CRWDConv_Restaurant_LOOP_01.ogg"
+      ],
       "license": "CC-BY-4.0",
       "attribution": "\"Oculus Audio Pack 01\" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.",
       "redistributable": true
@@ -116,20 +124,25 @@
       "sha256": "03f9b072f79a7ceb8fa8b3b101f7a3c2a7919f5b1d6b61c7be7f4c089ee9a2ec",
       "max_bytes": 4194304,
       "source_page": "https://github.com/facebookincubator/Meta-open-sound/tree/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack",
-      "urls": ["https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/DOORWood_FrontDoorOpen_OS_01.ogg"],
+      "urls": [
+        "https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/DOORWood_FrontDoorOpen_OS_01.ogg"
+      ],
       "license": "CC-BY-4.0",
       "attribution": "\"Oculus Audio Pack 01\" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.",
       "redistributable": true
     },
     {
-      "id": "meta-impact",
+      "id": "meta-garage-door-close",
       "kind": "sfx",
-      "filename": "DSGNImpt_ImpactCreepyReverb_OS_01.ogg",
-      "runtime_path": "game/audio/runtime/sfx/DSGNImpt_ImpactCreepyReverb_OS_01.ogg",
-      "sha256": "01a4c4206e785b99964c76e7cc6a2ee903e2d9f287c7f4637747b233bfd15fd6",
+      "filename": "DOORMetl_GarageDoorClose_OS_01.ogg",
+      "runtime_path": "game/audio/runtime/sfx/DOORMetl_GarageDoorClose_OS_01.ogg",
+      "sha256": "ee6991718012747c804d89db537ce5b4bb2f41be82e912193c9647cfb3fe5528",
       "max_bytes": 4194304,
+      "duration_s": 10.036,
       "source_page": "https://github.com/facebookincubator/Meta-open-sound/tree/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack",
-      "urls": ["https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/DSGNImpt_ImpactCreepyReverb_OS_01.ogg"],
+      "urls": [
+        "https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/251c0be57d5d1b3242b91f53e0cde62ab1cb42d9/corpora/oculus-audio-pack/ogg/DOORMetl_GarageDoorClose_OS_01.ogg"
+      ],
       "license": "CC-BY-4.0",
       "attribution": "\"Oculus Audio Pack 01\" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.",
       "redistributable": true

@@ -203,7 +203,7 @@ public static class AudioRenderProbe {
                 oracle = $Oracle; gate = $gate; executable = $gameExe;
                 phase = $Phase; timeout_seconds = $TimeoutSeconds;
                 dialogues = $(switch ($Phase) {
-                    'hook' { 1 }; 'reading' { 3 }; 'accuracy' { 23 };
+                    'hook' { 1 }; 'reading' { 3 }; 'accuracy' { 24 };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
                 continue_collection = ($Phase -eq 'accuracy');

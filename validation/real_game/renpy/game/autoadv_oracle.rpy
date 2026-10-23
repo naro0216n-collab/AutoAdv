@@ -14,6 +14,8 @@ init -1 python:
     _adv_oracle_voice = None
     _adv_oracle_voice_line = None
     _adv_oracle_last_active = None
+    _adv_oracle_mix_channels = ("music", "adv_ambient", "adv_background", "adv_sfx")
+    _adv_oracle_mix = {}
 
     def _adv_oracle_write(event, **fields):
         if not _adv_oracle_path:
@@ -37,6 +39,40 @@ init -1 python:
         if not filename or not isinstance(position, (float, int)) or position < 0:
             return None
         return filename
+
+
+    def _adv_oracle_mix_playing(channel):
+        try:
+            filename = renpy.music.get_playing(channel=channel)
+            position = renpy.music.get_pos(channel=channel)
+        except Exception:
+            return None
+        if not filename or not isinstance(position, (float, int)) or position < 0:
+            return None
+        return filename
+
+    def _adv_oracle_sample_mix():
+        if not _adv_oracle_path:
+            return
+        for channel in _adv_oracle_mix_channels:
+            playing = _adv_oracle_mix_playing(channel)
+            previous = _adv_oracle_mix.get(channel)
+            if playing == previous:
+                continue
+            if previous is not None:
+                _adv_oracle_write("mix_stopped", line=_adv_oracle_current,
+                                  channel=channel, file=previous)
+                _adv_oracle_mix.pop(channel, None)
+            if playing is not None:
+                _adv_oracle_mix[channel] = playing
+                _adv_oracle_write("mix_started", line=_adv_oracle_current,
+                                  channel=channel, file=playing)
+
+    def _adv_oracle_mix_snapshot():
+        _adv_oracle_sample_mix()
+        if _adv_oracle_current is not None:
+            _adv_oracle_write("mix_snapshot", line=_adv_oracle_current,
+                              channels=dict(_adv_oracle_mix))
 
     def _adv_oracle_sample():
         global _adv_oracle_voice, _adv_oracle_voice_line, _adv_oracle_last_active
@@ -72,6 +108,7 @@ init -1 python:
             _adv_oracle_voice = None
             _adv_oracle_voice_line = None
             _adv_oracle_last_active = None
+        _adv_oracle_sample_mix()
 
     def _adv_oracle_character(event, **kwargs):
         global _adv_oracle_line, _adv_oracle_current
@@ -86,6 +123,7 @@ init -1 python:
             _adv_oracle_write("line_started", line=_adv_oracle_current,
                 body_hash=_adv_hashlib.sha256(normalized.encode("utf-8")).hexdigest())
             _adv_oracle_sample()
+            _adv_oracle_mix_snapshot()
         elif event == "end" and _adv_oracle_current is not None:
             # End only closes attribution of *new* playback to this dialogue.
             # The already-owned voice lifecycle remains observable until the
