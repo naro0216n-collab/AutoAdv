@@ -83,12 +83,14 @@ class StressScenarios(unittest.TestCase):
             tokens.write_bytes(b'fake-tokens-only-for-checker')
             with patch.object(stress_asr, 'JapaneseASR', BackgroundRecognizer):
                 data = stress_asr.run(model, tokens, selection='background')
-            risk = next(c for c in data['cases'] if c['id'] == 'background_only_same_text')
-            self.assertEqual(risk['attribution'], 'unverified')
-            self.assertFalse(risk['false_attribution_risk'])
+            case = next(c for c in data['cases'] if c['id'] == 'background_only_same_text')
+            self.assertEqual(case['attribution'], 'unverified')
+            self.assertNotIn('false_attribution_risk', case)
             self.assertIs(data['real_game_verified'], False)
             self.assertEqual(len(data['observations']), len(data['cases']))
-            self.assertEqual(next(o for o in data['observations'] if o['case'] == 'background_only_same_text')['transcript'], 'ヒューズが飛んだ。')
+            observation = next(o for o in data['observations'] if o['case'] == 'background_only_same_text')
+            self.assertEqual(observation['transcript'], 'ヒューズが飛んだ。')
+            self.assertNotIn('false_attribution_risk', observation)
 
     def test_stress_is_native_or_reading_only_not_tts_asr(self):
         scenario = json.loads((STRESS.parent / 'ASR_STRESS_SCENARIO.json').read_text(encoding='utf-8'))

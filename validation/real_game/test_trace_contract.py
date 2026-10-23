@@ -38,13 +38,13 @@ class EvidenceIntegrityTests(unittest.TestCase):
             observer.install()
             token = Token(4, 2)
             app.observer('asr_inference', token, {
-                'phonetic_coverage': .75, 'phonetic_progress_delta': .12,
-                'target_last_token_age_ms': 80, 'vad_tail_ms': 0,
+                'phonetic_coverage': .75, 'target_progressed': True,
+                'vad_tail_ms': 0,
             })
             app.observer('voice_assessment', token, {
-                'state': 'playing', 'method': 'asr', 'association': .91,
-                'completion': .72, 'contradiction': .04, 'endpoint': .10,
-                'evidence': .67, 'endpoint_source': '',
+                'state': 'playing', 'method': 'asr',
+                'target_correlated': True, 'target_complete': False,
+                'endpoint_source': '',
             })
             records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
             raw = next(record for record in records if record['event'] == 'asr_inference')
@@ -52,7 +52,8 @@ class EvidenceIntegrityTests(unittest.TestCase):
             self.assertEqual(raw['phonetic_coverage'], .75)
             self.assertNotIn('state', raw)
             self.assertEqual(judged['state'], 'playing')
-            self.assertEqual(judged['association'], .91)
+            self.assertTrue(judged['target_correlated'])
+            self.assertFalse(judged['target_complete'])
             self.assertNotIn('phonetic_coverage', judged)
 
     def test_no_actual_autoadv_events_is_always_unverified(self):

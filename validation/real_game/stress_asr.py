@@ -1,9 +1,9 @@
 """Opt-in real-model ASR investigation for nonlexical and competing voices.
 
 Uses production JapaneseASR, real recordings, deterministic mixtures. This is
-not a source-separation or a second AutoAdv audio controller: it reports whether
-text matching could mistake background/nonverbal sounds for foreground speech.
-True advancement behavior still requires the live GUI/HOOК verification.
+not a source-separation or a second AutoAdv audio controller: it records raw
+recognizer and G2P-alignment measurements only.  Advancement behavior still
+requires the live product path.
 """
 from __future__ import annotations
 import argparse
@@ -81,17 +81,6 @@ def _mix(case: dict, audio: dict):
     return np.clip(out, -1, 1)
 
 
-def _benchmark_text_match(alignment) -> bool:
-    """Stress-report lexical criterion over raw alignment measurements only."""
-    target = alignment.phonetic_target_units
-    if target < 3:
-        return False
-    return bool(
-        alignment.phonetic_coverage >= .78
-        and alignment.phonetic_edits <= max(2, target // 6)
-        and .72 <= alignment.pronunciation_length_ratio <= 1.28
-    )
-
 
 def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -> dict:
     import numpy as np
@@ -113,10 +102,6 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
             transcript, target = surface_key(hypothesis.text), surface_key(case['display'])
             alignment = TargetMatcher(case['display']).align(
                 hypothesis.text, tokens=hypothesis.tokens)
-            # This is a stress-report lexical criterion over raw alignment only.
-            # It is not the product voice assessment and cannot prove speaker origin.
-            matching = bool(target) and _benchmark_text_match(alignment)
-            no_foreground = case['attribution'] == 'not_foreground'
             lexical = case['kind'] == 'lexical'
             observations.append({
                 'case': case['id'], 'kind': case['kind'], 'attribution': case['attribution'],
@@ -124,7 +109,7 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
                 'decode_ms': round(duration, 3), 'rtf': round(duration / chunk.duration_ms, 4),
                 'transcript_hash': hashlib.sha256(transcript.encode('utf-8')).hexdigest(),
                 'transcript': hypothesis.text,  # real recognizer output, not inferred from its hash
-                'recognized_characters': len(transcript), 'matches_display_text': matching,
+                'recognized_characters': len(transcript),
                 'phonetic_coverage': round(alignment.phonetic_coverage, 4),
                 'phonetic_matches': alignment.phonetic_matches,
                 'phonetic_target_units': alignment.phonetic_target_units,
@@ -132,8 +117,6 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
                 'reading_rank': alignment.reading_rank,
                 'cer': round(_edit_distance(target, transcript) / max(1, len(target)), 4)
                         if lexical else None,
-                'false_attribution_risk': no_foreground and matching,
-                'unsafe_to_assume_speaker': case['attribution'] != 'foreground',
             })
     return {
         'device': platform.platform(), 'python': platform.python_version(),
@@ -143,9 +126,7 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
         'recordings_sha256': {name: hashlib.sha256(mono.astype('<f4').tobytes()).hexdigest()
                               for name, mono in audio.items()},
         'cases': [{**case, 'decode': _summary([o['decode_ms'] for o in observations if o['case'] == case['id']]),
-                   'rtf': _summary([o['rtf'] for o in observations if o['case'] == case['id']]),
-                   'false_attribution_risk': any(o['false_attribution_risk']
-                                                 for o in observations if o['case'] == case['id'])}
+                   'rtf': _summary([o['rtf'] for o in observations if o['case'] == case['id']])}
                   for case in cases],
         'observations': observations,
         # Benchmark metrics are evidence, not a fabricated PASS for real game input.

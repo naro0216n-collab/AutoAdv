@@ -69,10 +69,6 @@ class TargetAlignment:
         return self.surface_matches / max(1, self.surface_target_units, self.surface_observed_units)
 
     @property
-    def onset_score(self) -> float:
-        return self.surface_matches / max(1, self.surface_prefix_units, self.surface_observed_units)
-
-    @property
     def matched_chars(self) -> int:
         return self.surface_matches
 
@@ -81,16 +77,8 @@ class TargetAlignment:
         return self.surface_edits
 
     @property
-    def length_ratio(self) -> float:
-        return self.surface_observed_units / max(1, self.surface_target_units)
-
-    @property
     def phonetic_coverage(self) -> float:
         return self.phonetic_matches / max(1, self.phonetic_target_units, self.phonetic_observed_units)
-
-    @property
-    def phonetic_onset_score(self) -> float:
-        return self.phonetic_matches / max(1, self.phonetic_prefix_units, self.phonetic_observed_units)
 
     @property
     def matched_phonemes(self) -> int:
@@ -99,22 +87,6 @@ class TargetAlignment:
     @property
     def phonetic_edit_count(self) -> int:
         return self.phonetic_edits
-
-    @property
-    def target_units(self) -> int:
-        return self.phonetic_target_units
-
-    @property
-    def pronunciation_length_ratio(self) -> float:
-        return self.phonetic_observed_units / max(1, self.phonetic_target_units)
-
-    @property
-    def signature(self) -> tuple:
-        return (
-            self.phonetic_matches, self.phonetic_target_units, self.phonetic_observed_units,
-            self.phonetic_prefix_units, self.phonetic_edits, self.reading_rank,
-            self.observed_token_count, self.observed,
-        )
 
 
 class TargetMatcher:
@@ -136,14 +108,14 @@ class TargetMatcher:
             self._target_pronunciations = self._g2p.candidates(target, max_candidates=4)
 
     @staticmethod
-    def _reading_rank(*, matches: int, target_units: int, observed_units: int,
-                      prefix_units: int, edits: int, reading_rank: int) -> tuple:
-        target_fraction = matches / max(1, target_units)
-        error_ratio = edits / max(1, prefix_units, observed_units)
-        length_error = abs(observed_units - target_units) / max(1, target_units)
+    def _alignment_rank(alignment: TargetAlignment) -> tuple:
+        """Choose the strongest raw alignment without weighted confidence math."""
         return (
-            target_fraction - .25 * error_ratio - .025 * reading_rank,
-            matches, -edits, -length_error, -reading_rank,
+            alignment.phonetic_matches - alignment.phonetic_edits,
+            alignment.phonetic_matches,
+            -alignment.phonetic_edits,
+            alignment.phonetic_prefix_units,
+            -alignment.reading_rank,
         )
 
     def _evaluate(self, hypothesis: str) -> TargetAlignment:
@@ -178,10 +150,7 @@ class TargetMatcher:
                             phonetic_edits=perrors,
                             reading_rank=candidate.rank,
                         )
-                        rank = self._reading_rank(
-                            matches=pm, target_units=len(target_phones),
-                            observed_units=len(observed_phones), prefix_units=pprefix,
-                            edits=perrors, reading_rank=candidate.rank)
+                        rank = self._alignment_rank(item)
                         if best_phone is None or rank > best_phone[0]:
                             best_phone = (rank, item)
 
@@ -204,17 +173,10 @@ class TargetMatcher:
 
     @classmethod
     def _prefix_rank(cls, alignment: TargetAlignment, token_count: int) -> tuple:
-        p = cls._reading_rank(
-            matches=alignment.phonetic_matches,
-            target_units=alignment.phonetic_target_units,
-            observed_units=alignment.phonetic_observed_units,
-            prefix_units=alignment.phonetic_prefix_units,
-            edits=alignment.phonetic_edits,
-            reading_rank=alignment.reading_rank)
-        surface_fraction = alignment.surface_matches / max(1, alignment.surface_target_units)
-        # On equal alignment quality choose the earliest ASR prefix so trailing
-        # background speech is not absorbed into the target observation.
-        return (*p, surface_fraction, -token_count)
+        # Prefer more target matches, then fewer edit operations.  Equal
+        # alignments choose the earliest ASR prefix so trailing background
+        # speech is not absorbed into the target observation.
+        return (*cls._alignment_rank(alignment), -token_count)
 
     def align(self, hypothesis: str, *, tokens=()) -> TargetAlignment:
         tokens = tuple(str(t) for t in (tokens or ()))

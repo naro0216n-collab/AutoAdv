@@ -1,37 +1,34 @@
-"""Alignment observations remain separate from product voice assessment."""
+"""Raw alignment observations and the minimal product voice assessment stay separate."""
 import unittest
 
-from autoadv.audio_evidence import (VoiceAssessmentPolicy, VoiceEvidence, VoiceState,
-                                    assess_voice)
+from autoadv.audio_evidence import VoiceEvidence, VoiceState, assess_voice
 from autoadv.audio_match import TargetMatcher, surface_key
 from autoadv.conversation import Controller, Target
 from autoadv.model import Profile, AdvanceMode, HookSelection
 
 
-def evidence(alignment, *, audio_ms=1000, capture_end_ms=1000,
-             target_last_token_ms=None, target_boundary_ms=None,
-             post_target_pcm_ms=0, vad_tail_ms=0, stable=1, progress_delta=None):
+def evidence(alignment, *, target_last_token_ms=None, target_boundary_ms=None,
+             vad_tail_ms=0, target_progressed=False):
     return VoiceEvidence(
-        alignment=alignment, audio_ms=audio_ms, capture_end_ms=capture_end_ms,
-        observation_ms=capture_end_ms, target_last_token_ms=target_last_token_ms,
+        alignment=alignment,
+        target_last_token_ms=target_last_token_ms,
         target_boundary_ms=target_boundary_ms,
-        post_target_pcm_ms=post_target_pcm_ms,
-        vad_active=False, vad_contains_speech=False, vad_onset_ms=None, vad_tail_ms=vad_tail_ms,
-        vad_end_ms=(capture_end_ms - vad_tail_ms if vad_tail_ms else None),
-        stable_alignment_observations=stable, phonetic_progress_delta=progress_delta)
+        vad_onset_ms=None,
+        vad_tail_ms=vad_tail_ms,
+        vad_end_ms=(1000 - vad_tail_ms if vad_tail_ms else None),
+        target_progressed=target_progressed,
+    )
 
 
 class ASRCues(unittest.TestCase):
-    def test_corrected_partial_transcript_changes_alignment_without_hidden_history(self):
+    def test_corrected_partial_transcript_changes_raw_alignment(self):
         matcher = TargetMatcher('おはようございます', g2p=None)
         first = matcher.align('おはおう')
         second = matcher.align('おはようござ')
         third = matcher.align('おはようございます')
-        fourth = matcher.align('おはようございます')
-        self.assertLess(first.coverage, second.coverage)
-        self.assertLess(second.coverage, third.coverage)
-        self.assertEqual(third, fourth)
-        self.assertGreaterEqual(third.coverage, .9)
+        self.assertLess(first.phonetic_matches, second.phonetic_matches)
+        self.assertLess(second.phonetic_matches, third.phonetic_matches)
+        self.assertEqual(third.phonetic_prefix_units, third.phonetic_target_units)
 
     def test_single_omission_and_substitution_remain_raw_alignment_measurements(self):
         deletion = TargetMatcher('えっ嘘でしょ', g2p=None).align('え嘘でしょ')
@@ -40,26 +37,30 @@ class ASRCues(unittest.TestCase):
         substitution = TargetMatcher('ヒューズが飛んだ', g2p=None).align('シューズが飛んだ')
         self.assertEqual(substitution.edit_count, 1)
 
-    def test_prefix_only_and_background_lead_in_are_not_relabelled_by_matcher(self):
+    def test_prefix_only_and_background_lead_in_remain_distinct_alignments(self):
         partial = TargetMatcher('今日は晴れです', g2p=None).align('今日は')
-        self.assertLess(partial.coverage, .8)
+        self.assertLess(partial.phonetic_prefix_units, partial.phonetic_target_units)
         noise = TargetMatcher('おはようございます', g2p=None).align('別の台詞ですおはようございます')
-        self.assertLess(noise.onset_score, .8)
-        self.assertGreater(noise.edit_count, 0)
+        self.assertGreater(noise.phonetic_edit_count, 0)
 
-    def test_short_alignment_without_endpoint_evidence_is_inconclusive(self):
+    def test_complete_target_without_endpoint_is_inconclusive(self):
         alignment = TargetMatcher('はい', g2p=None).align('はい')
         assessed = assess_voice(evidence(alignment))
         self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+        self.assertTrue(assessed.target_complete)
 
-    def test_same_observation_can_be_reassessed_with_different_policy(self):
+    def test_following_token_bounds_completed_target(self):
         alignment = TargetMatcher('おはようございます', g2p=None).align('おはようございます')
-        observed = evidence(
-            alignment, capture_end_ms=2000, target_last_token_ms=1200,
-            target_boundary_ms=1900, post_target_pcm_ms=100)
-        self.assertEqual(assess_voice(observed).state, VoiceState.INCONCLUSIVE)
-        relaxed = VoiceAssessmentPolicy(endpoint_min=.30)
-        self.assertEqual(assess_voice(observed, relaxed).state, VoiceState.ENDED)
+        assessed = assess_voice(evidence(
+            alignment, target_last_token_ms=800, target_boundary_ms=900))
+        self.assertEqual(assessed.state, VoiceState.ENDED)
+        self.assertEqual(assessed.estimated_end_ms, 900)
+
+    def test_target_progress_without_endpoint_is_playing(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようござ')
+        assessed = assess_voice(evidence(
+            alignment, target_last_token_ms=800, target_progressed=True))
+        self.assertEqual(assessed.state, VoiceState.PLAYING)
 
     def test_surface_only_fallback_does_not_invent_kanji_reading(self):
         matcher = TargetMatcher('東京へ行く', g2p=None)
