@@ -22,6 +22,39 @@ label start:
         $ renpy.say(a, "AutoAdvフック校正専用", interact=False)
         while not _autoadv_fixture_os.path.isfile(_adv_gate + ".monitoring"):
             $ renpy.pause(.1, hard=True)
+    $ _adv_case = _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_CASE", "")
+    if _adv_case == "normal-001":
+        jump autoadv_case_normal_001
+    if _adv_case == "normal-017":
+        jump autoadv_case_normal_017
+    if _adv_case == "normal-022":
+        jump autoadv_case_normal_022
+    if _adv_case == "normal-026-bgm":
+        jump autoadv_case_normal_026_bgm
+    if _adv_case == "normal-028-bgm":
+        jump autoadv_case_normal_028_bgm
+    if _adv_case == "normal-001-repeat":
+        jump autoadv_case_normal_001_repeat
+    if _adv_case == "whisper-001":
+        jump autoadv_case_whisper_001
+    if _adv_case == "whisper-017":
+        jump autoadv_case_whisper_017
+    if _adv_case == "whisper-022":
+        jump autoadv_case_whisper_022
+    if _adv_case == "normal-020-first":
+        jump autoadv_case_normal_020_first
+    if _adv_case == "normal-020-second":
+        jump autoadv_case_normal_020_second
+    if _adv_case == "normal-010":
+        jump autoadv_case_normal_010
+    if _adv_case == "normal-012":
+        jump autoadv_case_normal_012
+    if _adv_case == "normal-021":
+        jump autoadv_case_normal_021
+    if _adv_case == "normal-030":
+        jump autoadv_case_normal_030
+    if _adv_case == "normal-035":
+        jump autoadv_case_normal_035
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
         jump asr_stress
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "native":
@@ -38,35 +71,54 @@ label standard_tts:
     p "この文章はIrodori TTSの確認に使用します。"
 
 label standard_voice:
+    jump autoadv_case_normal_001
+
+label autoadv_case_normal_001:
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
+label autoadv_case_normal_017:
     voice "audio/voice/normal_017.wav"
     a "あっベルが鳴ってる。"
+label autoadv_case_normal_022:
     voice "audio/voice/normal_022.wav"
     a "猫はにゃーにゃーと鳴く。"
 
     "ここからはBGMが流れる状態で、ゲーム内の原音を再生します。"
 label bgm_voice:
     play music "audio/music/original_synth_loop.wav" fadein 0.2
+    jump autoadv_case_normal_026_bgm
+
+label autoadv_case_normal_026_bgm:
+    if _adv_case == "normal-026-bgm":
+        play music "audio/music/original_synth_loop.wav" fadein 0.2
     voice "audio/voice/normal_026.wav"
     a "私はいつもミネラルウォーターを持ち歩いています。"
+label autoadv_case_normal_028_bgm:
+    if _adv_case == "normal-028-bgm":
+        play music "audio/music/original_synth_loop.wav" fadein 0.2
     voice "audio/voice/normal_028.wav"
     a "彼女はスタッフをまとめていけると思いますか？"
     stop music fadeout 0.2
 
     "同一の表示台詞を、異なる音声収録条件で連続して再生します。"
+label autoadv_case_normal_001_repeat:
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
+label autoadv_case_whisper_001:
     voice "audio/voice/whisper_001.wav"
     s "えっ嘘でしょ。"
+label autoadv_case_whisper_017:
     voice "audio/voice/whisper_017.wav"
     s "あっベルが鳴ってる。"
+label autoadv_case_whisper_022:
     voice "audio/voice/whisper_022.wav"
     s "猫はにゃーにゃーと鳴く。"
 
     "同じ取得本文が連続する区間です。二重送りと台詞取りこぼしに注意してください。"
+label autoadv_case_normal_020_first:
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
+label autoadv_case_normal_020_second:
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
 
@@ -86,14 +138,21 @@ label bgm_voice:
             return
 
 label continuation:
+    jump autoadv_case_normal_010
+
+label autoadv_case_normal_010:
     voice "audio/voice/normal_010.wav"
     a "彼のあだ名は言い得て妙だよね。"
+label autoadv_case_normal_012:
     voice "audio/voice/normal_012.wav"
     a "ゼロという概念は、ヒンドゥー文化に由来している。"
+label autoadv_case_normal_021:
     voice "audio/voice/normal_021.wav"
     a "私はポピュラー音楽を聞きたい。"
+label autoadv_case_normal_030:
     voice "audio/voice/normal_030.wav"
     a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
+label autoadv_case_normal_035:
     voice "audio/voice/normal_035.wav"
     a "彼女は息子に家で行儀よくするように言った。"
     "検証用シナリオを終了します。"

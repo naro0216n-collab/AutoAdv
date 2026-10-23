@@ -7,6 +7,7 @@ param(
     [ValidateSet('hook', 'reading', 'native', 'tts', 'mixed', 'stress')]
     [string] $Phase,
     [int] $StartLine = 0,
+    [string] $NativeCase = '',
     [string] $Trace = '',
     [string] $Oracle = '',
     [string] $Report = '',
@@ -32,6 +33,18 @@ if ($Automated -and -not $GameExecutable) {
     throw 'Automated real-game validation requires a prebuilt -GameExecutable'
 }
 if ($Automated -and $TimeoutSeconds -lt 10) { throw 'Finite test timeout must be >= 10 seconds' }
+if ($NativeCase -and $Phase -ne 'native') {
+    throw '-NativeCase is valid only with -Phase native'
+}
+if ($Automated -and $Phase -eq 'native' -and -not $NativeCase) {
+    throw 'Automated native validation requires one explicit -NativeCase; use run_windows_validation.ps1 for the complete RealAudio matrix'
+}
+if ($Automated -and $NativeCase -and $StartLine -lt 1) {
+    throw 'Automated native case validation requires its SCENARIO -StartLine'
+}
+if ($NativeCase -and $NativeCase -notmatch '^[a-z0-9-]+$') {
+    throw 'Invalid native case id'
+}
 if (-not $Report) { $Report = $Trace + '.result.json' }
 if (Test-Path -LiteralPath $Report) {
     throw "Refusing to overwrite a prior validation report: $Report"
@@ -73,6 +86,7 @@ if ($GameExecutable -and $Oracle -and (Test-Path -LiteralPath $Oracle)) {
 $oldTrace = $env:AUTOADV_VALIDATION_TRACE
 $oldOracle = $env:AUTOADV_GAME_ORACLE
 $oldScene = $env:AUTOADV_VALIDATION_SCENARIO
+$oldCase = $env:AUTOADV_VALIDATION_CASE
 $oldGate = $env:AUTOADV_VALIDATION_CONTROL_FILE
 $oldSession = $env:AUTOADV_VALIDATION_SESSION
 $oldAppData = $env:APPDATA
@@ -172,6 +186,7 @@ public static class AudioRenderProbe {
         }
         $env:AUTOADV_GAME_ORACLE = $Oracle
         $env:AUTOADV_VALIDATION_SCENARIO = $scene
+        $env:AUTOADV_VALIDATION_CASE = $NativeCase
         # Fixture build/packaging is deliberately outside this acceptance run.
         # This step only starts an already built game process.
         $gameProcess = Start-Process -FilePath $resolvedGameExe `
@@ -188,7 +203,7 @@ public static class AudioRenderProbe {
             }
             Start-Sleep -Milliseconds 200
         }
-        Write-Host "Validation game launched (scene=$scene)"
+        Write-Host "Validation game launched (scene=$scene, case=$NativeCase)"
     } else {
         Write-Host 'Using an already running game; no game input is driven by the checker.'
     }
@@ -203,9 +218,11 @@ public static class AudioRenderProbe {
                 oracle = $Oracle; gate = $gate; executable = $gameExe;
                 phase = $Phase; timeout_seconds = $TimeoutSeconds;
                 dialogues = $(switch ($Phase) {
-                    'hook' { 1 }; 'reading' { 3 }; 'native' { 3 };
+                    'hook' { 1 }; 'reading' { 3 };
+                    'native' { 2 };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
+                validation_case = $NativeCase;
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool]$UncertainFallback
             }
@@ -256,6 +273,7 @@ public static class AudioRenderProbe {
     $env:AUTOADV_VALIDATION_TRACE = $oldTrace
     $env:AUTOADV_GAME_ORACLE = $oldOracle
     $env:AUTOADV_VALIDATION_SCENARIO = $oldScene
+    $env:AUTOADV_VALIDATION_CASE = $oldCase
     $env:AUTOADV_VALIDATION_CONTROL_FILE = $oldGate
     $env:AUTOADV_VALIDATION_SESSION = $oldSession
     $env:APPDATA = $oldAppData

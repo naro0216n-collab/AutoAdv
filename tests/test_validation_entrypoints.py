@@ -50,6 +50,20 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         for stale in ('RenPySdk', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
             self.assertNotIn(stale, source)
 
+    def test_realaudio_runs_every_foreground_case_independently(self):
+        orchestrator = (ROOT / 'validation' / 'real_game' / 'run_windows_validation.ps1').read_text(encoding='utf-8')
+        live = (ROOT / 'validation' / 'real_game' / 'run_live_check.ps1').read_text(encoding='utf-8')
+        self.assertIn('validation.real_game.case_matrix', orchestrator)
+        self.assertIn('foreach ($nativeCase in $nativeCases)', orchestrator)
+        self.assertIn("schema = 'autoadv-realaudio-matrix-v1'", orchestrator)
+        self.assertIn("'-NativeCase',$caseId", orchestrator)
+        self.assertIn('A failed ASR attribution/completion is a case result', orchestrator)
+        self.assertIn('[string] $NativeCase', live)
+        self.assertIn('$env:AUTOADV_VALIDATION_CASE = $NativeCase', live)
+        self.assertIn("'native' { 2 }", live)
+        self.assertIn('Automated native validation requires one explicit -NativeCase', live)
+
+
     def test_hosted_and_broad_ci_do_not_run_real_audio(self):
         live = (ROOT / '.github' / 'workflows' / 'live-advancement.yml').read_text(encoding='utf-8')
         self.assertIn('-Phase reading', live)
