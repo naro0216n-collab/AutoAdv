@@ -142,19 +142,23 @@ function Set-IssueComment($commentId, [string] $content) {
 }
 function Get-HistorySlotMarker([int] $slot) { return "<!-- autoadv-validation-slot-$slot -->" }
 function Find-IssueCommentByMarker($comments, [string] $marker) {
-    return @($comments | Where-Object { ([string]$_.body).TrimStart().StartsWith($marker) } | Select-Object -First 1)
+    # This is a nullable single-object lookup, not a collection API. PowerShell
+    # enumerates arrays returned from functions, so a one-item result becomes a
+    # scalar under Windows PowerShell 5.1. Callers must test against $null rather
+    # than relying on a .Count property that the scalar does not have in StrictMode.
+    return ($comments | Where-Object { ([string]$_.body).TrimStart().StartsWith($marker) } | Select-Object -First 1)
 }
 function Ensure-IssueHistorySlots {
     $comments = @(Get-IssueComments)
     foreach ($slot in 1..4) {
         $marker = Get-HistorySlotMarker $slot
-        if (-not (Find-IssueCommentByMarker $comments $marker).Count) {
+        if ($null -eq (Find-IssueCommentByMarker $comments $marker)) {
             [void](Set-IssueComment $null "$marker`n_No validation run stored yet._")
             $comments = @(Get-IssueComments)
         }
     }
     $baselineMarker = '<!-- autoadv-validation-baseline -->'
-    if (-not (Find-IssueCommentByMarker $comments $baselineMarker).Count) {
+    if ($null -eq (Find-IssueCommentByMarker $comments $baselineMarker)) {
         [void](Set-IssueComment $null "$baselineMarker`n_No successful accuracy baseline stored yet._")
         $comments = @(Get-IssueComments)
     }

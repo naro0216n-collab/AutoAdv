@@ -213,6 +213,13 @@ class IssueReportingContract(unittest.TestCase):
         self.assertNotIn("Format-IssueSnapshot", source)
         self.assertIn("PATCH", source)
 
+    def test_windows_runner_treats_marker_lookup_as_nullable_scalar(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("$null -eq (Find-IssueCommentByMarker $comments $marker)", source)
+        self.assertIn("$null -eq (Find-IssueCommentByMarker $comments $baselineMarker)", source)
+        self.assertNotIn("(Find-IssueCommentByMarker $comments $marker).Count", source)
+        self.assertNotIn("(Find-IssueCommentByMarker $comments $baselineMarker).Count", source)
+
 
 if __name__ == "__main__":
     unittest.main()
