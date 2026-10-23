@@ -28,7 +28,7 @@ class IdentityG2P:
 
 TEST_G2P = IdentityG2P()
 
-def test_native_audio(*args, **kwargs):
+def _native_audio(*args, **kwargs):
     kwargs.setdefault('g2p', TEST_G2P)
     return NativeAudio(*args, **kwargs)
 
@@ -172,7 +172,7 @@ class NativeAudioSessionTests(unittest.TestCase):
                 pass
             def observe_float32_stereo(self, frames):
                 return VADDecision(False, 0)
-        audio = test_native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
+        audio = _native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
                             lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 3000)
         from autoadv.conversation import Token
         try:
@@ -197,7 +197,7 @@ class NativeAudioSessionTests(unittest.TestCase):
                 self.index += 1
                 return VADDecision(self.index == 1, 300 if self.index > 1 else 0)
         assessments = []
-        audio = test_native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
+        audio = _native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
                  lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 1000,
                  g2p=TEST_G2P, on_evidence=lambda token, e: assessments.append((token, assess_voice(e).state)))
         from autoadv.conversation import Token

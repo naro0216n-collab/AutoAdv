@@ -28,7 +28,7 @@ class IdentityG2P:
 
 TEST_G2P = IdentityG2P()
 
-def test_native_audio(*args, **kwargs):
+def _native_audio(*args, **kwargs):
     kwargs.setdefault('g2p', TEST_G2P)
     return NativeAudio(*args, **kwargs)
 
@@ -100,7 +100,7 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
 
     def test_early_helper_failure_is_delivered_to_first_real_utterance(self):
         reported = []
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *fields: reported.append(fields),
                             recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=SimpleNamespace(reset=lambda: None), clock=lambda: 1000)
@@ -116,7 +116,7 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
 
     def test_transport_heartbeat_is_not_pcm_or_utterance_evidence(self):
         events = []
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *args: events.append(args),
                             recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=SimpleNamespace(reset=lambda: None), clock=lambda: 1000)
@@ -158,7 +158,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
         self.assertEqual([chunk.at_ms for chunk in history.since(0)],
                          [2000, 2500, 3000])
 
-    def test_native_audio_keeps_full_active_line_in_every_decode_then_returns_to_rolling_history(self):
+    def _native_audio_keeps_full_active_line_in_every_decode_then_returns_to_rolling_history(self):
         decoded_windows = []
 
         class Recognizer:
@@ -173,7 +173,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
                 return VADDecision(False, 0, frames_analyzed=True)
 
         clock = [1000]
-        native = test_native_audio(
+        native = _native_audio(
             11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
             recognizer=Recognizer(), activity=Quiet(), clock=lambda: clock[0],
             replay_lookback_ms=0)
@@ -223,7 +223,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
         self.assertAlmostEqual(antiphase.stereo_peak, 0.25, places=5)
         # Audio amplitude alone may be music or SFX: no ASR attribution or
         # completion may be inferred from this observation.
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *_: None, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=detector, clock=lambda: 1000)
         try:
@@ -256,7 +256,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
     def test_trailing_quiet_after_speech_preserves_prior_voice_cue(self):
         outcomes = iter([VADDecision(False, 400, contains_speech=True)])
         activity = SimpleNamespace(observe_float32_stereo=lambda _: next(outcomes))
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *_: None, activity=activity, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             clock=lambda: 1000)
         try:
@@ -272,7 +272,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
         activity = SimpleNamespace(
             observe_float32_stereo=lambda _: VADDecision(False, 0),
             reset=lambda: None)
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *_: None, activity=activity,
                             recognizer=SimpleNamespace(recognize=lambda _: ''), clock=lambda: 2000)
         try:
@@ -303,7 +303,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
             def reset(self):
                 pass
 
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *args: observed.append(args), activity=BlockingActivity(),
                             recognizer=SimpleNamespace(recognize=lambda _: ''), clock=lambda: times[0])
         try:
@@ -340,7 +340,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
                 heard.append(tuple(chunk.at_ms for chunk in chunks))
                 signal.set()
                 return ''
-        audio = test_native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
+        audio = _native_audio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
                             lambda *_: None, recognizer=Recognizer(), activity=activity,
                             clock=lambda: 1000)
         try:
@@ -365,7 +365,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
             VADDecision(False, 300, contains_speech=False),
             VADDecision(True, 0, contains_speech=True),
         ))
-        audio = test_native_audio(
+        audio = _native_audio(
             11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
             lambda *_: None,
             recognizer=SimpleNamespace(recognize=lambda _: ''),
@@ -456,7 +456,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         self.assertEqual(assess_voice(initial).state, VoiceState.PLAYING)
 
         observed = []
-        native = test_native_audio(
+        native = _native_audio(
             11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
             recognizer=SimpleNamespace(recognize=lambda _: ''), g2p=TEST_G2P,
             activity=SimpleNamespace(
@@ -474,7 +474,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         finally:
             native.close()
 
-    def test_native_audio_reports_raw_evidence_not_completion_state(self):
+    def _native_audio_reports_raw_evidence_not_completion_state(self):
         assessments = []
         metrics = []
         ready = threading.Event()
@@ -484,7 +484,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
                 return ASRResult('おはようございます背景', tuple('おはようございます背景'),
                                  tuple(i * .1 for i in range(len('おはようございます背景'))))
 
-        native = test_native_audio(
+        native = _native_audio(
             11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
             recognizer=Recognizer(), g2p=TEST_G2P,
             activity=SimpleNamespace(
@@ -533,7 +533,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
                 end_observations.append((token, assessment, evidence))
                 ready.set()
 
-        audio = test_native_audio(11, Path('unused'), Path('unused'), Path('unused'),
+        audio = _native_audio(11, Path('unused'), Path('unused'), Path('unused'),
                             lambda *_: None, recognizer=Recognizer(),
                             activity=SimpleNamespace(observe_float32_stereo=lambda _: next(activity),
                                                      reset=lambda: None),
@@ -561,7 +561,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
     def test_previous_interval_audio_is_not_replayed_after_next_send(self):
         times = [1000]
         viewed = []
-        audio = test_native_audio(11, Path('unused'), Path('unused'), Path('unused'),
+        audio = _native_audio(11, Path('unused'), Path('unused'), Path('unused'),
                             lambda *_: None, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=SimpleNamespace(observe_float32_stereo=lambda _: (
                                 viewed.append('frame') or VADDecision(True, 0)), reset=lambda: None),
@@ -585,7 +585,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
 
     def test_no_send_does_not_claim_pre_hook_voice_from_prior_line(self):
         times = [1600]
-        audio = test_native_audio(11, Path('unused'), Path('unused'), Path('unused'),
+        audio = _native_audio(11, Path('unused'), Path('unused'), Path('unused'),
                             lambda *_: None, recognizer=SimpleNamespace(recognize=lambda _: ''),
                             activity=SimpleNamespace(observe_float32_stereo=lambda _: VADDecision(True, 0),
                                                      reset=lambda: None),

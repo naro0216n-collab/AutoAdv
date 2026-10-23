@@ -32,7 +32,7 @@ class IdentityG2P:
 
 TEST_G2P = IdentityG2P()
 
-def test_native_audio(*args, **kwargs):
+def _native_audio(*args, **kwargs):
     kwargs.setdefault('g2p', TEST_G2P)
     return NativeAudio(*args, **kwargs)
 
@@ -52,7 +52,7 @@ def replay_pcm_into_real_native_activity(file: Path, token: Token):
     import numpy as np
     errors = []
     evidence = []
-    native = test_native_audio(
+    native = _native_audio(
         42, Path("not-used-for-offline-samples.dll"),
         Path("unused-asr.onnx"), Path("unused-asr.tokens"),
         lambda t, reason: errors.append((t, reason)),
@@ -116,7 +116,7 @@ class RealRecordedAudioContracts(unittest.TestCase):
         errors = []
         evidence = []
         observed_pcm = []
-        native = test_native_audio(
+        native = _native_audio(
             42, Path("not-used.dll"), Path("unused.onnx"), Path("unused.tokens"),
             lambda token, reason: errors.append((token, reason)),
             recognizer=SimpleNamespace(recognize=lambda _: ''),

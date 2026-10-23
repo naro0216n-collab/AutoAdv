@@ -24,7 +24,7 @@ class IdentityG2P:
 
 TEST_G2P = IdentityG2P()
 
-def test_native_audio(*args, **kwargs):
+def _native_audio(*args, **kwargs):
     kwargs.setdefault('g2p', TEST_G2P)
     return NativeAudio(*args, **kwargs)
 
@@ -57,7 +57,7 @@ class PerformanceObservationTests(unittest.TestCase):
                 return type('Status', (), {'frames_analyzed': True,
                     'active': True, 'tail_silence_ms': 0})()
         self_test = self
-        native = test_native_audio(101, Path('unused'), Path('unused'), Path('unused'),
+        native = _native_audio(101, Path('unused'), Path('unused'), Path('unused'),
                              lambda *_: None, recognizer=Recognizer(), activity=Activity(),
                              on_inference=lambda ticket, measurements: reports.append((ticket, measurements)))
         try:

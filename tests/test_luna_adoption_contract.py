@@ -23,7 +23,7 @@ class IdentityG2P:
 
 TEST_G2P = IdentityG2P()
 
-def test_native_audio(*args, **kwargs):
+def _native_audio(*args, **kwargs):
     kwargs.setdefault('g2p', TEST_G2P)
     return NativeAudio(*args, **kwargs)
 
@@ -106,7 +106,7 @@ class MultiHookProductContract(unittest.TestCase):
 class NativeRecognitionContract(unittest.TestCase):
     def test_asr_model_and_tokens_are_required_without_injected_recognizer(self):
         with self.assertRaises(FileNotFoundError):
-            test_native_audio(31, Path('unused.dll'), Path('missing.onnx'),
+            _native_audio(31, Path('unused.dll'), Path('missing.onnx'),
                         Path('missing.tokens'), lambda *_: None)
 
     def test_vad_activity_and_silence_cannot_complete_without_matching_asr(self):
@@ -122,7 +122,7 @@ class NativeRecognitionContract(unittest.TestCase):
             def recognize(self, _samples):
                 return ''
 
-        audio = test_native_audio(31, Path('unused.dll'), Path('missing.onnx'),
+        audio = _native_audio(31, Path('unused.dll'), Path('missing.onnx'),
                             Path('missing.tokens'), lambda *_: None,
                             activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0,
                             g2p=TEST_G2P, on_evidence=lambda _t, e: assessments.append(assess_voice(e).state))
