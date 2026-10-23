@@ -33,3 +33,8 @@ jobs:
       - name: Validate installed Windows adapter imports
         run: |
           python -c "import cv2, mss, numpy, sherpa_onnx, sounddevice; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().candidates('えっ嘘でしょ。'); print('Windows adapters available')"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Build process-scoped audio loopback helper
+        run: dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj --configuration Release --nologo
