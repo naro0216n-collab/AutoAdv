@@ -61,9 +61,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libegl1
-      - name: Install real image adapter dependencies for contract tests
-        run: python -m pip install 'numpy>=2,<3' 'opencv-python-headless>=4.8,<5' 'PySide6-Essentials>=6.8,<7'
-      - run: python -m unittest discover -s tests -v
+      - name: Install lightweight contract-test dependencies
+        run: python -m pip install 'numpy>=1.26,<3' 'PySide6-Essentials>=6.8,<7'
+      - name: Run fast product contracts
+        run: python -m unittest discover -s tests -v
+      - name: Run lightweight accuracy-verifier contracts
+        run: >-
+          python -m unittest
+          validation.real_game.test_e2e_verifier
+          validation.real_game.test_game_oracle
+          validation.real_game.test_accuracy_assets
+          validation.real_game.test_fixture_runtime -v
 
   package-smoke:
     name: Clean package install

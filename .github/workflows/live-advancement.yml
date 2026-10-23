@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 # Explicit PR title edit requests only the hosted Hook/text-advance path.
-# RealAudio is an actual-machine-only acceptance path and is never run here.
+# Auto-advance accuracy measurement is actual-machine-only and is never run here.
 # The game is consumed as a prebuilt fixture; RenPy construction is separate.
 jobs:
   reading-auto-advance:
