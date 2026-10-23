@@ -55,7 +55,7 @@ class ASRCues(unittest.TestCase):
         # the explicit option permits time-based continuation at the deadline.
         p = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
                     uncertain_text_fallback=True,
-                    hooks=[HookSelection('X', 1, 2)], body_sources=['X|1|2'])
+                    hooks=[HookSelection('X', 1, 2)], body_source='X|1|2')
         ctrl = Controller(lambda *_: None, lambda *_: True)
         ctrl.begin(p, Target(1, 1), 'host', 1)
         from types import SimpleNamespace

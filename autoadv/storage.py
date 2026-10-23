@@ -98,7 +98,7 @@ def user_settings_path() -> Path:
 def _profile_payload(p: Profile) -> dict:
     return dict(
         id=p.id, name=p.name, hooks=[vars(h) for h in p.hooks],
-        body_sources=list(p.body_sources), speaker_sources=list(p.speaker_sources),
+        body_source=p.body_source, speaker_source=p.speaker_source,
         source_rules={identity: [vars(rule) for rule in rules]
                       for identity, rules in p.source_rules.items()},
         inserted_hooks=p.inserted_hooks, insert_pc_hooks=p.insert_pc_hooks,
@@ -129,30 +129,37 @@ def _read_profile(raw: dict) -> Profile:
     hooks = [HookSelection(h['code'], int(h['context']), int(h['context2'])) for h in raw_hooks]
     identities = [hook.identity for hook in hooks]
 
-    # settings-v4 originally stored one exclusive role on every HOOK plus one
-    # profile-wide extractor.  Read that representation once at the storage
-    # boundary and immediately convert it to the field-provider model.  The
-    # runtime and serializer only use the new representation.
-    if 'body_sources' in raw or 'speaker_sources' in raw or 'source_rules' in raw:
-        body_sources = list(raw.get('body_sources', []))
-        speaker_sources = list(raw.get('speaker_sources', []))
+    # Older settings-v4 revisions stored provider-priority lists.  The product
+    # contract has one explicit source per field, so normalize that historical
+    # representation once at the persistence boundary and never carry fallback
+    # ordering into runtime state.
+    if ('body_source' in raw or 'speaker_source' in raw or 'body_sources' in raw or
+            'speaker_sources' in raw or 'source_rules' in raw):
+        body_source = str(raw.get('body_source', '') or '')
+        speaker_source = str(raw.get('speaker_source', '') or '')
+        if not body_source:
+            body_source = next(iter(raw.get('body_sources', []) or []), '')
+        if not speaker_source:
+            speaker_source = next(iter(raw.get('speaker_sources', []) or []), '')
         source_rules = {identity: [StructureRule(**rule) for rule in rules]
                         for identity, rules in raw.get('source_rules', {}).items()}
     else:
         legacy_roles = {hook.identity: str(data.get('role', 'text'))
                         for hook, data in zip(hooks, raw_hooks)}
-        body_sources = [identity for identity in identities if legacy_roles.get(identity) != 'speaker']
-        speaker_sources = [identity for identity in identities if legacy_roles.get(identity) == 'speaker']
+        body_source = next((identity for identity in identities
+                            if legacy_roles.get(identity) != 'speaker'), '')
+        speaker_source = next((identity for identity in identities
+                               if legacy_roles.get(identity) == 'speaker'), '')
         old_rules = ([StructureRule(**rule) for rule in raw['structure_rules']]
                      if 'structure_rules' in raw else list(DEFAULT_STRUCTURE_RULES))
         source_rules = {}
-        for identity in body_sources:
-            source_rules[identity] = list(old_rules)
-        for identity in speaker_sources:
-            source_rules[identity] = [SPEAKER_ONLY_RULE]
+        if body_source:
+            source_rules[body_source] = list(old_rules)
+        if speaker_source:
+            source_rules[speaker_source] = [SPEAKER_ONLY_RULE]
     p = Profile(
         id=raw['id'], name=raw['name'], hooks=hooks,
-        body_sources=body_sources, speaker_sources=speaker_sources, source_rules=source_rules,
+        body_source=body_source, speaker_source=speaker_source, source_rules=source_rules,
         inserted_hooks=list(raw.get('inserted_hooks', [])),
         insert_pc_hooks=raw.get('insert_pc_hooks', False),
         advance_mode=AdvanceMode(raw.get('advance_mode', 'text')),

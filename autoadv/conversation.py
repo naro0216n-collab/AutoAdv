@@ -52,14 +52,12 @@ class Controller:
         self.line_no = 0
         self.awaiting_next = False
         self.ocr_blank = False
-        self.active_body_source: str | None = None
         self.external_transition_ns = 0
         self.confirmed_external_boundary = False
 
-    def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
-              available_sources: tuple[str, ...] = ()) -> int:
+    def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
         profile.validate()
-        if profile.source == 'hook' and not profile.body_sources:
+        if profile.source == 'hook' and not profile.body_source:
             raise ValueError('select at least one body source to monitor')
         if not host_generation or connection_generation <= 0:
             raise ValueError('Host connection must be identified')
@@ -67,8 +65,6 @@ class Controller:
         self.profile, self.target = deepcopy(profile), target
         self.pending_profile = None
         self.source_generation, self.connection_generation = host_generation, connection_generation
-        self.active_body_source = next(
-            (identity for identity in profile.body_sources if identity in available_sources), None)
         self.pause_reason = None if self.authorized else 'advance_not_authorized'
         self.reason = 'presenting' if self.authorized else 'advance_not_authorized'
         return self.session
@@ -87,7 +83,6 @@ class Controller:
         self.completed = self.sent = False
         self.awaiting_next = False
         self.ocr_blank = False
-        self.active_body_source = None
         self.external_transition_ns = 0
         self.confirmed_external_boundary = False
         self.presentation_reason = None
@@ -102,8 +97,8 @@ class Controller:
             raise ValueError('monitoring is not active')
         if (profile.id != self.profile.id or profile.source != self.profile.source or
                 profile.hooks != self.profile.hooks or
-                profile.body_sources != self.profile.body_sources or
-                profile.speaker_sources != self.profile.speaker_sources or
+                profile.body_source != self.profile.body_source or
+                profile.speaker_source != self.profile.speaker_source or
                 profile.source_rules != self.profile.source_rules or
                 (profile.source == 'ocr' and profile.ocr != self.profile.ocr)):
             raise ValueError('capture ownership changes require a new monitoring session')
@@ -127,23 +122,15 @@ class Controller:
         if len(matched) != 1 or sequence <= self.highest_sequence:
             return None
         identity = matched[0].identity
-        if identity not in self.profile.body_sources or not text.strip():
+        if identity != self.profile.body_source or not text.strip():
             self.highest_sequence = max(self.highest_sequence, sequence)
             return None
         fields = extract_source_fields(text, self.profile, identity)
         if not fields.body:
             self.highest_sequence = max(self.highest_sequence, sequence)
             return None
-        if self.active_body_source is None:
-            self.active_body_source = identity
-        if identity != self.active_body_source:
-            self.highest_sequence = max(self.highest_sequence, sequence)
-            return None
         self.highest_sequence = sequence
-        if self.profile.speaker_sources:
-            speaker = fields.speaker if identity == self.profile.speaker_sources[0] else ''
-        else:
-            speaker = fields.speaker
+        speaker = fields.speaker if not self.profile.speaker_source else ''
         return self._accept_line(sequence=sequence, raw=text, body=fields.body, speaker=speaker,
                                  origin=identity, verified_boundary=False, received_ns=received_ns)
 
@@ -151,8 +138,8 @@ class Controller:
         """Assemble one dialogue from independently extracted source fields.
 
         Luna-selected outputs are correlated only inside this bounded group.  A
-        body and speaker may come from the same source or different sources;
-        the first usable configured provider for each field wins.
+        body and speaker may come from the same source or different explicitly
+        configured sources; no provider-priority fallback exists.
         """
         if not self.profile or self.profile.source != 'hook' or not events:
             return None
@@ -179,14 +166,7 @@ class Controller:
             id(event): extract_source_fields(event.text, self.profile, event.source.identity)
             for event in matching
         }
-        chosen = self.active_body_source
-        if chosen is None:
-            chosen = next((identity for identity in self.profile.body_sources
-                           if any(event.source.identity == identity and extracted[id(event)].body
-                                  for event in matching)), None)
-        if chosen is None:
-            self.highest_sequence = ordered[-1].sequence
-            return None
+        chosen = self.profile.body_source
         primary = [event for event in matching
                    if event.source.identity == chosen and extracted[id(event)].body]
         if not primary:
@@ -196,22 +176,20 @@ class Controller:
             self.highest_sequence = ordered[-1].sequence
             self.pause('ambiguous_multihook_lines')
             return None
-        self.active_body_source = chosen
         body_event = primary[0]
         body_fields = extracted[id(body_event)]
 
         speaker = ''
-        if self.profile.speaker_sources:
-            for identity in self.profile.speaker_sources:
-                candidates = [event for event in matching
-                              if event.source.identity == identity and extracted[id(event)].speaker]
-                if len(candidates) > 1:
-                    self.highest_sequence = ordered[-1].sequence
-                    self.pause('ambiguous_multihook_speakers')
-                    return None
-                if candidates:
-                    speaker = extracted[id(candidates[0])].speaker
-                    break
+        if self.profile.speaker_source:
+            candidates = [event for event in matching
+                          if event.source.identity == self.profile.speaker_source and
+                          extracted[id(event)].speaker]
+            if len(candidates) > 1:
+                self.highest_sequence = ordered[-1].sequence
+                self.pause('ambiguous_multihook_speakers')
+                return None
+            if candidates:
+                speaker = extracted[id(candidates[0])].speaker
         else:
             speaker = body_fields.speaker
 

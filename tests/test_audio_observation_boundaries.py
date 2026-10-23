@@ -324,7 +324,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
         sent = []
         ctrl = Controller(lambda target, key: sent.append((target.pid, key)), lambda _: True)
         profile = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
-                          hooks=[HookSelection('X', 1, 2)], body_sources=['X|1|2'])
+                          hooks=[HookSelection('X', 1, 2)], body_source='X|1|2')
         ctrl.begin(profile, Target(11, 2), 'host', 1)
         source = SimpleNamespace(hook_code='X', context=1, context2=2)
         token = ctrl.observe(generation='host', connection=1, sequence=1,
@@ -454,7 +454,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                 pass
         profile = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
                           uncertain_text_fallback=True,
-                          hooks=[HookSelection('X', 1, 2)], body_sources=['X|1|2'])
+                          hooks=[HookSelection('X', 1, 2)], body_source='X|1|2')
         controller = Controller(lambda *_: sent.append('input'), lambda *_: True)
         controller.begin(profile, Target(11, 22), 'host', 1)
         controller.permit(True)

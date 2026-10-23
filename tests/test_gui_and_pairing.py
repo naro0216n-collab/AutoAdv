@@ -17,8 +17,8 @@ class HookPairingTests(unittest.TestCase):
         p.hooks = [HookSelection('T', 1, 2),
                    HookSelection('S1', 3, 4),
                    HookSelection('S2', 5, 6)]
-        p.body_sources = [p.hooks[0].identity]
-        p.speaker_sources = [p.hooks[2].identity]
+        p.body_source = p.hooks[0].identity
+        p.speaker_source = p.hooks[2].identity
         p.source_rules[p.hooks[0].identity] = [BODY_ONLY_RULE]
         p.source_rules[p.hooks[2].identity] = [SPEAKER_ONLY_RULE]
         c = Controller(lambda *_: None, lambda _: True)
@@ -40,7 +40,7 @@ class HookPairingTests(unittest.TestCase):
 
     def test_provider_must_reference_a_selected_source(self):
         p = Profile('id', 'invalid', hooks=[HookSelection('T', 1, 2)])
-        p.body_sources = ['nonexistent|2|3']
+        p.body_source = 'nonexistent|2|3'
         with self.assertRaises(ValueError):
             p.validate()
 
@@ -84,7 +84,7 @@ class GuiSourceArchitectureTests(unittest.TestCase):
         for runtime_policy in ('def present(', 'def fallback_due(', 'def presentation_event(',
                                'def advance_if_ready(', 'def expire_next_line('):
             self.assertNotIn(runtime_policy, source)
-        self.assertIn('self.application.start_presentation(token)', source)
+        self.assertNotIn('self.application.start_presentation(token)', source)
         for legacy_status in ('host_status', 'hook_target', 'hook_capture_status',
                               'selected_hooks', 'hook_reconnect', 'active_hook_status'):
             self.assertNotIn(legacy_status, source)
@@ -115,11 +115,13 @@ class GuiSourceArchitectureTests(unittest.TestCase):
     def test_normal_hook_output_updates_capture_application_without_refresh_command(self):
         source = Path('autoadv/gui.py').read_text(encoding='utf-8')
         self.assertNotIn('self.application.observe_capture(', source)
-        self.assertIn('self.application.handle_capture_host_event(event)', source)
-        self.assertIn('self.application.queue_capture_output(event)', source)
-        self.assertIn('self.application.flush_capture_outputs()', source)
-        self.assertIn('self.application.handle_runtime_hook_output(event)', source)
-        self.assertIn('self.application.flush_runtime_hook_outputs()', source)
+        self.assertNotIn('self.application.handle_hook_event(event)', source)
+        self.assertNotIn('self.application.flush_hook_outputs()', source)
+        self.assertIn('on_event=self.on_hook', source)
+        self.assertNotIn('self.application.handle_capture_host_event(event)', source)
+        self.assertNotIn('queue_capture_output', source)
+        self.assertNotIn('handle_runtime_hook_output', source)
+        self.assertNotIn('flush_runtime_hook_outputs', source)
         self.assertNotIn('self._capture_output_group', source)
         self.assertNotIn('self._output_group', source)
         self.assertNotIn('self._synced_sources', source)
@@ -148,7 +150,7 @@ class GuiSourceArchitectureTests(unittest.TestCase):
         self.assertIn('self.application.runtime_target_state()', source)
         self.assertIn('if self.application.runtime_target_state().selected:', source)
         self.assertIn('QTimer.singleShot(0, self.connect_game)', source)
-        self.assertIn('self.application.handle_hook_error(message)', source)
+        self.assertNotIn('self.application.handle_hook_error(message)', source)
         self.assertNotIn('self.application.report_capture_problem(', source)
         self.assertNotIn('self.application.update_profile(', source)
         self.assertNotIn('self.application.update_capture_recipe(', source)
@@ -156,7 +158,7 @@ class GuiSourceArchitectureTests(unittest.TestCase):
         self.assertNotIn('capture_transition_boundary(', source)
         self.assertNotIn('consume_capture_transition(', source)
         self.assertNotIn('capture_transition_pending', source)
-        self.assertIn('self.application.handle_runtime_ocr_output(', source)
+        self.assertNotIn('self.application.handle_runtime_ocr_output(', source)
         self.assertIn('self.refresh_capture_workspace()', source)
 
 
@@ -309,7 +311,7 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.connect_game()
                 commands.assert_any_call('connect', pid=31)
                 commands.reset_mock()
-                window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=31))
+                window.application.handle_hook_event(HookEvent('connected', 'host', 1, 1, 100, process_id=31))
                 commands.assert_any_call('insert_pc_hooks', pid=31)
             finally:
                 window.application.hook_host = None
@@ -341,7 +343,7 @@ class TaskOrientedGuiContracts(unittest.TestCase):
         game = catalog.create_game('作品', 'C:/Game.exe')
         profile = game.profiles[game.default_profile]
         profile.hooks = [HookSelection('HOOK-1', 1, 2)]
-        profile.body_sources = [profile.hooks[0].identity]
+        profile.body_source = profile.hooks[0].identity
 
         def inspect(*_):
             window = next(w for w in QApplication.topLevelWidgets()
@@ -355,9 +357,9 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.connect_game()
-                window.on_hook(HookEvent('connected', 'host', 1, 1, 100, process_id=101))
+                window.application.handle_hook_event(HookEvent('connected', 'host', 1, 1, 100, process_id=101))
                 src = ThreadSource(101, 0x500, 1, 2, 'HOOK-1', 'HOOK-1')
-                window.on_hook(HookEvent('output', 'host', 1, 2, 200,
+                window.application.handle_hook_event(HookEvent('output', 'host', 1, 2, 200,
                                          process_id=101, source=src, text='京「おはよう」'))
                 QApplication.processEvents()
                 self.assertIsNotNone(window.application.runtime_state().profile)

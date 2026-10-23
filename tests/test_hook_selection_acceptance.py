@@ -29,18 +29,17 @@ class SelectedHookContracts(unittest.TestCase):
         self.p = Profile('p', 'P', hooks=[HookSelection('A', 1, 2),
                                          HookSelection('B', 3, 4),
                                          HookSelection('S', 5, 6)],
-                         body_sources=[self.a.identity, self.b.identity],
+                         body_source=self.a.identity,
                          source_rules={self.s.identity: [SPEAKER_ONLY_RULE]})
         self.sent = []
         self.c = Controller(lambda *_: self.sent.append('advance'), lambda _: True)
 
-    def begin(self, present):
-        self.c.begin(self.p, Target(101, 400), 'host', 7, tuple(present))
+    def begin(self):
+        self.c.begin(self.p, Target(101, 400), 'host', 7)
         self.c.permit(True)
 
-    def test_prioritized_available_hook_is_only_dialogue_owner(self):
-        self.begin((self.b.identity, self.a.identity))
-        self.assertEqual(self.c.active_body_source, self.a.identity)
+    def test_selected_body_source_is_only_dialogue_owner(self):
+        self.begin()
         self.assertIsNone(output(self.c, self.b, 'duplication from B', 1))
         token = output(self.c, self.a, 'first line', 2)
         self.assertIsNotNone(token)
@@ -52,67 +51,51 @@ class SelectedHookContracts(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertIsNotNone(output(self.c, self.a, 'next line', 4))
 
-    def test_fallback_available_at_session_start_does_not_switch_mid_line(self):
-        self.begin((self.b.identity,))
-        self.assertEqual(self.c.active_body_source, self.b.identity)
-        t = output(self.c, self.b, 'line', 1)
-        self.assertIsNone(output(self.c, self.a, 'late high priority duplicate', 2))
-        self.assertEqual(self.c.token, t)
-        self.c.presentation_event(t, 'text_elapsed')
-        self.assertTrue(self.c.try_advance())
-        self.assertEqual(len(self.sent), 1)
-        self.assertIsNone(output(self.c, self.a, 'late duplicate', 3))
-
-    def test_no_observed_source_then_first_selected_output_owns_session(self):
-        self.begin(())
-        self.assertIsNone(self.c.active_body_source)
+    def test_unselected_source_never_becomes_body_owner(self):
+        self.begin()
         self.assertIsNone(output(self.c, source('X', 7), 'unselected', 1))
-        self.assertIsNone(self.c.active_body_source)
-        self.assertIsNotNone(output(self.c, self.b, 'valid', 2))
-        self.assertEqual(self.c.active_body_source, self.b.identity)
-        self.assertIsNone(output(self.c, self.a, 'not owner', 3))
+        self.assertIsNone(output(self.c, self.b, 'also unselected', 2))
+        self.assertIsNotNone(output(self.c, self.a, 'valid', 3))
 
-    def test_speaker_provider_works_with_prioritized_body_provider(self):
-        self.p.speaker_sources = [self.s.identity]
-        self.begin((self.a.identity, self.b.identity, self.s.identity))
-        def e(source, seq, text):
-            return HookEvent('output', 'host', 7, seq, seq * 100_000_000, 101, source, text)
+    def test_speaker_provider_works_with_explicit_body_provider(self):
+        self.p.speaker_source = self.s.identity
+        self.begin()
+        def e(src, seq, text):
+            return HookEvent('output', 'host', 7, seq, seq * 100_000_000, 101, src, text)
         ticket = self.c.observe_group([e(self.b, 1, 'duplicate'), e(self.s, 2, '京'),
                                        e(self.a, 3, 'おはよう')])
         self.assertIsNotNone(ticket)
         self.assertEqual(self.c.utterance.speaker, '京')
         self.assertEqual(self.c.utterance.raw, 'おはよう')
 
-    def test_saved_hook_priority_restores_without_pid_or_thread_address(self):
+    def test_saved_sources_restore_without_pid_or_thread_address(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'settings.json'
             catalog = Catalog()
             game = catalog.create_game('Some game')
             profile = game.profiles[game.default_profile]
             profile.hooks = list(self.p.hooks)
-            profile.hooks[0], profile.hooks[1] = profile.hooks[1], profile.hooks[0]
-            profile.body_sources = [self.b.identity, self.a.identity]
-            profile.speaker_sources = [self.s.identity]
+            profile.body_source = self.b.identity
+            profile.speaker_source = self.s.identity
             profile.source_rules[self.s.identity] = [SPEAKER_ONLY_RULE]
             save(catalog, path)
             restored = load(path).games[game.id].profiles[profile.id]
-            self.assertEqual([h.identity for h in restored.hooks], [self.b.identity, self.a.identity, self.s.identity])
-            self.assertEqual(restored.body_sources, profile.body_sources)
-            self.assertEqual(restored.speaker_sources, profile.speaker_sources)
+            self.assertEqual(restored.body_source, self.b.identity)
+            self.assertEqual(restored.speaker_source, self.s.identity)
             self.assertNotIn('address', path.read_text(encoding='utf-8'))
             c = Controller(lambda *_: None, lambda _: True)
-            c.begin(restored, Target(101, 401), 'new-host', 1,
-                    (self.a.identity, self.b.identity))
-            self.assertEqual(c.active_body_source, self.b.identity)
-            self.assertTrue(restored.hooks[0].matches(source('B', 3, address=0xBEEF)))
+            c.begin(restored, Target(101, 401), 'new-host', 1)
+            self.assertTrue(next(h for h in restored.hooks if h.identity == self.b.identity)
+                            .matches(source('B', 3, address=0xBEEF)))
 
-    def test_switching_sessions_revokes_prior_selection_and_input(self):
-        self.begin((self.a.identity,))
+    def test_switching_sessions_revokes_prior_input(self):
+        self.begin()
         original = output(self.c, self.a, 'old', 1)
-        self.c.begin(self.p, Target(101, 400), 'host', 7, (self.b.identity,))
+        self.p.body_source = self.b.identity
+        self.c.begin(self.p, Target(101, 400), 'host', 7)
         self.assertFalse(self.c.presentation_event(original, 'text_elapsed'))
         self.assertFalse(self.c.try_advance())
-        self.assertEqual(self.c.active_body_source, self.b.identity)
+        self.assertIsNotNone(output(self.c, self.b, 'new owner', 2))
 
 
 @unittest.skipUnless(__import__('importlib').util.find_spec('PySide6'), 'PySide6 required for native GUI acceptance')
@@ -136,11 +119,11 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.application.begin_hook_connection(101, window.current_profile())
-                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                window.application.handle_hook_event(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 existing = source('A', 1)
-                window.on_hook(HookEvent('output', 'host', 7, 2, 200,
+                window.application.handle_hook_event(HookEvent('output', 'host', 7, 2, 200,
                                          process_id=101, source=existing, text='台詞A'))
-                window.flush_capture_outputs()
+                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
                 self.assertEqual(window.source_table.rowCount(), 1)
                 self.assertEqual(window.source_table.item(0, 0).text(), '台詞A')
                 self.assertEqual(window.source_table.item(0, 1).text(), '—')
@@ -174,16 +157,16 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
                 window.application.begin_hook_connection(101, window.current_profile())
-                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                window.application.handle_hook_event(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 window.btn_recovery_search.click()
-                window.on_hook(HookEvent('hook_found', 'host', 7, 2, 200,
+                window.application.handle_hook_event(HookEvent('hook_found', 'host', 7, 2, 200,
                                          process_id=101, detail='B', text='探索試料'))
                 commands.assert_any_call('insert_hook', pid=101, code='B')
                 self.assertEqual(window.current_profile().inserted_hooks, [])
                 found = source('B', 5)
-                window.on_hook(HookEvent('output', 'host', 7, 3, 300,
+                window.application.handle_hook_event(HookEvent('output', 'host', 7, 3, 300,
                                          process_id=101, source=found, text='台詞B'))
-                window.flush_capture_outputs()
+                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
                 idx = next(i for i in range(window.capture_body_source.count())
                            if window.capture_body_source.itemData(i) == (found.identity, found.address))
                 window.capture_body_source.setCurrentIndex(idx)
@@ -192,7 +175,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 self.assertTrue(window.btn_commit_capture.isEnabled())
                 window.btn_commit_capture.click()
                 self.assertEqual([h.code for h in window.current_profile().hooks], ['B'])
-                self.assertEqual(window.current_profile().body_sources, [found.identity])
+                self.assertEqual(window.current_profile().body_source, found.identity)
                 self.assertEqual(window.current_profile().inserted_hooks, ['B'])
             finally:
                 window.application.hook_host = None
@@ -218,16 +201,16 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.application.select_primary_target(101, 0x1234)
                 window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
                 window.application.begin_hook_connection(101, window.current_profile())
-                window.on_hook(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
+                window.application.handle_hook_event(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
                 speaker_source = source('S', 1)
                 body_source = source('T', 5, address=0x200)
                 speaker_raw = 'きぬ　（０４０６）■■壊れた本文■■'
                 body_raw = '???「あれカレー屋を荒らしてくれた女だ」'
-                window.on_hook(HookEvent('output', 'host', 3, 2, 200,
+                window.application.handle_hook_event(HookEvent('output', 'host', 3, 2, 200,
                                          process_id=101, source=speaker_source, text=speaker_raw))
-                window.on_hook(HookEvent('output', 'host', 3, 3, 220,
+                window.application.handle_hook_event(HookEvent('output', 'host', 3, 3, 220,
                                          process_id=101, source=body_source, text=body_raw))
-                window.flush_capture_outputs()
+                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
                 body_index = next(i for i in range(window.capture_body_source.count())
                                   if window.capture_body_source.itemData(i) ==
                                   (body_source.identity, body_source.address))
@@ -243,8 +226,8 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                                  'あれカレー屋を荒らしてくれた女だ')
                 window.btn_commit_capture.click()
                 profile = window.current_profile()
-                self.assertEqual(profile.body_sources, [body_source.identity])
-                self.assertEqual(profile.speaker_sources, [speaker_source.identity])
+                self.assertEqual(profile.body_source, body_source.identity)
+                self.assertEqual(profile.speaker_source, speaker_source.identity)
             finally:
                 window.application.hook_host = None
                 window.close()
@@ -270,11 +253,11 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.application.select_primary_target(101, 0x1234)
                 window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
                 window.application.begin_hook_connection(101, window.current_profile())
-                window.on_hook(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
+                window.application.handle_hook_event(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 combined = source('C', 1)
-                window.on_hook(HookEvent('output', 'host', 7, 2, 200,
+                window.application.handle_hook_event(HookEvent('output', 'host', 7, 2, 200,
                                          process_id=101, source=combined, text=raw))
-                window.flush_capture_outputs()
+                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
                 window.source_table.selectRow(0)
                 QApplication.processEvents()
                 self.assertEqual(window.source_extraction_preview.rowCount(), 1)

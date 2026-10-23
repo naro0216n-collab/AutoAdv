@@ -23,7 +23,7 @@ from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
 from .model import (HookSelection, OCRSettings, Profile, ReplacementRule, StructureRule,
-                    Utterance, EXTRACTION_PRESETS, extract_source_fields, interpret)
+                    Utterance, EXTRACTION_PRESETS, extract_fields, interpret)
 from .native_audio import NativeAudio
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
@@ -91,7 +91,6 @@ class RuntimeState:
     ocr_blank: bool
     source_generation: str
     connection_generation: int
-    active_body_source: str | None
     presentation_reason: str | None
     pause_reason: str | None
 
@@ -181,6 +180,15 @@ class CaptureHostEventOutcome:
     monitor_started: bool = False
 
 
+@dataclass(frozen=True)
+class HookEventOutcome:
+    connection_transition: str | None = None
+    capture: CaptureHostEventOutcome = CaptureHostEventOutcome()
+    token: Token | None = None
+    flush_delay_ms: int | None = None
+    note: str = ''
+
+
 _PLAY_ISSUES = {
     'target_unavailable': ('自動送り先のゲームウィンドウを確認できないため、この台詞の自動送りを保留しています。', None),
     'next_line_timeout': ('送り後に次の台詞を取得できません。会話取得を確認してください。', 'open_capture'),
@@ -215,31 +223,50 @@ class _ObservedSource:
     ambiguous: bool = False
 
 
-class CaptureWorkspace:
-    """Draft one field-based conversation capture recipe against real output."""
+@dataclass
+class CaptureRecipe:
+    hooks: list[HookSelection]
+    body_source: str
+    speaker_source: str
+    source_rules: dict[str, list[StructureRule]]
+    inserted_hooks: list[str]
 
-    def __init__(self, profile: Profile, resolve: Callable[[Profile], Profile] | None = None):
-        self._base = deepcopy(profile)
-        self._draft = deepcopy(profile)
-        self._resolve = resolve or (lambda value: value)
+    @classmethod
+    def from_profile(cls, profile: Profile) -> 'CaptureRecipe':
+        return cls(
+            hooks=deepcopy(profile.hooks),
+            body_source=profile.body_source,
+            speaker_source=profile.speaker_source,
+            source_rules=deepcopy(profile.source_rules),
+            inserted_hooks=list(profile.inserted_hooks),
+        )
+
+    def apply_to(self, profile: Profile) -> Profile:
+        result = deepcopy(profile)
+        result.hooks = deepcopy(self.hooks)
+        result.body_source = self.body_source
+        result.speaker_source = self.speaker_source
+        result.source_rules = deepcopy(self.source_rules)
+        result.inserted_hooks = list(self.inserted_hooks)
+        return result
+
+
+class CaptureWorkspace:
+    """Draft only the interdependent conversation-capture recipe."""
+
+    def __init__(self, profile: Profile):
+        self._base = CaptureRecipe.from_profile(profile)
+        self._draft = deepcopy(self._base)
         self._observed: dict[tuple[str, int], _ObservedSource] = {}
         self._groups: deque[tuple[HookEvent, ...]] = deque(maxlen=16)
 
     @property
-    def profile(self) -> Profile:
-        return self._draft
-
-    @property
     def dirty(self) -> bool:
-        return (self._draft.hooks != self._base.hooks or
-                self._draft.body_sources != self._base.body_sources or
-                self._draft.speaker_sources != self._base.speaker_sources or
-                self._draft.source_rules != self._base.source_rules or
-                self._draft.inserted_hooks != self._base.inserted_hooks)
+        return self._draft != self._base
 
     def reset(self, profile: Profile) -> None:
-        self._base = deepcopy(profile)
-        self._draft = deepcopy(profile)
+        self._base = CaptureRecipe.from_profile(profile)
+        self._draft = deepcopy(self._base)
         self._observed.clear()
         self._groups.clear()
 
@@ -292,22 +319,19 @@ class CaptureWorkspace:
         return any(record.ambiguous for (candidate_identity, _), record in self._observed.items()
                    if candidate_identity == identity)
 
-    def has_identity(self, identity: str) -> bool:
-        return any(candidate_identity == identity for candidate_identity, _ in self._observed)
-
     def has_output(self, identity: str) -> bool:
         record = self._record_for_identity(identity)
         return bool(record and record.history)
 
-    def output_identities(self) -> tuple[str, ...]:
-        identities = []
-        for identity in self._draft.body_sources:
-            if identity not in identities and self.has_output(identity):
-                identities.append(identity)
-        return tuple(identities)
-
     def has_hook_code(self, code: str) -> bool:
         return any(record.source.hook_code == code for record in self._observed.values())
+
+    def _rules_for(self, identity: str) -> tuple[StructureRule, ...]:
+        configured = self._draft.source_rules.get(identity)
+        return tuple(configured) if configured is not None else tuple(EXTRACTION_PRESETS['auto'])
+
+    def _extract(self, raw: str, identity: str):
+        return extract_fields(raw, self._rules_for(identity))
 
     def _preset_for(self, identity: str) -> str:
         configured = tuple(self._draft.source_rules.get(identity, ()))
@@ -324,16 +348,14 @@ class CaptureWorkspace:
             return None
         history = tuple(text for _, text in record.history)
         samples = tuple(CaptureSampleView(raw, *(lambda fields: (fields.speaker, fields.body))(
-            extract_source_fields(raw, self._draft, identity))) for raw in history)
+            self._extract(raw, identity))) for raw in history)
         used_fields = []
-        if identity in self._draft.body_sources:
+        if identity == self._draft.body_source:
             used_fields.append('body')
-        if identity in self._draft.speaker_sources or (not self._draft.speaker_sources and
-                                                        identity in self._draft.body_sources):
+        if identity == (self._draft.speaker_source or self._draft.body_source):
             used_fields.append('speaker')
-        used = tuple(used_fields)
         return CaptureCandidateView(identity, address, history[-1] if history else '', history,
-                                    samples, used, self._preset_for(identity), record.ambiguous)
+                                    samples, tuple(used_fields), self._preset_for(identity), record.ambiguous)
 
     def _source(self, identity: str, address: int) -> ThreadSource:
         record = self._observed.get((identity, address))
@@ -352,19 +374,20 @@ class CaptureWorkspace:
     def set_field_source(self, field: str, identity: str | None, address: int | None = None) -> None:
         if field not in ('body', 'speaker'):
             raise ValueError('invalid dialogue field')
-        providers = self._draft.body_sources if field == 'body' else self._draft.speaker_sources
-        providers.clear()
-        if identity is None:
-            return
-        if address is None:
-            record = self._record_for_identity(identity)
-            if record is None:
-                raise ValueError('取得元を利用できません')
-            source = record.source
+        value = ''
+        if identity is not None:
+            if address is None:
+                record = self._record_for_identity(identity)
+                if record is None:
+                    raise ValueError('取得元を利用できません')
+                source = record.source
+            else:
+                source = self._source(identity, address)
+            value = self._ensure_hook(source).identity
+        if field == 'body':
+            self._draft.body_source = value
         else:
-            source = self._source(identity, address)
-        hook = self._ensure_hook(source)
-        providers.append(hook.identity)
+            self._draft.speaker_source = value
 
     def set_extraction_preset(self, identity: str, address: int, preset: str) -> None:
         if preset not in EXTRACTION_PRESETS:
@@ -382,8 +405,7 @@ class CaptureWorkspace:
         self._draft.source_rules[hook.identity] = [deepcopy(rule) for rule in rules]
 
     def source_rules(self, identity: str) -> tuple[StructureRule, ...]:
-        configured = self._draft.source_rules.get(identity)
-        return tuple(configured) if configured is not None else tuple(EXTRACTION_PRESETS['auto'])
+        return self._rules_for(identity)
 
     def _record_for_identity(self, identity: str) -> _ObservedSource | None:
         matches = [record for (candidate_identity, _), record in self._observed.items()
@@ -391,25 +413,23 @@ class CaptureWorkspace:
         return matches[0] if len(matches) == 1 and not matches[0].ambiguous else None
 
     def _assembly_from_events(self, events: Sequence[HookEvent]) -> CaptureAssemblyView | None:
-        if not self._draft.body_sources:
+        body_identity = self._draft.body_source
+        if not body_identity:
             return None
-        body_identity = self._draft.body_sources[0]
         body_events = [event for event in events if event.source and
                        event.source.identity == body_identity and event.text.strip()]
-        body_values = [(event, extract_source_fields(event.text, self._draft, body_identity))
-                       for event in body_events]
+        body_values = [(event, self._extract(event.text, body_identity)) for event in body_events]
         body_values = [(event, fields) for event, fields in body_values if fields.body]
         if len(body_values) != 1:
             return None
         body_event, body_fields = body_values[0]
         speaker_source: str | None = None
         speaker = ''
-        if self._draft.speaker_sources:
-            speaker_source = self._draft.speaker_sources[0]
+        if self._draft.speaker_source:
+            speaker_source = self._draft.speaker_source
             speaker_events = [event for event in events if event.source and
                               event.source.identity == speaker_source and event.text.strip()]
-            values = [(event, extract_source_fields(event.text, self._draft, speaker_source))
-                      for event in speaker_events]
+            values = [(event, self._extract(event.text, speaker_source)) for event in speaker_events]
             values = [(event, fields) for event, fields in values if fields.speaker]
             if len(values) > 1:
                 return None
@@ -422,10 +442,10 @@ class CaptureWorkspace:
                                    body_identity, speaker_source)
 
     def _assembly(self) -> tuple[CaptureAssemblyView, ...]:
-        if not self._draft.body_sources:
+        body_identity = self._draft.body_source
+        if not body_identity:
             return ()
-        body_identity = self._draft.body_sources[0]
-        speaker_identity = self._draft.speaker_sources[0] if self._draft.speaker_sources else body_identity
+        speaker_identity = self._draft.speaker_source or body_identity
         assembled: list[CaptureAssemblyView] = []
         if speaker_identity != body_identity:
             for group in self._groups:
@@ -436,13 +456,11 @@ class CaptureWorkspace:
             record = self._record_for_identity(body_identity)
             if record is not None:
                 for sequence, raw in record.history:
-                    fields = extract_source_fields(raw, self._draft, body_identity)
+                    fields = self._extract(raw, body_identity)
                     if fields.body:
-                        speaker = fields.speaker if (not self._draft.speaker_sources or
-                                  body_identity in self._draft.speaker_sources) else ''
                         assembled.append(CaptureAssemblyView(
-                            sequence, speaker, fields.body, body_identity,
-                            body_identity if speaker else None))
+                            sequence, fields.speaker, fields.body, body_identity,
+                            body_identity if fields.speaker else None))
         assembled.sort(key=lambda item: item.sequence)
         return tuple(assembled[-12:])
 
@@ -454,54 +472,40 @@ class CaptureWorkspace:
             candidate = self.candidate(record.source.identity, address)
             if candidate is not None:
                 candidates.append(candidate)
-        providers = set(self._draft.body_sources) | set(self._draft.speaker_sources)
+        providers = {value for value in (self._draft.body_source, self._draft.speaker_source) if value}
         ambiguous_selected = any(
             candidate.ambiguous and candidate.identity in providers for candidate in candidates)
         problem = None
         if ambiguous_selected:
             problem = CaptureProblemView('選択した取得元を一意に識別できません。別の取得元を選択してください。')
-        can_commit = bool(self._draft.body_sources) and not ambiguous_selected
         return CaptureWorkspaceView(
             candidates=tuple(candidates), assembly=self._assembly(),
-            body_source=self._draft.body_sources[0] if self._draft.body_sources else None,
-            speaker_source=self._draft.speaker_sources[0] if self._draft.speaker_sources else None,
-            dirty=self.dirty, can_commit=can_commit, problem=problem)
+            body_source=self._draft.body_source or None,
+            speaker_source=self._draft.speaker_source or None,
+            dirty=self.dirty, can_commit=bool(self._draft.body_source) and not ambiguous_selected,
+            problem=problem)
 
     def adopt_inserted_hook(self, code: str) -> None:
         code = code.strip()
         if code and code not in self._draft.inserted_hooks:
             self._draft.inserted_hooks.append(code)
 
-    def mutate_recipe(self, mutate: Callable[[Profile], None]) -> None:
-        prior = deepcopy(self._draft)
-        try:
-            mutate(self._draft)
-            self._draft.validate()
-        except Exception:
-            self._draft = prior
-            raise
+    def selected_provider_ids(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(
+            identity for identity in (self._draft.body_source, self._draft.speaker_source) if identity))
 
-    def rebase_settings(self, profile: Profile) -> None:
-        """Refresh non-capture settings without discarding a capture draft."""
-        capture_fields = {'hooks', 'body_sources', 'speaker_sources', 'source_rules', 'inserted_hooks'}
-        for field in profile.__dataclass_fields__:
-            if field in capture_fields or field in ('id', 'name'):
-                continue
-            setattr(self._base, field, deepcopy(getattr(profile, field)))
-            setattr(self._draft, field, deepcopy(getattr(profile, field)))
+    def selected_hooks(self) -> tuple[HookSelection, ...]:
+        selected = set(self.selected_provider_ids())
+        return tuple(hook for hook in self._draft.hooks if hook.identity in selected)
 
-    def committed_profile(self) -> Profile:
+    def committed_profile(self, profile: Profile) -> Profile:
         if not self.view().can_commit:
             raise ValueError('本文として使用する取得元を選択してください')
-        candidate = deepcopy(self._draft)
-        used = set(candidate.body_sources) | set(candidate.speaker_sources)
+        candidate = self._draft.apply_to(profile)
+        used = set(self.selected_provider_ids())
         candidate.hooks = [hook for hook in candidate.hooks if hook.identity in used]
         candidate.source_rules = {identity: rules for identity, rules in candidate.source_rules.items()
                                   if identity in used or identity == 'ocr'}
-        # Recovery-search insertions are provisional until a source backed by
-        # that hook code is part of the committed assembly.  Keep codes that
-        # already existed before this workspace, but never persist a newly
-        # trialled code merely because it produced one sample during editing.
         base_codes = set(self._base.inserted_hooks)
         used_codes = {hook.code for hook in candidate.hooks}
         candidate.inserted_hooks = [
@@ -512,8 +516,8 @@ class CaptureWorkspace:
         return candidate
 
     def mark_committed(self, profile: Profile) -> None:
-        self._base = deepcopy(profile)
-        self._draft = deepcopy(profile)
+        self._base = CaptureRecipe.from_profile(profile)
+        self._draft = deepcopy(self._base)
 
 
 class AutoAdvApplication:
@@ -533,7 +537,6 @@ class AutoAdvApplication:
         self.capture: CaptureWorkspace | None = None
         self._runtime_capture_problem: CaptureProblemView | None = None
         self._raw_input_send = input_send or self._windows_input_send
-        self._input_observer: Callable[[str, Token | None], None] | None = None
         self.controller = Controller(self._send_runtime_input, target_ready or self._windows_target_ready)
         self.hook_host: HookHost | None = None
         self._host_epoch = 0
@@ -547,28 +550,22 @@ class AutoAdvApplication:
         self._preview_jobs: VoiceJobs | None = None
         self._searched_hook_codes: set[str] = set()
         self._trial_hook_codes: set[str] = set()
-        self._capture_output_group: list[HookEvent] = []
-        self._runtime_output_group: list[HookEvent] = []
+        self._hook_output_group: list[HookEvent] = []
+        self._hook_flush_epoch = 0
+        self._hook_flush_pending = False
         self._synced_sources: dict[tuple[int, int, int, int], ThreadSource] = {}
         self._hook_connection = HookConnectionState()
         self._runtime_target = RuntimeTargetState()
         self._inserted_hook_codes: set[str] = set()
         self._pc_hooks_inserted = False
-        self._resume_saved_monitor = False
         self._capture_transition_pending = False
         self._schedule_runtime: Callable[[int, Callable[[], None]], None] | None = None
         self._runtime_observer: Callable[[], None] | None = None
         self._runtime_event_observer: Callable[[str, Token | None, dict], None] | None = None
-        self._ocr_text_observer: Callable[[int, int, int, str], None] | None = None
-        self._ocr_error_observer: Callable[[str], None] | None = None
-        self._native_ready_observer: Callable[[int, bool, str], None] | None = None
-        self._native_event_observer: Callable[[Token | None, str, str], None] | None = None
-        self._native_pcm_observer: Callable[[Token, int], None] | None = None
-        self._native_inference_observer: Callable[[Token, dict], None] | None = None
-        self._native_voice_end_observer: Callable[[Token, dict], None] | None = None
-        self._hook_event_observer: Callable[[HookEvent], None] | None = None
+        self._hook_event_observer: Callable[[HookEvent, HookEventOutcome], None] | None = None
         self._hook_closed_observer: Callable[[str], None] | None = None
         self._hook_error_observer: Callable[[str], None] | None = None
+        self._telemetry_observer: Callable[[str, Token | None, dict], None] | None = None
 
     @staticmethod
     def _windows_target_ready(target: Target) -> bool:
@@ -596,10 +593,6 @@ class AutoAdvApplication:
     def _windows_input_send(target: Target, virtual_key: int) -> None:
         WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
 
-    def configure_input_observer(self, observer: Callable[[str, Token | None], None] | None) -> None:
-        """Expose diagnostic milestones without giving the GUI input authority."""
-        self._input_observer = observer
-
     def configure_runtime_loop(self, *,
                                schedule: Callable[[int, Callable[[], None]], None],
                                on_change: Callable[[], None] | None = None,
@@ -613,27 +606,14 @@ class AutoAdvApplication:
         self._runtime_observer = on_change
         self._runtime_event_observer = on_event
 
-    def configure_runtime_services(self, *,
-                                   on_ocr_text: Callable[[int, int, int, str], None] | None = None,
-                                   on_ocr_error: Callable[[str], None] | None = None,
-                                   on_native_ready: Callable[[int, bool, str], None] | None = None,
-                                   on_native_event: Callable[[Token | None, str, str], None] | None = None,
-                                   on_native_pcm: Callable[[Token, int], None] | None = None,
-                                   on_native_inference: Callable[[Token, dict], None] | None = None,
-                                   on_native_voice_end: Callable[[Token, dict], None] | None = None) -> None:
-        """Bind observation adapters for runtime services once."""
-        self._ocr_text_observer = on_ocr_text
-        self._ocr_error_observer = on_ocr_error
-        self._native_ready_observer = on_native_ready
-        self._native_event_observer = on_native_event
-        self._native_pcm_observer = on_native_pcm
-        self._native_inference_observer = on_native_inference
-        self._native_voice_end_observer = on_native_voice_end
+    def configure_telemetry(self, observer: Callable[[str, Token | None, dict], None] | None) -> None:
+        """Attach one optional diagnostics sink; it never participates in policy."""
+        self._telemetry_observer = observer
 
-    def configure_hook_service(self, *, on_event: Callable[[HookEvent], None],
+    def configure_hook_service(self, *, on_event: Callable[[HookEvent, HookEventOutcome], None],
                                on_closed: Callable[[str], None],
                                on_error: Callable[[str], None]) -> None:
-        """Bind Host observation adapters; Application retains Host lifecycle policy."""
+        """Bind presentation observers after Application has consumed Host events."""
         self._hook_event_observer = on_event
         self._hook_closed_observer = on_closed
         self._hook_error_observer = on_error
@@ -646,22 +626,37 @@ class AutoAdvApplication:
         if self._runtime_event_observer is not None:
             self._runtime_event_observer(event, token, detail)
 
+    def _emit_telemetry(self, event: str, token: Token | None = None, **detail) -> None:
+        if self._telemetry_observer is not None:
+            self._telemetry_observer(event, token, detail)
+
+    def _accept_runtime_token(self, token: Token | None) -> None:
+        if token is None or token != self.controller.token:
+            return
+        self.start_presentation(token)
+        self._emit_runtime_event('utterance', token)
+
     def _schedule(self, delay_ms: int, callback: Callable[[], None]) -> None:
         if self._schedule_runtime is None:
             raise RuntimeError('runtime scheduler is not configured')
         self._schedule_runtime(max(0, int(delay_ms)), callback)
 
+    def _dispatch_runtime(self, callback: Callable[[], None]) -> None:
+        """Marshal service callbacks through the configured event loop when present."""
+        if self._schedule_runtime is None:
+            callback()
+        else:
+            self._schedule_runtime(0, callback)
+
     def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
         token = self.controller.token
-        if self._input_observer is not None:
-            self._input_observer('attempt', token)
+        self._emit_runtime_event('advance_attempt', token)
         if self._native_audio is not None:
             self._native_audio.boundary()
-            if self._input_observer is not None:
-                self._input_observer('audio_boundary', token)
+            self._emit_runtime_event('audio_observation_boundary', token)
         self._raw_input_send(target, virtual_key)
-        if self._input_observer is not None:
-            self._input_observer('sent', token)
+        self._emit_runtime_event(
+            'advance_input', token, presentation_reason=self.controller.presentation_reason)
 
     def runtime_state(self) -> RuntimeState:
         c = self.controller
@@ -670,7 +665,6 @@ class AutoAdvApplication:
             utterance=c.utterance, authorized=c.authorized, sent=c.sent,
             completed=c.completed, native_playing=c.native_playing, ocr_blank=c.ocr_blank,
             source_generation=c.source_generation, connection_generation=c.connection_generation,
-            active_body_source=c.active_body_source,
             presentation_reason=c.presentation_reason, pause_reason=c.pause_reason)
 
     def runtime_capture_matches(self, profile: Profile) -> bool:
@@ -678,8 +672,8 @@ class AutoAdvApplication:
         if active is None or active.id != profile.id:
             return False
         if not (active.source == profile.source and active.hooks == profile.hooks and
-                active.body_sources == profile.body_sources and
-                active.speaker_sources == profile.speaker_sources and
+                active.body_source == profile.body_source and
+                active.speaker_source == profile.speaker_source and
                 active.source_rules == profile.source_rules and
                 not (profile.source == 'ocr' and active.ocr != profile.ocr)):
             return False
@@ -722,9 +716,8 @@ class AutoAdvApplication:
             else:
                 self._request_capture_transition()
 
-    def begin_runtime(self, profile: Profile, target: Target, generation: str, connection: int,
-                      available_sources: tuple[str, ...] = ()) -> int:
-        return self.controller.begin(profile, target, generation, connection, available_sources)
+    def begin_runtime(self, profile: Profile, target: Target, generation: str, connection: int) -> int:
+        return self.controller.begin(profile, target, generation, connection)
 
     def confirm_external_advance(self, token: Token) -> bool:
         """Prepare one test/validation-forced advance without product credit.
@@ -790,6 +783,8 @@ class AutoAdvApplication:
         if state.native_playing:
             self.runtime_presentation_event(token, 'native_evidence_stale')
         self.runtime_presentation_event(token, 'fallback_elapsed')
+        if self.runtime_state().pause_reason == 'native_inconclusive_hold':
+            self._emit_native_capture_summary(token)
 
     def start_presentation(self, token: Token) -> int:
         """Start every presentation effect for the current immutable Utterance.
@@ -826,7 +821,7 @@ class AutoAdvApplication:
         return external_ns
 
     def close_runtime(self, reason: str = 'stopped') -> None:
-        self._runtime_output_group.clear()
+        self._hook_output_group.clear()
         self.controller.close(reason)
         self._notify_runtime()
 
@@ -840,26 +835,19 @@ class AutoAdvApplication:
         self.stop_monitoring('session_changed')
         if effective.source == 'ocr':
             self.begin_runtime(effective, target, 'ocr', 1)
-            self.start_ocr(
-                effective,
-                on_text=self._ocr_text_observer or (lambda *_: None),
-                on_error=self._ocr_error_observer or (lambda *_: None))
+            self.start_ocr(effective)
         else:
-            if any(self.capture_identity_is_ambiguous(h.identity) for h in effective.hooks):
+            selected_sources = tuple(identity for identity in
+                                     (effective.body_source, effective.speaker_source) if identity)
+            if any(self.capture_identity_is_ambiguous(identity) for identity in selected_sources):
                 raise ValueError('選択した取得元を一意に識別できません。別の取得元を選択してください')
             connection = self._hook_connection
             if not connection.connected:
                 raise RuntimeError('ゲームへのLunaHook接続が完了していません')
             self.begin_runtime(effective, target, connection.host_generation,
-                               connection.connection_generation, self.capture_output_identities())
+                               connection.connection_generation)
             self._reconcile_hook_sync()
-        self.start_native_audio(
-            effective,
-            on_ready=self._native_ready_observer or (lambda *_: None),
-            on_event=self._native_event_observer or (lambda *_: None),
-            on_pcm=self._native_pcm_observer,
-            on_inference=self._native_inference_observer,
-            on_voice_end=self._native_voice_end_observer)
+        self.start_native_audio(effective)
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(
@@ -884,23 +872,29 @@ class AutoAdvApplication:
         self.cancel_voice_preview()
         self.close_runtime(reason)
 
-    def request_saved_monitor_resume(self, profile: Profile | None) -> None:
-        self._resume_saved_monitor = bool(
-            profile and profile.source == 'hook' and bool(profile.body_sources))
+    def reconcile_monitoring(self, profile: Profile | None = None) -> RuntimeState | None:
+        """Converge runtime monitoring from current persisted and connection state.
 
-    def cancel_saved_monitor_resume(self) -> None:
-        self._resume_saved_monitor = False
-
-    def saved_monitor_resume_ready(self, profile: Profile | None) -> bool:
-        if (not self._resume_saved_monitor or profile is None or
-                not self._hook_connection.connected or not self.capture_saved_sources_ready(profile)):
-            return False
-        self._resume_saved_monitor = False
-        return True
-
-    def try_resume_saved_monitor(self, profile: Profile | None = None) -> RuntimeState | None:
+        No resume latch is kept.  A saved capture becomes monitorable exactly
+        when its target, connection and selected source are all available.
+        """
         profile = profile or self.current_profile()
-        if not self.saved_monitor_resume_ready(profile):
+        if profile is None:
+            return None
+        effective = self.catalog.effective_profile(profile)
+        state = self.runtime_state()
+        if state.profile is not None and state.profile.id == effective.id and self.runtime_capture_matches(effective):
+            return state
+        target = self._runtime_target
+        if profile.source == 'ocr':
+            return self.start_monitoring() if target.input_ready else None
+        if (not profile.body_source or not target.selected or
+                not self._hook_connection.connected_to(target.hook_pid) or
+                not self.capture_saved_sources_ready(profile)):
+            return None
+        if self.capture_identity_is_ambiguous(profile.body_source):
+            return None
+        if profile.speaker_source and self.capture_identity_is_ambiguous(profile.speaker_source):
             return None
         return self.start_monitoring()
 
@@ -912,7 +906,6 @@ class AutoAdvApplication:
         target = self._runtime_target
         if not target.selected:
             raise ValueError('実行中のゲーム・プロセスを選択してください')
-        self.request_saved_monitor_resume(profile)
         if profile.source == 'ocr':
             if target.input_ready:
                 self.start_monitoring()
@@ -924,7 +917,7 @@ class AutoAdvApplication:
         if self.hook_host_running and (connection.connected_to(pid) or connection.connecting_pid == pid):
             if connection.connected_to(pid):
                 self.restore_profile_capture(profile)
-                if self.try_resume_saved_monitor(profile) is not None:
+                if self.reconcile_monitoring(profile) is not None:
                     return 'monitoring'
                 return 'connected'
             return 'connecting'
@@ -940,7 +933,7 @@ class AutoAdvApplication:
             raise RuntimeError('LunaHook Hostの起動に失敗しました')
         if self.begin_hook_connection(pid, profile):
             return 'connecting'
-        if self.try_resume_saved_monitor(profile) is not None:
+        if self.reconcile_monitoring(profile) is not None:
             return 'monitoring'
         return 'connected'
 
@@ -960,11 +953,10 @@ class AutoAdvApplication:
                     self.report_capture_problem('保存した会話取得設定を現在のゲームへ復元できません。')
                     self._emit_runtime_event('capture_environment_apply_failed', None, reason=str(exc))
                     return 'restore_failed'
-                self.try_resume_saved_monitor(profile)
+                self.reconcile_monitoring(profile)
         elif transition == 'disconnected':
             self.stop_monitoring('host_changed')
             self.clear_capture_observations()
-            self.cancel_saved_monitor_resume()
             self.report_capture_problem('ゲームからの台詞取得が切断されました。')
         return transition
 
@@ -984,7 +976,7 @@ class AutoAdvApplication:
             return False
         if event.kind != 'output' or event.source is None or not event.text.strip():
             return False
-        selected = next((h for h in profile.hooks if h.identity in profile.body_sources and h.matches(event.source)), None)
+        selected = next((h for h in profile.hooks if h.identity == profile.body_source and h.matches(event.source)), None)
         if selected is None:
             return False
         state = self.runtime_state()
@@ -1005,12 +997,11 @@ class AutoAdvApplication:
             self.stop_monitoring('session_changed')
             return False
         if profile.source == 'hook':
-            if not profile.body_sources:
+            if not profile.body_source:
                 self.stop_monitoring('settings_changed')
                 return False
             if not self._hook_connection.connected:
                 self.stop_monitoring('host_changed')
-                self.request_saved_monitor_resume(profile)
                 return False
         self.start_monitoring()
         return True
@@ -1025,58 +1016,72 @@ class AutoAdvApplication:
                 return None
         return self.controller.observe_ocr(session=session, pid=pid, sequence=sequence, text=text)
 
-    def handle_runtime_hook_output(self, event: HookEvent) -> tuple[Token | None, int | None]:
-        """Feed one Hook output or queue the selected multi-source batch.
+    def _runtime_uses_hook_group(self) -> bool:
+        profile = self.controller.profile
+        return bool(profile and profile.source == 'hook' and profile.body_source and
+                    profile.speaker_source and profile.speaker_source != profile.body_source)
 
-        The returned delay is only a scheduling request for the UI/event loop;
-        ownership of the batch and the grouping policy remain in Application.
-        """
+    def _handle_hook_output(self, event: HookEvent) -> tuple[Token | None, int | None]:
+        """Admit one Host output and share one bounded multi-source group."""
         profile = self.current_profile()
         if self.capture_transition_boundary(event, profile):
-            # Rebuild synchronously on this HookEvent so the same first output is
-            # admitted to the new runtime instead of being discarded.
             self.apply_capture_transition()
         state = self.runtime_state()
-        profile, target = state.profile, state.target
-        if (event.kind != 'output' or event.source is None or profile is None or target is None or
-                profile.source != 'hook' or event.process_id != (target.hook_pid or target.pid) or
-                event.host_generation != state.source_generation or
-                event.connection_generation != state.connection_generation):
+        runtime_profile, target = state.profile, state.target
+        runtime_matches = bool(
+            event.kind == 'output' and event.source is not None and runtime_profile is not None and
+            target is not None and runtime_profile.source == 'hook' and
+            event.process_id == (target.hook_pid or target.pid) and
+            event.host_generation == state.source_generation and
+            event.connection_generation == state.connection_generation and
+            any(h.matches(event.source) for h in runtime_profile.hooks))
+        capture_matches = bool(
+            event.kind == 'output' and event.source is not None and
+            self.capture_event_matches_connection(event) and
+            not self.capture_identity_is_ambiguous(event.source.identity))
+        if not runtime_matches and not capture_matches:
             return None, None
-        selected = profile.hooks
-        if len(selected) > 1 and any(h.matches(event.source) for h in selected):
-            self._runtime_output_group.append(event)
-            if len(self._runtime_output_group) >= 32:
-                return self.flush_runtime_hook_outputs(), None
-            return None, max(10, min(100, profile.hook_flush_ms))
-        return (self.controller.observe(
-            generation=event.host_generation, connection=event.connection_generation,
-            sequence=event.sequence, source=event.source, text=event.text,
-            pid=event.process_id or 0, received_ns=event.received_ns), None)
 
-    def flush_runtime_hook_outputs(self) -> Token | None:
-        group, self._runtime_output_group = self._runtime_output_group, []
-        return self.controller.observe_group(group) if group and self.controller.profile else None
+        token = None
+        runtime_grouped = runtime_matches and self._runtime_uses_hook_group()
+        # Keep one bounded observation group even before the user chooses fields.
+        # Candidate rows update immediately in handle_capture_host_event; this
+        # buffer exists only so a later body/speaker selection can preview the
+        # same synchronized evidence that runtime will use.
+        capture_grouped = capture_matches and self.capture is not None
+        if runtime_matches and not runtime_grouped:
+            token = self.controller.observe(
+                generation=event.host_generation, connection=event.connection_generation,
+                sequence=event.sequence, source=event.source, text=event.text,
+                pid=event.process_id or 0, received_ns=event.received_ns)
+        if not runtime_grouped and not capture_grouped:
+            return token, None
+
+        self._hook_output_group.append(event)
+        if len(self._hook_output_group) >= 64:
+            grouped_token = self.flush_hook_outputs()
+            return grouped_token or token, None
+        delay = 100
+        if runtime_grouped and runtime_profile is not None:
+            delay = max(10, min(100, runtime_profile.hook_flush_ms))
+        return token, delay
+
+    def flush_hook_outputs(self) -> Token | None:
+        group, self._hook_output_group = self._hook_output_group, []
+        if not group:
+            return None
+        if self.capture:
+            self.capture.observe_group(group)
+        if self._runtime_uses_hook_group():
+            return self.controller.observe_group(group)
+        return None
 
     @property
     def native_audio_available(self) -> bool:
         return self._native_audio is not None
 
-    @property
-    def native_audio_pid(self) -> int:
-        return self._native_audio.pid if self._native_audio is not None else 0
-
-    def start_native_audio(self, profile: Profile, *, on_ready: Callable[[int, bool, str], None],
-                           on_event: Callable[[Token | None, str, str], None],
-                           on_pcm: Callable[[Token, int], None] | None = None,
-                           on_inference: Callable[[Token, dict], None] | None = None,
-                           on_voice_end: Callable[[Token, dict], None] | None = None) -> bool:
-        """Own process audio capture for the active runtime session.
-
-        Loading is asynchronous because ASR model construction can be slow.  A
-        later session/close invalidates the worker by epoch, so a late helper can
-        never become the active audio source for another game or utterance.
-        """
+    def start_native_audio(self, profile: Profile) -> bool:
+        """Own process audio capture and publish only semantic/telemetry events."""
         self.close_native_audio()
         if (profile.advance_mode.value != 'audio' or not profile.native_helper or
                 not profile.asr_model or not profile.asr_tokens):
@@ -1088,58 +1093,81 @@ class AutoAdvApplication:
         epoch = self._native_audio_epoch
         session = state.session
         pid = state.target.audio_pid or state.target.pid
+        telemetry = self._telemetry_observer is not None
 
         def current() -> bool:
             now = self.runtime_state()
             return (epoch == self._native_audio_epoch and now.session == session and
                     now.target is not None and (now.target.audio_pid or now.target.pid) == pid)
 
+        def consume_event(token: Token | None, event: str, detail: str) -> None:
+            if not current():
+                return
+            self.handle_native_event(token, event, detail)
+            self._emit_runtime_event('native_event', token, status=event, reason=detail)
+
         def publish_event(token: Token | None, event: str, detail: str) -> None:
             if current():
-                self.handle_native_event(token, event, detail)
-                on_event(token, event, detail)
+                self._dispatch_runtime(lambda: consume_event(token, event, detail))
 
         def publish_pcm(token: Token, frames: int) -> None:
-            if current() and on_pcm is not None:
-                on_pcm(token, frames)
+            if current():
+                self._emit_telemetry('native_pcm', token, frames=frames, audio_pid=pid)
 
         def publish_inference(token: Token, metrics: dict) -> None:
-            if current() and on_inference is not None:
-                on_inference(token, metrics)
+            if current():
+                self._emit_telemetry('asr_inference', token, **metrics)
 
         def publish_voice_end(token: Token, metrics: dict) -> None:
-            if current() and on_voice_end is not None:
-                on_voice_end(token, metrics)
+            if not current():
+                return
+            self._emit_telemetry(
+                'native_voice_end_estimate', token,
+                estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
+                onset_estimated_at_ns=(metrics['estimated_onset_ms'] * 1_000_000
+                    if metrics.get('estimated_onset_ms') is not None else None),
+                evidence=metrics['source'])
+
+        def activate(native: NativeAudio) -> None:
+            if not current():
+                native.close()
+                return
+            self._native_audio = native
+            now = self.runtime_state()
+            if (now.token is not None and now.utterance is not None and not now.sent and
+                    not now.completed and now.utterance.advance_mode.value == 'audio' and
+                    not now.utterance.use_tts):
+                native.begin(now.token, now.utterance.match_text)
+            self._emit_runtime_event('native_ready', None, session=session, ready=True,
+                                     reason='', audio_pid=pid)
+
+        def fail(reason: str) -> None:
+            if not current():
+                return
+            now = self.runtime_state()
+            utterance = now.utterance
+            if (utterance is not None and utterance.advance_mode.value == 'audio' and
+                    not utterance.use_tts and not utterance.uncertain_text_fallback):
+                self.controller.pause('native_audio_unavailable_hold')
+            self._emit_runtime_event('native_ready', None, session=session, ready=False,
+                                     reason=reason, audio_pid=pid)
+            self._notify_runtime()
 
         def load_native() -> None:
             native = None
             try:
                 native = NativeAudio(
                     pid, Path(profile.native_helper), Path(profile.asr_model), Path(profile.asr_tokens),
-                    publish_event, on_pcm=publish_pcm if on_pcm is not None else None,
-                    on_inference=publish_inference if on_inference is not None else None,
-                    on_voice_end=publish_voice_end if on_voice_end is not None else None)
+                    publish_event,
+                    on_pcm=publish_pcm if telemetry else None,
+                    on_inference=publish_inference if telemetry else None,
+                    on_voice_end=publish_voice_end if telemetry else None)
                 native.start()
-                if not current():
-                    native.close()
-                    return
-                self._native_audio = native
-                now = self.runtime_state()
-                if (now.token is not None and now.utterance is not None and not now.sent and
-                        not now.completed and now.utterance.advance_mode.value == 'audio' and
-                        not now.utterance.use_tts):
-                    native.begin(now.token, now.utterance.match_text)
-                on_ready(session, True, '')
+                self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:
                 if native is not None:
                     native.close()
-                if current():
-                    state = self.runtime_state()
-                    utterance = state.utterance
-                    if (utterance is not None and utterance.advance_mode.value == 'audio' and
-                            not utterance.use_tts and not utterance.uncertain_text_fallback):
-                        self.controller.pause('native_audio_unavailable_hold')
-                    on_ready(session, False, str(exc))
+                self._dispatch_runtime(lambda reason=str(exc): fail(reason))
 
         threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
         return True
@@ -1163,8 +1191,12 @@ class AutoAdvApplication:
     def native_audio_holds_deadline(self, token: Token) -> bool:
         return bool(self._native_audio and self._native_audio.holds_deadline(token))
 
-    def native_audio_capture_status(self) -> dict:
-        return self._native_audio.capture_status() if self._native_audio is not None else {}
+    def _emit_native_capture_summary(self, token: Token) -> None:
+        if self._native_audio is None:
+            return
+        self._emit_runtime_event(
+            'native_capture_summary', token, audio_pid=self._native_audio.pid,
+            **self._native_audio.capture_status())
 
     def handle_native_event(self, token: Token | None, event: str, detail: str = '') -> bool:
         """Apply native evidence and drive completion/advance in Application."""
@@ -1177,6 +1209,7 @@ class AutoAdvApplication:
         if event == 'error':
             if not utterance.uncertain_text_fallback:
                 self.controller.pause('native_audio_failure')
+                self._emit_native_capture_summary(token)
             self._notify_runtime()
             return False
         mapping = {'started': 'native_started', 'quiet': 'native_quiet', 'completed': 'native_finished'}
@@ -1185,9 +1218,8 @@ class AutoAdvApplication:
             return False
         return self.runtime_presentation_event(token, presentation)
 
-    def start_ocr(self, profile: Profile, *, on_text: Callable[[int, int, int, str], None],
-                  on_error: Callable[[str], None]) -> bool:
-        """Own the optional OCR acquisition worker for the active runtime."""
+    def start_ocr(self, profile: Profile) -> bool:
+        """Own OCR acquisition, Controller admission and presentation dispatch."""
         self.close_ocr()
         if profile.source != 'ocr':
             return False
@@ -1204,14 +1236,27 @@ class AutoAdvApplication:
             return (epoch == self._ocr_epoch and now.session == session and
                     now.target is not None and now.target.pid == pid)
 
+        def consume_text(sequence: int, text: str) -> None:
+            if not current():
+                return
+            token = self.handle_runtime_ocr_output(
+                session=session, pid=pid, sequence=sequence, text=text)
+            self._accept_runtime_token(token)
+
         def publish_text(sequence: int, text: str) -> None:
             if current():
-                on_text(session, pid, sequence, text)
+                self._dispatch_runtime(lambda: consume_text(sequence, text))
+
+        def consume_error(reason: str) -> None:
+            if not current():
+                return
+            self.controller.pause('ocr_failure')
+            self._emit_runtime_event('ocr_error', None, reason=reason)
+            self._notify_runtime()
 
         def publish_error(reason: str) -> None:
             if current():
-                self.controller.pause('ocr_failure')
-                on_error(reason)
+                self._dispatch_runtime(lambda: consume_error(reason))
 
         reader = TesseractOCR(profile.ocr, WindowsClientCapture(state.target.hwnd, pid))
         worker = OCRWorker(reader, publish_text, publish_error)
@@ -1226,8 +1271,7 @@ class AutoAdvApplication:
             threading.Thread(target=worker.close, daemon=True, name='autoadv-close-ocr').start()
 
     def configure_voice_jobs(self, *, on_result: Callable[[Token, bool, str], None] | None,
-                             on_preview: Callable[[bool, str], None],
-                             on_timing: Callable[[Token, str, float, float], None] | None = None) -> None:
+                             on_preview: Callable[[bool, str], None]) -> None:
         """Bind observers while Application retains playback completion policy."""
         if self._voice_jobs is not None:
             self._voice_jobs.cancel()
@@ -1239,7 +1283,12 @@ class AutoAdvApplication:
             if on_result is not None:
                 on_result(token, done, reason)
 
-        self._voice_jobs = VoiceJobs(runtime_result, on_timing=on_timing)
+        def runtime_timing(token: Token, stage: str, duration_ms: float, audio_ms: float) -> None:
+            self._emit_telemetry(
+                'tts_timing', token, stage=stage, duration_ms=duration_ms, audio_ms=audio_ms)
+
+        self._voice_jobs = VoiceJobs(
+            runtime_result, on_timing=runtime_timing if self._telemetry_observer is not None else None)
         self._preview_jobs = VoiceJobs(lambda _token, done, reason: on_preview(done, reason))
 
     def start_voice(self, token: Token, reading: str, voice: str) -> None:
@@ -1333,12 +1382,12 @@ class AutoAdvApplication:
             raise
         return True
 
-    def record_inserted_hook(self, code: str) -> None:
+    def _record_inserted_hook(self, code: str) -> None:
         code = code.strip()
         if code:
             self._inserted_hook_codes.add(code)
 
-    def record_pc_hooks_inserted(self) -> None:
+    def _record_pc_hooks_inserted(self) -> None:
         self._pc_hooks_inserted = True
 
     def restore_profile_capture(self, profile: Profile) -> None:
@@ -1405,8 +1454,37 @@ class AutoAdvApplication:
         host = self.hook_host
         return bool(host and host.child is not None and host.child.poll() is None)
 
+    def _schedule_hook_flush(self, delay_ms: int) -> None:
+        if self._schedule_runtime is None or self._hook_flush_pending:
+            return
+        self._hook_flush_pending = True
+        epoch = self._hook_flush_epoch
+
+        def finish() -> None:
+            if epoch != self._hook_flush_epoch:
+                return
+            self._hook_flush_pending = False
+            token = self.flush_hook_outputs()
+            self._accept_runtime_token(token)
+            self._emit_runtime_event('hook_group_flushed', token)
+
+        self._schedule(delay_ms, finish)
+
+    def _consume_host_event(self, event: HookEvent) -> None:
+        self.handle_hook_event(event)
+
+    def _consume_host_closed(self, reason: str) -> None:
+        self._handle_hook_closed()
+        if self._hook_closed_observer is not None:
+            self._hook_closed_observer(reason)
+
+    def _consume_host_error(self, message: str) -> None:
+        self.handle_hook_error(message)
+        if self._hook_error_observer is not None:
+            self._hook_error_observer(message)
+
     def start_hook_host(self) -> None:
-        """Own the isolated Luna Host lifecycle and suppress stale callbacks."""
+        """Own the isolated Luna Host lifecycle and all Host state transitions."""
         if self._hook_event_observer is None or self._hook_closed_observer is None or self._hook_error_observer is None:
             raise RuntimeError('Hook service observers are not configured')
         self._host_epoch += 1
@@ -1419,14 +1497,14 @@ class AutoAdvApplication:
 
         def current(callback, *args):
             if epoch == self._host_epoch:
-                callback(*args)
+                self._dispatch_runtime(lambda: callback(*args))
 
         runtime = adopted_runtime()
         host = HookHost(
             runtime.host,
-            lambda event: current(self._hook_event_observer, event),
-            lambda reason: current(self._hook_closed_observer, reason),
-            lambda message: current(self._hook_error_observer, message),
+            lambda event: current(self._consume_host_event, event),
+            lambda reason: current(self._consume_host_closed, reason),
+            lambda message: current(self._consume_host_error, message),
         )
         host.start()
         self.hook_host = host
@@ -1456,25 +1534,25 @@ class AutoAdvApplication:
         capture recipes or the active runtime change.  The UI never owns the
         selected set or remembers which native threads were synchronized.
         """
-        selected = []
+        selected: list[HookSelection] = []
         if not clear:
-            profiles = []
+            seen: set[str] = set()
             runtime = self.runtime_state().profile
             if runtime is not None and runtime.source == 'hook':
-                profiles.append(runtime)
-            if self.capture is not None and self.capture.profile.source == 'hook':
-                profiles.append(self.capture.profile)
-            seen: set[str] = set()
-            for profile in profiles:
-                provider_ids = list(dict.fromkeys([*profile.body_sources, *profile.speaker_sources]))
-                if len(provider_ids) <= 1:
-                    continue
-                by_identity = {hook.identity: hook for hook in profile.hooks}
-                for identity in provider_ids:
-                    hook = by_identity.get(identity)
-                    if hook is not None and identity not in seen:
+                provider_ids = tuple(dict.fromkeys(
+                    identity for identity in (runtime.body_source, runtime.speaker_source) if identity))
+                if len(provider_ids) > 1:
+                    by_identity = {hook.identity: hook for hook in runtime.hooks}
+                    for identity in provider_ids:
+                        hook = by_identity.get(identity)
+                        if hook is not None and identity not in seen:
+                            selected.append(hook)
+                            seen.add(identity)
+            if self.capture is not None and len(self.capture.selected_provider_ids()) > 1:
+                for hook in self.capture.selected_hooks():
+                    if hook.identity not in seen:
                         selected.append(hook)
-                        seen.add(identity)
+                        seen.add(hook.identity)
 
         desired: dict[tuple[int, int, int, int], ThreadSource] = {}
         for source in self.capture_sources():
@@ -1607,10 +1685,8 @@ class AutoAdvApplication:
         self.game_id = ''
         self.profile_id = ''
         self.capture = None
-        self._capture_output_group.clear()
-        self._runtime_output_group.clear()
+        self._hook_output_group.clear()
         self.clear_runtime_target()
-        self._resume_saved_monitor = False
         self._capture_transition_pending = False
         self._runtime_capture_problem = None
 
@@ -1657,11 +1733,11 @@ class AutoAdvApplication:
         self.game_id, self.profile_id = game_id, profile_id
         game = self.catalog.games.get(game_id)
         profile = game.profiles.get(profile_id) if game else None
-        self._capture_output_group.clear()
-        self._runtime_output_group.clear()
-        self._resume_saved_monitor = False
+        self._hook_output_group.clear()
+        self._hook_flush_epoch += 1
+        self._hook_flush_pending = False
         self._capture_transition_pending = False
-        self.capture = CaptureWorkspace(profile, self.catalog.effective_profile) if profile else None
+        self.capture = CaptureWorkspace(profile) if profile else None
         self._runtime_capture_problem = None
         self._searched_hook_codes.clear()
         self._trial_hook_codes.clear()
@@ -1676,19 +1752,6 @@ class AutoAdvApplication:
             self.capture.observe(source, text, sequence=sequence)
             self._reconcile_hook_sync()
 
-    def queue_capture_output(self, event: HookEvent) -> int | None:
-        if not self.capture or event.kind != 'output' or event.source is None:
-            return None
-        self._capture_output_group.append(event)
-        if len(self._capture_output_group) >= 64:
-            self.flush_capture_outputs()
-            return None
-        return 100
-
-    def flush_capture_outputs(self) -> None:
-        group, self._capture_output_group = self._capture_output_group, []
-        if group and self.capture:
-            self.capture.observe_group(group)
 
     def remove_capture_source(self, identity: str, address: int) -> None:
         if self.capture:
@@ -1699,7 +1762,9 @@ class AutoAdvApplication:
         target = self._runtime_target
         if target.selected:
             self.sync_hook_threads(target.hook_pid, clear=True)
-        self._capture_output_group.clear()
+        self._hook_output_group.clear()
+        self._hook_flush_epoch += 1
+        self._hook_flush_pending = False
         if self.capture:
             self.capture.clear_observations()
         self._searched_hook_codes.clear()
@@ -1714,8 +1779,6 @@ class AutoAdvApplication:
     def capture_candidate(self, identity: str, address: int) -> CaptureCandidateView | None:
         return self.capture.candidate(identity, address) if self.capture else None
 
-    def capture_profile_snapshot(self) -> Profile | None:
-        return deepcopy(self.capture.profile) if self.capture else None
 
     def capture_identity_is_ambiguous(self, identity: str) -> bool:
         return bool(self.capture and self.capture.identity_is_ambiguous(identity))
@@ -1723,12 +1786,9 @@ class AutoAdvApplication:
     def capture_saved_sources_ready(self, profile: Profile) -> bool:
         if not self.capture:
             return False
-        return any(
-            not self.capture.identity_is_ambiguous(identity) and self.capture.has_output(identity)
-            for identity in profile.body_sources)
-
-    def capture_output_identities(self) -> tuple[str, ...]:
-        return self.capture.output_identities() if self.capture else ()
+        identity = profile.body_source
+        return bool(identity and not self.capture.identity_is_ambiguous(identity) and
+                    self.capture.has_output(identity))
 
     def handle_capture_host_event(self, event: HookEvent) -> CaptureHostEventOutcome:
         """Own capture-source state transitions for one current Host event."""
@@ -1736,14 +1796,14 @@ class AutoAdvApplication:
             return CaptureHostEventOutcome()
         identity = event.source.identity
         if event.kind == 'removed':
-            active_removed = self.runtime_state().active_body_source == identity
+            runtime_profile = self.runtime_state().profile
+            active_removed = bool(runtime_profile and runtime_profile.body_source == identity)
             self.remove_capture_source(identity, event.source.address)
             resumed = False
             if active_removed:
                 self.stop_monitoring('host_changed')
                 profile = self.current_profile()
-                self.request_saved_monitor_resume(profile)
-                resumed = self.try_resume_saved_monitor(profile) is not None
+                resumed = self.reconcile_monitoring(profile) is not None
                 if resumed:
                     self.clear_capture_problem()
                 else:
@@ -1758,15 +1818,46 @@ class AutoAdvApplication:
         if new_ambiguity and self.runtime_state().profile is not None:
             self.stop_monitoring('host_changed')
             self.report_capture_problem('同じ識別子の取得元が複数あり、台詞を一意に選べません。')
-        resumed = self.try_resume_saved_monitor(self.current_profile()) is not None
+        resumed = self.reconcile_monitoring(self.current_profile()) is not None
         return CaptureHostEventOutcome(
             changed=True, new_ambiguity=new_ambiguity, monitor_started=resumed)
 
-    def handle_hook_diagnostic(self, event: HookEvent) -> None:
+    def handle_hook_event(self, event: HookEvent) -> HookEventOutcome:
+        """Apply one Host event through the product's single Hook state path."""
+        note = ''
+        if event.kind == 'hook_found' and self.capture_event_matches_connection(event):
+            try:
+                self.insert_recovery_hook(event.detail, discovered=True)
+            except (RuntimeError, OSError, ValueError) as exc:
+                note = '探索したHOOKを試用できません: ' + str(exc)
+
+        transition = self.handle_hook_connection_event(event)
+        capture_outcome = self.handle_capture_host_event(event)
+        token = None
+        delay = None
+        if event.kind == 'output' and event.source is not None:
+            token, delay = self._handle_hook_output(event)
+        elif event.kind == 'inserted':
+            target = self._runtime_target
+            if target.selected and event.process_id == target.hook_pid:
+                code = event.source.hook_code if event.source else ''
+                note = f'LunaによるHOOK挿入: {event.detail} {code}'.strip()
+        elif event.kind == 'diagnostic':
+            self._handle_hook_diagnostic(event)
+            note = 'LunaHost: ' + event.detail
+        outcome = HookEventOutcome(transition, capture_outcome, token, delay, note)
+        if self._schedule_runtime is not None:
+            self._accept_runtime_token(token)
+            if delay is not None:
+                self._schedule_hook_flush(delay)
+        if self._hook_event_observer is not None:
+            self._hook_event_observer(event, outcome)
+        return outcome
+
+    def _handle_hook_diagnostic(self, event: HookEvent) -> None:
         if event.kind != 'diagnostic':
             return
         if event.detail in ('existing_luna_injection_detected', 'cannot_attach_to_host_process'):
-            self.cancel_saved_monitor_resume()
             self.cancel_hook_connection_attempt(event.process_id)
         if event.detail == 'existing_luna_injection_detected':
             self.report_capture_problem(
@@ -1793,8 +1884,7 @@ class AutoAdvApplication:
         if message:
             self._emit_runtime_event('hook_error', None, reason=message)
 
-    def handle_hook_closed(self) -> None:
-        self.cancel_saved_monitor_resume()
+    def _handle_hook_closed(self) -> None:
         self.stop_monitoring('host_changed')
         self.reset_hook_connection()
         self.report_capture_problem('ゲームからの台詞取得が停止しました。')
@@ -1819,7 +1909,7 @@ class AutoAdvApplication:
     def insert_pc_recovery_hooks(self) -> None:
         pid = self._connected_hook_pid()
         self.hook_command('insert_pc_hooks', pid=pid)
-        self.record_pc_hooks_inserted()
+        self._record_pc_hooks_inserted()
 
     def insert_recovery_hook(self, code: str, *, discovered: bool = False) -> bool:
         code = code.strip()
@@ -1830,7 +1920,7 @@ class AutoAdvApplication:
         try:
             pid = self._connected_hook_pid()
             self.hook_command('insert_hook', pid=pid, code=code)
-            self.record_inserted_hook(code)
+            self._record_inserted_hook(code)
             self.mark_recovery_hook_inserted(code)
             return True
         except Exception:
@@ -1945,7 +2035,7 @@ class AutoAdvApplication:
             ('Saved sources: ' + str(len(profile.hooks)) if profile else 'Saved sources: -'),
             ('Runtime: session=' + str(runtime.session) +
              ' source=' + (runtime.profile.source if runtime.profile else '-') +
-             ' active=' + (runtime.active_body_source or '-') +
+             ' body=' + (runtime.profile.body_source if runtime.profile else '-') +
              ' token=' + (f'{runtime.token.session}:{runtime.token.line}' if runtime.token else '-') +
              ' sent=' + str(runtime.sent) + ' completed=' + str(runtime.completed)),
             ('Runtime reason: presentation=' + (runtime.presentation_reason or '-') +
@@ -1970,16 +2060,12 @@ class AutoAdvApplication:
                 issue = CaptureProblemView(*resolved)
         return PlayView(authorized, dialogue, issue)
 
-    def _update_capture_recipe(self, mutate: Callable[[Profile], None]) -> None:
-        if not self.capture:
-            raise ValueError('作品を選択してください')
-        self.capture.mutate_recipe(mutate)
 
     def commit_capture(self) -> Profile:
         current = self.current_profile()
         if current is None or self.capture is None:
             raise ValueError('作品を選択してください')
-        updated = self.capture.committed_profile()
+        updated = self.capture.committed_profile(current)
         game = self.catalog.games[self.game_id]
         previous = game.profiles[current.id]
         game.profiles[updated.id] = updated
@@ -1991,10 +2077,8 @@ class AutoAdvApplication:
         self.capture.mark_committed(updated)
         self._reconcile_hook_sync()
         self._apply_persisted_profile_change(previous, updated)
-        if (self.runtime_state().profile is None and updated.body_sources
-                and self._hook_connection.connected):
-            self.request_saved_monitor_resume(updated)
-            self.try_resume_saved_monitor(updated)
+        if self.runtime_state().profile is None:
+            self.reconcile_monitoring(updated)
         return updated
 
     def _update_profile(self, mutate: Callable[[Profile], None]) -> Profile:
@@ -2003,7 +2087,7 @@ class AutoAdvApplication:
             raise ValueError('作品を選択してください')
         updated = deepcopy(current)
         mutate(updated)
-        capture_transaction_fields = ('hooks', 'body_sources', 'speaker_sources', 'source_rules', 'inserted_hooks')
+        capture_transaction_fields = ('hooks', 'body_source', 'speaker_source', 'source_rules', 'inserted_hooks')
         changed_capture_fields = [
             field for field in capture_transaction_fields
             if getattr(updated, field) != getattr(current, field)
@@ -2021,8 +2105,6 @@ class AutoAdvApplication:
         except Exception:
             game.profiles[current.id] = previous
             raise
-        if self.capture:
-            self.capture.rebase_settings(updated)
         self._apply_persisted_profile_change(previous, updated)
         return updated
 
@@ -2172,7 +2254,7 @@ class AutoAdvApplication:
         internal to the application; the GUI never toggles an inheritance field.
         """
         if (name not in Profile.__dataclass_fields__ or
-                name in {'id', 'name', 'hooks', 'body_sources', 'speaker_sources', 'source_rules', 'inserted_hooks'}):
+                name in {'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules', 'inserted_hooks'}):
             raise ValueError('unsupported profile setting')
 
         def change(profile: Profile) -> None:

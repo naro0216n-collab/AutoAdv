@@ -12,14 +12,38 @@ def source(code, context, address=1):
 
 
 def runtime_hook(app, source_, text, sequence, *, received_ns=1, generation='host', connection=1, pid=101):
-    return app.handle_runtime_hook_output(
-        HookEvent('output', generation, connection, sequence, received_ns, pid, source_, text))[0]
+    return app.handle_hook_event(
+        HookEvent('output', generation, connection, sequence, received_ns, pid, source_, text)).token
 
 
 def capture_group(app, events):
-    for event in events:
-        app.queue_capture_output(event)
-    app.flush_capture_outputs()
+    # CaptureWorkspace is the domain under test here; Application runtime uses
+    # the same bounded group through handle_hook_event()/flush_hook_outputs().
+    app.capture.observe_group(events)
+
+
+
+class _Child:
+    def poll(self):
+        return None
+
+
+class _Host:
+    def __init__(self):
+        self.child = _Child()
+        self.commands = []
+
+    def command(self, action, **kwargs):
+        self.commands.append((action, kwargs))
+
+
+def connect_hook(app, profile, *, pid=101, hwnd=500, generation='host', connection=1):
+    app.select_primary_target(pid, hwnd)
+    app.hook_host = _Host()
+    app.begin_hook_connection(pid, profile)
+    app.handle_hook_connection_event(
+        HookEvent('connected', generation, connection, 1, 10, process_id=pid))
+
 
 def app_with_game():
     catalog = Catalog()
@@ -87,8 +111,8 @@ def test_different_sources_can_supply_only_the_correct_field_from_each_mixed_out
     assert [(item.speaker, item.body) for item in view.assembly] == [
         ('きぬ', 'あれカレー屋を荒らしてくれた女だ')]
     updated = app.commit_capture()
-    assert updated.body_sources == [body.identity]
-    assert updated.speaker_sources == [speaker.identity]
+    assert updated.body_source == body.identity
+    assert updated.speaker_source == speaker.identity
     assert {hook.identity for hook in updated.hooks} == {body.identity, speaker.identity}
 
 
@@ -103,7 +127,7 @@ def test_capture_recipe_does_not_persist_until_committed():
     app.commit_capture()
     current = app.current_profile()
     assert [h.code for h in current.hooks] == ['T']
-    assert current.body_sources == [candidate.identity]
+    assert current.body_source == candidate.identity
     assert calls == ['save']
 
 
@@ -141,7 +165,6 @@ def test_recovery_trial_becomes_persistent_only_when_used_by_final_fields():
     app.observe_capture(candidate, '本文', sequence=1)
     assert app.current_profile().inserted_hooks == []
     app.set_capture_field_source('body', candidate.identity, candidate.address)
-    assert app.capture.profile.inserted_hooks == [candidate.hook_code]
     app.commit_capture()
     assert app.current_profile().inserted_hooks == [candidate.hook_code]
 
@@ -155,11 +178,10 @@ def test_recovery_trial_is_not_persisted_after_switching_to_another_final_source
     app.observe_capture(trial, '試用本文', sequence=1)
     app.observe_capture(normal, '採用本文', sequence=2)
     app.set_capture_field_source('body', trial.identity, trial.address)
-    assert app.capture.profile.inserted_hooks == [trial.hook_code]
     app.set_capture_field_source('body', normal.identity, normal.address)
     app.commit_capture()
     profile = app.current_profile()
-    assert profile.body_sources == [normal.identity]
+    assert profile.body_source == normal.identity
     assert [hook.code for hook in profile.hooks] == [normal.hook_code]
     assert profile.inserted_hooks == []
 
@@ -184,7 +206,7 @@ def test_speaker_from_later_flush_is_never_reused_for_older_body():
     assert [(p.speaker, p.body) for p in app.capture_view().assembly] == [('大和', '一つ目'), ('', '二つ目')]
 
 
-def test_capture_batch_buffer_is_application_owned_and_preserves_same_flush_field_assembly():
+def test_shared_hook_batch_is_application_owned_and_feeds_capture_preview():
     app, _ = app_with_game()
     body = source('T', 1)
     speaker = source('S', 5, address=2)
@@ -194,14 +216,17 @@ def test_capture_batch_buffer_is_application_owned_and_preserves_same_flush_fiel
     app.set_capture_extraction_preset(speaker.identity, speaker.address, 'speaker')
     app.set_capture_field_source('body', body.identity, body.address)
     app.set_capture_field_source('speaker', speaker.identity, speaker.address)
-    assert app.queue_capture_output(HookEvent('output', 'host', 1, 1, 100, 101, body, 'おはよう')) == 100
-    assert app.queue_capture_output(HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和')) == 100
+    connect_hook(app, app.current_profile())
+
+    first = app.handle_hook_event(HookEvent('output', 'host', 1, 2, 100, 101, body, 'おはよう'))
+    second = app.handle_hook_event(HookEvent('output', 'host', 1, 3, 110, 101, speaker, '大和'))
+    assert first.flush_delay_ms == second.flush_delay_ms == 100
     assert app.capture_view().assembly == ()
-    app.flush_capture_outputs()
+    app.flush_hook_outputs()
     assert [(p.speaker, p.body) for p in app.capture_view().assembly] == [('大和', 'おはよう')]
 
 
-def test_runtime_assembles_body_and_speaker_from_independent_sources():
+def test_runtime_assembles_body_and_speaker_from_the_same_shared_hook_group():
     app, _ = app_with_game()
     body = source('T', 1)
     speaker = source('S', 5, address=2)
@@ -209,15 +234,15 @@ def test_runtime_assembles_body_and_speaker_from_independent_sources():
     body_hook = HookSelection('T', 1, 2)
     speaker_hook = HookSelection('S', 5, 6)
     profile.hooks = [body_hook, speaker_hook]
-    profile.body_sources = [body_hook.identity]
-    profile.speaker_sources = [speaker_hook.identity]
+    profile.body_source = body_hook.identity
+    profile.speaker_source = speaker_hook.identity
     profile.source_rules[body_hook.identity] = [StructureRule(r'^(?P<body>.*)$')]
     profile.source_rules[speaker_hook.identity] = [StructureRule(r'^(?P<speaker>.*)$')]
-    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
-                      available_sources=(body.identity, speaker.identity))
-    app.handle_runtime_hook_output(HookEvent('output', 'host', 1, 1, 100, 101, body, 'おはよう'))
-    app.handle_runtime_hook_output(HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和'))
-    token = app.flush_runtime_hook_outputs()
+    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1)
+    first = app.handle_hook_event(HookEvent('output', 'host', 1, 1, 100, 101, body, 'おはよう'))
+    second = app.handle_hook_event(HookEvent('output', 'host', 1, 2, 110, 101, speaker, '大和'))
+    assert first.flush_delay_ms == second.flush_delay_ms == 100
+    token = app.flush_hook_outputs()
     assert token is not None
     assert app.runtime_state().utterance.text == 'おはよう'
     assert app.runtime_state().utterance.speaker == '大和'
@@ -340,22 +365,26 @@ def test_application_owns_hook_host_lifecycle_and_discards_stale_callbacks(monke
     closed = []
     errors = []
 
-    app.configure_hook_service(on_event=events.append, on_closed=closed.append, on_error=errors.append)
+    app.configure_hook_service(
+        on_event=lambda event, outcome: events.append((event, outcome)),
+        on_closed=closed.append, on_error=errors.append)
     app.start_hook_host()
     first = FakeHost.instances[-1]
     assert app.hook_host_running
     app.hook_command('connect', pid=101)
     assert first.commands == [('connect', {'pid': 101})]
-    first.on_event('first')
-    assert events == ['first']
+    first_event = HookEvent('diagnostic', 'host', 1, 1, 1, detail='first')
+    first.on_event(first_event)
+    assert events[-1][0] == first_event
 
     app.start_hook_host()
     second = FakeHost.instances[-1]
     assert first.closed
-    first.on_event('stale')
+    first.on_event(HookEvent('diagnostic', 'old', 1, 2, 2, detail='stale'))
     first.on_error('stale error')
-    second.on_event('second')
-    assert events == ['first', 'second']
+    second_event = HookEvent('diagnostic', 'new', 1, 3, 3, detail='second')
+    second.on_event(second_event)
+    assert [event.detail for event, _ in events] == ['first', 'second']
     assert errors == []
 
     app.close_hook_host()
@@ -423,15 +452,16 @@ def test_application_owns_native_audio_lifecycle_and_runtime_evidence(monkeypatc
     profile.asr_model = 'model.onnx'
     profile.asr_tokens = 'tokens.txt'
     app.begin_runtime(profile, Target(101, 500, audio_pid=202), 'ocr', 1)
-    ready = []
-    assert app.start_native_audio(
-        profile, on_ready=lambda *args: ready.append(args),
-        on_event=lambda *_: None)
+    runtime_events = []
+    app.configure_runtime_loop(
+        schedule=lambda _delay, callback: callback(),
+        on_event=lambda name, token, detail: runtime_events.append((name, token, detail)))
+    assert app.start_native_audio(profile)
     native = FakeNative.instances[-1]
     assert native.started
     assert app.native_audio_available
-    assert app.native_audio_pid == 202
-    assert ready == [(app.runtime_state().session, True, '')]
+    assert any(name == 'native_ready' and detail['ready']
+               for name, _, detail in runtime_events)
 
     token = app.handle_runtime_ocr_output(
         sequence=1, text='「声」', pid=101, session=app.runtime_state().session)
@@ -443,7 +473,7 @@ def test_application_owns_native_audio_lifecycle_and_runtime_evidence(monkeypatc
     app.cancel_native_audio()
     assert native.boundaries == 1
     assert native.cancelled == 1
-    assert app.native_audio_capture_status() == {'packets': 3}
+    assert not hasattr(app, 'native_audio_capture_status')
     assert app.handle_native_event(token, 'completed')
     assert app.runtime_state().presentation_reason == 'native'
 
@@ -452,7 +482,7 @@ def test_application_owns_native_audio_lifecycle_and_runtime_evidence(monkeypatc
     assert not app.native_audio_available
 
 
-def test_application_owns_ocr_worker_and_turns_failure_into_runtime_hold(monkeypatch):
+def test_application_owns_ocr_worker_admission_and_failure_policy(monkeypatch):
     import autoadv.application as application_module
 
     class ImmediateThread:
@@ -489,14 +519,21 @@ def test_application_owns_ocr_worker_and_turns_failure_into_runtime_hold(monkeyp
     profile = app.current_profile()
     profile.source = 'ocr'
     app.begin_runtime(profile, Target(101, 500), 'ocr', 1)
-    lines, errors = [], []
-    assert app.start_ocr(profile, on_text=lambda *args: lines.append(args), on_error=errors.append)
+    delayed = []
+    events = []
+    app.configure_runtime_loop(
+        schedule=lambda delay, callback: callback() if delay == 0 else delayed.append((delay, callback)),
+        on_event=lambda name, token, detail: events.append((name, token, detail)))
+    assert app.start_ocr(profile)
     worker = FakeWorker.instances[-1]
     assert worker.started
     worker.on_text(3, '台詞')
-    assert lines == [(app.runtime_state().session, 101, 3, '台詞')]
+    assert app.runtime_state().utterance.raw == '台詞'
+    assert any(name == 'utterance' for name, _, _ in events)
+    assert delayed  # presentation deadline is Application-owned
     worker.on_error('capture failed')
-    assert errors == ['capture failed']
+    assert any(name == 'ocr_error' and detail['reason'] == 'capture failed'
+               for name, _, detail in events)
     assert app.runtime_state().pause_reason == 'ocr_failure'
     app.close_ocr()
     assert worker.closed
@@ -715,22 +752,19 @@ def test_changing_body_provider_recomputes_final_preview_without_changing_source
     assert app.capture_candidate(first.identity, first.address).preset == 'body'
 
 
-def test_saved_provider_readiness_requires_real_body_output_and_allows_fallback():
+def test_saved_provider_readiness_requires_output_from_the_explicit_body_source():
     app, _ = app_with_game()
     primary = source('A', 1, address=1)
-    fallback = source('B', 3, address=2)
+    unselected = source('B', 3, address=2)
     profile = app.current_profile()
     profile.hooks = [HookSelection('A', 1, 2), HookSelection('B', 3, 4)]
-    profile.body_sources = [hook.identity for hook in profile.hooks]
+    profile.body_source = primary.identity
     app.select_profile(app.game_id, app.profile_id)
-    app.observe_capture(primary, '', sequence=1)  # thread exists, but produced no dialogue
+    app.observe_capture(primary, '', sequence=1)
+    app.observe_capture(unselected, 'other line', sequence=2)
     assert not app.capture_saved_sources_ready(profile)
-    app.observe_capture(fallback, 'fallback line', sequence=2)
+    app.observe_capture(primary, 'selected line', sequence=3)
     assert app.capture_saved_sources_ready(profile)
-    assert app.capture_output_identities() == (fallback.identity,)
-    app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
-                      available_sources=app.capture_output_identities())
-    assert app.runtime_state().active_body_source == fallback.identity
 
 
 def test_failed_recovery_hook_trial_can_be_retried():
@@ -753,19 +787,19 @@ def test_runtime_target_identity_is_application_session_state():
     assert not app.runtime_target_state().selected
 
 
-def test_profile_selection_discards_capture_batches_and_pending_runtime_transitions():
+def test_profile_selection_discards_shared_hook_batches_and_pending_runtime_transitions():
     app, _ = app_with_game()
     text = source('T', 1)
-    event = HookEvent('output', 'host', 1, 1, 100, 101, text, 'old')
-    assert app.queue_capture_output(event) == 100
+    app.observe_capture(text, 'old', sequence=1)
+    app.set_capture_field_source('body', text.identity, text.address)
+    # Force a pending shared group without exposing a second public batch API.
+    app.capture.observe_group((HookEvent('output', 'host', 1, 1, 100, 101, text, 'old'),))
     app.defer_capture_transition()
-    app.request_saved_monitor_resume(app.current_profile())
     game_id, profile_id = app.game_id, app.profile_id
     app.select_profile(game_id, profile_id)
     assert not app.consume_capture_transition()
     assert app.capture_view().assembly == ()
-    app.flush_capture_outputs()
-    assert app.capture_view().assembly == ()
+    assert app.flush_hook_outputs() is None
 
 
 def test_capture_transition_boundary_is_application_owned():
@@ -773,9 +807,9 @@ def test_capture_transition_boundary_is_application_owned():
     text = source('T', 1)
     profile = app.current_profile()
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
-                      available_sources=(text.identity,))
+)
     first = runtime_hook(app, text, 'first', 1, received_ns=100)
     assert first is not None
     assert not app.defer_capture_transition()
@@ -844,13 +878,13 @@ def test_capture_commit_failure_keeps_the_workspace_draft_intact():
     app.mark_recovery_hook_inserted(candidate.hook_code)
     app.observe_capture(candidate, 'きぬ「本文」', sequence=1)
     app.set_capture_field_source('body', candidate.identity, candidate.address)
-    before = app.capture_profile_snapshot()
+    before = app.capture_view()
     import pytest
     with pytest.raises(OSError):
         app.commit_capture()
-    after = app.capture_profile_snapshot()
+    after = app.capture_view()
     assert after == before
-    assert app.capture_view().dirty
+    assert after.dirty
     assert app.current_profile().hooks == []
     assert app.current_profile().inserted_hooks == []
 
@@ -938,7 +972,7 @@ def test_application_owns_text_presentation_deadline_and_next_line_timeout():
     profile = app.select_profile(game.id, game.default_profile)
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     profile.advance_mode = AdvanceMode.TEXT
     scheduled = []
     changed = []
@@ -948,10 +982,9 @@ def test_application_owns_text_presentation_deadline_and_next_line_timeout():
         on_change=lambda: changed.append(app.runtime_state().pause_reason),
         on_event=lambda name, token, detail: events.append((name, token, detail)))
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
-                      available_sources=(text.identity,))
+)
     token = runtime_hook(app, text, '本文', 1, received_ns=100)
     app.set_auto_advance(True)
-    app.start_presentation(token)
     assert scheduled[0][0] == app.runtime_state().utterance.text_wait_ms
     scheduled.pop(0)[1]()
     assert sent == [(101, profile.input_key)]
@@ -970,16 +1003,15 @@ def test_application_owns_uncertain_audio_fallback_policy():
     profile = app.current_profile()
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     profile.advance_mode = AdvanceMode.AUDIO
     profile.uncertain_text_fallback = False
     scheduled = []
     app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
-                      available_sources=(text.identity,))
+)
     token = runtime_hook(app, text, '本文', 1)
     app.set_auto_advance(True)
-    app.start_presentation(token)
     assert len(scheduled) == 1
     scheduled.pop(0)[1]()
     assert app.runtime_state().pause_reason == 'native_inconclusive_hold'
@@ -991,13 +1023,12 @@ def test_application_auto_advance_can_complete_without_gui_runtime_policy():
     profile = app.current_profile()
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     scheduled = []
     app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
     app.begin_runtime(profile, Target(101, 500, hook_pid=101), 'host', 1,
-                      available_sources=(text.identity,))
+)
     token = runtime_hook(app, text, '本文', 1)
-    app.start_presentation(token)
     scheduled.pop(0)[1]()
     assert app.runtime_state().completed
     assert not app.runtime_state().sent
@@ -1006,40 +1037,27 @@ def test_application_auto_advance_can_complete_without_gui_runtime_policy():
 
 
 def test_application_rebuilds_pending_hook_capture_before_admitting_first_new_line():
-    class Child:
-        def poll(self):
-            return None
-    class Host:
-        def __init__(self):
-            self.child = Child()
-            self.commands = []
-        def command(self, action, **kwargs):
-            self.commands.append((action, kwargs))
-
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
-    app.select_primary_target(101, 500)
-    app.hook_host = Host()
-    app.begin_hook_connection(101, profile)
-    app.accept_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, 101))
+    profile.body_source = profile.hooks[0].identity
+    connect_hook(app, profile)
     app.observe_capture(text, '一つ目', sequence=1)
     first_state = app.start_monitoring()
-    first = app.handle_runtime_hook_output(
-        HookEvent('output', 'host', 1, 2, 20, 101, text, '一つ目'))[0]
+    first = app.handle_hook_event(
+        HookEvent('output', 'host', 1, 2, 20, 101, text, '一つ目')).token
     assert first is not None
     first_session = first_state.session
 
-    # A capture-affecting setting edit keeps the current utterance frozen until
-    # the next distinct Hook output, then that same output must enter the new runtime.
+    # A capture-affecting edit rebuilds at the next distinct Hook output, and
+    # that same output is admitted by the rebuilt runtime.
     app.defer_capture_transition()
-    second, delay = app.handle_runtime_hook_output(
+    second_outcome = app.handle_hook_event(
         HookEvent('output', 'host', 1, 3, 30, 101, text, '二つ目'))
-    assert delay is None
-    assert second is not None
-    assert second.session > first_session
+    assert second_outcome.flush_delay_ms == 100  # capture evidence groups without delaying runtime
+    assert second_outcome.token is not None
+    assert second_outcome.token.session > first_session
     assert app.runtime_state().utterance.raw == '二つ目'
     assert not app.consume_capture_transition()
 
@@ -1059,43 +1077,32 @@ def test_application_owns_ocr_capture_transition_boundary():
     assert calls == ['apply']
 
 
-def test_activate_selected_target_owns_connection_request_and_saved_monitor_resume():
-    class Child:
-        def poll(self):
-            return None
-    class Host:
-        def __init__(self):
-            self.child = Child()
-            self.commands = []
-        def command(self, action, **kwargs):
-            self.commands.append((action, kwargs))
-
+def test_activate_selected_target_reconciles_saved_monitor_from_current_state():
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
-    app.hook_host = Host()
+    app.hook_host = _Host()
 
     assert app.activate_selected_target() == 'connecting'
     assert [action for action, _ in app.hook_host.commands] == ['settings', 'connect']
     assert app.activate_selected_target() == 'connecting'
 
-    transition = app.handle_hook_connection_event(
-        HookEvent('connected', 'host', 1, 1, 10, process_id=101))
+    transition = app.handle_hook_event(
+        HookEvent('connected', 'host', 1, 1, 10, process_id=101)).connection_transition
     assert transition == 'changed'
     assert app.activate_selected_target() == 'connected'
     assert app.runtime_state().profile is None
 
-    app.observe_capture(text, '最初の台詞', sequence=2)
-    state = app.try_resume_saved_monitor(profile)
-    assert state is not None
-    assert state.profile is not None
-    assert state.active_body_source == text.identity
-
+    outcome = app.handle_hook_event(
+        HookEvent('output', 'host', 1, 2, 20, 101, text, '最初の台詞'))
+    assert outcome.capture.monitor_started
+    assert app.runtime_state().profile is not None
+    assert app.runtime_state().profile.body_source == text.identity
 
 
 def test_reusing_connected_target_after_profile_switch_reapplies_profile_capture_settings():
@@ -1152,76 +1159,53 @@ def test_hook_error_is_translated_to_capture_problem_by_application():
     assert events[-1][0] == 'hook_error'
     assert events[-1][1]['reason'] == 'native failure'
 
-def test_capture_host_event_resumes_saved_monitor_before_same_first_output_enters_runtime():
-    class Child:
-        def poll(self):
-            return None
-    class Host:
-        def __init__(self):
-            self.child = Child()
-            self.commands = []
-        def command(self, action, **kwargs):
-            self.commands.append((action, kwargs))
-
+def test_single_hook_event_starts_saved_monitor_before_same_first_output_enters_runtime():
     app, _ = app_with_game()
     profile = app.current_profile()
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
-    app.hook_host = Host()
+    app.hook_host = _Host()
     assert app.activate_selected_target() == 'connecting'
-    app.handle_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, process_id=101))
+    app.handle_hook_event(HookEvent('connected', 'host', 1, 1, 10, process_id=101))
 
     first = HookEvent('output', 'host', 1, 2, 20, 101, text, '最初の台詞')
-    outcome = app.handle_capture_host_event(first)
-    assert outcome.monitor_started
-    token, delay = app.handle_runtime_hook_output(first)
-    assert delay is None
-    assert token is not None
+    outcome = app.handle_hook_event(first)
+    assert outcome.capture.monitor_started
+    assert outcome.flush_delay_ms == 100  # capture evidence groups without delaying runtime
+    assert outcome.token is not None
     assert app.runtime_state().utterance.raw == '最初の台詞'
 
 
-def test_active_body_source_removal_automatically_falls_back_to_next_saved_provider():
-    class Child:
-        def poll(self):
-            return None
-    class Host:
-        def __init__(self):
-            self.child = Child()
-            self.commands = []
-        def command(self, action, **kwargs):
-            self.commands.append((action, kwargs))
-
+def test_selected_body_source_removal_does_not_fall_back_to_an_unselected_provider():
     app, _ = app_with_game()
     profile = app.current_profile()
     primary = source('A', 1, address=1)
-    fallback = source('B', 3, address=2)
-    profile.hooks = [
-        HookSelection('A', 1, 2),
-        HookSelection('B', 3, 4),
-    ]
-    profile.body_sources = [hook.identity for hook in profile.hooks]
+    unselected = source('B', 3, address=2)
+    profile.hooks = [HookSelection('A', 1, 2), HookSelection('B', 3, 4)]
+    profile.body_source = primary.identity
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
-    app.select_primary_target(101, 500)
-    app.hook_host = Host()
-    app.begin_hook_connection(101, profile)
-    app.handle_hook_connection_event(HookEvent('connected', 'host', 1, 1, 10, process_id=101))
-    app.observe_capture(primary, 'A', sequence=1)
-    app.observe_capture(fallback, 'B', sequence=2)
-    app.request_saved_monitor_resume(profile)
-    app.try_resume_saved_monitor(profile)
-    assert app.runtime_state().active_body_source == primary.identity
+    connect_hook(app, profile)
 
-    removed = HookEvent('removed', 'host', 1, 3, 30, 101, primary)
-    outcome = app.handle_capture_host_event(removed)
-    assert outcome.active_source_removed
-    assert outcome.monitor_started
-    assert app.runtime_state().active_body_source == fallback.identity
-    assert app.capture_view().problem is None
+    first = app.handle_hook_event(HookEvent('output', 'host', 1, 2, 20, 101, primary, 'A'))
+    assert first.capture.monitor_started
+    assert app.runtime_state().profile is not None
+    app.handle_hook_event(HookEvent('output', 'host', 1, 3, 25, 101, unselected, 'B'))
+
+    removed = app.handle_hook_event(HookEvent('removed', 'host', 1, 4, 30, 101, primary))
+    assert removed.capture.active_source_removed
+    assert not removed.capture.monitor_started
+    assert app.runtime_state().profile is None
+    assert app.capture_view().problem is not None
+
+    restored = app.handle_hook_event(HookEvent('output', 'host', 1, 5, 40, 101, primary, 'A2'))
+    assert restored.capture.monitor_started
+    assert app.runtime_state().profile is not None
+    assert app.runtime_state().profile.body_source == primary.identity
 
 
 def test_public_profile_setting_api_cannot_bypass_capture_workspace_transaction():
@@ -1250,7 +1234,7 @@ def test_monitor_lifecycle_is_observable_from_application_events_without_gui_pol
     profile = app.current_profile()
     text = source('T', 1)
     profile.hooks = [HookSelection('T', 1, 2)]
-    profile.body_sources = [profile.hooks[0].identity]
+    profile.body_source = profile.hooks[0].identity
     app.select_profile(app.game_id, app.profile_id)
     profile = app.current_profile()
     app.select_primary_target(101, 500)
@@ -1316,7 +1300,7 @@ def test_capture_source_rule_commands_remain_inside_capture_transaction():
     app.set_capture_field_source('body', candidate.identity, candidate.address)
     app.save_capture_source_rule(candidate.identity, candidate.address, None, rule)
     assert app.current_profile().source_rules == before
-    assert app.capture_profile_snapshot().source_rules[candidate.identity][0] == rule
+    assert app.capture_source_rules(candidate.identity)[0] == rule
     assert calls == []
     app.commit_capture()
     assert app.current_profile().source_rules[candidate.identity][0] == rule

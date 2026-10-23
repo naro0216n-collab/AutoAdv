@@ -97,7 +97,7 @@ def add_luna_games(catalog: Catalog, games: tuple[LunaGame, ...]) -> Catalog:
         game = result.create_game(row.title.strip() or Path(row.path).stem or row.uid, row.path)
         profile = game.profiles[game.default_profile]
         profile.hooks = list(row.hooks)
-        profile.body_sources = [hook.identity for hook in profile.hooks]
+        profile.body_source = profile.hooks[0].identity if profile.hooks else ''
         profile.inserted_hooks = list(row.inserted)
         profile.replacements = list(row.repairs)
         for setting, value in row.hook_options:

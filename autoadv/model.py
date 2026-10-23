@@ -145,10 +145,10 @@ class Profile:
     id: str
     name: str
     hooks: list[HookSelection] = field(default_factory=list)
-    # Final dialogue fields are assembled independently.  Lists are provider
-    # priority: first usable provider in one synchronized output group wins.
-    body_sources: list[str] = field(default_factory=list)
-    speaker_sources: list[str] = field(default_factory=list)
+    # Final dialogue fields are assembled independently from one explicit
+    # body source and, optionally, one speaker source in the same sync group.
+    body_source: str = ''
+    speaker_source: str = ''
     # Source identity -> ordered extraction rules. Missing identity uses the
     # structural defaults above.  'ocr' may also be configured here.
     source_rules: dict[str, list[StructureRule]] = field(default_factory=dict)
@@ -191,9 +191,12 @@ class Profile:
         if len(identities) != len(set(identities)):
             raise ValueError('duplicate selected HOOK')
         selected = set(identities)
-        for providers, label in ((self.body_sources, 'body'), (self.speaker_sources, 'speaker')):
-            if len(providers) != len(set(providers)) or any(identity not in selected for identity in providers):
-                raise ValueError(f'invalid {label} providers')
+        if self.body_source and self.body_source not in selected:
+            raise ValueError('invalid body source')
+        if self.speaker_source and not self.body_source:
+            raise ValueError('speaker source requires body source')
+        if self.speaker_source and self.speaker_source not in selected:
+            raise ValueError('invalid speaker source')
         if any(identity not in selected and identity != 'ocr' for identity in self.source_rules):
             raise ValueError('extraction rules require a selected source')
         for rules in self.source_rules.values():
@@ -282,9 +285,8 @@ def matching_structure_rule(raw: str, rules: Sequence[StructureRule]) -> tuple[r
     return None, None, normalized
 
 
-def extract_source_fields(raw: str, profile: Profile, source_identity: str) -> ExtractedFields:
-    matched, matched_index, normalized = matching_structure_rule(
-        raw, extraction_rules_for(profile, source_identity))
+def extract_fields(raw: str, rules: Sequence[StructureRule]) -> ExtractedFields:
+    matched, matched_index, normalized = matching_structure_rule(raw, rules)
     if matched is None:
         # Unknown structures stay usable as body text; the workspace can then
         # define a source-specific extractor without losing the sample.
@@ -293,6 +295,10 @@ def extract_source_fields(raw: str, profile: Profile, source_identity: str) -> E
     speaker = (groups.get('speaker') or '').strip()
     body = (groups.get('body') or '').strip()
     return ExtractedFields(speaker=speaker, body=body, matched_rule=matched_index)
+
+
+def extract_source_fields(raw: str, profile: Profile, source_identity: str) -> ExtractedFields:
+    return extract_fields(raw, extraction_rules_for(profile, source_identity))
 
 
 def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,

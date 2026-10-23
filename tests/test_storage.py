@@ -15,8 +15,8 @@ class SettingsContract(unittest.TestCase):
             b = c.create_game('ゲーム2', 'C:/games/b.exe')
             p = c.add_profile(a.id, 'Route B')
             p.hooks = [HookSelection('HX', 1, 2), HookSelection('HY', 5, 6)]
-            p.body_sources = [p.hooks[0].identity]
-            p.speaker_sources = [p.hooks[1].identity]
+            p.body_source = p.hooks[0].identity
+            p.speaker_source = p.hooks[1].identity
             p.speaker_tts = {'大和': True}
             p.speaker_voices = {'大和': 'voice-m'}
             p.replacements = [ReplacementRule('東京', 'とうきょう')]
@@ -26,8 +26,8 @@ class SettingsContract(unittest.TestCase):
             self.assertEqual(set(restored.games), {a.id, b.id})
             q = restored.games[a.id].profiles[p.id]
             self.assertEqual(q.hooks, p.hooks)
-            self.assertEqual(q.body_sources, p.body_sources)
-            self.assertEqual(q.speaker_sources, p.speaker_sources)
+            self.assertEqual(q.body_source, p.body_source)
+            self.assertEqual(q.speaker_source, p.speaker_source)
             self.assertEqual(q.speaker_tts['大和'], True)
             self.assertEqual(q.speaker_voices['大和'], 'voice-m')
             self.assertEqual(q.replacements, p.replacements)
@@ -43,8 +43,8 @@ class SettingsContract(unittest.TestCase):
             text = HookSelection('TEXT', 1, 2)
             speaker = HookSelection('SPEAKER', 3, 4)
             profile.hooks = [text, speaker]
-            profile.body_sources = [text.identity]
-            profile.speaker_sources = [speaker.identity]
+            profile.body_source = text.identity
+            profile.speaker_source = speaker.identity
             save(c, path)
 
             raw = json.loads(path.read_text(encoding='utf-8'))
@@ -53,8 +53,8 @@ class SettingsContract(unittest.TestCase):
                 {'code': 'TEXT', 'context': 1, 'context2': 2, 'role': 'text'},
                 {'code': 'SPEAKER', 'context': 3, 'context2': 4, 'role': 'speaker'},
             ]
-            payload.pop('body_sources', None)
-            payload.pop('speaker_sources', None)
+            payload.pop('body_source', None)
+            payload.pop('speaker_source', None)
             payload.pop('source_rules', None)
             payload['structure_rules'] = [
                 {'pattern': r'^(?P<body>.*)$', 'condition': '', 'enabled': True},
@@ -64,16 +64,16 @@ class SettingsContract(unittest.TestCase):
 
             restored = load(path)
             converted = restored.games[game.id].profiles[profile.id]
-            self.assertEqual(converted.body_sources, [text.identity])
-            self.assertEqual(converted.speaker_sources, [speaker.identity])
+            self.assertEqual(converted.body_source, text.identity)
+            self.assertEqual(converted.speaker_source, speaker.identity)
             self.assertIn(text.identity, converted.source_rules)
             self.assertIn(speaker.identity, converted.source_rules)
 
             save(restored, path)
             stored = json.loads(path.read_text(encoding='utf-8'))
             rewritten = stored['games'][game.id]['profiles'][profile.id]
-            self.assertEqual(rewritten['body_sources'], [text.identity])
-            self.assertEqual(rewritten['speaker_sources'], [speaker.identity])
+            self.assertEqual(rewritten['body_source'], text.identity)
+            self.assertEqual(rewritten['speaker_source'], speaker.identity)
             self.assertNotIn('role', rewritten['hooks'][0])
             self.assertNotIn('role', rewritten['hooks'][1])
             self.assertNotIn('structure_rules', rewritten)

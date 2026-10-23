@@ -90,7 +90,7 @@ def inspect_legacy(path: Path) -> tuple[LegacyGame, ...]:
             if not isinstance(hooks, list):
                 raise ValueError('Invalid previous selected HOOK list')
             profile.hooks = [HookSelection(h['code'], h['context'], h['context2']) for h in hooks]
-            profile.body_sources = [hook.identity for hook in profile.hooks]
+            profile.body_source = profile.hooks[0].identity if profile.hooks else ''
             profile.source_rules = {hook.identity: list(legacy_structure_rules) for hook in profile.hooks}
             profile.inserted_hooks = list(row.get('inserted_hooks', []))
             monitor = row.get('monitor') or {}

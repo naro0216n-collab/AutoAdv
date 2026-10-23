@@ -76,7 +76,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             capture_source=lambda identity, address, require_unique=False: source,
             set_capture_extraction_preset=lambda *args: calls.append(('preset', args)),
             set_capture_field_source=lambda *args: calls.append(('field', args)),
-            commit_capture=lambda: SimpleNamespace(body_sources=['hook-a']),
+            commit_capture=lambda: SimpleNamespace(body_source='hook-a'),
             runtime_state=lambda: SimpleNamespace(profile=SimpleNamespace(id='p')),
         )
         window = SimpleNamespace(application=product)

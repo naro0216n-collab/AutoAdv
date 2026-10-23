@@ -29,16 +29,8 @@ def run_gui() -> int:
                                    QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu, QButtonGroup)
 
     class SignalBridge(QObject):
-        hook = Signal(object)
-        closed = Signal(str)
-        host_error = Signal(str)
         voice = Signal(object, bool, str)
         server = Signal(object)
-        ocr = Signal(int, int, int, str)
-        ocr_error = Signal(str)
-        native = Signal(object, str, str)
-        native_ready = Signal(int, bool, str)
-        native_pcm = Signal(object, int)
         preview = Signal(bool, str)
         runtime_changed = Signal()
         runtime_event = Signal(str, object, object)
@@ -52,67 +44,28 @@ def run_gui() -> int:
             catalog = load()
             self.application = AutoAdvApplication(catalog, self.persist)
             self.bridge = SignalBridge()
-            self.bridge.hook.connect(self.on_host_hook)
-            self.bridge.closed.connect(self.on_host_closed)
-            self.bridge.host_error.connect(self.on_host_error_from_host)
             self.bridge.voice.connect(self.on_voice)
             self.bridge.server.connect(self.on_server)
-            self.bridge.ocr.connect(self.on_ocr)
-            self.bridge.ocr_error.connect(self.on_ocr_error)
-            self.bridge.native.connect(self.on_native)
-            self.bridge.native_ready.connect(self.on_native_ready)
-            self.bridge.native_pcm.connect(self.on_native_pcm)
             self.bridge.preview.connect(self.on_preview)
             self.bridge.runtime_changed.connect(self.refresh_status)
             self.bridge.runtime_event.connect(self.on_runtime_event)
             self.bridge.runtime_schedule.connect(self.schedule_runtime_callback)
             self.validation_trace = ValidationTrace()
-            self.application.configure_hook_service(
-                on_event=self.bridge.hook.emit,
-                on_closed=self.bridge.closed.emit,
-                on_error=self.bridge.host_error.emit)
-            self.application.configure_input_observer(self.on_input_milestone)
             self.application.configure_runtime_loop(
                 schedule=lambda delay, callback: self.bridge.runtime_schedule.emit(delay, callback),
                 on_change=self.bridge.runtime_changed.emit,
                 on_event=lambda event, token, detail: self.bridge.runtime_event.emit(event, token, detail))
+            self.application.configure_hook_service(
+                on_event=self.on_hook,
+                on_closed=self.on_host_closed,
+                on_error=self.on_host_error_from_host)
+            self.application.configure_telemetry(
+                self.on_telemetry if self.validation_trace.path else None)
             self.application.configure_voice_jobs(
                 on_result=lambda token, done, reason: self.bridge.voice.emit(token, done, reason),
-                on_preview=lambda done, reason: self.bridge.preview.emit(done, reason),
-                on_timing=(lambda token, stage, duration_ms, audio_ms:
-                    self.validation_trace.emit('tts_timing', session=token.session,
-                        line=token.line, stage=stage, duration_ms=duration_ms, audio_ms=audio_ms))
-                if os.environ.get('AUTOADV_VALIDATION_TRACE') else None)
-            self.application.configure_runtime_services(
-                on_ocr_text=lambda session, pid, sequence, text:
-                    self.bridge.ocr.emit(session, pid, sequence, text),
-                on_ocr_error=self.bridge.ocr_error.emit,
-                on_native_ready=lambda session, ready, reason:
-                    self.bridge.native_ready.emit(session, ready, reason),
-                on_native_event=lambda token, event, detail:
-                    self.bridge.native.emit(token, event, detail),
-                on_native_pcm=(lambda token, frames: self.bridge.native_pcm.emit(token, frames))
-                    if self.validation_trace.path else None,
-                on_native_inference=(lambda token, metrics:
-                    self.validation_trace.emit('asr_inference', session=token.session,
-                        line=token.line, **metrics))
-                    if self.validation_trace.path else None,
-                on_native_voice_end=(lambda token, metrics:
-                    self.validation_trace.emit('native_voice_end_estimate',
-                        session=token.session, line=token.line,
-                        estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
-                        onset_estimated_at_ns=(metrics['estimated_onset_ms'] * 1_000_000
-                            if metrics.get('estimated_onset_ms') is not None else None),
-                        evidence=metrics['source']))
-                    if self.validation_trace.path else None)
+                on_preview=lambda done, reason: self.bridge.preview.emit(done, reason))
             self._loading_profile = False
             self.source_rows: dict[tuple[str, int], int] = {}
-            self._output_timer = QTimer(self)
-            self._output_timer.setSingleShot(True)
-            self._output_timer.timeout.connect(self.flush_selected_outputs)
-            self._capture_output_timer = QTimer(self)
-            self._capture_output_timer.setSingleShot(True)
-            self._capture_output_timer.timeout.connect(self.flush_capture_outputs)
             self.profile_reset_buttons = {}
 
             root = QWidget()
@@ -655,7 +608,6 @@ def run_gui() -> int:
             return self.application.current_profile()
 
         def choose_game(self, *_):
-            self.application.cancel_saved_monitor_resume()
             self.stop_session()
             self.application.close_hook_host()
             self.clear_hook_observations()
@@ -862,7 +814,6 @@ def run_gui() -> int:
             self.refresh_rule_preview()
 
         def choose_profile(self, *_):
-            self.application.cancel_saved_monitor_resume()
             self.stop_session()
             profile_id = self.profile_choice.currentData() or ''
             profile = self.application.select_profile(self.game_id, profile_id)
@@ -1093,9 +1044,6 @@ def run_gui() -> int:
                 self.speaker_table.blockSignals(False)
                 self._refreshing_speakers = False
             self.refresh_rule_preview()
-
-        def capture_draft_profile(self) -> Profile | None:
-            return self.application.capture_profile_snapshot() or self.current_profile()
 
         def selected_capture_rule_source(self):
             source = self.chosen_source()
@@ -1405,33 +1353,6 @@ def run_gui() -> int:
             elif action == 'open_voice':
                 self.reveal_section('speakers', 'game')
 
-        def edit_detected_speaker(self):
-            u = getattr(self, '_preview_utterance', None)
-            if not u or not u.speaker:
-                self.show_task_section('extraction')
-                return
-            self.tabs.setCurrentIndex(self.game_tab_index)
-            self.page_scrollers['game'].ensureWidgetVisible(self.ui_sections['speakers'])
-            for row in range(self.speaker_table.rowCount()):
-                if self.speaker_table.item(row, 0).text() == u.speaker:
-                    self.speaker_table.selectRow(row)
-                    self.speaker_table.scrollToItem(self.speaker_table.item(row, 0))
-                    return
-            self.new_speaker_name.setText(u.speaker)
-            self.new_speaker_name.setFocus()
-
-        def edit_preview_reading(self):
-            chosen = self.example_raw.textCursor().selectedText().strip()
-            self.show_task_section('reading')
-            if chosen:
-                p = self.current_profile()
-                if p and chosen in p.name_readings:
-                    self.refresh_reading_table(chosen)
-                else:
-                    self.new_reading_word.setText(chosen)
-                    self.new_reading_value.setFocus()
-
-
         def edit_current_dialogue(self):
             u = self.application.runtime_state().utterance
             if not u:
@@ -1736,7 +1657,6 @@ def run_gui() -> int:
 
         def clear_hook_observations(self):
             self.source_rows.clear()
-            self._capture_output_timer.stop()
             self.application.clear_capture_observations()
             self.source_table.setRowCount(0)
             self.capture_result_table.setRowCount(0)
@@ -1951,31 +1871,23 @@ def run_gui() -> int:
             except Exception as exc:
                 self.note('会話取得を確定できません: ' + str(exc))
 
-        def on_host_hook(self, event: HookEvent):
-            self.on_hook(event)
-
-        def on_hook(self, event: HookEvent):
-            if event.kind == 'hook_found' and self.application.capture_event_matches_connection(event):
-                self.try_discovered_hook(event.detail)
-
-            transition = self.application.handle_hook_connection_event(event)
-            if transition in ('connected', 'changed', 'restore_failed'):
+        def on_hook(self, event: HookEvent, outcome):
+            if outcome.connection_transition in ('connected', 'changed', 'restore_failed'):
                 self.refresh_capture_workspace()
-                if transition != 'restore_failed':
+                if outcome.connection_transition != 'restore_failed':
                     self.validation_trace.emit('hook_connected', pid=event.process_id,
                         generation=event.host_generation, connection=event.connection_generation)
                 self.refresh_capture_hint()
-            elif transition == 'disconnected':
+            elif outcome.connection_transition == 'disconnected':
                 self.refresh_capture_workspace()
 
-            connected_event = self.application.capture_event_matches_connection(event)
-            capture_outcome = self.application.handle_capture_host_event(event)
-            if capture_outcome.changed:
+            capture = outcome.capture
+            if capture.changed:
                 self.refresh_capture_workspace()
                 self.refresh_capture_hint()
-                if capture_outcome.active_source_removed and not capture_outcome.monitor_started:
+                if capture.active_source_removed and not capture.monitor_started:
                     self.note('監視中の台詞取得元が消失しました。取得の復旧を確認してください。')
-                if capture_outcome.new_ambiguity:
+                if capture.new_ambiguity:
                     self.note('同じ識別子の取得元が複数検出されました。別の取得元を選択してください。')
                 if event.kind == 'created' and event.source:
                     self.validation_trace.emit('hook_candidate_created', pid=event.process_id,
@@ -1987,49 +1899,25 @@ def run_gui() -> int:
                         source=event.source.identity, hook_sequence=event.sequence,
                         raw_hash=text_digest(event.text))
 
-            if (event.kind == 'output' and event.source and connected_event and
-                    not self.application.capture_identity_is_ambiguous(event.source.identity)):
-                delay = self.application.queue_capture_output(event)
-                if delay is None:
-                    self._capture_output_timer.stop()
-                    self.refresh_capture_workspace()
-                else:
-                    self._capture_output_timer.start(delay)
-
             if event.kind == 'output' and event.source:
                 runtime = self.application.runtime_state()
-                if (runtime.profile and runtime.profile.source == 'hook' and runtime.target and
-                        event.process_id == (runtime.target.hook_pid or runtime.target.pid) and
-                        event.host_generation == runtime.source_generation and
-                        event.connection_generation == runtime.connection_generation and
-                        any(h.matches(event.source) for h in runtime.profile.hooks)):
+                if runtime.profile and runtime.profile.source == 'hook' and runtime.target:
                     self.validation_trace.emit('hook_output', session=runtime.session,
                         generation=event.host_generation, connection=event.connection_generation,
                         hook_sequence=event.sequence, source=event.source.identity,
                         received_ns=event.received_ns, pid=event.process_id, address=event.source.address,
                         context=event.source.context, context2=event.source.context2,
                         raw_hash=text_digest(event.text))
-                if connected_event and not self.application.capture_identity_is_ambiguous(event.source.identity):
-                    result, delay = self.application.handle_runtime_hook_output(event)
-                    if delay is not None:
-                        self._output_timer.start(delay)
-                    elif result is not None:
-                        self._output_timer.stop()
-                    if result and self.application.runtime_state().utterance:
-                        self.display_utterance(result)
-
-            target = self.application.runtime_target_state()
-            if event.kind == 'inserted' and target.selected and event.process_id == target.hook_pid:
-                self.note(f'LunaによるHOOK挿入: {event.detail} {event.source.hook_code if event.source else ""}'.strip())
-            if event.kind == 'diagnostic':
+            elif event.kind == 'diagnostic':
                 self.validation_trace.emit('hook_native_diagnostic',
                     pid=event.process_id, generation=event.host_generation,
                     connection=event.connection_generation,
                     info_type=event.detail.partition(':')[0][:64],
                     message_hash=text_digest(event.detail))
-                self.application.handle_hook_diagnostic(event)
                 self.refresh_capture_workspace()
-                self.note('LunaHost: ' + event.detail)
+
+            if outcome.note:
+                self.note(outcome.note)
 
 
         def show_hook_preview(self, *_):
@@ -2046,38 +1934,14 @@ def run_gui() -> int:
                 self.hook_technical_info.setText('取得元を選択すると識別情報を表示します')
             self.refresh_candidate_actions()
 
-        def flush_capture_outputs(self):
-            self.application.flush_capture_outputs()
-            self.refresh_capture_workspace()
 
-        def flush_selected_outputs(self):
-            result = self.application.flush_runtime_hook_outputs()
-            if result and self.application.runtime_state().utterance:
-                self.display_utterance(result)
-            else:
-                self.refresh_status()
 
-        def on_native_ready(self, session, ready, reason):
-            if session != self.application.runtime_state().session or not self.application.runtime_state().target:
-                return
-            if not ready:
-                self.note('Native audio unavailable: ' + reason)
-                return
-            self.validation_trace.emit('native_ready', session=session, audio_pid=self.application.native_audio_pid)
-            self.note('Process audio helper started; waiting for actual captured PCM')
-
-        def on_native_pcm(self, token, frames):
-            if token is not None and token == self.application.runtime_state().token:
-                self.validation_trace.emit('native_pcm', session=token.session, line=token.line,
-                    frames=frames, audio_pid=self.application.native_audio_pid)
-
-        def on_native(self, token, event, detail):
-            if token != self.application.runtime_state().token or token is None:
-                return
-            self.validation_trace.emit('native_event', session=token.session, line=token.line,
-                status=event, method='asr')
-            if event == 'error':
-                self.note('Native audio: ' + detail)
+        def on_telemetry(self, event: str, token: Token | None, detail: dict):
+            payload = dict(detail)
+            if token is not None:
+                payload.setdefault('session', token.session)
+                payload.setdefault('line', token.line)
+            self.validation_trace.emit(event, **payload)
 
         def display_utterance(self, token: Token):
             u = self.application.runtime_state().utterance
@@ -2103,7 +1967,6 @@ def run_gui() -> int:
                 body_hash=text_digest(u.text), speaker=u.speaker, advance_mode=u.advance_mode.value, use_tts=u.use_tts,
                 characters=u.character_count, text_wait_ms=u.text_wait_ms,
                 uncertain_text_fallback=u.uncertain_text_fallback)
-            self.application.start_presentation(token)
             self.refresh_status()
             if self.current_profile() and self.current_profile().source == 'ocr':
                 self.refresh_capture_workspace()
@@ -2132,34 +1995,37 @@ def run_gui() -> int:
             elif event == 'next_line_timeout' and token is not None:
                 self.validation_trace.emit('next_line_timeout', session=token.session, line=token.line)
                 self.note('送り後に次の台詞を取得できません。自動送りはONのまま入力を保留します。')
-
-        def on_ocr(self, session, pid, sequence, text):
-            token = self.application.handle_runtime_ocr_output(
-                session=session, pid=pid, sequence=sequence, text=text)
-            if token:
+            elif event == 'native_ready':
+                if detail.get('ready'):
+                    self.validation_trace.emit('native_ready', session=detail.get('session', 0),
+                        audio_pid=detail.get('audio_pid', 0))
+                    self.note('Process audio helper started; waiting for actual captured PCM')
+                else:
+                    self.note('Native audio unavailable: ' + detail.get('reason', ''))
+            elif event == 'native_event' and token is not None:
+                self.validation_trace.emit('native_event', session=token.session, line=token.line,
+                    status=detail.get('status', ''), method='asr')
+                if detail.get('status') == 'error':
+                    self.note('Native audio: ' + detail.get('reason', ''))
+            elif event == 'utterance' and token is not None:
                 self.display_utterance(token)
-
-        def on_ocr_error(self, reason):
-            self.note('OCR stopped: ' + reason)
-            self.refresh_status()
-            self.refresh_capture_workspace()
-
-        def on_input_milestone(self, event: str, token: Token | None):
-            if token is None:
-                return
-            if event == 'attempt':
+            elif event == 'hook_group_flushed':
+                self.refresh_capture_workspace()
+            elif event == 'ocr_error':
+                self.note('OCR stopped: ' + detail.get('reason', ''))
+                self.refresh_capture_workspace()
+            elif event == 'advance_attempt' and token is not None:
                 self.validation_trace.emit('advance_attempt', session=token.session, line=token.line)
-            elif event == 'audio_boundary':
+            elif event == 'audio_observation_boundary' and token is not None:
                 self.validation_trace.emit('audio_observation_boundary',
                     session=token.session, after_line=token.line)
-            elif event == 'sent':
-                # Controller has already established presentation completion
-                # before entering its synchronous input path. Qt-delivered
-                # diagnostic signals may be appended later, so carry the
-                # causal completion reason on the input record itself.
-                self.validation_trace.emit(
-                    'advance_input', session=token.session, line=token.line,
-                    presentation_reason=self.application.runtime_state().presentation_reason)
+            elif event == 'advance_input' and token is not None:
+                self.validation_trace.emit('advance_input', session=token.session, line=token.line,
+                    presentation_reason=detail.get('presentation_reason'))
+            elif event == 'native_capture_summary' and token is not None:
+                self.validation_trace.emit('native_capture_summary', session=token.session,
+                    line=token.line, **detail)
+
 
         def permit(self):
             self.validation_trace.emit('permit_requested', session=self.application.runtime_state().session)
@@ -2172,19 +2038,6 @@ def run_gui() -> int:
         def refresh_status(self):
             c = self.application.runtime_state()
             token = c.token
-            if self.validation_trace.path and token is not None and c.pause_reason:
-                marker = (token, c.pause_reason)
-                if marker != getattr(self, '_last_validation_handoff', None):
-                    self.validation_trace.emit('controller_handoff', session=token.session,
-                        line=token.line, reason=c.pause_reason)
-                    u = c.utterance
-                    if (self.application.native_audio_available and u and
-                            u.advance_mode == AdvanceMode.AUDIO and not u.use_tts):
-                        self.validation_trace.emit('native_capture_summary',
-                            session=token.session, line=token.line,
-                            audio_pid=self.application.native_audio_pid,
-                            **self.application.native_audio_capture_status())
-                    self._last_validation_handoff = marker
             view = self.application.play_view()
             previous = self.advance_authorization.blockSignals(True)
             self.advance_authorization.setChecked(view.advance_authorized)
@@ -2213,10 +2066,6 @@ def run_gui() -> int:
             self.refresh_diagnostics()
 
         def stop_session(self):
-            if hasattr(self, '_output_timer'):
-                self._output_timer.stop()
-            if hasattr(self, '_capture_output_timer'):
-                self._capture_output_timer.stop()
             self.application.stop_monitoring('session_changed')
             if hasattr(self, 'preview'):
                 self.preview.clear()
@@ -2226,7 +2075,6 @@ def run_gui() -> int:
             self.on_host_error(message)
 
         def on_host_error(self, message):
-            self.application.handle_hook_error(message)
             self.refresh_capture_workspace()
             self.note('LunaHostネイティブエラー: ' + message)
 
@@ -2234,7 +2082,6 @@ def run_gui() -> int:
             self.on_closed(reason)
 
         def on_closed(self, reason):
-            self.application.handle_hook_closed()
             if self.isVisible():
                 self.refresh_capture_workspace()
                 self.refresh_status()

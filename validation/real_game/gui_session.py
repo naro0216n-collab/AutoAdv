@@ -253,7 +253,7 @@ class SessionDriver:
         self.product.set_capture_field_source('body', source.identity, source.address)
         self.product.set_capture_field_source('speaker', None)
         saved = self.product.commit_capture()
-        if not saved.body_sources:
+        if not saved.body_source:
             raise RuntimeError('real selected Hook was not saved as the dialogue body source')
         if self.product.runtime_state().profile is None:
             raise RuntimeError('monitor could not start from the committed capture recipe')

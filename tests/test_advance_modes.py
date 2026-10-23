@@ -16,7 +16,7 @@ SOURCE = SimpleNamespace(hook_code='H', context=1, context2=2)
 
 
 def make_profile(mode=AdvanceMode.TEXT, tts=False, fallback=False):
-    return Profile('p', 'game', hooks=[HookSelection('H', 1, 2)], body_sources=['H|1|2'], advance_mode=mode,
+    return Profile('p', 'game', hooks=[HookSelection('H', 1, 2)], body_source='H|1|2', advance_mode=mode,
                    default_tts=tts, default_voice='v0', uncertain_text_fallback=fallback,
                    reading_ms=350, per_character_wait_ms=180)
 

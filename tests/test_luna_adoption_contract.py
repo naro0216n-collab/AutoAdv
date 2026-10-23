@@ -24,7 +24,7 @@ class MultiHookProductContract(unittest.TestCase):
         self.sent = []
         self.p = Profile('p', 'test', hooks=[HookSelection('HT', 1, 2),
                                               HookSelection('HS', 3, 4)],
-                         body_sources=['HT|1|2'], speaker_sources=['HS|3|4'],
+                         body_source='HT|1|2', speaker_source='HS|3|4',
                          source_rules={'HS|3|4': [SPEAKER_ONLY_RULE]},
                          default_tts=True, default_voice='default',
                          speaker_tts={'京': False})
