@@ -67,7 +67,9 @@ class JapaneseASR:
 
 class NativeAudio:
     """Owns one process's capture and one active line; never injects game input."""
-    COMPLETION_EVIDENCE_THRESHOLD = .70
+    COMPLETION_EVIDENCE_THRESHOLD = .60
+    ENDPOINT_EVIDENCE_THRESHOLD = .45
+    STABILITY_ENDPOINT_WEIGHT = .35
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
                  *, recognizer=None, activity=None, g2p=None, clock=None,
@@ -502,6 +504,40 @@ class NativeAudio:
         return max((max(0.0, min(1.0, 1.0 - abs(ratio - 1.0)))
                     for ratio in ratios if ratio > 0), default=0.0)
 
+    @classmethod
+    def _endpoint_evidence(cls, timestamp_score: float, vad_score: float,
+                           stability_score: float) -> tuple[float, float, float]:
+        """Fuse independent endpoint observations without making one mandatory.
+
+        VAD is intentionally capped below certainty because it describes the
+        process mix, not the selected voice. Repeated stable terminal ASR is a
+        corroborating endpoint observation; on its own it remains too weak to
+        finish, but it can strengthen a bounded token-timestamp or VAD cue.
+        """
+        timestamp = max(0.0, min(1.0, timestamp_score))
+        vad_endpoint = .75 * max(0.0, min(1.0, vad_score))
+        stability_endpoint = cls.STABILITY_ENDPOINT_WEIGHT * max(
+            0.0, min(1.0, stability_score))
+        fused = 1.0 - (1.0 - timestamp) * (1.0 - vad_endpoint) * (1.0 - stability_endpoint)
+        return fused, vad_endpoint, stability_endpoint
+
+    @staticmethod
+    def _content_completion_supported(progress, length_score: float) -> bool:
+        """Require coherent target progress, not exact ASR text.
+
+        A matcher terminal candidate is the normal path. Noisy/whispered speech
+        can instead qualify when pronunciation, target-relative recognition
+        length, attribution and contradiction jointly support the same target.
+        """
+        if progress.terminal_candidate:
+            return True
+        return (
+            progress.phonetic_coverage >= .65
+            and length_score >= .85
+            and progress.attribution_score >= .60
+            and progress.contradiction_score <= .25
+        )
+
     def _infer(self, token, generation, samples, submitted_ns=0,
                submitted_tail_ms=None, submitted_end_ms=None):
         started_ns = time.perf_counter_ns() if self.on_inference else 0
@@ -539,11 +575,11 @@ class NativeAudio:
                                      else submitted_tail_ms)
                 vad_score = min(1.0, tail_at_decode / 400.0)
                 stability_score = min(1.0, progress.tail_confidence)
-                # Token timing and VAD are independent endpoint observations.
-                # Neither is mandatory. Recognition stability strengthens the
-                # combined judgement but cannot by itself manufacture an end.
-                vad_endpoint_score = .75 * vad_score
-                endpoint_score = max(timestamp_score, vad_endpoint_score)
+                # Token timing, VAD and repeated terminal-ASR stability are
+                # independent endpoint observations. Fuse them instead of
+                # making timestamp or process-wide VAD a single-source gate.
+                endpoint_score, vad_endpoint_score, stability_endpoint_score = (
+                    self._endpoint_evidence(timestamp_score, vad_score, stability_score))
                 length_score = self._length_evidence(progress)
                 evidence_score = max(0.0, min(1.0,
                     .50 * progress.completion_score
@@ -551,26 +587,30 @@ class NativeAudio:
                     + .16 * endpoint_score
                     + .10 * length_score
                     + .06 * float(progress.monotonic)
-                    + .04 * stability_score
                     - .14 * progress.contradiction_score))
                 sufficient_progress = (
                     max(progress.phonetic_coverage, progress.coverage) >= .55
                     and progress.matched_phonemes >= min(4, max(1, progress.target_units))
                 )
-                if (sufficient_progress and endpoint_score >= .45
+                content_supported = self._content_completion_supported(progress, length_score)
+                if (sufficient_progress and content_supported
+                        and endpoint_score >= self.ENDPOINT_EVIDENCE_THRESHOLD
                         and evidence_score >= self.COMPLETION_EVIDENCE_THRESHOLD):
                     self.completed = True
                     events.append('completed')
                     vad_end = (self.voice_end_estimate_ms if submitted_end_ms is None
                                else submitted_end_ms)
-                    if (endpoint_ms >= 0 and timestamp_score >= .45
-                            and timestamp_score >= vad_endpoint_score):
+                    if (endpoint_ms >= 0 and timestamp_score > 0
+                            and (vad_end < 0 or timestamp_score >= vad_endpoint_score)):
                         voice_end_estimate = endpoint_ms
                         endpoint_source = 'asr_timestamp'
                     else:
                         voice_end_estimate = vad_end
                         if voice_end_estimate >= 0:
                             endpoint_source = 'asr_vad'
+                        elif endpoint_ms >= 0 and timestamp_score > 0:
+                            voice_end_estimate = endpoint_ms
+                            endpoint_source = 'asr_timestamp'
                 else:
                     voice_end_estimate = -1
             if self.on_voice_end and 'completed' in events and voice_end_estimate >= 0:
@@ -594,6 +634,8 @@ class NativeAudio:
                     'contradiction_score': round(progress.contradiction_score, 4),
                     'endpoint_score': round(endpoint_score, 4),
                     'timestamp_endpoint_score': round(timestamp_score, 4),
+                    'vad_endpoint_score': round(vad_endpoint_score, 4),
+                    'stability_endpoint_score': round(stability_endpoint_score, 4),
                     'length_score': round(length_score, 4),
                     'evidence_score': round(evidence_score, 4),
                     'asr_token_timestamp_count': len(result.timestamps),

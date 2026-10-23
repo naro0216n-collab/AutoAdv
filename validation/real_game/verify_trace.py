@@ -593,9 +593,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     # Post-collection PCM may precede the out-of-scope Utterance record.
     for record in pcm_records:
         key = _key(record)
-        if key not in utterances and (
-                key in out_of_scope_utterances or
-                (collection_target is not None and len(utterance_order) >= collection_target)):
+        if key not in utterances and key in out_of_scope_utterances:
             continue
         session = record.get('session')
         if (key not in utterances or type(record.get('frames')) is not int

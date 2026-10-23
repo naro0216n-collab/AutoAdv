@@ -411,6 +411,53 @@ class RealGameVerifierContract(unittest.TestCase):
         wrong_audio_process = [dict(r, audio_pid=51) if r['event'] == 'native_pcm' else r for r in records]
         self.assertFalse(validate(wrong_audio_process, phase='native')['ok'])
 
+
+    def test_native_pcm_may_arrive_before_its_utterance_record(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        pcm_index = next(i for i, r in enumerate(records)
+                         if r['event'] == 'native_pcm' and r['line'] == 1)
+        pcm = records.pop(pcm_index)
+        utterance_index = next(i for i, r in enumerate(records)
+                               if r['event'] == 'utterance' and r['line'] == 1)
+        records.insert(utterance_index, pcm)
+        resequence(records)
+        result = validate(records, phase='native')
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertFalse(any('PCM is not valid captured frames' in issue
+                             for issue in result['quality_issues']))
+
+    def test_post_collection_pcm_is_ignored_only_after_matching_out_of_scope_utterance(self):
+        records = contract_records(0, 4, lines=NATIVE_SCENARIO)
+        records.insert(4, {
+            'event': 'validation_collection_target', 'at_ns': 4_000_000_000,
+            'seq': 4, 'phase': 'native', 'dialogues': 3})
+        pcm_index = next(i for i, r in enumerate(records)
+                         if r['event'] == 'native_pcm' and r['line'] == 4)
+        pcm = records.pop(pcm_index)
+        utterance_index = next(i for i, r in enumerate(records)
+                               if r['event'] == 'utterance' and r['line'] == 4)
+        records.insert(utterance_index, pcm)
+        resequence(records)
+        result = validate(records, phase='native')
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertEqual(result['observed_lines'], 3)
+        self.assertFalse(any('PCM is not valid captured frames for (1, 4)' in issue
+                             for issue in result['quality_issues']))
+
+    def test_collection_target_does_not_hide_unmatched_pcm(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        records.insert(4, {
+            'event': 'validation_collection_target', 'at_ns': 4_000_000_000,
+            'seq': 4, 'phase': 'native', 'dialogues': 3})
+        records.append({
+            'event': 'native_pcm', 'at_ns': (len(records) + 1) * 1_000_000_000,
+            'seq': len(records) + 1, 'session': 1, 'line': 99,
+            'frames': 960, 'audio_pid': 50})
+        resequence(records)
+        result = validate(records, phase='native')
+        self.assertTrue(any('PCM is not valid captured frames for (1, 99)' in issue
+                            for issue in result['quality_issues']))
+
     def test_legacy_pause_diagnostic_is_not_an_authorization_contract(self):
         records = contract_records(0, 3, mode='reading')
         point = next(i for i, r in enumerate(records) if r['event'] == 'advance_attempt')

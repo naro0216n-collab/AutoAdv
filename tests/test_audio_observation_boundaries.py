@@ -537,7 +537,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             release.set()
             native.close()
 
-    def test_partial_asr_can_complete_with_independent_vad_endpoint_evidence(self):
+    def test_partial_asr_with_short_recognition_length_does_not_complete_from_vad_alone(self):
         events = []
         metrics = []
         clock = [1000]
@@ -575,13 +575,12 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                     time.sleep(.005)
                 self.assertFalse(busy, 'partial ASR inference did not finish')
             self.assertIn('started', events)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
+            self.assertNotIn('completed', events)
+            self.assertFalse(native.completed)
             self.assertFalse(metrics[-1]['terminal_candidate'])
             self.assertAlmostEqual(metrics[-1]['phonetic_coverage'], 4 / 6, places=3)
+            self.assertLess(metrics[-1]['length_score'], .85)
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .70)
-            self.assertGreaterEqual(
-                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
         finally:
             native.close()
 
@@ -596,11 +595,11 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
 
         progress = ASRProgress(
             coverage=.6667, onset_score=.75, tail_confidence=0.0, monotonic=True,
-            matched_chars=4, observed='え嘘でし', edit_count=2, length_ratio=.6667,
+            matched_chars=4, observed='え嘘でし', edit_count=2, length_ratio=.90,
             terminal_candidate=False, phonetic_coverage=.7778, matched_phonemes=7,
             phonetic_edit_count=2, attribution_score=.7529, completion_score=.72,
             contradiction_score=.1444, reading_rank=0, target_units=9,
-            pronunciation_length_ratio=.7778, observed_token_count=4)
+            pronunciation_length_ratio=.90, observed_token_count=4)
 
         native = NativeAudio(
             11, Path('unused'), Path('unused'), Path('unused'),
@@ -636,6 +635,107 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
             self.assertGreaterEqual(
                 metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
+        finally:
+            native.close()
+
+
+    def test_whisper_like_partial_alignment_completes_with_strong_vad_endpoint(self):
+        events = []
+        metrics = []
+        clock = [1000]
+        progress = ASRProgress(
+            coverage=.3636, onset_score=.61, tail_confidence=0.0, monotonic=True,
+            matched_chars=4, observed='whisper-like', edit_count=7, length_ratio=.9091,
+            terminal_candidate=False, phonetic_coverage=.6667, matched_phonemes=12,
+            phonetic_edit_count=6, attribution_score=.6130, completion_score=.5691,
+            contradiction_score=.2167, reading_rank=0, target_units=18,
+            pronunciation_length_ratio=.9091, observed_token_count=10)
+
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event),
+            recognizer=SimpleNamespace(recognize=lambda _: ASRResult('whisper-like')),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: VADDecision(
+                    False, 300, contains_speech=False),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
+        try:
+            native.history.start(11)
+            token = Token(1, 1)
+            native.begin(token, '囁き声の対象台詞')
+            native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
+            clock[0] = 1500
+            pcm = PCMChunk(1500, bytes(24000 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertFalse(busy, 'whisper-like inference did not finish')
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertFalse(metrics[-1]['terminal_candidate'])
+            self.assertGreaterEqual(metrics[-1]['length_score'], .85)
+            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .55)
+            self.assertGreaterEqual(
+                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
+        finally:
+            native.close()
+
+    def test_stable_terminal_asr_combines_with_short_timestamp_tail_under_bgm(self):
+        events = []
+        metrics = []
+        end_observations = []
+        clock = [1000]
+
+        class Recognizer:
+            def recognize(self, chunks):
+                total_ms = sum(chunk.duration_ms for chunk in chunks)
+                next_token = max(.42, total_ms / 1000.0 - .08)
+                return ASRResult(
+                    'えっ嘘でしょ背', tuple('えっ嘘でしょ背'),
+                    (0.05, 0.12, 0.20, 0.28, 0.34, next_token - .07, next_token))
+
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: VADDecision(
+                    True, 0, contains_speech=True),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m),
+            on_voice_end=lambda _t, m: end_observations.append(m))
+        try:
+            native.history.start(11)
+            native.begin(Token(1, 1), 'えっ嘘でしょ')
+            for when in (1500, 2000):
+                clock[0] = when
+                pcm = PCMChunk(when, bytes(24000 * 8), 48000, 2, 4)
+                native.history.push(pcm, target_pid=11)
+                native.feed(pcm)
+                end = time.monotonic() + 2
+                while time.monotonic() < end:
+                    with native._lock:
+                        busy = native._inflight
+                    if not busy:
+                        break
+                    time.sleep(.005)
+                self.assertFalse(busy, 'stable terminal inference did not finish')
+            self.assertEqual(len(metrics), 2)
+            self.assertLess(metrics[0]['endpoint_score'], NativeAudio.ENDPOINT_EVIDENCE_THRESHOLD)
+            self.assertEqual(metrics[0]['tail_confidence'], 0.0)
+            self.assertEqual(metrics[1]['tail_confidence'], 1.0)
+            self.assertAlmostEqual(metrics[1]['timestamp_endpoint_score'], .25, places=2)
+            self.assertGreaterEqual(
+                metrics[1]['endpoint_score'], NativeAudio.ENDPOINT_EVIDENCE_THRESHOLD)
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
         finally:
             native.close()
 
