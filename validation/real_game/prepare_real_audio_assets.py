@@ -8,17 +8,23 @@ prebuilt fixture, GitHub artifact, or uploaded validation report.
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
+from http.cookiejar import CookieJar
+from urllib.parse import urlencode, urljoin, urlparse
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[1]
 MANIFEST = HERE / 'REAL_AUDIO_ASSETS.json'
+USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+              'AppleWebKit/537.36 AutoAdv-RealAudio/1.0')
 
 
 def default_cache_directory() -> Path:
@@ -80,10 +86,51 @@ def _assert_cache_outside_repository(destination: Path) -> Path:
     raise ValueError('RealAudio media cache must be outside the repository')
 
 
-def _download(url: str, destination: Path, max_bytes: int) -> None:
-    request = urllib.request.Request(url, headers={'User-Agent': 'AutoAdv-RealAudio/1'})
-    with urllib.request.urlopen(request, timeout=90) as response, destination.open('wb') as stream:
-        total = 0
+class _DriveDownloadForm(HTMLParser):
+    """Extract a public Google Drive confirmation form without browser automation."""
+
+    def __init__(self):
+        super().__init__()
+        self.action: str | None = None
+        self.method = 'get'
+        self.fields: dict[str, str] = {}
+        self._inside = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        values = {str(key).lower(): str(value or '') for key, value in attrs}
+        if tag.lower() == 'form' and (
+                values.get('id') in ('download-form', 'downloadForm') or
+                'drive.usercontent.google.com/download' in values.get('action', '')):
+            self._inside = True
+            self.action = values.get('action') or self.action
+            self.method = (values.get('method') or 'get').lower()
+            return
+        if self._inside and tag.lower() == 'input':
+            name = values.get('name')
+            if name:
+                self.fields[name] = values.get('value', '')
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == 'form' and self._inside:
+            self._inside = False
+
+
+def _request_headers(url: str) -> dict[str, str]:
+    host = urlparse(url).hostname or ''
+    headers = {'User-Agent': USER_AGENT, 'Accept': '*/*'}
+    if host.endswith('opengameart.org'):
+        headers['Referer'] = 'https://opengameart.org/'
+    elif host.endswith('google.com') or host.endswith('googleusercontent.com'):
+        headers['Referer'] = 'https://drive.google.com/'
+    elif host.endswith('githubusercontent.com'):
+        headers['Referer'] = 'https://github.com/'
+    return headers
+
+
+def _write_response(response, destination: Path, max_bytes: int) -> tuple[int, str]:
+    total = 0
+    content_type = str(response.headers.get('Content-Type', '')).lower()
+    with destination.open('wb') as stream:
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk:
@@ -92,6 +139,56 @@ def _download(url: str, destination: Path, max_bytes: int) -> None:
             if total > max_bytes:
                 raise ValueError('RealAudio asset exceeded its pinned download size limit')
             stream.write(chunk)
+    return total, content_type
+
+
+def _drive_confirmation(path: Path) -> tuple[str, str, dict[str, str]] | None:
+    # Public Drive can return a small confirmation form instead of the file.
+    # Parse only HTML-looking responses; actual WAV/OGG bytes are never decoded.
+    data = path.read_bytes()
+    prefix = data[:1024].lstrip().lower()
+    if not (prefix.startswith(b'<!doctype html') or prefix.startswith(b'<html')
+            or b'<form' in prefix):
+        return None
+    document = data.decode('utf-8', errors='replace')
+    parser = _DriveDownloadForm()
+    parser.feed(document)
+    if not parser.action or not parser.fields:
+        return None
+    return parser.action, parser.method, parser.fields
+
+
+def _download(url: str, destination: Path, max_bytes: int) -> None:
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+
+    def fetch(target: str, *, data: bytes | None = None) -> str:
+        request = urllib.request.Request(
+            target, data=data, headers=_request_headers(target),
+            method='POST' if data is not None else 'GET')
+        with opener.open(request, timeout=90) as response:
+            _, content_type = _write_response(response, destination, max_bytes)
+        return content_type
+
+    content_type = fetch(url)
+    host = urlparse(url).hostname or ''
+    if 'google' not in host:
+        return
+    followup = _drive_confirmation(destination)
+    if followup is None:
+        if content_type.startswith('text/html'):
+            raise ValueError('Google Drive returned HTML instead of the pinned media file')
+        return
+    action, method, fields = followup
+    target = urljoin(url, action)
+    encoded = urlencode(fields)
+    if method == 'post':
+        followup_type = fetch(target, data=encoded.encode('utf-8'))
+    else:
+        separator = '&' if '?' in target else '?'
+        followup_type = fetch(target + separator + encoded)
+    if (_drive_confirmation(destination) is not None
+            or followup_type.startswith('text/html')):
+        raise ValueError('Google Drive confirmation did not resolve to the media file')
 
 
 def _cache_path(cache: Path, asset: dict) -> Path:
@@ -114,10 +211,12 @@ def prepare(destination: Path | None = None, *, allow_download: bool = True,
     info = _load_manifest(manifest_path)
     cache.mkdir(parents=True, exist_ok=True)
     prepared = []
-    for asset in info['assets']:
+    count = len(info['assets'])
+    for position, asset in enumerate(info['assets'], start=1):
         target = _cache_path(cache, asset)
         if target.is_file():
             _verify(target, asset)
+            print(f"RealAudio media [{position}/{count}] {asset['id']}: cache")
             prepared.append({'id': asset['id'], 'source': 'cache', 'path': str(target)})
             continue
         if not allow_download:
@@ -128,6 +227,9 @@ def prepare(destination: Path | None = None, *, allow_download: bool = True,
                     dir=cache, prefix=f".{asset['id']}.", suffix='.part', delete=False) as handle:
                 temporary = Path(handle.name)
             try:
+                host = urlparse(str(url)).hostname or '<unknown-host>'
+                print(f"RealAudio media [{position}/{count}] {asset['id']}: "
+                      f"download {index + 1}/{len(asset['urls'])} from {host}")
                 downloader(str(url), temporary, int(asset['max_bytes']))
                 _verify(temporary, asset)
                 os.replace(temporary, target)
@@ -136,6 +238,8 @@ def prepare(destination: Path | None = None, *, allow_download: bool = True,
                 break
             except Exception as exc:
                 errors.append(f'{type(exc).__name__}: {exc}')
+                print(f"RealAudio media {asset['id']}: source {index + 1} failed: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
                 temporary.unlink(missing_ok=True)
         else:
             raise RuntimeError(f"Unable to acquire pinned RealAudio asset {asset['id']}: "

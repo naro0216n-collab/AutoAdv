@@ -42,6 +42,18 @@ $phaseNames = if ($Phase -eq 'all') { @('reading', 'native') } else { @($Phase) 
 $startedUtc = [DateTime]::UtcNow.ToString('o')
 $gitSha = $null
 New-Item -ItemType Directory -Force -Path $session, $cache | Out-Null
+$lastRunPointer = Join-Path $WorkBase 'last-run.txt'
+$transcriptPath = Join-Path $session 'validation.log'
+[IO.File]::WriteAllText($lastRunPointer, $session, [Text.UTF8Encoding]::new($false))
+$transcriptStarted = $false
+try {
+    Start-Transcript -Path $transcriptPath -Force | Out-Null
+    $transcriptStarted = $true
+} catch {
+    Write-Warning "Validation transcript could not be started: $($_.Exception.Message)"
+}
+Write-Host "Validation session: $session"
+Write-Host "Persistent log: $transcriptPath"
 
 function Assert-Command([string] $name) {
     if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
@@ -159,16 +171,9 @@ try {
     $stage = 'prerequisites'
     Assert-Command 'git'
     Assert-Command 'py'
-    if ($phaseNames -contains 'native') { Assert-Command 'dotnet' }
     $versionLines = @(& py -3.11 -c 'import sys;print(sys.version_info.major*100+sys.version_info.minor)')
     if ($LASTEXITCODE -ne 0 -or $versionLines.Count -ne 1 -or ([string]$versionLines[0]).Trim() -ne '311') {
         throw 'Python 3.11 is required (py -3.11)'
-    }
-    if ($phaseNames -contains 'native') {
-        $dotnetSdks = & dotnet --list-sdks
-        if ($LASTEXITCODE -ne 0 -or -not @($dotnetSdks | Where-Object { $_ -match '^9\.' }).Count) {
-            throw '.NET 9 SDK is required for AutoAdv.ProcessLoopback'
-        }
     }
     $gitShaLines = @(& git -C $repo rev-parse HEAD)
     if ($LASTEXITCODE -ne 0 -or $gitShaLines.Count -ne 1) { throw 'Cannot read validation checkout commit' }
@@ -181,7 +186,7 @@ try {
     $env:PATH = (Join-Path $venv 'Scripts') + ';' + $oldPath
     Push-Location $repo
     try {
-        Invoke-Checked 'python' @('-m','pip','install','--disable-pip-version-check','.[gui,native]')
+        Invoke-Checked 'python' @('-m','pip','install','--disable-pip-version-check','.[gui]')
     } finally { Pop-Location }
     $env:RUNNER_TEMP = $session
 
@@ -193,49 +198,65 @@ try {
     $helper = $null
     $asrModel = $null
     $asrTokens = $null
-    if ($phaseNames -contains 'native') {
-        $stage = 'native-runtime'
-        Push-Location $repo
-        try {
-            Invoke-Checked 'dotnet' @('build','integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj','--configuration','Release','--nologo')
-            $helper = (Resolve-Path 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll').Path
-            $modelRoot = Join-Path $cache 'asr'
-            Invoke-Checked 'python' @('-m','validation.real_game.prepare_asr_model','--directory',$modelRoot)
-            $asrModel = Join-Path $modelRoot 'model.int8.onnx'
-            $asrTokens = Join-Path $modelRoot 'tokens.txt'
-            # RealAudio-only media is never bundled in the prebuilt fixture.
-            # Cache each pinned individual file across runs, then hydrate this
-            # run's staged game directory after the immutable fixture is unpacked.
-            $mediaRoot = Join-Path $cache 'media'
-            Invoke-Checked 'python' @('-m','validation.real_game.prepare_real_audio_assets',
-                '--cache',$mediaRoot,'--runtime',$runtime)
-        } finally { Pop-Location }
-    }
 
     foreach ($currentPhase in $phaseNames) {
-        $stage = "validate-$currentPhase"
         $trace = Join-Path $session "autoadv-$currentPhase.jsonl"
         $report = Join-Path $session "autoadv-$currentPhase.result.json"
         $phaseError = $null
-        Push-Location $repo
-        try {
-            $arguments = @(
-                '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',
-                (Join-Path $repo 'validation\real_game\run_live_check.ps1'),
-                '-Phase',$currentPhase,
-                '-GameExecutable',$gameExecutable,
-                '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
-                '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '300' })
-            )
-            if ($currentPhase -eq 'native') {
-                $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens)
-            }
-            & powershell.exe @arguments
-            if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
-        } catch {
-            $phaseError = [string]$_.Exception.Message
-            Write-Warning "Phase ${currentPhase}: $phaseError"
-        } finally { Pop-Location }
+
+        # Native-only prerequisites and downloads are deliberately delayed until
+        # after the reading phase. A RealAudio setup failure must not erase the
+        # independent Hook/text-path measurement that can still run normally.
+        if ($currentPhase -eq 'native') {
+            $stage = 'prepare-native'
+            Push-Location $repo
+            try {
+                Assert-Command 'dotnet'
+                $dotnetSdks = & dotnet --list-sdks
+                if ($LASTEXITCODE -ne 0 -or -not @($dotnetSdks | Where-Object { $_ -match '^9\.' }).Count) {
+                    throw '.NET 9 SDK is required for AutoAdv.ProcessLoopback'
+                }
+                Invoke-Checked 'python' @('-m','pip','install','--disable-pip-version-check','.[native]')
+                Invoke-Checked 'dotnet' @('build','integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj','--configuration','Release','--nologo')
+                $helper = (Resolve-Path 'integrations/windows-loopback/bin/Release/net9.0-windows/AutoAdv.ProcessLoopback.dll').Path
+                $modelRoot = Join-Path $cache 'asr'
+                Invoke-Checked 'python' @('-m','validation.real_game.prepare_asr_model','--directory',$modelRoot)
+                $asrModel = Join-Path $modelRoot 'model.int8.onnx'
+                $asrTokens = Join-Path $modelRoot 'tokens.txt'
+                # Runtime-only media is cached across runs and hydrated only
+                # into this run's staged game. No external media enters Git.
+                $mediaRoot = Join-Path $cache 'media'
+                Invoke-Checked 'python' @('-m','validation.real_game.prepare_real_audio_assets',
+                    '--cache',$mediaRoot,'--runtime',$runtime)
+            } catch {
+                $phaseError = "Native setup failed: $($_.Exception.Message)"
+                Write-Warning $phaseError
+            } finally { Pop-Location }
+        }
+
+        if (-not $phaseError) {
+            $stage = "validate-$currentPhase"
+            Push-Location $repo
+            try {
+                $arguments = @(
+                    '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',
+                    (Join-Path $repo 'validation\real_game\run_live_check.ps1'),
+                    '-Phase',$currentPhase,
+                    '-GameExecutable',$gameExecutable,
+                    '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
+                    '-TimeoutSeconds',$(if ($currentPhase -eq 'reading') { '120' } else { '300' })
+                )
+                if ($currentPhase -eq 'native') {
+                    $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens)
+                }
+                & powershell.exe @arguments
+                if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
+            } catch {
+                $phaseError = [string]$_.Exception.Message
+                Write-Warning "Phase ${currentPhase}: $phaseError"
+            } finally { Pop-Location }
+        }
+
         $measurement = $null
         if (Test-Path -LiteralPath $report -PathType Leaf) {
             try { $measurement = Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json }
@@ -298,13 +319,28 @@ if (-not $NoUpload -and $hasProductRun) {
 } elseif (-not $NoUpload -and -not $hasProductRun) {
     Write-Warning 'Upload skipped: product validation never started. The local summary remains available.'
 }
-if ($uploadError) { throw "AutoAdv result upload failed: $uploadError" }
-if ($errorText) { throw "AutoAdv validation setup failed: $errorText" }
-$unmeasurable = @($results.ToArray() | Where-Object {
-    $_.runner_error -or $_.report_present -ne $true -or
-    $_.measurement_valid -ne $true -or $_.collection_complete -ne $true
-})
-if ($results.Count -ne $phaseNames.Count -or $unmeasurable.Count -gt 0) {
-    throw "AutoAdv measurement could not complete ($($unmeasurable.Count) invalid/incomplete phase(s)); see local/uploaded reports"
+$finalError = $null
+if ($uploadError) {
+    $finalError = "AutoAdv result upload failed: $uploadError"
+} elseif ($errorText) {
+    $finalError = "AutoAdv validation setup failed: $errorText"
+} else {
+    $unmeasurable = @($results.ToArray() | Where-Object {
+        $_.runner_error -or $_.report_present -ne $true -or
+        $_.measurement_valid -ne $true -or $_.collection_complete -ne $true
+    })
+    if ($results.Count -ne $phaseNames.Count -or $unmeasurable.Count -gt 0) {
+        $finalError = "AutoAdv measurement could not complete ($($unmeasurable.Count) invalid/incomplete phase(s)); see local/uploaded reports"
+    }
 }
-Write-Host 'AutoAdv measurement completed for all requested phases. Product accuracy and safety remain in the reported metrics.'
+if (-not $finalError) {
+    Write-Host 'AutoAdv measurement completed for all requested phases. Product accuracy and safety remain in the reported metrics.'
+} else {
+    Write-Warning $finalError
+    Write-Warning "Persistent log: $transcriptPath"
+}
+if ($transcriptStarted) {
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Warning "Validation transcript could not be closed cleanly: $($_.Exception.Message)" }
+}
+if ($finalError) { throw $finalError }

@@ -56,6 +56,8 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('--branch develop', source)
         self.assertIn('-WorkBase $base', source)
         self.assertIn('validation\\real_game\\run_windows_validation.ps1', source)
+        self.assertIn('bootstrap-latest.log', source)
+        self.assertIn('last-run.txt', source)
         for stale in ('RenPySdk', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
             self.assertNotIn(stale, source)
 
@@ -72,6 +74,16 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn("'-Automated','-MeasurementOnly'", orchestrator)
         self.assertIn('prepare_real_audio_assets', orchestrator)
         self.assertIn("Join-Path $cache 'media'", orchestrator)
+        self.assertIn('Start-Transcript -Path $transcriptPath', orchestrator)
+        self.assertIn("Join-Path $WorkBase 'last-run.txt'", orchestrator)
+        # Native prerequisites and downloads must not block the independent
+        # reading measurement when Phase=all.
+        loop = orchestrator.index('foreach ($currentPhase in $phaseNames)')
+        native_prepare = orchestrator.index("$stage = 'prepare-native'")
+        self.assertGreater(native_prepare, loop)
+        self.assertGreater(orchestrator.index("Assert-Command 'dotnet'"), loop)
+        self.assertGreater(orchestrator.index("'.[native]'"), loop)
+        self.assertLess(orchestrator.index("'.[gui]'"), loop)
         self.assertNotIn('skipped_after_reading_hook_failure', orchestrator)
         self.assertIn('$_.measurement_valid -ne $true', orchestrator)
         self.assertNotIn('$_.voice_safety_verified -ne $true', orchestrator)

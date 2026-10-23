@@ -55,7 +55,7 @@ RealAudioはGitHub hosted runnerでは実行せず、実際にAutoAdvを利用�
   -AsrTokens C:\path\to\tokens.txt
 ```
 
-通常の実機計測は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。両phaseはmeasurement modeで実行し、一方の品質低下を理由に他方をskipしない。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行する。AutoAdv自身の送りが成立しない台詞ではその観測結果を保持し、検証driverが`validation_recovery_input`を記録してから一度だけゲームを進め、後続ケースのPCM/ASR/VAD/Controller観測を継続する。回復入力後の次HookはAutoAdv成功に数えず、要求ケース数に対する自動進行率、安全な自動進行率、回復率、早送り率、過剰保留率、誤帰属率を報告する。品質値に固定合格点は置かず、trace/oracle破損、実音声経路やfixtureの未成立、要求ケースの収集未完了など計測不能だけをrunner異常とする。強制入力の直前に`confirm_external_advance()`で既知の境界だけを通知し、同一本文の後続ケースも収集可能にするが、AutoAdvの送り成功や音声判断へは算入しない。ケース別再起動は行わない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
+通常の実機計測は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。`reading` はnative固有の.NET、ASR、外部RealAudio素材の準備より先に独立して実行し、native準備失敗でreadingの測定結果まで失わない。両phaseはmeasurement modeで実行し、一方の品質低下を理由に他方をskipしない。各runは`.autoadv-validation/runs/<run>/validation.log`へ永続transcriptを残し、`.autoadv-validation/last-run.txt`から最新runを特定できる。bootstrap自体も`bootstrap-latest.log`を残すため、呼び出し元terminalが閉じても失敗段階と出力を失わない。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行する。AutoAdv自身の送りが成立しない台詞ではその観測結果を保持し、検証driverが`validation_recovery_input`を記録してから一度だけゲームを進め、後続ケースのPCM/ASR/VAD/Controller観測を継続する。回復入力後の次HookはAutoAdv成功に数えず、要求ケース数に対する自動進行率、安全な自動進行率、回復率、早送り率、過剰保留率、誤帰属率を報告する。品質値に固定合格点は置かず、trace/oracle破損、実音声経路やfixtureの未成立、要求ケースの収集未完了など計測不能だけをrunner異常とする。強制入力の直前に`confirm_external_advance()`で既知の境界だけを通知し、同一本文の後続ケースも収集可能にするが、AutoAdvの送り成功や音声判断へは算入しない。ケース別再起動は行わない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
 
 RealAudioはFast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／Fullテストへ含めない。Hosted runnerの音声endpoint有無を製品のNativeAudio成否に読み替えない。
 
@@ -98,7 +98,7 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 `REAL_AUDIO_ASSETS.json` はWindows実機RealAudioだけで使う外部メディアを固定する。巨大corpus/archiveから数ファイルだけ抜き出す方式は採らず、JVS/JVS-MuSiCの公式個別sampleや、個別配布されるBGM・ambient・SEを直接取得する。各ファイルはURL、SHA-256、最大取得サイズ、runtime配置先、ライセンスをmanifestで固定する。
 
-`run_windows_validation.ps1` は初回だけこれらを永続的な検証cache（既定のWorkBaseでは`.autoadv-validation/cache/media`）へ取得し、以後はSHA-256が一致するcacheを再利用する。既存cacheがmanifestと一致しない場合は上書きや再取得で隠さず停止する。native開始前に検証済みcacheから、そのrunのstaged Ren'Py runtimeの`game/audio/runtime/`へだけcopyする。JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifact、Issue uploadへ含めない。
+`run_windows_validation.ps1` は初回だけこれらを永続的な検証cache（既定のWorkBaseでは`.autoadv-validation/cache/media`）へ取得し、以後はSHA-256が一致するcacheを再利用する。既存cacheがmanifestと一致しない場合は上書きや再取得で隠さず停止する。Google Driveの公式個別sampleでdownload確認HTMLが返る場合は、その公開download formを同じHTTP sessionで追従する。各assetのcache hit／取得元host／失敗理由は`validation.log`へ残す。native開始前に検証済みcacheから、そのrunのstaged Ren'Py runtimeの`game/audio/runtime/`へだけcopyする。JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifact、Issue uploadへ含めない。
 
 外部素材は元形式のまま再生する。JVS sampleの24 kHz WAVやOGGを検証都合で48 kHz PCMへ事前統一せず、ゲーム/Windows音声系でのdecode・resampleを含めてProcess Loopback実経路として観測する。素材分類やscenarioの`environment`/`speaker_family`は検証結果の層別化用metadataであり、AutoAdvのNativeAudio判断へ入力しない。
 

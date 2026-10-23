@@ -65,6 +65,31 @@ class RealAudioAssetProvisioningTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'size mismatch|hash mismatch'):
                 media.prepare(cache, manifest_path=manifest)
 
+    def test_google_drive_confirmation_form_can_be_followed_without_browser_automation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = Path(directory) / 'drive.html'
+            page.write_text('''<!doctype html><html><body>
+                <form id="download-form" action="https://drive.usercontent.google.com/download" method="get">
+                  <input type="hidden" name="id" value="abc123">
+                  <input type="hidden" name="export" value="download">
+                  <input type="hidden" name="confirm" value="t">
+                  <input type="hidden" name="uuid" value="fixed-token">
+                </form></body></html>''', encoding='utf-8')
+            action, method, fields = media._drive_confirmation(page)
+            self.assertEqual(action, 'https://drive.usercontent.google.com/download')
+            self.assertEqual(method, 'get')
+            self.assertEqual(fields['id'], 'abc123')
+            self.assertEqual(fields['uuid'], 'fixed-token')
+
+    def test_download_headers_are_browser_compatible_and_source_specific(self):
+        drive = media._request_headers('https://drive.usercontent.google.com/download?id=x')
+        oga = media._request_headers('https://opengameart.org/sites/default/files/a.ogg')
+        github = media._request_headers('https://raw.githubusercontent.com/a/b/c/a.ogg')
+        self.assertIn('Mozilla/5.0', drive['User-Agent'])
+        self.assertEqual(drive['Referer'], 'https://drive.google.com/')
+        self.assertEqual(oga['Referer'], 'https://opengameart.org/')
+        self.assertEqual(github['Referer'], 'https://github.com/')
+
     def test_hydration_copies_verified_cache_only_into_runtime_overlay(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
