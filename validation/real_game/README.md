@@ -96,7 +96,7 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 ### RealAudio実行時メディア
 
-`REAL_AUDIO_ASSETS.json` はWindows実機RealAudioだけで使う外部メディアを固定する。巨大corpus/archiveから数ファイルだけ抜き出す方式は採らず、JVS/JVS-MuSiCの公式個別sampleや、個別配布されるBGM・ambient・SEを直接取得する。各ファイルはURL、SHA-256、最大取得サイズ、runtime配置先、ライセンスをmanifestで固定する。
+`REAL_AUDIO_ASSETS.json` はWindows実機RealAudioだけで使う外部メディアを固定する。巨大corpus/archiveから数ファイルだけ抜き出す方式は採らず、JVSの公式個別sampleや、個別配布されるBGM・ambient・SEを直接取得する。各ファイルはURL、SHA-256、最大取得サイズ、runtime配置先、ライセンスをmanifestで固定する。
 
 `run_windows_validation.ps1` は初回だけこれらを永続的な検証cache（既定のWorkBaseでは`.autoadv-validation/cache/media`）へ取得し、以後はSHA-256が一致するcacheを再利用する。既存cacheがmanifestと一致しない場合は上書きや再取得で隠さず停止する。Google Driveの公式個別sampleでdownload確認HTMLが返る場合は、その公開download formを同じHTTP sessionで追従する。各assetのcache hit／取得元host／失敗理由は`validation.log`へ残す。native開始前に検証済みcacheから、そのrunのstaged Ren'Py runtimeの`game/audio/runtime/`へだけcopyする。JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifact、Issue uploadへ含めない。
 

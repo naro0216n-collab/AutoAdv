@@ -108,7 +108,7 @@ class RealAudioAssetProvisioningTests(unittest.TestCase):
 
     def test_real_manifest_uses_small_individual_downloads_and_no_runtime_media_is_committed(self):
         info = media._load_manifest()
-        self.assertGreaterEqual(len(info['assets']), 10)
+        self.assertEqual(len(info['assets']), 9)
         self.assertTrue(all(len(asset['urls']) >= 1 for asset in info['assets']))
         self.assertTrue(all(int(asset['max_bytes']) <= 16 * 1024 * 1024
                             for asset in info['assets']))
@@ -120,6 +120,12 @@ class RealAudioAssetProvisioningTests(unittest.TestCase):
         self.assertEqual(len(voices), 3)
         self.assertTrue(all(asset['size_bytes'] < 1024 * 1024 for asset in voices))
         self.assertTrue(all('.zip' not in url.lower() for asset in voices for url in asset['urls']))
+        self.assertNotIn('jvs-music-jvs001-sample', {asset['id'] for asset in info['assets']})
+        drive_assets = [asset for asset in info['assets']
+                        if any('drive.' in url for url in asset['urls'])]
+        self.assertEqual({asset['id'] for asset in drive_assets},
+                         {'jvs001-sample', 'jvs002-sample', 'jvs003-sample'})
+        self.assertTrue(all(asset['size_bytes'] < 1024 * 1024 for asset in drive_assets))
 
 
 class RealAudioScenarioTests(unittest.TestCase):
@@ -136,11 +142,19 @@ class RealAudioScenarioTests(unittest.TestCase):
         required = {
             'clean', 'instrumental_bgm_soft', 'instrumental_bgm_dense',
             'machine_ambient', 'background_conversation',
-            'background_conversation_outlasts_foreground', 'japanese_vocal_bgm',
+            'background_conversation_outlasts_foreground', 'japanese_background_voice',
+            'japanese_background_voice_same_text_boundary',
             'transient_sfx_outlasts_short_voice', 'door_sfx',
             'clean_after_complex_mix',
         }
         self.assertTrue(required <= environments)
+
+    def test_native_scene_uses_cached_jvs_speech_for_japanese_lexical_background(self):
+        script = (media.HERE / 'renpy/game/script.rpy').read_text(encoding='utf-8')
+        self.assertNotIn('jvs_music_ver1', script)
+        self.assertIn(
+            'play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop',
+            script)
 
     def test_every_external_foreground_file_is_backed_by_the_runtime_manifest(self):
         manifest_paths = {asset['runtime_path'].removeprefix('game/')

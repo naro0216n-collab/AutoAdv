@@ -57,22 +57,6 @@
       "text": "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
     },
     {
-      "id": "jvs-music-jvs001-sample",
-      "kind": "vocal_bgm",
-      "filename": "jvs_music_ver1_jvs001_modified_grouped.wav",
-      "runtime_path": "game/audio/runtime/music/jvs_music_ver1_jvs001_modified_grouped.wav",
-      "sha256": "6f04d30e11d2493246ff738e9cc4a2d15a39e707b825d6c2ff077fb3c7a90461",
-      "size_bytes": 1483676,
-      "max_bytes": 3145728,
-      "source_page": "https://sites.google.com/site/shinnosuketakamichi/research-topics/jvs_music",
-      "urls": [
-        "https://drive.usercontent.google.com/download?id=1iCErRzCt5-6ftALcic9w5zXWrzVXryIA&export=download&confirm=t",
-        "https://drive.google.com/uc?export=download&id=1iCErRzCt5-6ftALcic9w5zXWrzVXryIA"
-      ],
-      "license": "JVS-MuSiC terms: academic/noncommercial research and personal use; redistribution is not permitted",
-      "redistributable": false
-    },
-    {
       "id": "oga-lofi-loop",
       "kind": "instrumental_bgm",
       "filename": "LofiLoop_2.ogg",

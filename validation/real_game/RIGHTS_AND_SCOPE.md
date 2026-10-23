@@ -32,7 +32,6 @@ manifestは検証結果の照合用です。
 RealAudioのnative専用sceneでは、既存fixtureへの過適合を避けるため、Gitへ同梱しない外部メディアも使用する。対象と取得先・SHA-256・runtime配置先は`REAL_AUDIO_ASSETS.json`を正本とする。これらはWindows実機でRealAudioを明示実行したときだけ個別取得してローカルcacheへ保存し、staged validation gameへ一時配置する。prebuilt fixtureやGitHub artifactへ再配布しない。
 
 - JVS corpus: 公式ページが公開する`sample_jvs001` / `sample_jvs002` / `sample_jvs003`の個別WAVだけを使用する。3.5 GBの全corpus ZIPは取得しない。利用条件上、音声の再配布は行わない。
-- JVS-MuSiC: 公式ページが公開する`sample_jvs001`の個別WAVだけを日本語歌唱背景として使用する。0.6 GBの全corpus ZIPは取得しない。音声の再配布は行わない。
 - OpenGameArt: `Lofi Hip Hop Loop` (omfgdude) と `Heavenly Loop` (isaiah658) の個別OGG。各素材ページでCC0とされているものをSHA-256固定で取得する。
 - Meta Open Sound / Oculus Audio Pack 1: 個別OGGのmachine-room ambience、restaurant conversation、front-door open、reverberant impactをcommit SHAとファイルSHA-256で固定する。CC BY 4.0。Credit: "Oculus Audio Pack 01" by Oculus VR, LLC (https://developers.meta.com/vr/downloads/package/oculus-audio-pack-1/), licensed under CC BY 4.0. Files renamed to the UCS naming convention; OGG previews transcoded from the original WAVs.
 

@@ -46,7 +46,6 @@ label real_audio_native:
             "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
             "audio/runtime/music/Heavenly Loop_0.ogg",
             "audio/runtime/music/LofiLoop_2.ogg",
-            "audio/runtime/music/jvs_music_ver1_jvs001_modified_grouped.wav",
             "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg",
             "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg",
             "audio/runtime/sfx/DOORWood_FrontDoorOpen_OS_01.ogg",
@@ -106,10 +105,12 @@ label real_audio_native:
     a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
     stop sound fadeout 0.15
 
-    # Japanese singing is a stronger lexical distractor than instrumental BGM.
+    # A clearly intelligible Japanese voice on an independent game channel is
+    # a stronger lexical distractor than instrumental BGM. Reuse the already
+    # hydrated JVS sample instead of downloading a separate singing corpus.
     # Keep it across identical successive foreground text to exercise both
     # acoustic attribution and Utterance-generation boundaries.
-    play music "audio/runtime/music/jvs_music_ver1_jvs001_modified_grouped.wav" loop volume 0.19
+    play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
     voice "audio/voice/normal_010.wav"
     a "彼のあだ名は言い得て妙だよね。"
     voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
@@ -118,7 +119,7 @@ label real_audio_native:
     a "ヒューズが飛んだ。"
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
-    stop music fadeout 0.15
+    stop sound fadeout 0.15
 
     # One-shot game effects overlap foreground speech. The reverberant impact is
     # longer than the short whisper, so the mix remains active after its end.
