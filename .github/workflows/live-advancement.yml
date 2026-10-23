@@ -32,22 +32,12 @@ jobs:
         run: python -m pip install '.[gui]'
       - name: Acquire prebuilt validation game matching this fixture source
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $digest = & python -m validation.real_game.fixture_runtime source-digest
-          if ($LASTEXITCODE -ne 0 -or -not $digest) { throw 'Cannot calculate validation fixture source digest' }
-          $asset = "autoadv-validation-game-$digest.zip"
-          $download = Join-Path $env:RUNNER_TEMP $asset
-          gh release download autoadv-validation-fixtures --repo $env:GITHUB_REPOSITORY `
-            --pattern $asset --dir $env:RUNNER_TEMP --clobber
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $download)) {
-              throw "No prebuilt validation game matches current fixture source: $digest"
-          }
           $runtime = Join-Path $env:RUNNER_TEMP 'validation-game'
-          Expand-Archive -LiteralPath $download -DestinationPath $runtime
-          $game = & python -m validation.real_game.fixture_runtime verify --runtime $runtime
-          if ($LASTEXITCODE -ne 0 -or -not $game) { throw 'Prebuilt validation game verification failed' }
+          $cache = Join-Path $env:RUNNER_TEMP 'fixture-cache'
+          $game = & python -m validation.real_game.fixture_runtime stage `
+            --runtime $runtime --cache $cache --wait-seconds 600
+          if ($LASTEXITCODE -ne 0 -or -not $game) { throw 'Prebuilt validation game staging failed' }
           "AUTOADV_VALIDATION_GAME=$game" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Check Hook and reading decision through actual Luna and Windows input
         shell: pwsh
