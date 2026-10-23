@@ -1179,6 +1179,11 @@ class AutoAdvApplication:
             if not current():
                 return
             assessment = assess_voice(evidence)
+            state = self.runtime_state()
+            if token != state.token or state.completed or state.sent:
+                return
+            if assessment.state is self.controller.voice_state:
+                return
             self._emit_runtime_event(
                 'voice_assessment', token, state=assessment.state.value, method='asr',
                 association=round(assessment.association_score, 4),
@@ -1186,6 +1191,8 @@ class AutoAdvApplication:
                 contradiction=round(assessment.contradiction_score, 4),
                 endpoint=round(assessment.endpoint_score, 4),
                 evidence=round(assessment.evidence_score, 4),
+                target_token_age_ms=(round(assessment.target_last_token_age_ms, 1)
+                    if assessment.target_last_token_age_ms is not None else None),
                 endpoint_source=assessment.endpoint_source)
             if assessment.state.value == 'ended' and assessment.estimated_end_ms is not None:
                 self._emit_telemetry(

@@ -116,6 +116,7 @@ class ProductTraceObserver:
                 contradiction=detail.get('contradiction'),
                 endpoint=detail.get('endpoint'),
                 evidence=detail.get('evidence'),
+                target_token_age_ms=detail.get('target_token_age_ms'),
                 endpoint_source=detail.get('endpoint_source', ''))
             return
 

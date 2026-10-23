@@ -188,6 +188,14 @@ class ControllerModes(unittest.TestCase):
         self.assertIsNone(self.ctrl.presentation_reason)
         self.assertFalse(self.ctrl.try_advance())
 
+    def test_playing_at_audio_deadline_falls_back_only_after_evidence_becomes_inconclusive(self):
+        self.begin(AdvanceMode.AUDIO, False, True)
+        self.assertFalse(self.voice(VoiceState.PLAYING))
+        self.assertFalse(self.done('audio_deadline_elapsed'))
+        self.assertFalse(self.ctrl.completed)
+        self.assertTrue(self.voice(VoiceState.INCONCLUSIVE))
+        self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
+
     def test_late_native_finish_resolves_only_the_inconclusive_native_hold(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('audio_deadline_elapsed'))

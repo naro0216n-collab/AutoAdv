@@ -13,7 +13,7 @@ def evidence(alignment, *, audio_ms=1000, capture_end_ms=1000,
              post_target_pcm_ms=0, vad_tail_ms=0, stable=1, progress_delta=None):
     return VoiceEvidence(
         alignment=alignment, audio_ms=audio_ms, capture_end_ms=capture_end_ms,
-        target_last_token_ms=target_last_token_ms,
+        observation_ms=capture_end_ms, target_last_token_ms=target_last_token_ms,
         target_boundary_ms=target_boundary_ms,
         post_target_pcm_ms=post_target_pcm_ms,
         vad_active=False, vad_contains_speech=False, vad_onset_ms=None, vad_tail_ms=vad_tail_ms,

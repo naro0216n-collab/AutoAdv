@@ -23,6 +23,7 @@ class VoiceEvidence:
     alignment: TargetAlignment
     audio_ms: float
     capture_end_ms: int | None
+    observation_ms: int | None
     target_last_token_ms: int | None
     target_boundary_ms: int | None
     post_target_pcm_ms: float
@@ -36,9 +37,9 @@ class VoiceEvidence:
 
     @property
     def target_last_token_age_ms(self) -> float | None:
-        if self.capture_end_ms is None or self.target_last_token_ms is None:
+        if self.observation_ms is None or self.target_last_token_ms is None:
             return None
-        return max(0.0, float(self.capture_end_ms - self.target_last_token_ms))
+        return max(0.0, float(self.observation_ms - self.target_last_token_ms))
 
 
 @dataclass(frozen=True)

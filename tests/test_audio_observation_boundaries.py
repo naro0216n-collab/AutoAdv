@@ -383,7 +383,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
                   stable=1, progress_delta=None):
         return VoiceEvidence(
             alignment=alignment, audio_ms=2000.0, capture_end_ms=capture_end,
-            target_last_token_ms=target_last, target_boundary_ms=boundary,
+            observation_ms=capture_end, target_last_token_ms=target_last, target_boundary_ms=boundary,
             post_target_pcm_ms=post, vad_active=False, vad_contains_speech=False,
             vad_onset_ms=None, vad_tail_ms=vad_tail, vad_end_ms=vad_end,
             stable_alignment_observations=stable,
@@ -433,6 +433,37 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         self.assertEqual(last, 950)
         self.assertEqual(boundary, 1550)
         self.assertAlmostEqual(post, 50.0)
+
+    def test_healthy_heartbeat_ages_playing_evidence_without_fabricating_endpoint(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようござ')
+        initial = self._evidence(
+            alignment, capture_end=1000, target_last=950)
+        self.assertEqual(assess_voice(initial).state, VoiceState.PLAYING)
+
+        observed = []
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
+            recognizer=SimpleNamespace(recognize=lambda _: ''), g2p=None,
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _: VADDecision(False, 0), reset=lambda: None),
+            clock=lambda: 1000, on_evidence=lambda token, evidence: observed.append((token, evidence)))
+        try:
+            token = Token(1, 1)
+            native.token = token
+            native._latest_evidence = initial
+            native._last_heartbeat_evidence_ms = 1000
+            native.health(CaptureHealth(1800, True, 'helper_alive'))
+
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0][0], token)
+            refreshed = observed[0][1]
+            self.assertEqual(refreshed.capture_end_ms, initial.capture_end_ms)
+            self.assertEqual(refreshed.target_last_token_ms, initial.target_last_token_ms)
+            self.assertEqual(refreshed.observation_ms, 1800)
+            self.assertEqual(assess_voice(refreshed).state, VoiceState.INCONCLUSIVE)
+            self.assertNotEqual(assess_voice(refreshed).state, VoiceState.ENDED)
+        finally:
+            native.close()
 
     def test_native_audio_reports_evidence_not_completion_state(self):
         assessments = []

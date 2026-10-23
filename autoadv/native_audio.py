@@ -7,7 +7,7 @@ ENDED / PLAYING / INCONCLUSIVE assessment and Controller owns progression.
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import Callable
@@ -69,6 +69,7 @@ class NativeAudio:
     """Owns one process's capture and one active line; never injects game input."""
     DEFAULT_REPLAY_HISTORY_MS = 10000
     CAPTURE_HISTORY_MARGIN_MS = 1000
+    HEARTBEAT_EVIDENCE_INTERVAL_MS = 500
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  on_error: Callable[[Token | None, str], None],
                  *, recognizer=None, activity=None, g2p=None, clock=None,
@@ -136,6 +137,9 @@ class NativeAudio:
         self._pcm_reported = False
         self._tail_decoded = False
         self._alignment_history = AlignmentObservationHistory()
+        self._latest_evidence: VoiceEvidence | None = None
+        self._transport_observed_ms = -1
+        self._last_heartbeat_evidence_ms = -1
 
     def start(self):
         # Capture starts before the first HOOK: retain the first voice's PCM.
@@ -179,6 +183,9 @@ class NativeAudio:
         self.vad_tail_ms = 0
         self._tail_decoded = False
         self._alignment_history = AlignmentObservationHistory()
+        self._latest_evidence = None
+        self._transport_observed_ms = -1
+        self._last_heartbeat_evidence_ms = -1
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
         self._capture_stereo_peak = 0.0
@@ -271,19 +278,44 @@ class NativeAudio:
             self.history.release_retention()
 
     def health(self, status: CaptureHealth):
+        """Record transport health and age target-relative evidence on heartbeats.
+
+        A healthy heartbeat is not target-voice endpoint evidence. When PCM has
+        stopped, however, it advances the same capture clock while proving the
+        helper is alive. Re-emitting the latest raw evidence with that later
+        observation time can therefore make stale PLAYING evidence
+        INCONCLUSIVE without fabricating ENDED.
+        """
+        refreshed = None
+        token = None
         with self._lock:
             if status.healthy:
+                self._transport_observed_ms = max(self._transport_observed_ms, status.at_ms)
                 if status.pcm_frames:
                     self._capture_pcm_packets += 1
                     self._capture_pcm_frames += status.pcm_frames
                 else:
                     self._capture_heartbeats += 1
-                return
-            self._capture_error = status.reason
-            token = self.token
-        # Before the first line there is no token to notify. begin() replays
-        # the failure to the actual line; no silence/voice conclusion is made.
-        if token is not None:
+                    latest = self._latest_evidence
+                    if (not self._inflight and self.token is not None and latest is not None
+                            and latest.target_last_token_ms is not None
+                            and (self._last_heartbeat_evidence_ms < 0 or
+                                 status.at_ms - self._last_heartbeat_evidence_ms
+                                 >= self.HEARTBEAT_EVIDENCE_INTERVAL_MS)):
+                        observation_ms = max(status.at_ms, latest.observation_ms or 0)
+                        refreshed = replace(latest, observation_ms=observation_ms)
+                        self._latest_evidence = refreshed
+                        self._last_heartbeat_evidence_ms = status.at_ms
+                        token = self.token
+            else:
+                self._capture_error = status.reason
+                token = self.token
+        if refreshed is not None and token is not None and self.on_evidence is not None:
+            self.on_evidence(token, refreshed)
+            return
+        if not status.healthy and token is not None:
+            # Before the first line there is no token to notify. begin() replays
+            # the failure to the actual line; no silence/voice conclusion is made.
             self.on_error(token, status.reason)
 
     def capture_status(self) -> dict:
@@ -491,10 +523,14 @@ class NativeAudio:
                                              else submitted_vad_tail_ms))
                 vad_end = (self.vad_end_ms if submitted_end_ms is None
                            else submitted_end_ms)
+                observation_ms = max(
+                    capture_end_ms or 0,
+                    self._transport_observed_ms if self._transport_observed_ms >= 0 else 0)
                 evidence = VoiceEvidence(
                     alignment=alignment,
                     audio_ms=audio_ms,
                     capture_end_ms=capture_end_ms,
+                    observation_ms=observation_ms,
                     target_last_token_ms=target_last_ms,
                     target_boundary_ms=target_boundary_ms,
                     post_target_pcm_ms=post_target_pcm_ms,
@@ -506,6 +542,8 @@ class NativeAudio:
                     stable_alignment_observations=stable_count,
                     phonetic_progress_delta=phonetic_progress_delta,
                 )
+                self._latest_evidence = evidence
+                self._last_heartbeat_evidence_ms = observation_ms
 
             if self.on_inference and evidence is not None:
                 a = evidence.alignment
@@ -524,6 +562,7 @@ class NativeAudio:
                     'reading_rank': a.reading_rank,
                     'asr_token_timestamp_count': len(result.timestamps),
                     'target_token_count': a.observed_token_count,
+                    'observation_ms': evidence.observation_ms,
                     'target_last_token_ms': evidence.target_last_token_ms,
                     'target_boundary_ms': evidence.target_boundary_ms,
                     'target_last_token_age_ms': (round(evidence.target_last_token_age_ms, 3)
