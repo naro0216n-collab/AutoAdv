@@ -112,7 +112,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(actions[1:], ['permit', '.monitoring'])
 
     def test_native_product_handoff_forces_one_recovery_and_keeps_run_alive(self):
-        actions, traces, recoveries = [], [], []
+        actions, traces, recoveries, boundaries = [], [], [], []
         clock = [1.0]
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
                                   pause_reason='native_inconclusive_hold', sent=False,
@@ -129,19 +129,26 @@ class LiveGuiSessionContract(unittest.TestCase):
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
              'force_continue_on_failure': True},
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
-            recovery_boundary=lambda state: None)
+            recovery_boundary=lambda state: (
+                boundaries.append(state.token.line), setattr(runtime, 'pause_reason', None)))
         driver.state = 'running'
         driver.tick()
         self.assertEqual(recoveries, [])
         clock[0] = 1.3
         driver.tick()
         self.assertEqual(recoveries, [1])
+        self.assertEqual(boundaries, [1])
         self.assertEqual(actions, [])
         self.assertEqual(traces[-1][0], 'validation_recovery_input')
         self.assertEqual(traces[-1][1]['reason'], 'native_inconclusive_hold')
         clock[0] = 1.8
         driver.tick()
         self.assertEqual(recoveries, [1])
+        self.assertEqual(actions, [])
+        runtime.token = SimpleNamespace(session=1, line=2)
+        clock[0] = 2.0
+        driver.tick()
+        self.assertEqual(actions, [])
 
     def test_final_native_handoff_finishes_collection_without_extra_input(self):
         actions, recoveries = [], []

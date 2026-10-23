@@ -113,7 +113,7 @@ class NativeRecognitionContract(unittest.TestCase):
             audio.begin(Token(1, 1), '台詞')
             for ms in (100, 500, 1000):
                 audio.feed(PCMChunk(ms, bytes(8), 48000, 2, 4))
-            self.assertFalse(audio.attributed)
+            self.assertFalse(audio.is_confirmed_playing(Token(1, 1)))
             self.assertFalse(audio.completed)
             self.assertNotIn('completed', events)
             self.assertNotIn('started', events)

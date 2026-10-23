@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_buffer import AudioHistory
-from autoadv.audio_match import VoiceActivity, VADDecision
+from autoadv.audio_match import ASRProgress, VoiceActivity, VADDecision
 from autoadv.conversation import Controller, Target, Token
 from autoadv.model import AdvanceMode, HookSelection, Profile
 from autoadv.native_audio import ASRResult, NativeAudio
@@ -110,7 +110,7 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
             audio.health(CaptureHealth(1000, True, 'helper_alive'))
             self.assertEqual(audio.capture_status()['heartbeats'], 1)
             self.assertEqual(audio.capture_status()['pcm_packets'], 0)
-            self.assertFalse(audio.attributed)
+            self.assertFalse(audio.is_confirmed_playing(token))
             self.assertFalse(audio.completed)
             self.assertEqual(events, [])
             audio.health(CaptureHealth(1010, True, 'helper_alive', pcm_frames=960))
@@ -543,6 +543,55 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             self.assertFalse(metrics[-1]['terminal_candidate'])
             self.assertAlmostEqual(metrics[-1]['phonetic_coverage'], 4 / 6, places=3)
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .70)
+            self.assertGreaterEqual(
+                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
+        finally:
+            native.close()
+
+    def test_current_combined_evidence_completes_without_prior_attribution_latch(self):
+        events = []
+        metrics = []
+        clock = [1000]
+
+        progress = ASRProgress(
+            coverage=.6667, onset_score=.75, tail_confidence=0.0, monotonic=True,
+            matched_chars=4, observed='え嘘でし', edit_count=2, length_ratio=.6667,
+            terminal_candidate=False, phonetic_coverage=.7778, matched_phonemes=7,
+            phonetic_edit_count=2, attribution_score=.7529, completion_score=.72,
+            contradiction_score=.1444, reading_rank=0, target_units=9,
+            pronunciation_length_ratio=.7778, observed_token_count=4)
+
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event),
+            recognizer=SimpleNamespace(recognize=lambda _: ASRResult('え嘘でし')),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: VADDecision(
+                    False, 400, contains_speech=True),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
+        try:
+            native.history.start(11)
+            token = Token(1, 1)
+            native.begin(token, 'えっ嘘でしょ')
+            native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
+            clock[0] = 1600
+            pcm = PCMChunk(1600, bytes(4800 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertFalse(busy, 'combined-evidence inference did not finish')
+            self.assertIn('started', events)
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertAlmostEqual(metrics[-1]['attribution_score'], .7529, places=4)
+            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
             self.assertGreaterEqual(
                 metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
         finally:

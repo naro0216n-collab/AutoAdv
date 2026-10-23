@@ -295,6 +295,11 @@ class Controller:
         if token != self.token or self.utterance is None:
             return False
         self.confirmed_external_boundary = True
+        self.completed = False
+        self.native_playing = False
+        self.pause_reason = None
+        self.awaiting_next = True
+        self.reason = 'awaiting_next_line'
         return True
 
     def take_external_transition(self, token: Token) -> int:

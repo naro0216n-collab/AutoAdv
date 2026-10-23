@@ -107,8 +107,6 @@ class NativeAudio:
         self._last_processed_chunk: PCMChunk | None = None
         self.voice_end_estimate_ms = -1
         self.rise_ms = -1
-        self.active = False
-        self.attributed = False
         self.completed = False
         self.tail_ms = 0
         self._inference_at = -1
@@ -162,7 +160,7 @@ class NativeAudio:
             self._reset_observation()
 
     def _reset_observation(self):
-        self.active = self.attributed = self.completed = False
+        self.completed = False
         self._inference_at = -1
         self._pcm_reported = False
         self._last_vad = False
@@ -245,7 +243,7 @@ class NativeAudio:
         """
         with self._lock:
             now = self.clock()
-            if (token != self.token or not self.attributed or self._last_matching_asr_ms < 0
+            if (token != self.token or self._last_matching_asr_ms < 0
                     or now - self._last_matching_asr_ms > 1200):
                 return False
             recent_vad = (self._last_vad and self._last_active_ms >= 0
@@ -369,10 +367,13 @@ class NativeAudio:
                     # capture-receipt clock, *not* a device playback timestamp.
                     self.voice_end_estimate_ms = chunk.at_ms - activity.tail_silence_ms
             self.tail_ms = activity.tail_silence_ms
-            if activity.frames_analyzed and activity.active and self.attributed:
+            target_evidence_recent = (
+                self._last_matching_asr_ms >= 0
+                and self.clock() - self._last_matching_asr_ms <= 1200)
+            if activity.frames_analyzed and activity.active and target_evidence_recent:
                 self._last_active_ms = self.clock()
                 self._quiet_notified = False
-            elif (activity.frames_analyzed and not activity.active and self.attributed
+            elif (activity.frames_analyzed and not activity.active and target_evidence_recent
                   and activity.tail_silence_ms >= 400 and not self._quiet_notified):
                 self._quiet_notified = True
                 events.append('quiet')
@@ -520,22 +521,13 @@ class NativeAudio:
                 target_progress = progress.attribution_score >= .72
                 if (target_progress
                         and progress.phonetic_coverage > self._best_match_coverage + .02):
+                    first_matching_progress = self._last_matching_asr_ms < 0
                     self._best_match_coverage = progress.phonetic_coverage
                     self._last_matching_asr_ms = self.clock()
-
-                vad_seen = self.rise_ms >= self.window_start_ms
-                attribution_evidence = min(1.0,
-                    .94 * progress.attribution_score + (.06 if vad_seen else 0.0)
-                    - .08 * progress.contradiction_score)
-                if (not self.attributed
-                        and progress.matched_phonemes >= min(4, max(1, progress.target_units))
-                        and attribution_evidence >= .78
-                        and progress.contradiction_score <= .30):
-                    self.attributed = True
-                    if vad_seen:
-                        self._last_active_ms = self.clock()
-                    self._last_matching_asr_ms = self.clock()
-                    events.append('started')
+                    if first_matching_progress:
+                        if self.rise_ms >= self.window_start_ms:
+                            self._last_active_ms = self.clock()
+                        events.append('started')
 
                 endpoint_ms, trailing_after_target_ms, timestamp_score = (
                     self._timestamp_endpoint(samples, result, progress.observed_token_count))
@@ -562,8 +554,7 @@ class NativeAudio:
                     max(progress.phonetic_coverage, progress.coverage) >= .55
                     and progress.matched_phonemes >= min(4, max(1, progress.target_units))
                 )
-                if (self.attributed and sufficient_progress
-                        and endpoint_score >= .45
+                if (sufficient_progress and endpoint_score >= .45
                         and evidence_score >= self.COMPLETION_EVIDENCE_THRESHOLD):
                     self.completed = True
                     events.append('completed')

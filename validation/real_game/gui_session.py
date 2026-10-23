@@ -93,7 +93,6 @@ class SessionDriver:
         self.done_idle = None
         self.audio_deadline = None
         self.recovery_pending = None
-        self.recovered_tokens = set()
         self.collection_target_emitted = False
 
     def fail(self, why):
@@ -153,12 +152,13 @@ class SessionDriver:
 
     def _mark_validation_recovery_boundary(self, runtime):
         token = runtime.token
-        if token is None or not self.product.confirm_external_advance(token):
+        if token is None:
             raise RuntimeError('validation recovery lost the active utterance boundary')
-        # This is a real input boundary even though it is not a product input.
-        # Reset the observation interval so later case data is not polluted by
-        # the failed line's pre-recovery PCM.
+        # Match the ordinary product input ordering: invalidate the old audio
+        # interval immediately before the input, then wait for the next Hook.
         self.product.native_audio_boundary()
+        if not self.product.confirm_external_advance(token):
+            raise RuntimeError('validation recovery lost the active utterance boundary')
 
     def _recover_failed_line(self, runtime):
         token = runtime.token
@@ -167,8 +167,7 @@ class SessionDriver:
         key = (token.session, token.line)
         reason = runtime.pause_reason or ''
         if (not self.options.get('force_continue_on_failure') or
-                reason not in RECOVERABLE_VALIDATION_PAUSES or
-                key in self.recovered_tokens):
+                reason not in RECOVERABLE_VALIDATION_PAUSES):
             return False
         # Give queued product diagnostics (handoff/capture summary) one GUI
         # turn to reach the trace before the validation-only recovery input.
@@ -182,12 +181,11 @@ class SessionDriver:
         self.w.validation_trace.emit(
             'validation_recovery_attempt', session=token.session, line=token.line,
             reason=reason)
-        self.recovery_send(runtime)
         self.recovery_boundary(runtime)
+        self.recovery_send(runtime)
         self.w.validation_trace.emit(
             'validation_recovery_input', session=token.session, line=token.line,
             reason=reason)
-        self.recovered_tokens.add(key)
         self.recovery_pending = None
         return True
 
