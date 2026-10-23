@@ -108,8 +108,16 @@ class WindowsValidationLauncherContract(unittest.TestCase):
     def test_hosted_and_broad_ci_do_not_run_real_audio(self):
         live = (ROOT / '.github' / 'workflows' / 'live-advancement.yml').read_text(encoding='utf-8')
         self.assertIn('-Phase reading', live)
+        self.assertIn('validation.real_game.fixture_runtime stage', live)
+        self.assertNotIn('gh release download', live)
+        self.assertNotIn('autoadv-validation-fixtures', live)
         for forbidden in ('-Phase native', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj'):
             self.assertNotIn(forbidden, live)
+
+        fixture = (ROOT / '.github' / 'workflows' / 'validation-fixture.yml').read_text(encoding='utf-8')
+        self.assertIn('workflow_dispatch:', fixture)
+        self.assertNotIn('pull_request:', fixture)
+        self.assertNotIn('[BUILD AUTOADV FIXTURE]', fixture)
 
         for name in ('ci.yml', 'windows-adapters.yml'):
             source = (ROOT / '.github' / 'workflows' / name).read_text(encoding='utf-8')

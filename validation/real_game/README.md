@@ -61,9 +61,9 @@ RealAudioはFast CI、Windows Adapter Validation、AutoAdv Live Advancement、�
 
 ## Prebuilt validation game
 
-`validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。fixture構築入力または配布契約が`develop`へpublishされた場合だけPublish GatewayがValidation Fixture Runtimeを明示dispatchし、通常の製品publishやFast CIでは重量級fixture buildを反復しない。`workflow_dispatch`は欠損asset再生成用の回復経路である。Windows実機RealAudioは`python -m validation.real_game.fixture_runtime stage`を使用し、現行ソースdigestに対応するassetがpublish直後でまだ生成中なら一定時間待機した上で、同一assetだけを取得・展開・manifest照合する。release名、asset命名、URL組立はこのPython契約が所有し、PowerShell launcherへ重複させない。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
+`validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。fixture構築入力または配布契約が`develop`へpublishされた場合だけPublish GatewayがValidation Fixture Runtimeを明示dispatchし、通常の製品publishやFast CIでは重量級fixture buildを反復しない。`workflow_dispatch`は欠損asset再生成用の回復経路である。Windows実機RealAudioとHosted Live Advancementはともに`python -m validation.real_game.fixture_runtime stage`を使用し、現行ソースdigestに対応するassetがpublish直後でまだ生成中なら一定時間待機した上で、同一assetだけを取得・展開・manifest照合する。release名、asset命名、URL組立はこのPython契約が所有し、consumer側のPowerShell/workflowへ重複させない。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
 
-Live Advancement workflowは現行fixtureソースSHA-256と一致するassetだけを取得し、`fixture-manifest.json` では次の最小条件だけを確認してからゲームを起動する。
+Live Advancement workflowも独自のRelease download手順を持たず、同じ`fixture_runtime stage`から現行fixtureソースSHA-256と一致するassetだけを取得する。`fixture-manifest.json` では次の最小条件だけを確認してからゲームを起動する。
 
 - 現行 `renpy` fixture入力の正規化SHA-256（`.rpy`/`.txt` の改行差は同一内容として扱う）
 - 起動対象Windows executableの存在
