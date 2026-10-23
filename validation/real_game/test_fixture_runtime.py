@@ -1,8 +1,11 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import urllib.error
 
-from validation.real_game.fixture_runtime import source_digest, verify_runtime, write_manifest
+from validation.real_game.fixture_runtime import (
+    FIXTURE_RELEASE, acquire_archive, asset_name, source_digest, verify_runtime, write_manifest,
+)
 
 
 class ValidationFixtureRuntimeContracts(unittest.TestCase):
@@ -45,6 +48,39 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
             self.assertEqual(lf, source_digest(root))
             voice.write_bytes(b'RIFF\nBINARY')
             self.assertNotEqual(lf, source_digest(root))
+
+
+    def test_fixture_asset_name_and_missing_asset_wait_are_centralized(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source'
+            source.mkdir()
+            (source / 'script.rpy').write_text('label start:\n    return\n', encoding='utf-8')
+            expected = f'autoadv-validation-game-{source_digest(source)}.zip'
+            self.assertEqual(asset_name(source=source), expected)
+
+            now = [0.0]
+            calls = []
+
+            def clock():
+                return now[0]
+
+            def sleep(seconds):
+                now[0] += seconds
+
+            def downloader(url, destination):
+                calls.append(url)
+                if len(calls) == 1:
+                    raise urllib.error.HTTPError(url, 404, 'missing', {}, None)
+                destination.write_bytes(b'fixture-zip')
+
+            archive = acquire_archive(
+                root / 'cache', source=source, wait_seconds=20,
+                clock=clock, sleep=sleep, downloader=downloader)
+            self.assertEqual(archive.name, expected)
+            self.assertEqual(archive.read_bytes(), b'fixture-zip')
+            self.assertEqual(len(calls), 2)
+            self.assertIn(f'/releases/download/{FIXTURE_RELEASE}/{expected}', calls[0])
 
     def test_manifest_binds_ready_runtime_to_current_fixture_source(self):
         with TemporaryDirectory() as tmp:
@@ -90,22 +126,24 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
         self.assertNotIn('_adv_oracle_last_active = None', begin_block)
 
 
-    def test_live_workflow_consumes_prebuilt_fixture_and_keeps_construction_separate(self):
-        live = Path('.github/workflows/live-advancement.yml').read_text(encoding='utf-8')
+    def test_gateway_dispatches_fixture_build_and_local_runner_has_no_release_registration_copy(self):
+        gateway = Path('.github/workflows/publish-gateway.yml').read_text(encoding='utf-8')
         fixture = Path('.github/workflows/validation-fixture.yml').read_text(encoding='utf-8')
+        local = Path('validation/real_game/run_windows_validation.ps1').read_text(encoding='utf-8')
         runner = Path('validation/real_game/run_live_check.ps1').read_text(encoding='utf-8')
-        self.assertIn('fixture_runtime source-digest', live)
-        self.assertIn('gh release download autoadv-validation-fixtures', live)
-        self.assertIn('-GameExecutable $env:AUTOADV_VALIDATION_GAME', live)
-        self.assertNotIn('renpy.org', live)
-        self.assertNotIn('RenPySdk', live)
-        self.assertNotIn('launcher distribute', live)
+        self.assertIn('validation.real_game.fixture_runtime stage', local)
+        self.assertNotIn('Invoke-WebRequest', local)
+        self.assertNotIn('autoadv-validation-fixtures', local)
+        self.assertIn('validation-fixture.yml/dispatches', gateway)
+        self.assertIn('validation/real_game/renpy validation/real_game/fixture_runtime.py', gateway)
+        self.assertIn('workflow_dispatch:', fixture)
+        self.assertIn('gh release upload', fixture)
         self.assertIn('renpy.org', fixture)
         self.assertIn('launcher distribute', fixture)
-        self.assertIn('gh release upload', fixture)
         self.assertNotIn('RenPySdk', runner)
         self.assertNotIn('dotnet build', runner)
         self.assertNotIn('prepare_asr_model', runner)
+
 
     def test_real_audio_contract_is_not_a_broad_fixture_discovery_command(self):
         readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')

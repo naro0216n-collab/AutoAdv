@@ -1,19 +1,33 @@
 """Build-time/runtime contract for the prebuilt validation game artifact.
 
 Live AutoAdv validation consumes a ready-to-run game. Ren'Py SDK acquisition
-and distribution construction are owned by a separate fixture workflow.
+and distribution construction are owned by a separate fixture workflow. Runtime
+consumers derive one immutable release asset name from the fixture source and
+wait briefly for the automatic builder instead of duplicating release metadata.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.request
+import zipfile
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE / 'renpy'
 MANIFEST_NAME = 'fixture-manifest.json'
 SCHEMA = 'autoadv-validation-fixture-v1'
+FIXTURE_REPOSITORY = 'naro0216n-collab/AutoAdv'
+FIXTURE_RELEASE = 'autoadv-validation-fixtures'
+FIXTURE_ASSET_PREFIX = 'autoadv-validation-game-'
+DEFAULT_WAIT_SECONDS = 600
+POLL_SECONDS = 10
 
 _IGNORED_SOURCE_PARTS = {'cache', 'saves', '__pycache__'}
 _IGNORED_SOURCE_SUFFIXES = {'.rpyc', '.pyc', '.log'}
@@ -63,6 +77,104 @@ def source_digest(root: Path = SOURCE) -> str:
     return _tree_digest(_iter_source_files(root))
 
 
+def asset_name(*, source: Path = SOURCE) -> str:
+    return f'{FIXTURE_ASSET_PREFIX}{source_digest(source)}.zip'
+
+
+def asset_url(*, source: Path = SOURCE, repository: str = FIXTURE_REPOSITORY,
+              release: str = FIXTURE_RELEASE) -> str:
+    return f'https://github.com/{repository}/releases/download/{release}/{asset_name(source=source)}'
+
+
+def _download_once(url: str, destination: Path) -> None:
+    request = urllib.request.Request(url, headers={'User-Agent': 'AutoAdv-validation-fixture'})
+    with urllib.request.urlopen(request, timeout=60) as response, destination.open('wb') as stream:
+        shutil.copyfileobj(response, stream)
+
+
+def acquire_archive(cache: Path, *, source: Path = SOURCE,
+                    wait_seconds: int = DEFAULT_WAIT_SECONDS,
+                    repository: str = FIXTURE_REPOSITORY,
+                    release: str = FIXTURE_RELEASE,
+                    clock=time.monotonic, sleep=time.sleep, downloader=_download_once) -> Path:
+    """Return the exact immutable fixture asset, waiting for automatic publish.
+
+    A 404 means the source-matched fixture has not reached the release yet. That
+    is expected briefly after a develop publish that changes fixture inputs, so
+    retry only that status. Other HTTP/network failures remain real setup errors.
+    """
+    if wait_seconds < 0:
+        raise ValueError('wait_seconds must be nonnegative')
+    cache = cache.resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    name = asset_name(source=source)
+    destination = cache / name
+    if destination.is_file():
+        return destination
+    url = asset_url(source=source, repository=repository, release=release)
+    deadline = clock() + wait_seconds
+    announced = False
+    while True:
+        temporary = cache / f'.{name}.{os.getpid()}.part'
+        temporary.unlink(missing_ok=True)
+        try:
+            downloader(url, temporary)
+            os.replace(temporary, destination)
+            return destination
+        except urllib.error.HTTPError as exc:
+            temporary.unlink(missing_ok=True)
+            if exc.code != 404 or clock() >= deadline:
+                if exc.code == 404:
+                    raise FileNotFoundError(
+                        f'validation fixture was not published within {wait_seconds}s: {name}; '
+                        'automatic Validation Fixture Runtime may have failed') from exc
+                raise
+            if not announced:
+                print(
+                    f'Validation fixture {name} is not published yet; waiting for the automatic builder...',
+                    file=sys.stderr,
+                )
+                announced = True
+            sleep(min(POLL_SECONDS, max(0, deadline - clock())))
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+
+def _safe_extract(archive: Path, destination: Path) -> None:
+    destination = destination.resolve()
+    with zipfile.ZipFile(archive) as bundle:
+        for info in bundle.infolist():
+            target = (destination / info.filename).resolve()
+            try:
+                target.relative_to(destination)
+            except ValueError as exc:
+                raise ValueError(f'fixture archive contains unsafe path: {info.filename}') from exc
+        bundle.extractall(destination)
+
+
+def stage_runtime(runtime: Path, cache: Path, *, source: Path = SOURCE,
+                  wait_seconds: int = DEFAULT_WAIT_SECONDS) -> Path:
+    """Acquire, expand and verify one source-matched ready-to-run fixture."""
+    archive = acquire_archive(cache, source=source, wait_seconds=wait_seconds)
+    runtime = runtime.resolve()
+    for attempt in range(2):
+        if runtime.exists():
+            shutil.rmtree(runtime)
+        runtime.mkdir(parents=True)
+        try:
+            _safe_extract(archive, runtime)
+            return verify_runtime(runtime, source=source)
+        except (OSError, ValueError, zipfile.BadZipFile):
+            shutil.rmtree(runtime, ignore_errors=True)
+            if attempt:
+                raise
+            # A truncated/stale cache is never authoritative. Remove it once and
+            # reacquire the immutable source-addressed asset from the release.
+            archive.unlink(missing_ok=True)
+            archive = acquire_archive(cache, source=source, wait_seconds=wait_seconds)
+    raise RuntimeError('unreachable fixture staging state')
+
 
 def write_manifest(runtime: Path, executable: Path, *, source: Path = SOURCE,
                    renpy_version: str, sdk_sha256: str) -> dict:
@@ -104,7 +216,7 @@ def verify_runtime(runtime: Path, *, source: Path = SOURCE) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Create or verify the prebuilt validation-game manifest')
+    parser = argparse.ArgumentParser(description='Create, acquire or verify the prebuilt validation-game runtime')
     sub = parser.add_subparsers(dest='command', required=True)
 
     create = sub.add_parser('manifest')
@@ -121,6 +233,12 @@ def main() -> int:
     verify.add_argument('--runtime', type=Path, required=True)
     verify.add_argument('--source', type=Path, default=SOURCE)
 
+    stage = sub.add_parser('stage')
+    stage.add_argument('--runtime', type=Path, required=True)
+    stage.add_argument('--cache', type=Path, required=True)
+    stage.add_argument('--source', type=Path, default=SOURCE)
+    stage.add_argument('--wait-seconds', type=int, default=DEFAULT_WAIT_SECONDS)
+
     args = parser.parse_args()
     if args.command == 'source-digest':
         print(source_digest(args.source))
@@ -129,6 +247,9 @@ def main() -> int:
             args.runtime, args.executable, source=args.source,
             renpy_version=args.renpy_version, sdk_sha256=args.sdk_sha256)
         print(json.dumps(result, ensure_ascii=False))
+    elif args.command == 'stage':
+        print(stage_runtime(args.runtime, args.cache, source=args.source,
+                            wait_seconds=args.wait_seconds))
     else:
         print(verify_runtime(args.runtime, source=args.source))
     return 0

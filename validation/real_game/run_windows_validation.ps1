@@ -147,25 +147,10 @@ function Upload-Result([string] $root, [string] $sha) {
     if ($payload -ne $prefix) { Post-Comment $payload }
 }
 function Get-PrebuiltFixture([string] $destination) {
-    $digestLines = @(& python -m validation.real_game.fixture_runtime source-digest)
-    if ($LASTEXITCODE -ne 0 -or $digestLines.Count -ne 1) {
-        throw 'Cannot calculate validation fixture source digest'
-    }
-    $digest = ([string]$digestLines[0]).Trim()
-    if ($digest -notmatch '^[a-f0-9]{64}$') { throw 'Invalid validation fixture source digest' }
-    $asset = "autoadv-validation-game-$digest.zip"
-    $zip = Join-Path $cache $asset
-    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
-        $url = "https://github.com/$repository/releases/download/autoadv-validation-fixtures/$asset"
-        Write-Host "Downloading prebuilt validation game $asset"
-        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-    }
-    if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
-    Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
-    $gameLines = @(& python -m validation.real_game.fixture_runtime verify --runtime $destination)
+    $gameLines = @(& python -m validation.real_game.fixture_runtime stage `
+        --runtime $destination --cache $cache --wait-seconds 600)
     if ($LASTEXITCODE -ne 0 -or $gameLines.Count -ne 1) {
-        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-        throw 'Prebuilt validation game verification failed'
+        throw 'Prebuilt validation game staging failed'
     }
     return ([string]$gameLines[0]).Trim()
 }

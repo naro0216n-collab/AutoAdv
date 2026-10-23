@@ -61,7 +61,7 @@ RealAudioはFast CI、Windows Adapter Validation、AutoAdv Live Advancement、�
 
 ## Prebuilt validation game
 
-`validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。fixtureを変更した場合はValidation Fixture Runtimeを明示実行して対応assetを生成する。通常publishやFast CIから重量級fixture buildを自動連鎖させない。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
+`validation/real_game/renpy/game/` が検証ゲームの正準ソースである。実行用fixtureは `.github/workflows/validation-fixture.yml` がこのソースから独立に生成し、専用のpre-release `autoadv-validation-fixtures` へソースSHA-256を含むZIPとして保存する。fixture構築入力または配布契約が`develop`へpublishされた場合だけPublish GatewayがValidation Fixture Runtimeを明示dispatchし、通常の製品publishやFast CIでは重量級fixture buildを反復しない。`workflow_dispatch`は欠損asset再生成用の回復経路である。Windows実機RealAudioは`python -m validation.real_game.fixture_runtime stage`を使用し、現行ソースdigestに対応するassetがpublish直後でまだ生成中なら一定時間待機した上で、同一assetだけを取得・展開・manifest照合する。release名、asset命名、URL組立はこのPython契約が所有し、PowerShell launcherへ重複させない。このpre-releaseはAutoAdv製品のversionやreleaseではなく、検証用binaryの固定保管場所である。
 
 Live Advancement workflowは現行fixtureソースSHA-256と一致するassetだけを取得し、`fixture-manifest.json` では次の最小条件だけを確認してからゲームを起動する。
 
@@ -120,8 +120,8 @@ python -m validation.real_game.stress_asr `
 
 ## GitHub上の実行経路
 
-- `develop` push: Fast CI。fixtureや実ゲームを起動しない。
-- fixture構築入力の変更時: Validation Fixture Runtime。専用pre-releaseへprebuilt game assetを生成する。AutoAdvの合否判定はしない。
+- `develop` publish: Publish GatewayがFast CIを明示dispatchする。fixture構築入力に差分がある場合だけValidation Fixture Runtimeも明示dispatchし、通常の変更ではfixtureや実ゲームを起動しない。
+- fixture構築入力の変更時: Validation Fixture Runtimeが専用pre-releaseへprebuilt game assetを生成する。AutoAdvの合否判定はしない。`workflow_dispatch`は欠損assetの回復用。
 - 検証用draft PRの close → reopen: Windows Adapter Validation。
 - PRタイトルへ `[RUN LUNA NATIVE]` を付ける編集: Luna Native Source and ABI Validation。
 - PRタイトルを `[RUN AUTOADV LIVE]...` にする編集: AutoAdv Live Advancement。prebuilt fixtureを取得し、Hostedの`reading`実製品経路だけを実行する。
