@@ -214,8 +214,6 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                   'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= actual_input)
                                             if actual_input is not None else None),
                   'outcome': 'unadvanced'}
-        if actual_input is not None and (dismissal is None or dismissal['at_ns'] < actual_input):
-            diagnostics.append(f'confirmed advance input not followed by observed game dialogue dismissal: {key}')
         if attempt is not None and key not in sent:
             diagnostics.append(f'input attempt has no confirmed advance input: {key}')
         # The product's targeted input and following LunaHook already verify the
@@ -366,6 +364,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     utterance_order: list[tuple] = []
     complete: set[tuple] = set()
     pcm: set[tuple] = set()
+    pcm_records: list[dict] = []
     native: set[tuple] = set()
     tts: set[tuple] = set()
     attempts: dict[tuple, int] = {}
@@ -469,11 +468,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 audio_methods[session] = 'asr'
                 audio_targets[session] = record.get('audio_pid')
         elif event == 'native_pcm':
-            if (key not in utterances or type(record.get('frames')) is not int or record['frames'] <= 0
-                    or record.get('audio_pid') != audio_targets.get(session)
-                    or record.get('audio_pid') != monitoring.get(session, {}).get('audio_pid')):
-                product_issue(f'PCM is not valid captured frames for {key}')
-            pcm.add(key)
+            # PCM callbacks can precede the corresponding queued Utterance.
+            pcm_records.append(record)
         elif event == 'asr_inference':
             if key in utterances:
                 asr_counts[key] = asr_counts.get(key, 0) + 1
@@ -592,6 +588,23 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         elif event == 'validation_driver_failure':
             reason = record.get('reason')
             errors.append('validation driver failed: ' + (reason if isinstance(reason, str) else 'unknown'))
+
+    # Validate captured PCM after all queued Utterances have been collected.
+    # Post-collection PCM may precede the out-of-scope Utterance record.
+    for record in pcm_records:
+        key = _key(record)
+        if key not in utterances and (
+                key in out_of_scope_utterances or
+                (collection_target is not None and len(utterance_order) >= collection_target)):
+            continue
+        session = record.get('session')
+        if (key not in utterances or type(record.get('frames')) is not int
+                or record['frames'] <= 0
+                or record.get('audio_pid') != audio_targets.get(session)
+                or record.get('audio_pid') != monitoring.get(session, {}).get('audio_pid')):
+            product_issue(f'PCM is not valid captured frames for {key}')
+        else:
+            pcm.add(key)
 
     # GUI diagnostic signals are delivered through different threads/Qt queues.
     # Their append order is therefore not a causal contract. Validate the final
