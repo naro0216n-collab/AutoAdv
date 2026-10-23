@@ -14,6 +14,21 @@ from validation.real_game.trace import ValidationTrace
 from autoadv.voice import VoiceJobs
 
 
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        from autoadv.audio_match import surface_key
+        from autoadv.g2p import PronunciationCandidate
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+TEST_G2P = IdentityG2P()
+
+def test_native_audio(*args, **kwargs):
+    kwargs.setdefault('g2p', TEST_G2P)
+    return NativeAudio(*args, **kwargs)
+
+
 class PerformanceObservationTests(unittest.TestCase):
     def test_concurrent_trace_writers_keep_monotonic_sequence(self):
         with TemporaryDirectory() as root:
@@ -42,7 +57,7 @@ class PerformanceObservationTests(unittest.TestCase):
                 return type('Status', (), {'frames_analyzed': True,
                     'active': True, 'tail_silence_ms': 0})()
         self_test = self
-        native = NativeAudio(101, Path('unused'), Path('unused'), Path('unused'),
+        native = test_native_audio(101, Path('unused'), Path('unused'), Path('unused'),
                              lambda *_: None, recognizer=Recognizer(), activity=Activity(),
                              on_inference=lambda ticket, measurements: reports.append((ticket, measurements)))
         try:

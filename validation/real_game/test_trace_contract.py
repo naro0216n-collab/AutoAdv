@@ -42,9 +42,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
                 'vad_tail_ms': 0,
             })
             app.observer('voice_assessment', token, {
-                'state': 'playing', 'method': 'asr',
-                'target_correlated': True, 'target_complete': False,
-                'endpoint_source': '',
+                'state': 'playing', 'method': 'asr', 'endpoint_source': '',
             })
             records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
             raw = next(record for record in records if record['event'] == 'asr_inference')
@@ -52,8 +50,6 @@ class EvidenceIntegrityTests(unittest.TestCase):
             self.assertEqual(raw['phonetic_coverage'], .75)
             self.assertNotIn('state', raw)
             self.assertEqual(judged['state'], 'playing')
-            self.assertTrue(judged['target_correlated'])
-            self.assertFalse(judged['target_complete'])
             self.assertNotIn('phonetic_coverage', judged)
 
     def test_no_actual_autoadv_events_is_always_unverified(self):

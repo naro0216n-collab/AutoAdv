@@ -66,14 +66,6 @@ class HaqumeiG2P:
 
 
 @lru_cache(maxsize=1)
-def default_g2p() -> G2PBackend | None:
-    """Return Haqumei when installed, otherwise retain surface-only tooling.
-
-    The product native-audio path constructs Haqumei explicitly, so a missing
-    or broken native dependency fails readiness instead of silently degrading.
-    Core tests and non-native utilities may intentionally run without it.
-    """
-    try:
-        return HaqumeiG2P()
-    except ImportError:
-        return None
+def default_g2p() -> G2PBackend:
+    """Return the product Japanese G2P backend; missing readiness is an error."""
+    return HaqumeiG2P()

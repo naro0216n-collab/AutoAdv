@@ -6,9 +6,20 @@ import unittest
 from unittest.mock import patch
 
 from autoadv.native_audio import ASRResult
+from autoadv.audio_match import surface_key
+from autoadv.g2p import PronunciationCandidate
 
 from validation.real_game.benchmark_asr import _degrade, _edit_distance, run
 from autoadv import native_runtime
+
+
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+TEST_G2P = IdentityG2P()
 
 
 class OnDemandBenchmarkContracts(unittest.TestCase):
@@ -47,7 +58,8 @@ class OnDemandBenchmarkContracts(unittest.TestCase):
             model, tokens = Path(root) / 'model', Path(root) / 'tokens'
             model.write_bytes(b'model placeholder')
             tokens.write_bytes(b'tokens placeholder')
-            with patch('validation.real_game.benchmark_asr.JapaneseASR', FakeRecognizer):
+            with patch('validation.real_game.benchmark_asr.JapaneseASR', FakeRecognizer), \
+                 patch('autoadv.g2p.default_g2p', return_value=TEST_G2P):
                 report = run(model, tokens, conditions=('clean',), rounds=1, seed=10)
             self.assertEqual(report['conditions']['clean']['runs'], 14)
             self.assertEqual(len(report['samples']), 14)

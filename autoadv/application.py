@@ -1186,8 +1186,6 @@ class AutoAdvApplication:
                 return
             self._emit_runtime_event(
                 'voice_assessment', token, state=assessment.state.value, method='asr',
-                target_correlated=assessment.target_correlated,
-                target_complete=assessment.target_complete,
                 endpoint_source=assessment.endpoint_source)
             if assessment.state.value == 'ended' and assessment.estimated_end_ms is not None:
                 self._emit_telemetry(

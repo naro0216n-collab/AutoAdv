@@ -92,18 +92,10 @@ class NativeAudio:
             self.DEFAULT_REPLAY_HISTORY_MS,
             int(replay_lookback_ms) + self.CAPTURE_HISTORY_MARGIN_MS))
         self.asr = recognizer if recognizer is not None else JapaneseASR(model, tokens)
-        if g2p is not None:
-            self.g2p = g2p
-        elif recognizer is None:
-            # Product native-audio readiness includes the initial Japanese G2P
-            # backend. A missing native dependency must not silently change the
-            # matching contract to surface-only text.
-            from .g2p import HaqumeiG2P
-            self.g2p = HaqumeiG2P()
-        else:
-            # Unit/investigation recognizers can explicitly exercise the
-            # surface-only fallback without installing native extras.
-            self.g2p = None
+        if g2p is None:
+            from .g2p import default_g2p
+            g2p = default_g2p()
+        self.g2p = g2p
         self.activity = activity or VoiceActivity()
         self._lock = RLock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='autoadv-asr')
@@ -532,12 +524,9 @@ class NativeAudio:
                     'queue_ms': round(max(0, started_ns - submitted_ns) / 1_000_000, 3),
                     'decode_ms': round(max(0, decoded_ns - started_ns) / 1_000_000, 3),
                     'audio_ms': round(audio_ms, 3),
-                    'coverage': round(a.coverage, 4),
                     'phonetic_coverage': round(a.phonetic_coverage, 4),
-                    'matched_chars': a.matched_chars,
-                    'matched_phonemes': a.matched_phonemes,
-                    'edit_count': a.edit_count,
-                    'phonetic_edit_count': a.phonetic_edit_count,
+                    'matched_phonemes': a.phonetic_matches,
+                    'phonetic_edit_count': a.phonetic_edits,
                     'reading_rank': a.reading_rank,
                     'asr_token_timestamp_count': len(result.timestamps),
                     'target_token_count': a.observed_token_count,

@@ -110,7 +110,7 @@ def run(model: Path, tokens: Path, *, conditions: tuple[str, ...], rounds: int, 
                     'phonetic_coverage': round(alignment.phonetic_coverage, 4),
                     'phonetic_matches': alignment.phonetic_matches,
                     'phonetic_target_units': alignment.phonetic_target_units,
-                    'phonetic_edit_count': alignment.phonetic_edit_count,
+                    'phonetic_edit_count': alignment.phonetic_edits,
                     'reading_rank': alignment.reading_rank,
                     'recognized_hash': hashlib.sha256(actual.encode('utf-8')).hexdigest(),
                 })

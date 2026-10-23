@@ -3,8 +3,18 @@ import unittest
 
 from autoadv.audio_evidence import VoiceEvidence, VoiceState, assess_voice
 from autoadv.audio_match import TargetMatcher, surface_key
+from autoadv.g2p import PronunciationCandidate
 from autoadv.conversation import Controller, Target
 from autoadv.model import Profile, AdvanceMode, HookSelection
+
+
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+IDENTITY_G2P = IdentityG2P()
 
 
 def evidence(alignment, *, target_last_token_ms=None, target_boundary_ms=None,
@@ -22,7 +32,7 @@ def evidence(alignment, *, target_last_token_ms=None, target_boundary_ms=None,
 
 class ASRCues(unittest.TestCase):
     def test_corrected_partial_transcript_changes_raw_alignment(self):
-        matcher = TargetMatcher('おはようございます', g2p=None)
+        matcher = TargetMatcher('おはようございます', g2p=IDENTITY_G2P)
         first = matcher.align('おはおう')
         second = matcher.align('おはようござ')
         third = matcher.align('おはようございます')
@@ -31,41 +41,40 @@ class ASRCues(unittest.TestCase):
         self.assertEqual(third.phonetic_prefix_units, third.phonetic_target_units)
 
     def test_single_omission_and_substitution_remain_raw_alignment_measurements(self):
-        deletion = TargetMatcher('えっ嘘でしょ', g2p=None).align('え嘘でしょ')
-        self.assertEqual(deletion.matched_chars, 5)
-        self.assertEqual(deletion.edit_count, 1)
-        substitution = TargetMatcher('ヒューズが飛んだ', g2p=None).align('シューズが飛んだ')
-        self.assertEqual(substitution.edit_count, 1)
+        deletion = TargetMatcher('えっ嘘でしょ', g2p=IDENTITY_G2P).align('え嘘でしょ')
+        self.assertEqual(deletion.phonetic_matches, 5)
+        self.assertEqual(deletion.phonetic_edits, 1)
+        substitution = TargetMatcher('ヒューズが飛んだ', g2p=IDENTITY_G2P).align('シューズが飛んだ')
+        self.assertEqual(substitution.phonetic_edits, 1)
 
     def test_prefix_only_and_background_lead_in_remain_distinct_alignments(self):
-        partial = TargetMatcher('今日は晴れです', g2p=None).align('今日は')
+        partial = TargetMatcher('今日は晴れです', g2p=IDENTITY_G2P).align('今日は')
         self.assertLess(partial.phonetic_prefix_units, partial.phonetic_target_units)
-        noise = TargetMatcher('おはようございます', g2p=None).align('別の台詞ですおはようございます')
-        self.assertGreater(noise.phonetic_edit_count, 0)
+        noise = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('別の台詞ですおはようございます')
+        self.assertGreater(noise.phonetic_edits, 0)
 
     def test_complete_target_without_endpoint_is_inconclusive(self):
-        alignment = TargetMatcher('はい', g2p=None).align('はい')
+        alignment = TargetMatcher('はい', g2p=IDENTITY_G2P).align('はい')
         assessed = assess_voice(evidence(alignment))
         self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
-        self.assertTrue(assessed.target_complete)
 
     def test_following_token_bounds_completed_target(self):
-        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようございます')
+        alignment = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('おはようございます')
         assessed = assess_voice(evidence(
             alignment, target_last_token_ms=800, target_boundary_ms=900))
         self.assertEqual(assessed.state, VoiceState.ENDED)
         self.assertEqual(assessed.estimated_end_ms, 900)
 
     def test_target_progress_without_endpoint_is_playing(self):
-        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようござ')
+        alignment = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('おはようござ')
         assessed = assess_voice(evidence(
             alignment, target_last_token_ms=800, target_progressed=True))
         self.assertEqual(assessed.state, VoiceState.PLAYING)
 
-    def test_surface_only_fallback_does_not_invent_kanji_reading(self):
-        matcher = TargetMatcher('東京へ行く', g2p=None)
+    def test_unconfigured_reading_does_not_match_by_surface_fallback(self):
+        matcher = TargetMatcher('東京へ行く', g2p=IDENTITY_G2P)
         alignment = matcher.align('とうきょうへいく')
-        self.assertLess(alignment.coverage, 1)
+        self.assertLess(alignment.phonetic_coverage, 1)
         self.assertEqual(surface_key('「……」'), '')
         p = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
                     uncertain_text_fallback=True,

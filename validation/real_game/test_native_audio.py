@@ -22,6 +22,21 @@ GAME = Path(__file__).parent / "renpy" / "game"
 MANIFEST = Path(__file__).parent / "VOICE_MANIFEST.json"
 
 
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        from autoadv.audio_match import surface_key
+        from autoadv.g2p import PronunciationCandidate
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+TEST_G2P = IdentityG2P()
+
+def test_native_audio(*args, **kwargs):
+    kwargs.setdefault('g2p', TEST_G2P)
+    return NativeAudio(*args, **kwargs)
+
+
 def _wait_for_inference(native: NativeAudio) -> None:
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -37,7 +52,7 @@ def replay_pcm_into_real_native_activity(file: Path, token: Token):
     import numpy as np
     errors = []
     evidence = []
-    native = NativeAudio(
+    native = test_native_audio(
         42, Path("not-used-for-offline-samples.dll"),
         Path("unused-asr.onnx"), Path("unused-asr.tokens"),
         lambda t, reason: errors.append((t, reason)),
@@ -101,7 +116,7 @@ class RealRecordedAudioContracts(unittest.TestCase):
         errors = []
         evidence = []
         observed_pcm = []
-        native = NativeAudio(
+        native = test_native_audio(
             42, Path("not-used.dll"), Path("unused.onnx"), Path("unused.tokens"),
             lambda token, reason: errors.append((token, reason)),
             recognizer=SimpleNamespace(recognize=lambda _: ''),

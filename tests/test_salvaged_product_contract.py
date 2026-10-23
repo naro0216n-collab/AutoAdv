@@ -14,9 +14,23 @@ from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
 from autoadv.audio_match import TargetMatcher, surface_key, VADDecision
+from autoadv.g2p import PronunciationCandidate
 from autoadv.audio_evidence import VoiceState, assess_voice
 from autoadv.audio_buffer import PCMChunk
 from autoadv.native_audio import NativeAudio
+
+
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+TEST_G2P = IdentityG2P()
+
+def test_native_audio(*args, **kwargs):
+    kwargs.setdefault('g2p', TEST_G2P)
+    return NativeAudio(*args, **kwargs)
 
 
 class SalvagedTextTests(unittest.TestCase):
@@ -139,12 +153,12 @@ class AcquisitionAndInputTests(unittest.TestCase):
             Controller(lambda *_: None, lambda _: True).begin(p, Target(11, 22), 'h', 1)
 
     def test_target_matcher_does_not_complete_unrelated_or_unstable_voice(self):
-        m = TargetMatcher('おはようございます', g2p=None)
-        self.assertLess(m.align('明日').coverage, .9)
-        m2 = TargetMatcher('おはよう', g2p=None)
+        m = TargetMatcher('おはようございます', g2p=TEST_G2P)
+        self.assertLess(m.align('明日').phonetic_coverage, .9)
+        m2 = TargetMatcher('おはよう', g2p=TEST_G2P)
         a = m2.align('おはよう')
         b = m2.align('おはよう')
-        self.assertGreaterEqual(b.coverage, .9)
+        self.assertGreaterEqual(b.phonetic_coverage, .9)
         self.assertEqual(a, b)
 
 
@@ -158,7 +172,7 @@ class NativeAudioSessionTests(unittest.TestCase):
                 pass
             def observe_float32_stereo(self, frames):
                 return VADDecision(False, 0)
-        audio = NativeAudio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
+        audio = test_native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
                             lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 3000)
         from autoadv.conversation import Token
         try:
@@ -183,9 +197,9 @@ class NativeAudioSessionTests(unittest.TestCase):
                 self.index += 1
                 return VADDecision(self.index == 1, 300 if self.index > 1 else 0)
         assessments = []
-        audio = NativeAudio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
+        audio = test_native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
                  lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 1000,
-                 g2p=None, on_evidence=lambda token, e: assessments.append((token, assess_voice(e).state)))
+                 g2p=TEST_G2P, on_evidence=lambda token, e: assessments.append((token, assess_voice(e).state)))
         from autoadv.conversation import Token
         token = Token(1, 2)
         try:

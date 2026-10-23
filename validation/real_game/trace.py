@@ -111,8 +111,6 @@ class ProductTraceObserver:
             self.trace.emit(
                 'voice_assessment', session=token.session, line=token.line,
                 state=detail.get('state', ''), method=detail.get('method', 'asr'),
-                target_correlated=bool(detail.get('target_correlated', False)),
-                target_complete=bool(detail.get('target_complete', False)),
                 endpoint_source=detail.get('endpoint_source', ''))
             return
 

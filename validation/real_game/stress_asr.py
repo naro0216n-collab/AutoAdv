@@ -113,7 +113,7 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
                 'phonetic_coverage': round(alignment.phonetic_coverage, 4),
                 'phonetic_matches': alignment.phonetic_matches,
                 'phonetic_target_units': alignment.phonetic_target_units,
-                'phonetic_edit_count': alignment.phonetic_edit_count,
+                'phonetic_edit_count': alignment.phonetic_edits,
                 'reading_rank': alignment.reading_rank,
                 'cer': round(_edit_distance(target, transcript) / max(1, len(target)), 4)
                         if lexical else None,

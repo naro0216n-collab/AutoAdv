@@ -7,9 +7,20 @@ import unittest
 from unittest.mock import patch
 
 from autoadv.native_audio import ASRResult
+from autoadv.audio_match import surface_key
+from autoadv.g2p import PronunciationCandidate
 
 from validation.real_game import stress_asr
 from validation.real_game.stress_asr import STRESS, VOICE
+
+
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+TEST_G2P = IdentityG2P()
 
 
 class StressScenarios(unittest.TestCase):
@@ -81,7 +92,8 @@ class StressScenarios(unittest.TestCase):
             model, tokens = Path(tmp) / 'model', Path(tmp) / 'tokens'
             model.write_bytes(b'fake-model-only-for-checker')
             tokens.write_bytes(b'fake-tokens-only-for-checker')
-            with patch.object(stress_asr, 'JapaneseASR', BackgroundRecognizer):
+            with patch.object(stress_asr, 'JapaneseASR', BackgroundRecognizer), \
+                 patch('autoadv.g2p.default_g2p', return_value=TEST_G2P):
                 data = stress_asr.run(model, tokens, selection='background')
             case = next(c for c in data['cases'] if c['id'] == 'background_only_same_text')
             self.assertEqual(case['attribution'], 'unverified')

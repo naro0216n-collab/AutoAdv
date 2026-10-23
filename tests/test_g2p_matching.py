@@ -60,9 +60,8 @@ class PhoneticMatcherTests(unittest.TestCase):
             'とうきょうへいく': [PronunciationCandidate(phones)],
         })
         progress = TargetMatcher('東京へ行く', g2p=g2p).align('とうきょうへいく')
-        self.assertLess(progress.coverage, .5)
         self.assertEqual(progress.phonetic_coverage, 1)
-        self.assertEqual(progress.phonetic_edit_count, 0)
+        self.assertEqual(progress.phonetic_edits, 0)
 
     def test_dictionary_alternative_handles_context_reading_mismatch_without_unbounded_onkun(self):
         shijou = ('sh', 'i', 'j', 'o', 'o', 'e', 'i', 'k', 'u')
@@ -74,7 +73,7 @@ class PhoneticMatcherTests(unittest.TestCase):
         progress = TargetMatcher('市場へ行く', g2p=g2p).align('いちばへいく')
         self.assertEqual(progress.reading_rank, 1)
         self.assertEqual(progress.phonetic_coverage, 1)
-        self.assertEqual(progress.phonetic_edit_count, 0)
+        self.assertEqual(progress.phonetic_edits, 0)
 
     def test_trailing_background_is_excluded_by_asr_token_endpoint(self):
         g2p = RuleG2P()
@@ -88,8 +87,8 @@ class PhoneticMatcherTests(unittest.TestCase):
         g2p = RuleG2P()
         tokens = tuple('別のえっうそでしょ')
         progress = TargetMatcher('えっ嘘でしょ', g2p=g2p).align(''.join(tokens), tokens=tokens)
-        self.assertGreater(progress.phonetic_edit_count, 0)
-        self.assertGreater(progress.phonetic_edit_count, 0)
+        self.assertGreater(progress.phonetic_edits, 0)
+        self.assertGreater(progress.phonetic_edits, 0)
 
 
 

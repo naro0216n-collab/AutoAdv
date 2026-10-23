@@ -13,6 +13,21 @@ from autoadv.audio_match import VADDecision
 from autoadv.audio_evidence import VoiceState, assess_voice
 
 
+class IdentityG2P:
+    def candidates(self, text, *, max_candidates=4):
+        from autoadv.audio_match import surface_key
+        from autoadv.g2p import PronunciationCandidate
+        units = tuple(surface_key(text))
+        return (PronunciationCandidate(units),) if units and max_candidates else ()
+
+
+TEST_G2P = IdentityG2P()
+
+def test_native_audio(*args, **kwargs):
+    kwargs.setdefault('g2p', TEST_G2P)
+    return NativeAudio(*args, **kwargs)
+
+
 TEXT = ThreadSource(31, 0x100, 1, 2, 'HT', 'text')
 SPEAKER = ThreadSource(31, 0x200, 3, 4, 'HS', 'speaker')
 
@@ -91,7 +106,7 @@ class MultiHookProductContract(unittest.TestCase):
 class NativeRecognitionContract(unittest.TestCase):
     def test_asr_model_and_tokens_are_required_without_injected_recognizer(self):
         with self.assertRaises(FileNotFoundError):
-            NativeAudio(31, Path('unused.dll'), Path('missing.onnx'),
+            test_native_audio(31, Path('unused.dll'), Path('missing.onnx'),
                         Path('missing.tokens'), lambda *_: None)
 
     def test_vad_activity_and_silence_cannot_complete_without_matching_asr(self):
@@ -107,10 +122,10 @@ class NativeRecognitionContract(unittest.TestCase):
             def recognize(self, _samples):
                 return ''
 
-        audio = NativeAudio(31, Path('unused.dll'), Path('missing.onnx'),
+        audio = test_native_audio(31, Path('unused.dll'), Path('missing.onnx'),
                             Path('missing.tokens'), lambda *_: None,
                             activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0,
-                            g2p=None, on_evidence=lambda _t, e: assessments.append(assess_voice(e).state))
+                            g2p=TEST_G2P, on_evidence=lambda _t, e: assessments.append(assess_voice(e).state))
         try:
             audio.begin(Token(1, 1), '台詞')
             for ms in (100, 500, 1000):
