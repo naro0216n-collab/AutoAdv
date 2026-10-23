@@ -51,7 +51,7 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
 
 ## 標準Windows runtime
 
-ASR/G2P/Process Loopbackを検証専用環境として持たない。通常の`AutoAdv.cmd`は`%LOCALAPPDATA%\AutoAdv\runtime`にAutoAdv管理runtimeを準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定SenseVoice model/tokensを自動配置する。Process Loopback helperも同じ管理領域へhelperソースdigest単位で配置し、既に成立しているruntimeを毎回再構築しない。
+ASR/G2P/Process Loopbackを検証専用環境として持たない。通常の`AutoAdv.cmd`は`%LOCALAPPDATA%\AutoAdv\runtime`にAutoAdv管理runtimeを準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定SenseVoice model/tokensを自動配置する。Process Loopback helperも同じ管理領域へhelperソースdigest単位の自己完結Windows実行資産として配置し、利用者PCではcompileせず、既に成立しているruntimeを再取得しない。
 
 ASRの固定repository/revision/SHA-256は`autoadv.native_runtime`が所有する。精度計測、ASR benchmark、通常製品は同じmanaged model/tokensを使用し、検証専用ASR downloaderや第二の配置正本を持たない。個別パスは必要な場合だけ詳細設定から上書きできる。
 

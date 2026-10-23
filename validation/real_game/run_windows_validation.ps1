@@ -245,7 +245,7 @@ try {
     try { $runtimeInfo = ($runtimeLines | Select-Object -Last 1) | ConvertFrom-Json }
     catch { throw "Standard AutoAdv runtime result cannot be parsed: $($_.Exception.Message)" }
     $python = [string]$runtimeInfo.python
-    $managedHelper = [string]$runtimeInfo.native.paths.helper_dll
+    $managedHelper = [string]$runtimeInfo.native.paths.helper_executable
     $managedAsrModel = [string]$runtimeInfo.native.paths.asr_model
     $managedAsrTokens = [string]$runtimeInfo.native.paths.asr_tokens
     foreach ($required in @($python, $managedHelper, $managedAsrModel, $managedAsrTokens)) {

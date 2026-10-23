@@ -533,7 +533,7 @@ def test_application_resolves_managed_native_runtime_when_profile_overrides_are_
             return {'packets': 0}
 
     managed = SimpleNamespace(
-        helper_dll='C:/AutoAdv/runtime/native/loopback/helper.dll',
+        helper_executable='C:/AutoAdv/runtime/native/loopback/AutoAdv.ProcessLoopback.exe',
         asr_model='C:/AutoAdv/runtime/native/asr/model.int8.onnx',
         asr_tokens='C:/AutoAdv/runtime/native/asr/tokens.txt',
     )
@@ -553,7 +553,7 @@ def test_application_resolves_managed_native_runtime_when_profile_overrides_are_
 
     assert app.activate_selected_target() == 'monitoring'
     native = FakeNative.instances[-1]
-    assert str(native.helper) == managed.helper_dll
+    assert str(native.helper) == managed.helper_executable
     assert str(native.model) == managed.asr_model
     assert str(native.tokens) == managed.asr_tokens
     assert app.native_audio_available

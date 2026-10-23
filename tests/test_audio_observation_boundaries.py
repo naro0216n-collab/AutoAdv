@@ -44,7 +44,7 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
                 self.stdout.q.put(b'')
 
         def new_capture(proc, observed):
-            return ProcessCapture(11, Path('helper.dll'), AudioHistory(),
+            return ProcessCapture(11, Path('helper.exe'), AudioHistory(),
                                   lambda _: None, observed.append, clock=lambda: 1000)
 
         # A Popen success is insufficient: the WASAPI helper must send its
@@ -53,12 +53,15 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
         observed = []
         with patch.object(process_audio.sys, 'platform', 'win32'), \
              patch.object(Path, 'is_file', return_value=True), \
-             patch.object(process_audio.subprocess, 'Popen', return_value=normal), \
+             patch.object(process_audio.subprocess, 'Popen', return_value=normal) as popen, \
              patch.object(process_audio.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
             capture = new_capture(normal, observed)
             try:
                 capture.start()
                 self.assertTrue(any(h.healthy for h in observed))
+                command = popen.call_args.args[0]
+                self.assertEqual(command, ['helper.exe', '--pid', '11'])
+                self.assertNotIn('dotnet', command)
             finally:
                 capture.close()
 

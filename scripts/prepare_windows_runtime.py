@@ -40,7 +40,7 @@ def ensure_environment(repo: Path, root: Path) -> Path:
     if installed != expected:
         subprocess.run([
             str(python), "-m", "pip", "install", "--disable-pip-version-check",
-            ".[gui,audio,ocr,native]",
+            "--only-binary=:all:", ".[gui,audio,ocr,native]",
         ], cwd=repo, check=True)
         marker.write_text(json.dumps({"fingerprint": expected}, indent=2) + "\n", encoding="utf-8")
     return python

@@ -48,13 +48,13 @@ def read_packet(stream: BinaryIO) -> tuple[int, PCMChunk | None]:
 
 
 class ProcessCapture:
-    def __init__(self, pid: int, helper_dll: Path, history: AudioHistory,
+    def __init__(self, pid: int, helper_executable: Path, history: AudioHistory,
                  on_chunk: Callable[[PCMChunk], None],
                  on_health: Callable[[CaptureHealth], None],
                  clock: Callable[[], int] = lambda: time.monotonic_ns() // 1_000_000):
         if pid <= 0:
             raise ValueError('target PID required')
-        self.pid, self.helper_dll, self.history = pid, helper_dll, history
+        self.pid, self.helper_executable, self.history = pid, helper_executable, history
         self.on_chunk, self.on_health, self.clock = on_chunk, on_health, clock
         self.stop_requested = Event()
         self.process: subprocess.Popen | None = None
@@ -64,13 +64,13 @@ class ProcessCapture:
         self._startup_failure: str | None = None
 
     def start(self) -> None:
-        if sys.platform != 'win32' or not self.helper_dll.is_file():
-            raise OSError('Windows and built process-loopback helper required')
+        if sys.platform != 'win32' or not self.helper_executable.is_file():
+            raise OSError('Windows and managed process-loopback helper required')
         if self.process is not None:
             raise RuntimeError('capture already started')
         self.history.start(self.pid)
         self.process = subprocess.Popen(
-            ['dotnet', str(self.helper_dll), '--pid', str(self.pid)],
+            [str(self.helper_executable), '--pid', str(self.pid)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )

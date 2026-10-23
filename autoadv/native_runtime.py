@@ -13,10 +13,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
-import subprocess
 import tempfile
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ASR_REPOSITORY = "twmht/sherpa-onnx-sense-voice-small"
 ASR_REVISION = "229c9743cc68c051d09a49aa07fa88b1d4463465"
@@ -29,11 +27,9 @@ HELPER_FILES = (
     "integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj",
     "integrations/windows-loopback/Program.cs",
 )
-HELPER_REQUIRED_OUTPUTS = (
-    "AutoAdv.ProcessLoopback.dll",
-    "AutoAdv.ProcessLoopback.deps.json",
-    "AutoAdv.ProcessLoopback.runtimeconfig.json",
-)
+RUNTIME_RELEASE_REPOSITORY = "naro0216n-collab/AutoAdv"
+RUNTIME_RELEASE_TAG = "autoadv-runtime-assets"
+HELPER_MAX_BYTES = 160 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -41,7 +37,7 @@ class NativeRuntimePaths:
     root: str
     asr_model: str
     asr_tokens: str
-    helper_dll: str
+    helper_executable: str
     helper_digest: str
 
 
@@ -89,7 +85,7 @@ def managed_paths(*, repo_root: Path | None = None,
         root=str(runtime_root),
         asr_model=str(asr_root / "model.int8.onnx"),
         asr_tokens=str(asr_root / "tokens.txt"),
-        helper_dll=str(helper_root / "AutoAdv.ProcessLoopback.dll"),
+        helper_executable=str(helper_root / "AutoAdv.ProcessLoopback.exe"),
         helper_digest=digest,
     )
 
@@ -141,57 +137,86 @@ def verify_g2p() -> dict:
     return {"backend": "haqumei", "ready": True}
 
 
-def _dotnet_build_command(repo_root: Path, output: Path, intermediate: Path) -> list[str]:
-    return [
-        "dotnet", "build",
-        str(repo_root / "integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj"),
-        "--configuration", "Release", "--nologo", "--output", str(output),
-        f"-p:BaseIntermediateOutputPath={intermediate}{os.sep}",
-    ]
+def _helper_asset_names(digest: str) -> tuple[str, str]:
+    base = f"AutoAdv.ProcessLoopback-{digest}-win-x64"
+    return base + ".exe", base + ".json"
+
+
+def _runtime_asset_url(filename: str) -> str:
+    return (f"https://github.com/{RUNTIME_RELEASE_REPOSITORY}/releases/download/"
+            f"{RUNTIME_RELEASE_TAG}/{filename}")
+
+
+def _download_bytes(url: str, *, max_bytes: int) -> bytes:
+    request = Request(url, headers={"User-Agent": "AutoAdv-runtime"})
+    chunks = []
+    total = 0
+    with urlopen(request, timeout=90) as response:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("Unexpected managed runtime asset size")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _valid_helper_manifest(manifest: dict, *, digest: str, filename: str) -> bool:
+    return (manifest.get("schema") == "autoadv-process-loopback-runtime-v1" and
+            manifest.get("source_digest") == digest and
+            manifest.get("filename") == filename and
+            isinstance(manifest.get("sha256"), str) and len(manifest["sha256"]) == 64 and
+            isinstance(manifest.get("size_bytes"), int) and
+            0 < manifest["size_bytes"] <= HELPER_MAX_BYTES)
 
 
 def prepare_helper(*, repo_root: Path | None = None,
-                   runtime_root: Path | None = None) -> dict:
+                   runtime_root: Path | None = None,
+                   allow_download: bool = True) -> dict:
     repo_root = (repo_root or default_repo_root()).resolve()
     paths = managed_paths(repo_root=repo_root, runtime_root=runtime_root)
-    helper = Path(paths.helper_dll)
+    helper = Path(paths.helper_executable)
     target = helper.parent
-    if all((target / name).is_file() for name in HELPER_REQUIRED_OUTPUTS):
-        return {"digest": paths.helper_digest, "directory": str(target), "source": "existing"}
-    if os.name != "nt":
-        raise OSError("Process Loopback helper build requires Windows")
-    if shutil.which("dotnet") is None:
-        raise FileNotFoundError(".NET 9 SDK is required for AutoAdv.ProcessLoopback")
-    probe = subprocess.run(["dotnet", "--list-sdks"], capture_output=True, text=True, check=True)
-    if not any(line.lstrip().startswith("9.") for line in probe.stdout.splitlines()):
-        raise RuntimeError(".NET 9 SDK is required for AutoAdv.ProcessLoopback")
+    manifest_path = target / "manifest.json"
+    asset_name, manifest_name = _helper_asset_names(paths.helper_digest)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        shutil.rmtree(target)
-    with tempfile.TemporaryDirectory(prefix="autoadv-loopback-", dir=target.parent) as temp_name:
-        temp = Path(temp_name)
-        output = temp / "out"
-        intermediate = temp / "obj"
-        output.mkdir()
-        intermediate.mkdir()
-        subprocess.run(_dotnet_build_command(repo_root, output, intermediate),
-                       cwd=repo_root, check=True)
-        missing = [name for name in HELPER_REQUIRED_OUTPUTS if not (output / name).is_file()]
-        if missing:
-            raise FileNotFoundError(
-                "Process Loopback build output incomplete: " + ", ".join(missing))
-        target.mkdir(parents=True, exist_ok=True)
-        for item in output.iterdir():
-            destination = target / item.name
-            if item.is_file():
-                shutil.copy2(item, destination)
-            elif item.is_dir():
-                if destination.exists():
-                    shutil.rmtree(destination)
-                shutil.copytree(item, destination)
-    return {"digest": paths.helper_digest, "directory": str(target), "source": "built"}
+    if helper.is_file() and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+        if (_valid_helper_manifest(manifest, digest=paths.helper_digest, filename=asset_name) and
+                helper.stat().st_size == manifest["size_bytes"] and
+                _sha256(helper) == manifest["sha256"]):
+            return {"digest": paths.helper_digest, "directory": str(target),
+                    "source": "existing"}
 
+    if not allow_download:
+        raise FileNotFoundError(f"Managed Process Loopback helper is not installed: {helper}")
+
+    manifest_raw = _download_bytes(_runtime_asset_url(manifest_name), max_bytes=64 * 1024)
+    manifest = json.loads(manifest_raw.decode("utf-8"))
+    if not _valid_helper_manifest(manifest, digest=paths.helper_digest, filename=asset_name):
+        raise ValueError("Managed Process Loopback helper manifest does not match source")
+    payload = _download_bytes(_runtime_asset_url(asset_name), max_bytes=HELPER_MAX_BYTES)
+    if len(payload) != manifest["size_bytes"]:
+        raise ValueError("Managed Process Loopback helper size mismatch")
+    if hashlib.sha256(payload).hexdigest() != manifest["sha256"]:
+        raise ValueError("Managed Process Loopback helper hash mismatch")
+
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target, prefix=".AutoAdv.ProcessLoopback.",
+                                     delete=False) as stream:
+        stream.write(payload)
+        temp = Path(stream.name)
+    try:
+        temp.replace(helper)
+    finally:
+        temp.unlink(missing_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return {"digest": paths.helper_digest, "directory": str(target), "source": "downloaded"}
 
 def prepare(*, repo_root: Path | None = None, runtime_root: Path | None = None,
             allow_download: bool = True, require_helper: bool = True) -> dict:
@@ -202,7 +227,8 @@ def prepare(*, repo_root: Path | None = None, runtime_root: Path | None = None,
     helper = None
     helper_error = None
     try:
-        helper = prepare_helper(repo_root=repo_root, runtime_root=Path(paths.root))
+        helper = prepare_helper(repo_root=repo_root, runtime_root=Path(paths.root),
+                                allow_download=allow_download)
     except Exception as exc:
         if require_helper:
             raise
