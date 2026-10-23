@@ -36,7 +36,6 @@ def main() -> int:
             return
         observer = ProductTraceObserver(trace, window.application)
         observer.install()
-        window._validation_trace_observer = observer
         install(window, app, trace)
 
     QTimer.singleShot(0, attach)
