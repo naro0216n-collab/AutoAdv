@@ -81,9 +81,9 @@ def select_game_window(windows, class_name):
 
 
 class SessionDriver:
-    def __init__(self, window, qt_app, options, *, clock=time.monotonic,
+    def __init__(self, window, qt_app, options, trace, *, clock=time.monotonic,
                  recovery_send=None, recovery_confirm=None):
-        self.w, self.qt_app, self.options = window, qt_app, options
+        self.w, self.qt_app, self.options, self.trace = window, qt_app, options, trace
         self.product = window.application
         self.clock = clock
         self.recovery_send = recovery_send or self._send_validation_recovery
@@ -110,7 +110,7 @@ class SessionDriver:
         )
         print('AutoAdv live test failed [' + self.state + ']: ' + why
               + ' | product state: ' + json.dumps(details, ensure_ascii=False), flush=True)
-        self.w.validation_trace.emit('validation_driver_failure', reason=why,
+        self.trace.emit('validation_driver_failure', reason=why,
                                      stage=self.state, **details)
         self.w.close()
         self.qt_app.exit(3)
@@ -171,14 +171,14 @@ class SessionDriver:
             return True
         if now - pending[3] < .25:
             return True
-        self.w.validation_trace.emit(
+        self.trace.emit(
             'validation_recovery_attempt', session=token.session, line=token.line,
             reason=reason)
         # Establish the known test-only boundary immediately before the forced
         # input, matching the product input/audio-boundary ordering.
         self.recovery_confirm(runtime)
         self.recovery_send(runtime)
-        self.w.validation_trace.emit(
+        self.trace.emit(
             'validation_recovery_input', session=token.session, line=token.line,
             reason=reason)
         self.recovery_pending = None
@@ -292,7 +292,7 @@ class SessionDriver:
                     raise RuntimeError('product process audio did not become ready within 30 seconds')
             elif self.state == 'activate':
                 if not self.collection_target_emitted:
-                    self.w.validation_trace.emit(
+                    self.trace.emit(
                         'validation_collection_target', phase=self.options['phase'],
                         dialogues=int(self.options.get('dialogues', 0)),
                         force_continue_on_failure=bool(
@@ -344,9 +344,9 @@ class SessionDriver:
             self.fail(str(error))
 
 
-def install(window, app):
+def install(window, app, trace):
     from PySide6.QtCore import QTimer
-    driver = SessionDriver(window, app, load_session())
+    driver = SessionDriver(window, app, load_session(), trace)
     timer = QTimer(window)
     timer.setInterval(150)
     timer.timeout.connect(driver.tick)

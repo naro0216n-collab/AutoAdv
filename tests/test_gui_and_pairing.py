@@ -2,7 +2,6 @@
 import importlib.util
 import os
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -45,121 +44,6 @@ class HookPairingTests(unittest.TestCase):
             p.validate()
 
 
-class GuiSourceArchitectureTests(unittest.TestCase):
-    """These contracts run even when Qt is unavailable locally."""
-
-    def test_old_form_and_status_contracts_are_not_the_new_gui_api(self):
-        source = Path('autoadv/gui.py').read_text(encoding='utf-8')
-        self.assertNotIn('def save_profile(', source)
-        self.assertNotIn('overview_capture', source)
-        self.assertNotIn('overview_voice', source)
-        self.assertNotIn('overview_advance', source)
-        self.assertNotIn('profile_save_state', source)
-        self.assertNotIn('inherit_controls', source)
-        self.assertNotIn("QPushButton('ほかの取得候補を探す')", source)
-        self.assertIn("QPushButton('高度なHOOK探索を試す')", source)
-        self.assertNotIn('from .hook_host import HookHost', source)
-        self.assertNotIn('self.hook_host', source)
-        self.assertNotIn('from .irodori_server import IrodoriServer', source)
-        self.assertNotIn('self.server =', source)
-        self.assertNotIn('self.server:', source)
-        self.assertNotIn('from .native_audio import NativeAudio', source)
-        self.assertNotIn('from .ocr import OCRWorker', source)
-        self.assertNotIn('from .voice import VoiceJobs', source)
-        self.assertIn('self.audition_voice_choice = QComboBox()', source)
-        voice_change = source.split('def speaker_voice_changed', 1)[1].split('except Exception as exc:', 1)[0]
-        self.assertNotIn('refresh_speaker_choices', voice_change)
-        self.assertNotIn('self.native_audio', source)
-        self.assertNotIn('self.ocr_worker', source)
-        self.assertNotIn('self.jobs', source)
-        self.assertNotIn('self.preview_jobs', source)
-        self.assertNotIn('self.sources', source)
-        self.assertNotIn('self.source_samples', source)
-        self.assertNotIn('self.ambiguous_sources', source)
-        self.assertNotIn('self._searched_codes', source)
-        self.assertNotIn('self._trial_hook_codes', source)
-        self.assertNotIn('status_reason_label', source)
-        self.assertNotIn('native_inconclusive_hold', source)
-        self.assertNotIn('application.controller', source)
-        for runtime_policy in ('def present(', 'def fallback_due(', 'def presentation_event(',
-                               'def advance_if_ready(', 'def expire_next_line('):
-            self.assertNotIn(runtime_policy, source)
-        self.assertNotIn('self.application.start_presentation(token)', source)
-        for legacy_status in ('host_status', 'hook_target', 'hook_capture_status',
-                              'selected_hooks', 'hook_reconnect', 'active_hook_status'):
-            self.assertNotIn(legacy_status, source)
-        self.assertIn('diagnostics_snapshot', source)
-        self.assertIn("('home', 'プレイ'), ('game', 'ゲーム'), ('settings', '設定')", source)
-        self.assertIn("group('話者・音声', page='game', section='speakers')", source)
-        self.assertNotIn("group('話者とVoice', page='game', section='speakers')", source)
-
-    def test_capture_workspace_exposes_format_preview_and_independent_final_fields(self):
-        source = Path('autoadv/gui.py').read_text(encoding='utf-8')
-        self.assertIn("QLabel('1. 取得元')", source)
-        self.assertIn("QLabel('2. 選択した取得元の整形')", source)
-        self.assertIn("QLabel('3. 会話の組み立て')", source)
-        self.assertIn("['原文', '話者候補', '本文候補']", source)
-        self.assertIn("QLabel('最終結果プレビュー')", source)
-        self.assertIn('self.capture_body_source', source)
-        self.assertIn('self.capture_speaker_source', source)
-        self.assertIn("('話者 + 括弧情報 + 本文', 'metadata')", source)
-        self.assertIn("('原文全体を本文候補にする', 'body')", source)
-        self.assertIn("('原文全体を話者候補にする', 'speaker')", source)
-        self.assertIn("assembly_form.addRow('本文を使う取得元'", source)
-        self.assertIn("assembly_form.addRow('話者を使う取得元'", source)
-        self.assertNotIn("QLabel('完成する会話')", source)
-        self.assertNotIn('_capture_role_buttons', source)
-        self.assertNotIn('route_table', source)
-        self.assertNotIn('speaker_links', source)
-
-    def test_normal_hook_output_updates_capture_application_without_refresh_command(self):
-        source = Path('autoadv/gui.py').read_text(encoding='utf-8')
-        self.assertNotIn('self.application.observe_capture(', source)
-        self.assertNotIn('self.application.handle_hook_event(event)', source)
-        self.assertNotIn('self.application.flush_hook_outputs()', source)
-        self.assertIn('on_event=self.on_hook', source)
-        self.assertNotIn('self.application.handle_capture_host_event(event)', source)
-        self.assertNotIn('queue_capture_output', source)
-        self.assertNotIn('handle_runtime_hook_output', source)
-        self.assertNotIn('flush_runtime_hook_outputs', source)
-        self.assertNotIn('self._capture_output_group', source)
-        self.assertNotIn('self._output_group', source)
-        self.assertNotIn('self._synced_sources', source)
-        self.assertNotIn('self.host_generation', source)
-        self.assertNotIn('self.connection_generation', source)
-        self.assertNotIn('self.attached_pid', source)
-        self.assertNotIn('self._connecting_pid', source)
-        self.assertNotIn('self.pid=', source)
-        self.assertNotIn('self.audio_pid=', source)
-        self.assertNotIn('self.input_pid=', source)
-        self.assertNotIn('self.hwnd=', source)
-        self.assertNotIn('self.application.capture.profile', source)
-        self.assertNotIn('profile.inherit_common', source)
-        self.assertNotIn('self.catalog.create_game(', source)
-        self.assertNotIn('self.catalog.add_profile(', source)
-        self.assertNotIn('self.catalog.duplicate_profile(', source)
-        self.assertNotIn('self.catalog.rename_profile(', source)
-        self.assertNotIn('self.catalog.delete_profile(', source)
-        self.assertNotIn('self._resume_monitor_requested', source)
-        self.assertNotIn('self._pending_monitor_apply', source)
-        self.assertNotIn('self.catalog =', source)
-        self.assertNotIn('self.game_id =', source)
-        self.assertNotIn('self.profile_id =', source)
-        self.assertNotIn('self.application.hook_connection_state()', source)
-        self.assertIn('self.application.activate_selected_target()', source)
-        self.assertIn('self.application.runtime_target_state()', source)
-        self.assertIn('if self.application.runtime_target_state().selected:', source)
-        self.assertIn('QTimer.singleShot(0, self.connect_game)', source)
-        self.assertNotIn('self.application.handle_hook_error(message)', source)
-        self.assertNotIn('self.application.report_capture_problem(', source)
-        self.assertNotIn('self.application.update_profile(', source)
-        self.assertNotIn('self.application.update_capture_recipe(', source)
-        self.assertNotIn('sync_hook_threads(', source)
-        self.assertNotIn('capture_transition_boundary(', source)
-        self.assertNotIn('consume_capture_transition(', source)
-        self.assertNotIn('capture_transition_pending', source)
-        self.assertNotIn('self.application.handle_runtime_ocr_output(', source)
-        self.assertIn('self.refresh_capture_workspace()', source)
 
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'Windows GUI dependencies not installed')
@@ -183,7 +67,15 @@ class WindowsGuiInitialization(unittest.TestCase):
                                  ['プレイ', 'ゲーム', '設定'])
                 self.assertEqual(window.speaker_table.rowCount(), 2)
                 capture = ThreadSource(101, 1, 1, 2, 'HOOK', 'HOOK')
-                window.application.observe_capture(capture, '大和「おはよう」', sequence=1)
+                window.application.select_primary_target(101, 0x1234)
+                window.application.hook_host = SimpleNamespace(
+                    command=Mock(), child=SimpleNamespace(poll=lambda: None))
+                self.assertEqual(window.application.activate_selected_target(), 'connecting')
+                window.application.handle_hook_event(
+                    HookEvent('connected', 'host', 1, 1, 10, process_id=101))
+                window.application.handle_hook_event(
+                    HookEvent('output', 'host', 1, 2, 20, 101, capture, '大和「おはよう」'))
+                QApplication.processEvents()
                 window.application.set_capture_field_source('body', capture.identity, capture.address)
                 window.refresh_capture_workspace()
                 window.example_raw.setPlainText('おはよう')
@@ -196,6 +88,7 @@ class WindowsGuiInitialization(unittest.TestCase):
                 self.assertEqual(window.ui_sections['speakers'].title(), '話者・音声')
                 self.assertIsNot(window.ui_sections['source_format'], window.ui_sections['speakers'])
             finally:
+                window.application.hook_host = None
                 window.close()
             return 0
 

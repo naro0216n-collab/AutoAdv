@@ -42,12 +42,13 @@ class SessionOwnership(unittest.TestCase):
         c.permit(True)
         c.pause('native_inconclusive_hold')
         c.presentation_event(token, 'text_elapsed')
-        self.assertEqual(c.reason, 'native_inconclusive_hold')
+        self.assertEqual(c.pause_reason, 'native_inconclusive_hold')
         self.assertTrue(c.authorized)
         second = c.observe(generation='host', connection=1, sequence=2,
                            source=source, text='another', pid=10)
         self.assertIsNotNone(second)
-        self.assertEqual(c.reason, 'presenting')
+        self.assertIsNone(c.pause_reason)
+        self.assertFalse(c.completed)
         self.assertTrue(c.authorized)
 
     def test_explicit_text_source_ignores_unselected_hook_and_rejects_ambiguous_same_source(self):
@@ -63,7 +64,7 @@ class SessionOwnership(unittest.TestCase):
         self.assertEqual(c.utterance.raw, 'chosen')
         c.permit(True)
         self.assertIsNone(c.observe_group([event(primary, 3, 'first'), event(primary, 4, 'second')]))
-        self.assertEqual(c.reason, 'ambiguous_multihook_lines')
+        self.assertEqual(c.pause_reason, 'ambiguous_multihook_lines')
         self.assertTrue(c.authorized)
 
 

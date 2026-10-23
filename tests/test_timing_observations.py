@@ -10,7 +10,7 @@ from unittest.mock import patch
 from autoadv.audio_buffer import PCMChunk
 from autoadv.conversation import Token
 from autoadv.native_audio import NativeAudio
-from autoadv.validation_trace import ValidationTrace
+from validation.real_game.trace import ValidationTrace
 from autoadv.voice import VoiceJobs
 
 

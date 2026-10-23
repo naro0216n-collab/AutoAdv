@@ -47,7 +47,7 @@ class DialogueContractTests(unittest.TestCase):
         self.controller.presentation_event(first, 'text_elapsed')
         self.controller.try_advance()
         self.assertIsNone(self.output('同じ台詞', 2))
-        self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
+        self.assertEqual(self.controller.pause_reason, 'ambiguous_identical_line')
         self.assertTrue(self.controller.authorized)
         second = self.output('違う台詞', 3)
         self.assertNotEqual(second, first)
@@ -75,13 +75,15 @@ class DialogueContractTests(unittest.TestCase):
         self.assertTrue(self.controller.confirm_external_advance(first))
         self.assertTrue(self.controller.awaiting_next)
         self.assertIsNone(self.controller.pause_reason)
-        self.assertEqual(self.controller.reason, 'awaiting_next_line')
+        self.assertTrue(self.controller.awaiting_next)
+        self.assertIsNone(self.controller.pause_reason)
         self.assertFalse(self.controller.sent)
         second = self.output('同じ台詞', 2)
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
         self.assertFalse(self.controller.awaiting_next)
-        self.assertEqual(self.controller.reason, 'presenting')
+        self.assertIsNone(self.controller.pause_reason)
+        self.assertFalse(self.controller.completed)
         self.assertTrue(self.controller.authorized)
 
     def test_partial_update_invalidates_previous_presentation(self):
@@ -111,7 +113,8 @@ class DialogueContractTests(unittest.TestCase):
         self.assertTrue(self.controller.authorized)
         self.assertIsNotNone(self.output('次', 2))
         self.assertTrue(self.controller.authorized)
-        self.assertEqual(self.controller.reason, 'presenting')
+        self.assertIsNone(self.controller.pause_reason)
+        self.assertFalse(self.controller.completed)
 
     def test_other_pid_and_stale_sequence_not_accepted(self):
         self.assertIsNone(self.output('他ゲーム', 1, pid=9, gen='host-b'))
@@ -123,7 +126,7 @@ class DialogueContractTests(unittest.TestCase):
     def test_host_generation_change_holds_without_rewriting_user_mode(self):
         self.controller.permit(True)
         self.assertIsNone(self.output('wrong gen', 1, gen='host-b'))
-        self.assertEqual(self.controller.reason, 'host_changed')
+        self.assertEqual(self.controller.pause_reason, 'host_changed')
         self.assertTrue(self.controller.authorized)
         self.assertFalse(self.controller.try_advance())
 
@@ -164,16 +167,16 @@ class DialogueContractTests(unittest.TestCase):
         self.assertFalse(c.authorized)
         c.permit(True)
         self.assertTrue(c.authorized)
-        self.assertEqual(c.reason, 'not_monitoring')
+        self.assertEqual(c.pause_reason, 'not_monitoring')
         c.begin(profile(), Target(101, 202), 'host-a', 1)
         self.assertTrue(c.authorized)
         self.assertFalse(c.try_advance())
         c.close('session_changed')
         self.assertTrue(c.authorized)
-        self.assertEqual(c.reason, 'session_changed')
+        self.assertEqual(c.pause_reason, 'session_changed')
         c.permit(False)
         self.assertFalse(c.authorized)
-        self.assertEqual(c.reason, 'advance_not_authorized')
+        self.assertEqual(c.pause_reason, 'advance_not_authorized')
 
     def test_duplicate_selected_hook_is_rejected(self):
         p = profile()
@@ -221,7 +224,7 @@ class HookBoundaryContractTests(unittest.TestCase):
         self.assertIsNone(self.out('', 2))
         self.assertIsNone(self.out('同じ', 3))
         self.assertEqual(first, self.controller.token)
-        self.assertEqual(self.controller.reason, 'ambiguous_identical_line')
+        self.assertEqual(self.controller.pause_reason, 'ambiguous_identical_line')
         self.assertTrue(self.controller.authorized)
 
     def test_same_text_as_two_flushed_lines_when_configured(self):

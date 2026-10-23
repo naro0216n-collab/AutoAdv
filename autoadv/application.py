@@ -297,6 +297,9 @@ class CaptureWorkspace:
         if outputs:
             self._groups.append(outputs)
 
+    def clear_groups(self) -> None:
+        self._groups.clear()
+
     def remove(self, identity: str, address: int) -> None:
         self._observed.pop((identity, address), None)
         self._refresh_ambiguity(identity)
@@ -562,9 +565,6 @@ class AutoAdvApplication:
         self._schedule_runtime: Callable[[int, Callable[[], None]], None] | None = None
         self._runtime_observer: Callable[[], None] | None = None
         self._runtime_event_observer: Callable[[str, Token | None, dict], None] | None = None
-        self._hook_event_observer: Callable[[HookEvent, HookEventOutcome], None] | None = None
-        self._hook_closed_observer: Callable[[str], None] | None = None
-        self._hook_error_observer: Callable[[str], None] | None = None
         self._telemetry_observer: Callable[[str, Token | None, dict], None] | None = None
 
     @staticmethod
@@ -610,14 +610,6 @@ class AutoAdvApplication:
         """Attach one optional diagnostics sink; it never participates in policy."""
         self._telemetry_observer = observer
 
-    def configure_hook_service(self, *, on_event: Callable[[HookEvent, HookEventOutcome], None],
-                               on_closed: Callable[[str], None],
-                               on_error: Callable[[str], None]) -> None:
-        """Bind presentation observers after Application has consumed Host events."""
-        self._hook_event_observer = on_event
-        self._hook_closed_observer = on_closed
-        self._hook_error_observer = on_error
-
     def _notify_runtime(self) -> None:
         if self._runtime_observer is not None:
             self._runtime_observer()
@@ -625,6 +617,7 @@ class AutoAdvApplication:
     def _emit_runtime_event(self, event: str, token: Token | None = None, **detail) -> None:
         if self._runtime_event_observer is not None:
             self._runtime_event_observer(event, token, detail)
+        self._emit_telemetry(event, token, **detail)
 
     def _emit_telemetry(self, event: str, token: Token | None = None, **detail) -> None:
         if self._telemetry_observer is not None:
@@ -633,7 +626,7 @@ class AutoAdvApplication:
     def _accept_runtime_token(self, token: Token | None) -> None:
         if token is None or token != self.controller.token:
             return
-        self.start_presentation(token)
+        self._start_presentation(token)
         self._emit_runtime_event('utterance', token)
 
     def _schedule(self, delay_ms: int, callback: Callable[[], None]) -> None:
@@ -667,7 +660,7 @@ class AutoAdvApplication:
             source_generation=c.source_generation, connection_generation=c.connection_generation,
             presentation_reason=c.presentation_reason, pause_reason=c.pause_reason)
 
-    def runtime_capture_matches(self, profile: Profile) -> bool:
+    def _runtime_capture_matches(self, profile: Profile) -> bool:
         active = self.runtime_state().profile
         if active is None or active.id != profile.id:
             return False
@@ -686,8 +679,8 @@ class AutoAdvApplication:
         return True
 
     def _request_capture_transition(self) -> None:
-        if self.defer_capture_transition():
-            self._schedule(0, self.apply_capture_transition)
+        if self._defer_capture_transition():
+            self._schedule(0, self._apply_capture_transition)
 
     def _apply_persisted_profile_change(self, previous: Profile, updated: Profile) -> None:
         """Apply one saved profile change to Host/runtime from one owner."""
@@ -702,21 +695,21 @@ class AutoAdvApplication:
         if (updated.source == 'hook' and hook_environment_changed and
                 self._hook_connection.connected and self.hook_host_running):
             try:
-                self.restore_profile_capture(updated)
+                self._restore_profile_capture(updated)
                 self.clear_capture_problem()
             except Exception as exc:
-                self.report_capture_problem(
+                self._report_capture_problem(
                     '保存した取得設定を現在のゲームへ反映できません。取得の復旧を確認してください。')
                 self._emit_runtime_event('capture_environment_apply_failed', None, reason=str(exc))
         state = self.runtime_state()
         if state.profile is not None and state.profile.id == updated.id:
-            if self.runtime_capture_matches(effective):
+            if self._runtime_capture_matches(effective):
                 self.controller.stage_profile(effective)
                 self._notify_runtime()
             else:
                 self._request_capture_transition()
 
-    def begin_runtime(self, profile: Profile, target: Target, generation: str, connection: int) -> int:
+    def _begin_runtime(self, profile: Profile, target: Target, generation: str, connection: int) -> int:
         return self.controller.begin(profile, target, generation, connection)
 
     def confirm_external_advance(self, token: Token) -> bool:
@@ -741,7 +734,7 @@ class AutoAdvApplication:
         if sent and state.token is not None and state.profile is not None:
             token = state.token
             if self._capture_transition_pending:
-                self._schedule(0, self.apply_capture_transition)
+                self._schedule(0, self._apply_capture_transition)
             self._schedule(state.profile.next_line_timeout_ms,
                            lambda t=token: self._expire_next_line(t))
         self._notify_runtime()
@@ -754,7 +747,7 @@ class AutoAdvApplication:
         self._notify_runtime()
         return expired
 
-    def runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
+    def _runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
         completed = self.controller.presentation_event(token, event, success=success)
         if completed:
             self._emit_runtime_event('presentation_complete', token,
@@ -777,16 +770,16 @@ class AutoAdvApplication:
         if (token != state.token or utterance is None or utterance.use_tts or
                 utterance.advance_mode.value != 'audio' or state.completed or state.sent):
             return
-        if self.native_audio_holds_deadline(token):
+        if self._native_audio_holds_deadline(token):
             self._schedule(200, lambda t=token: self._fallback_due(t))
             return
         if state.native_playing:
-            self.runtime_presentation_event(token, 'native_evidence_stale')
-        self.runtime_presentation_event(token, 'fallback_elapsed')
+            self._runtime_presentation_event(token, 'native_evidence_stale')
+        self._runtime_presentation_event(token, 'fallback_elapsed')
         if self.runtime_state().pause_reason == 'native_inconclusive_hold':
             self._emit_native_capture_summary(token)
 
-    def start_presentation(self, token: Token) -> int:
+    def _start_presentation(self, token: Token) -> int:
         """Start every presentation effect for the current immutable Utterance.
 
         The event-loop adapter does not decide whether text time, native audio,
@@ -796,58 +789,58 @@ class AutoAdvApplication:
         utterance = state.utterance
         if utterance is None or token != state.token:
             return 0
-        self.cancel_voice()
-        self.cancel_native_audio()
+        self._cancel_voice()
+        self._cancel_native_audio()
         external_ns = self.controller.take_external_transition(token)
         if external_ns:
             self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns)
         if utterance.advance_mode.value == 'text':
             self._schedule(utterance.text_wait_ms,
-                           lambda t=token: self.runtime_presentation_event(t, 'text_elapsed'))
+                           lambda t=token: self._runtime_presentation_event(t, 'text_elapsed'))
         elif not utterance.use_tts:
             if self.native_audio_available:
                 replay_from_ms = None
                 if external_ns and state.profile is not None:
                     lookback_ms = max(100, state.profile.hook_flush_ms + 100)
                     replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
-                self.begin_native_audio(token, utterance.match_text, replay_from_ms=replay_from_ms)
+                self._begin_native_audio(token, utterance.match_text, replay_from_ms=replay_from_ms)
             self._schedule(utterance.text_wait_ms, lambda t=token: self._fallback_due(t))
         if utterance.use_tts:
             if not utterance.voice:
-                self.runtime_presentation_event(token, 'tts_finished', success=False)
+                self._runtime_presentation_event(token, 'tts_finished', success=False)
             else:
-                self.start_voice(token, utterance.reading, utterance.voice)
+                self._start_voice(token, utterance.reading, utterance.voice)
         self._notify_runtime()
         return external_ns
 
-    def close_runtime(self, reason: str = 'stopped') -> None:
+    def _close_runtime(self, reason: str = 'stopped') -> None:
         self._hook_output_group.clear()
         self.controller.close(reason)
         self._notify_runtime()
 
-    def start_monitoring(self) -> RuntimeState:
+    def _start_monitoring(self) -> RuntimeState:
         """Build the selected profile's one runtime path and its services."""
         profile = self.current_profile()
         if profile is None:
             raise ValueError('作品とプロファイルを選択してください')
         effective = self.catalog.effective_profile(profile)
-        target = self.session_target()
+        target = self._session_target()
         self.stop_monitoring('session_changed')
         if effective.source == 'ocr':
-            self.begin_runtime(effective, target, 'ocr', 1)
-            self.start_ocr(effective)
+            self._begin_runtime(effective, target, 'ocr', 1)
+            self._start_ocr(effective)
         else:
             selected_sources = tuple(identity for identity in
                                      (effective.body_source, effective.speaker_source) if identity)
-            if any(self.capture_identity_is_ambiguous(identity) for identity in selected_sources):
+            if any(self._capture_identity_is_ambiguous(identity) for identity in selected_sources):
                 raise ValueError('選択した取得元を一意に識別できません。別の取得元を選択してください')
             connection = self._hook_connection
             if not connection.connected:
                 raise RuntimeError('ゲームへのLunaHook接続が完了していません')
-            self.begin_runtime(effective, target, connection.host_generation,
+            self._begin_runtime(effective, target, connection.host_generation,
                                connection.connection_generation)
             self._reconcile_hook_sync()
-        self.start_native_audio(effective)
+        self._start_native_audio(effective)
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(
@@ -865,14 +858,14 @@ class AutoAdvApplication:
             self._emit_runtime_event('monitor_ended', None, session=prior.session, reason=reason)
         target = self._runtime_target
         if target.selected:
-            self.sync_hook_threads(target.hook_pid, clear=True)
-        self.close_native_audio()
-        self.close_ocr()
-        self.cancel_voice()
+            self._sync_hook_threads(target.hook_pid, clear=True)
+        self._close_native_audio()
+        self._close_ocr()
+        self._cancel_voice()
         self.cancel_voice_preview()
-        self.close_runtime(reason)
+        self._close_runtime(reason)
 
-    def reconcile_monitoring(self, profile: Profile | None = None) -> RuntimeState | None:
+    def _reconcile_monitoring(self, profile: Profile | None = None) -> RuntimeState | None:
         """Converge runtime monitoring from current persisted and connection state.
 
         No resume latch is kept.  A saved capture becomes monitorable exactly
@@ -883,20 +876,25 @@ class AutoAdvApplication:
             return None
         effective = self.catalog.effective_profile(profile)
         state = self.runtime_state()
-        if state.profile is not None and state.profile.id == effective.id and self.runtime_capture_matches(effective):
+        # A persisted capture-affecting change stays staged until the current
+        # dialogue boundary. Capture-source observation must not bypass that
+        # boundary by reconciling the new profile early.
+        if self._capture_transition_pending and state.profile is not None:
+            return state
+        if state.profile is not None and state.profile.id == effective.id and self._runtime_capture_matches(effective):
             return state
         target = self._runtime_target
         if profile.source == 'ocr':
-            return self.start_monitoring() if target.input_ready else None
+            return self._start_monitoring() if target.input_ready else None
         if (not profile.body_source or not target.selected or
                 not self._hook_connection.connected_to(target.hook_pid) or
-                not self.capture_saved_sources_ready(profile)):
+                not self._capture_saved_sources_ready(profile)):
             return None
-        if self.capture_identity_is_ambiguous(profile.body_source):
+        if self._capture_identity_is_ambiguous(profile.body_source):
             return None
-        if profile.speaker_source and self.capture_identity_is_ambiguous(profile.speaker_source):
+        if profile.speaker_source and self._capture_identity_is_ambiguous(profile.speaker_source):
             return None
-        return self.start_monitoring()
+        return self._start_monitoring()
 
     def activate_selected_target(self) -> str:
         """Apply the selected game target without exposing connection mechanics to UI."""
@@ -908,7 +906,7 @@ class AutoAdvApplication:
             raise ValueError('実行中のゲーム・プロセスを選択してください')
         if profile.source == 'ocr':
             if target.input_ready:
-                self.start_monitoring()
+                self._start_monitoring()
                 return 'monitoring'
             return 'waiting-input-target'
 
@@ -916,8 +914,8 @@ class AutoAdvApplication:
         connection = self._hook_connection
         if self.hook_host_running and (connection.connected_to(pid) or connection.connecting_pid == pid):
             if connection.connected_to(pid):
-                self.restore_profile_capture(profile)
-                if self.reconcile_monitoring(profile) is not None:
+                self._restore_profile_capture(profile)
+                if self._reconcile_monitoring(profile) is not None:
                     return 'monitoring'
                 return 'connected'
             return 'connecting'
@@ -929,17 +927,17 @@ class AutoAdvApplication:
             self.clear_capture_observations()
             self.start_hook_host()
         if not self.hook_host_running:
-            self.report_capture_problem('ゲームから台詞を取得するためのLunaHookを起動できません。')
+            self._report_capture_problem('ゲームから台詞を取得するためのLunaHookを起動できません。')
             raise RuntimeError('LunaHook Hostの起動に失敗しました')
-        if self.begin_hook_connection(pid, profile):
+        if self._begin_hook_connection(pid, profile):
             return 'connecting'
-        if self.reconcile_monitoring(profile) is not None:
+        if self._reconcile_monitoring(profile) is not None:
             return 'monitoring'
         return 'connected'
 
-    def handle_hook_connection_event(self, event: HookEvent) -> str | None:
+    def _handle_hook_connection_event(self, event: HookEvent) -> str | None:
         """Apply connection provenance, profile restoration and monitor resume."""
-        transition = self.accept_hook_connection_event(event)
+        transition = self._accept_hook_connection_event(event)
         if transition in ('connected', 'changed'):
             if transition == 'changed':
                 self.stop_monitoring('host_changed')
@@ -948,19 +946,20 @@ class AutoAdvApplication:
             profile = self.current_profile()
             if profile and profile.source == 'hook':
                 try:
-                    self.restore_profile_capture(profile)
+                    self._restore_profile_capture(profile)
                 except Exception as exc:
-                    self.report_capture_problem('保存した会話取得設定を現在のゲームへ復元できません。')
+                    self._report_capture_problem('保存した会話取得設定を現在のゲームへ復元できません。')
                     self._emit_runtime_event('capture_environment_apply_failed', None, reason=str(exc))
                     return 'restore_failed'
-                self.reconcile_monitoring(profile)
+                self._reconcile_hook_sync()
+                self._reconcile_monitoring(profile)
         elif transition == 'disconnected':
             self.stop_monitoring('host_changed')
             self.clear_capture_observations()
-            self.report_capture_problem('ゲームからの台詞取得が切断されました。')
+            self._report_capture_problem('ゲームからの台詞取得が切断されました。')
         return transition
 
-    def defer_capture_transition(self) -> bool:
+    def _defer_capture_transition(self) -> bool:
         """Hold input and remember that capture/runtime services need rebuilding.
 
         Returns True when no current unsent utterance needs to be preserved and
@@ -971,7 +970,7 @@ class AutoAdvApplication:
         state = self.runtime_state()
         return state.utterance is None or state.sent
 
-    def capture_transition_boundary(self, event: HookEvent, profile: Profile | None) -> bool:
+    def _capture_transition_boundary(self, event: HookEvent, profile: Profile | None) -> bool:
         if not self._capture_transition_pending or not profile or profile.source != 'hook':
             return False
         if event.kind != 'output' or event.source is None or not event.text.strip():
@@ -982,15 +981,15 @@ class AutoAdvApplication:
         state = self.runtime_state()
         return state.utterance is None or state.sent or event.text != state.utterance.raw
 
-    def consume_capture_transition(self) -> bool:
+    def _consume_capture_transition(self) -> bool:
         if not self._capture_transition_pending:
             return False
         self._capture_transition_pending = False
         return True
 
-    def apply_capture_transition(self) -> bool:
+    def _apply_capture_transition(self) -> bool:
         """Rebuild the active acquisition/runtime path at one safe dialogue boundary."""
-        if not self.consume_capture_transition():
+        if not self._consume_capture_transition():
             return False
         profile = self.current_profile()
         if profile is None:
@@ -1003,16 +1002,16 @@ class AutoAdvApplication:
             if not self._hook_connection.connected:
                 self.stop_monitoring('host_changed')
                 return False
-        self.start_monitoring()
+        self._start_monitoring()
         return True
 
-    def handle_runtime_ocr_output(self, *, session: int, pid: int, sequence: int, text: str) -> Token | None:
+    def _handle_runtime_ocr_output(self, *, session: int, pid: int, sequence: int, text: str) -> Token | None:
         """Own OCR boundary transitions before admitting text to Controller."""
         if self._capture_transition_pending and text.strip():
             state = self.runtime_state()
             if state.utterance is None or state.sent or state.ocr_blank:
                 # The replacement OCR worker will observe the still-visible line.
-                self.apply_capture_transition()
+                self._apply_capture_transition()
                 return None
         return self.controller.observe_ocr(session=session, pid=pid, sequence=sequence, text=text)
 
@@ -1021,11 +1020,37 @@ class AutoAdvApplication:
         return bool(profile and profile.source == 'hook' and profile.body_source and
                     profile.speaker_source and profile.speaker_source != profile.body_source)
 
+    def _hook_group_sync_ready(self, provider_ids: Sequence[str], process_id: int) -> bool:
+        required = set(provider_ids)
+        if len(required) <= 1:
+            return True
+        synchronized = {
+            source.identity for source in self._synced_sources.values()
+            if source.process_id == process_id and source.identity in required
+        }
+        return synchronized == required
+
+    def _capture_uses_hook_group(self, event: HookEvent) -> bool:
+        if self.capture is None or event.source is None or event.process_id is None:
+            return False
+        providers = self.capture.selected_provider_ids()
+        return bool(
+            len(providers) > 1 and event.source.identity in providers and
+            self._hook_group_sync_ready(providers, event.process_id))
+
+    def _invalidate_hook_group_evidence(self) -> None:
+        """Discard evidence whenever provider/synchronization ownership changes."""
+        self._hook_output_group.clear()
+        self._hook_flush_epoch += 1
+        self._hook_flush_pending = False
+        if self.capture is not None:
+            self.capture.clear_groups()
+
     def _handle_hook_output(self, event: HookEvent) -> tuple[Token | None, int | None]:
         """Admit one Host output and share one bounded multi-source group."""
         profile = self.current_profile()
-        if self.capture_transition_boundary(event, profile):
-            self.apply_capture_transition()
+        if self._capture_transition_boundary(event, profile):
+            self._apply_capture_transition()
         state = self.runtime_state()
         runtime_profile, target = state.profile, state.target
         runtime_matches = bool(
@@ -1037,19 +1062,39 @@ class AutoAdvApplication:
             any(h.matches(event.source) for h in runtime_profile.hooks))
         capture_matches = bool(
             event.kind == 'output' and event.source is not None and
-            self.capture_event_matches_connection(event) and
-            not self.capture_identity_is_ambiguous(event.source.identity))
+            self._capture_event_matches_connection(event) and
+            not self._capture_identity_is_ambiguous(event.source.identity))
         if not runtime_matches and not capture_matches:
             return None, None
 
         token = None
-        runtime_grouped = runtime_matches and self._runtime_uses_hook_group()
-        # Keep one bounded observation group even before the user chooses fields.
-        # Candidate rows update immediately in handle_capture_host_event; this
-        # buffer exists only so a later body/speaker selection can preview the
-        # same synchronized evidence that runtime will use.
-        capture_grouped = capture_matches and self.capture is not None
-        if runtime_matches and not runtime_grouped:
+        if runtime_matches:
+            # Provenance belongs to Application: at this point the output has
+            # passed the current runtime PID/generation/connection and selected
+            # HookSelection checks.  Emit that fact before Controller can turn
+            # the output (or its synchronized group) into an Utterance.
+            self._emit_telemetry(
+                'selected_hook_output', None,
+                session=state.session,
+                generation=event.host_generation,
+                connection=event.connection_generation,
+                hook_sequence=event.sequence,
+                source=event.source.identity,
+                received_ns=event.received_ns,
+                pid=event.process_id,
+                address=event.source.address,
+                context=event.source.context,
+                context2=event.source.context2,
+                raw=event.text,
+            )
+        runtime_requires_group = runtime_matches and self._runtime_uses_hook_group()
+        runtime_grouped = bool(
+            runtime_requires_group and runtime_profile is not None and target is not None and
+            self._hook_group_sync_ready(
+                tuple(dict.fromkeys((runtime_profile.body_source, runtime_profile.speaker_source))),
+                target.hook_pid or target.pid))
+        capture_grouped = capture_matches and self._capture_uses_hook_group(event)
+        if runtime_matches and not runtime_requires_group:
             token = self.controller.observe(
                 generation=event.host_generation, connection=event.connection_generation,
                 sequence=event.sequence, source=event.source, text=event.text,
@@ -1059,20 +1104,24 @@ class AutoAdvApplication:
 
         self._hook_output_group.append(event)
         if len(self._hook_output_group) >= 64:
-            grouped_token = self.flush_hook_outputs()
+            grouped_token = self._flush_hook_outputs()
             return grouped_token or token, None
         delay = 100
         if runtime_grouped and runtime_profile is not None:
             delay = max(10, min(100, runtime_profile.hook_flush_ms))
         return token, delay
 
-    def flush_hook_outputs(self) -> Token | None:
+    def _flush_hook_outputs(self) -> Token | None:
         group, self._hook_output_group = self._hook_output_group, []
         if not group:
             return None
-        if self.capture:
+        if self.capture and any(self._capture_uses_hook_group(event) for event in group):
             self.capture.observe_group(group)
-        if self._runtime_uses_hook_group():
+        state = self.runtime_state()
+        if (self._runtime_uses_hook_group() and state.profile is not None and state.target is not None and
+                self._hook_group_sync_ready(
+                    tuple(dict.fromkeys((state.profile.body_source, state.profile.speaker_source))),
+                    state.target.hook_pid or state.target.pid)):
             return self.controller.observe_group(group)
         return None
 
@@ -1080,9 +1129,9 @@ class AutoAdvApplication:
     def native_audio_available(self) -> bool:
         return self._native_audio is not None
 
-    def start_native_audio(self, profile: Profile) -> bool:
+    def _start_native_audio(self, profile: Profile) -> bool:
         """Own process audio capture and publish only semantic/telemetry events."""
-        self.close_native_audio()
+        self._close_native_audio()
         if (profile.advance_mode.value != 'audio' or not profile.native_helper or
                 not profile.asr_model or not profile.asr_tokens):
             return False
@@ -1093,7 +1142,6 @@ class AutoAdvApplication:
         epoch = self._native_audio_epoch
         session = state.session
         pid = state.target.audio_pid or state.target.pid
-        telemetry = self._telemetry_observer is not None
 
         def current() -> bool:
             now = self.runtime_state()
@@ -1103,7 +1151,7 @@ class AutoAdvApplication:
         def consume_event(token: Token | None, event: str, detail: str) -> None:
             if not current():
                 return
-            self.handle_native_event(token, event, detail)
+            self._handle_native_event(token, event, detail)
             self._emit_runtime_event('native_event', token, status=event, reason=detail)
 
         def publish_event(token: Token | None, event: str, detail: str) -> None:
@@ -1159,9 +1207,9 @@ class AutoAdvApplication:
                 native = NativeAudio(
                     pid, Path(profile.native_helper), Path(profile.asr_model), Path(profile.asr_tokens),
                     publish_event,
-                    on_pcm=publish_pcm if telemetry else None,
-                    on_inference=publish_inference if telemetry else None,
-                    on_voice_end=publish_voice_end if telemetry else None)
+                    on_pcm=publish_pcm,
+                    on_inference=publish_inference,
+                    on_voice_end=publish_voice_end)
                 native.start()
                 self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:
@@ -1172,23 +1220,23 @@ class AutoAdvApplication:
         threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
         return True
 
-    def close_native_audio(self) -> None:
+    def _close_native_audio(self) -> None:
         self._native_audio_epoch += 1
         native, self._native_audio = self._native_audio, None
         if native is not None:
             threading.Thread(target=native.close, daemon=True, name='autoadv-close-native').start()
 
-    def cancel_native_audio(self) -> None:
+    def _cancel_native_audio(self) -> None:
         if self._native_audio is not None:
             self._native_audio.cancel()
 
-    def begin_native_audio(self, token: Token, match_text: str, *, replay_from_ms: int | None = None) -> bool:
+    def _begin_native_audio(self, token: Token, match_text: str, *, replay_from_ms: int | None = None) -> bool:
         if self._native_audio is None:
             return False
         self._native_audio.begin(token, match_text, replay_from_ms=replay_from_ms)
         return True
 
-    def native_audio_holds_deadline(self, token: Token) -> bool:
+    def _native_audio_holds_deadline(self, token: Token) -> bool:
         return bool(self._native_audio and self._native_audio.holds_deadline(token))
 
     def _emit_native_capture_summary(self, token: Token) -> None:
@@ -1198,7 +1246,7 @@ class AutoAdvApplication:
             'native_capture_summary', token, audio_pid=self._native_audio.pid,
             **self._native_audio.capture_status())
 
-    def handle_native_event(self, token: Token | None, event: str, detail: str = '') -> bool:
+    def _handle_native_event(self, token: Token | None, event: str, detail: str = '') -> bool:
         """Apply native evidence and drive completion/advance in Application."""
         state = self.runtime_state()
         if token is None or token != state.token or state.utterance is None:
@@ -1216,11 +1264,11 @@ class AutoAdvApplication:
         presentation = mapping.get(event)
         if presentation is None:
             return False
-        return self.runtime_presentation_event(token, presentation)
+        return self._runtime_presentation_event(token, presentation)
 
-    def start_ocr(self, profile: Profile) -> bool:
+    def _start_ocr(self, profile: Profile) -> bool:
         """Own OCR acquisition, Controller admission and presentation dispatch."""
-        self.close_ocr()
+        self._close_ocr()
         if profile.source != 'ocr':
             return False
         state = self.runtime_state()
@@ -1239,7 +1287,7 @@ class AutoAdvApplication:
         def consume_text(sequence: int, text: str) -> None:
             if not current():
                 return
-            token = self.handle_runtime_ocr_output(
+            token = self._handle_runtime_ocr_output(
                 session=session, pid=pid, sequence=sequence, text=text)
             self._accept_runtime_token(token)
 
@@ -1264,7 +1312,7 @@ class AutoAdvApplication:
         worker.start()
         return True
 
-    def close_ocr(self) -> None:
+    def _close_ocr(self) -> None:
         self._ocr_epoch += 1
         worker, self._ocr_worker = self._ocr_worker, None
         if worker is not None:
@@ -1279,7 +1327,8 @@ class AutoAdvApplication:
             self._preview_jobs.cancel()
 
         def runtime_result(token: Token, done: bool, reason: str) -> None:
-            self.runtime_presentation_event(token, 'tts_finished', success=done)
+            self._runtime_presentation_event(token, 'tts_finished', success=done)
+            self._emit_runtime_event('tts_result', token, success=done, reason=reason)
             if on_result is not None:
                 on_result(token, done, reason)
 
@@ -1287,16 +1336,15 @@ class AutoAdvApplication:
             self._emit_telemetry(
                 'tts_timing', token, stage=stage, duration_ms=duration_ms, audio_ms=audio_ms)
 
-        self._voice_jobs = VoiceJobs(
-            runtime_result, on_timing=runtime_timing if self._telemetry_observer is not None else None)
+        self._voice_jobs = VoiceJobs(runtime_result, on_timing=runtime_timing)
         self._preview_jobs = VoiceJobs(lambda _token, done, reason: on_preview(done, reason))
 
-    def start_voice(self, token: Token, reading: str, voice: str) -> None:
+    def _start_voice(self, token: Token, reading: str, voice: str) -> None:
         if self._voice_jobs is None:
             raise RuntimeError('voice jobs are not configured')
         self._voice_jobs.start(token, self.catalog.irodori_url, reading, voice)
 
-    def cancel_voice(self) -> None:
+    def _cancel_voice(self) -> None:
         if self._voice_jobs is not None:
             self._voice_jobs.cancel()
 
@@ -1354,15 +1402,15 @@ class AutoAdvApplication:
         )
         return self._runtime_target
 
-    def session_target(self) -> Target:
+    def _session_target(self) -> Target:
         return self._runtime_target.target()
 
-    def reset_hook_connection(self) -> None:
+    def _reset_hook_connection(self) -> None:
         self._hook_connection = HookConnectionState()
         self._inserted_hook_codes.clear()
         self._pc_hooks_inserted = False
 
-    def begin_hook_connection(self, pid: int, profile: Profile) -> bool:
+    def _begin_hook_connection(self, pid: int, profile: Profile) -> bool:
         """Request one Host connection and own its transient identity."""
         if pid <= 0:
             raise ValueError('hook pid must be positive')
@@ -1373,12 +1421,12 @@ class AutoAdvApplication:
             raise RuntimeError('LunaHook Host is not running')
         self._hook_connection = HookConnectionState(connecting_pid=pid)
         try:
-            self.hook_command('settings', flush_ms=profile.hook_flush_ms,
+            self._hook_command('settings', flush_ms=profile.hook_flush_ms,
                 codepage=profile.hook_codepage, max_buffer=profile.hook_max_buffer,
                 max_history=profile.hook_max_history)
-            self.hook_command('connect', pid=pid)
+            self._hook_command('connect', pid=pid)
         except Exception:
-            self.reset_hook_connection()
+            self._reset_hook_connection()
             raise
         return True
 
@@ -1390,7 +1438,7 @@ class AutoAdvApplication:
     def _record_pc_hooks_inserted(self) -> None:
         self._pc_hooks_inserted = True
 
-    def restore_profile_capture(self, profile: Profile) -> None:
+    def _restore_profile_capture(self, profile: Profile) -> None:
         """Apply one profile's Luna settings to the current connection.
 
         Reusing an already connected game after a profile change must not leave
@@ -1401,19 +1449,19 @@ class AutoAdvApplication:
         state = self._hook_connection
         if not self.hook_host_running or not state.connected:
             raise RuntimeError('LunaHook is not connected')
-        self.hook_command('settings', flush_ms=profile.hook_flush_ms,
+        self._hook_command('settings', flush_ms=profile.hook_flush_ms,
             codepage=profile.hook_codepage, max_buffer=profile.hook_max_buffer,
             max_history=profile.hook_max_history)
         if profile.insert_pc_hooks and not self._pc_hooks_inserted:
-            self.hook_command('insert_pc_hooks', pid=state.attached_pid)
+            self._hook_command('insert_pc_hooks', pid=state.attached_pid)
             self._pc_hooks_inserted = True
         for code in profile.inserted_hooks:
             if code in self._inserted_hook_codes:
                 continue
-            self.hook_command('insert_hook', pid=state.attached_pid, code=code)
+            self._hook_command('insert_hook', pid=state.attached_pid, code=code)
             self._inserted_hook_codes.add(code)
 
-    def accept_hook_connection_event(self, event: HookEvent) -> str | None:
+    def _accept_hook_connection_event(self, event: HookEvent) -> str | None:
         """Update transient Host connection identity from one provenance event."""
         state = self._hook_connection
         if event.kind == 'connected':
@@ -1428,11 +1476,11 @@ class AutoAdvApplication:
                 connection_generation=event.connection_generation)
             return 'changed' if changed else 'connected'
         if event.kind == 'disconnected' and event.process_id == state.attached_pid:
-            self.reset_hook_connection()
+            self._reset_hook_connection()
             return 'disconnected'
         return None
 
-    def cancel_hook_connection_attempt(self, pid: int | None = None) -> None:
+    def _cancel_hook_connection_attempt(self, pid: int | None = None) -> None:
         state = self._hook_connection
         if pid is not None and state.connecting_pid != pid:
             return
@@ -1441,9 +1489,9 @@ class AutoAdvApplication:
                 attached_pid=state.attached_pid, host_generation=state.host_generation,
                 connection_generation=state.connection_generation)
         else:
-            self.reset_hook_connection()
+            self._reset_hook_connection()
 
-    def capture_event_matches_connection(self, event: HookEvent) -> bool:
+    def _capture_event_matches_connection(self, event: HookEvent) -> bool:
         state = self._hook_connection
         return bool(state.connected and event.process_id == state.attached_pid and
                     event.host_generation == state.host_generation and
@@ -1464,7 +1512,7 @@ class AutoAdvApplication:
             if epoch != self._hook_flush_epoch:
                 return
             self._hook_flush_pending = False
-            token = self.flush_hook_outputs()
+            token = self._flush_hook_outputs()
             self._accept_runtime_token(token)
             self._emit_runtime_event('hook_group_flushed', token)
 
@@ -1475,25 +1523,21 @@ class AutoAdvApplication:
 
     def _consume_host_closed(self, reason: str) -> None:
         self._handle_hook_closed()
-        if self._hook_closed_observer is not None:
-            self._hook_closed_observer(reason)
+        self._emit_runtime_event('hook_closed', None, reason=reason)
 
     def _consume_host_error(self, message: str) -> None:
-        self.handle_hook_error(message)
-        if self._hook_error_observer is not None:
-            self._hook_error_observer(message)
+        self._handle_hook_error(message)
 
     def start_hook_host(self) -> None:
         """Own the isolated Luna Host lifecycle and all Host state transitions."""
-        if self._hook_event_observer is None or self._hook_closed_observer is None or self._hook_error_observer is None:
-            raise RuntimeError('Hook service observers are not configured')
         self._host_epoch += 1
         epoch = self._host_epoch
-        self.reset_hook_connection()
+        self._reset_hook_connection()
         if self.hook_host is not None:
             self.hook_host.close()
             self.hook_host = None
         self._synced_sources.clear()
+        self._invalidate_hook_group_evidence()
 
         def current(callback, *args):
             if epoch == self._host_epoch:
@@ -1511,9 +1555,10 @@ class AutoAdvApplication:
 
     def close_hook_host(self) -> None:
         self._host_epoch += 1
-        self.reset_hook_connection()
+        self._reset_hook_connection()
         host, self.hook_host = self.hook_host, None
         self._synced_sources.clear()
+        self._invalidate_hook_group_evidence()
         if host is not None:
             host.close()
 
@@ -1521,19 +1566,20 @@ class AutoAdvApplication:
         target = self._runtime_target
         if not target.selected:
             return
-        errors = self.sync_hook_threads(target.hook_pid)
+        errors = self._sync_hook_threads(target.hook_pid)
         if errors:
-            self.report_capture_problem('複数の取得元を同期できません。取得の復旧を確認してください。')
+            self._report_capture_problem('複数の取得元を同期できません。取得の復旧を確認してください。')
             for reason in errors:
                 self._emit_runtime_event('hook_sync_failed', None, reason=reason)
 
-    def sync_hook_threads(self, process_id: int, *, clear: bool = False) -> tuple[str, ...]:
+    def _sync_hook_threads(self, process_id: int, *, clear: bool = False) -> tuple[str, ...]:
         """Apply Luna selected-thread synchronization from application-owned recipes.
 
         Application recomputes synchronization whenever observed sources,
         capture recipes or the active runtime change.  The UI never owns the
         selected set or remembers which native threads were synchronized.
         """
+        before = set(self._synced_sources)
         selected: list[HookSelection] = []
         if not clear:
             seen: set[str] = set()
@@ -1555,7 +1601,7 @@ class AutoAdvApplication:
                         seen.add(hook.identity)
 
         desired: dict[tuple[int, int, int, int], ThreadSource] = {}
-        for source in self.capture_sources():
+        for source in self._capture_sources():
             if source.process_id == process_id and any(h.matches(source) for h in selected):
                 key = (source.process_id, source.address, source.context, source.context2)
                 desired[key] = source
@@ -1566,7 +1612,7 @@ class AutoAdvApplication:
                 continue
             try:
                 if self.hook_host_running:
-                    self.hook_command('sync_thread', source=source.__dict__, enabled=False)
+                    self._hook_command('sync_thread', source=source.__dict__, enabled=False)
             except (RuntimeError, OSError, ValueError) as exc:
                 errors.append(str(exc))
             self._synced_sources.pop(key, None)
@@ -1576,15 +1622,20 @@ class AutoAdvApplication:
                 if key in self._synced_sources:
                     continue
                 try:
-                    self.hook_command('sync_thread', source=source.__dict__, enabled=True)
+                    self._hook_command('sync_thread', source=source.__dict__, enabled=True)
                     self._synced_sources[key] = source
                 except (RuntimeError, OSError, ValueError) as exc:
                     errors.append(str(exc))
         elif clear:
             self._synced_sources.clear()
+        if set(self._synced_sources) != before:
+            # A group is valid only inside one concrete Luna synchronization
+            # set. Never let evidence collected under an earlier sync set cross
+            # into the newly synchronized epoch.
+            self._invalidate_hook_group_evidence()
         return tuple(errors)
 
-    def hook_command(self, action: str, **kwargs) -> None:
+    def _hook_command(self, action: str, **kwargs) -> None:
         if not self.hook_host_running or self.hook_host is None:
             raise RuntimeError('LunaHook Host is not running')
         self.hook_host.command(action, **kwargs)
@@ -1672,9 +1723,9 @@ class AutoAdvApplication:
         except Exception:
             self.catalog = previous
             raise
-        self.replace_catalog(catalog)
+        self._replace_catalog(catalog)
 
-    def replace_catalog(self, catalog: Catalog) -> None:
+    def _replace_catalog(self, catalog: Catalog) -> None:
         """Replace the persisted catalog after an explicit import.
 
         A catalog replacement invalidates every selected game/profile and capture
@@ -1695,7 +1746,7 @@ class AutoAdvApplication:
         # A server generation change invalidates both preview and runtime HTTP
         # work.  Do not let an old synthesis finish against a replaced endpoint.
         self.cancel_voice_preview()
-        self.cancel_voice()
+        self._cancel_voice()
         self._irodori_epoch += 1
         epoch = self._irodori_epoch
         if self._irodori_server is not None:
@@ -1723,7 +1774,7 @@ class AutoAdvApplication:
 
     def close_irodori(self) -> None:
         self.cancel_voice_preview()
-        self.cancel_voice()
+        self._cancel_voice()
         self._irodori_epoch += 1
         server, self._irodori_server = self._irodori_server, None
         if server is not None:
@@ -1747,92 +1798,97 @@ class AutoAdvApplication:
         game = self.catalog.games.get(self.game_id)
         return game.profiles.get(self.profile_id) if game else None
 
-    def observe_capture(self, source: ThreadSource, text: str = '', *, sequence: int = 0) -> None:
+    def _observe_capture(self, source: ThreadSource, text: str = '', *, sequence: int = 0) -> None:
         if self.capture:
+            was_ambiguous = self.capture.identity_is_ambiguous(source.identity)
             self.capture.observe(source, text, sequence=sequence)
+            if (source.identity in self.capture.selected_provider_ids() and
+                    was_ambiguous != self.capture.identity_is_ambiguous(source.identity)):
+                self._invalidate_hook_group_evidence()
             self._reconcile_hook_sync()
 
 
-    def remove_capture_source(self, identity: str, address: int) -> None:
+    def _remove_capture_source(self, identity: str, address: int) -> None:
         if self.capture:
+            selected = identity in self.capture.selected_provider_ids()
             self.capture.remove(identity, address)
+            if selected:
+                self._invalidate_hook_group_evidence()
             self._reconcile_hook_sync()
 
     def clear_capture_observations(self) -> None:
         target = self._runtime_target
         if target.selected:
-            self.sync_hook_threads(target.hook_pid, clear=True)
-        self._hook_output_group.clear()
-        self._hook_flush_epoch += 1
-        self._hook_flush_pending = False
+            self._sync_hook_threads(target.hook_pid, clear=True)
         if self.capture:
             self.capture.clear_observations()
+        self._invalidate_hook_group_evidence()
         self._searched_hook_codes.clear()
         self._trial_hook_codes.clear()
 
     def capture_source(self, identity: str, address: int, *, require_unique: bool = True) -> ThreadSource | None:
         return self.capture.source(identity, address, require_unique=require_unique) if self.capture else None
 
-    def capture_sources(self, *, unique_only: bool = True) -> tuple[ThreadSource, ...]:
+    def _capture_sources(self, *, unique_only: bool = True) -> tuple[ThreadSource, ...]:
         return self.capture.sources(unique_only=unique_only) if self.capture else ()
 
     def capture_candidate(self, identity: str, address: int) -> CaptureCandidateView | None:
         return self.capture.candidate(identity, address) if self.capture else None
 
 
-    def capture_identity_is_ambiguous(self, identity: str) -> bool:
+    def _capture_identity_is_ambiguous(self, identity: str) -> bool:
         return bool(self.capture and self.capture.identity_is_ambiguous(identity))
 
-    def capture_saved_sources_ready(self, profile: Profile) -> bool:
+    def _capture_saved_sources_ready(self, profile: Profile) -> bool:
         if not self.capture:
             return False
         identity = profile.body_source
         return bool(identity and not self.capture.identity_is_ambiguous(identity) and
                     self.capture.has_output(identity))
 
-    def handle_capture_host_event(self, event: HookEvent) -> CaptureHostEventOutcome:
+    def _handle_capture_host_event(self, event: HookEvent) -> CaptureHostEventOutcome:
         """Own capture-source state transitions for one current Host event."""
-        if event.source is None or not self.capture_event_matches_connection(event):
+        if event.source is None or not self._capture_event_matches_connection(event):
             return CaptureHostEventOutcome()
         identity = event.source.identity
         if event.kind == 'removed':
             runtime_profile = self.runtime_state().profile
             active_removed = bool(runtime_profile and runtime_profile.body_source == identity)
-            self.remove_capture_source(identity, event.source.address)
+            self._remove_capture_source(identity, event.source.address)
             resumed = False
             if active_removed:
                 self.stop_monitoring('host_changed')
                 profile = self.current_profile()
-                resumed = self.reconcile_monitoring(profile) is not None
+                resumed = self._reconcile_monitoring(profile) is not None
                 if resumed:
                     self.clear_capture_problem()
                 else:
-                    self.report_capture_problem('監視中の台詞取得元が消失しました。取得の復旧を確認してください。')
+                    self._report_capture_problem('監視中の台詞取得元が消失しました。取得の復旧を確認してください。')
             return CaptureHostEventOutcome(
                 changed=True, active_source_removed=active_removed, monitor_started=resumed)
         if event.kind not in ('created', 'output'):
             return CaptureHostEventOutcome()
-        was_ambiguous = self.capture_identity_is_ambiguous(identity)
-        self.observe_capture(event.source, event.text if event.kind == 'output' else '', sequence=event.sequence)
-        new_ambiguity = self.capture_identity_is_ambiguous(identity) and not was_ambiguous
+        was_ambiguous = self._capture_identity_is_ambiguous(identity)
+        self._observe_capture(event.source, event.text if event.kind == 'output' else '', sequence=event.sequence)
+        new_ambiguity = self._capture_identity_is_ambiguous(identity) and not was_ambiguous
         if new_ambiguity and self.runtime_state().profile is not None:
             self.stop_monitoring('host_changed')
-            self.report_capture_problem('同じ識別子の取得元が複数あり、台詞を一意に選べません。')
-        resumed = self.reconcile_monitoring(self.current_profile()) is not None
+            self._report_capture_problem('同じ識別子の取得元が複数あり、台詞を一意に選べません。')
+        resumed = self._reconcile_monitoring(self.current_profile()) is not None
         return CaptureHostEventOutcome(
             changed=True, new_ambiguity=new_ambiguity, monitor_started=resumed)
 
-    def handle_hook_event(self, event: HookEvent) -> HookEventOutcome:
-        """Apply one Host event through the product's single Hook state path."""
+    def _apply_hook_event(self, event: HookEvent) -> HookEventOutcome:
+        """Apply one Host event and return its semantic outcome internally."""
         note = ''
-        if event.kind == 'hook_found' and self.capture_event_matches_connection(event):
+        if event.kind == 'hook_found' and self._capture_event_matches_connection(event):
             try:
                 self.insert_recovery_hook(event.detail, discovered=True)
             except (RuntimeError, OSError, ValueError) as exc:
                 note = '探索したHOOKを試用できません: ' + str(exc)
 
-        transition = self.handle_hook_connection_event(event)
-        capture_outcome = self.handle_capture_host_event(event)
+        transition = self._handle_hook_connection_event(event)
+        capture_outcome = self._handle_capture_host_event(event)
         token = None
         delay = None
         if event.kind == 'output' and event.source is not None:
@@ -1845,35 +1901,42 @@ class AutoAdvApplication:
         elif event.kind == 'diagnostic':
             self._handle_hook_diagnostic(event)
             note = 'LunaHost: ' + event.detail
-        outcome = HookEventOutcome(transition, capture_outcome, token, delay, note)
+        return HookEventOutcome(transition, capture_outcome, token, delay, note)
+
+    def handle_hook_event(self, event: HookEvent) -> None:
+        """Admit one Host event through the product's single external Hook contract.
+
+        Result delivery is semantic notification only.  Callers inspect
+        application state rather than using a second return-value observation
+        surface that exists only for tests.
+        """
+        outcome = self._apply_hook_event(event)
+        self._emit_runtime_event('hook_event', None, hook_event=event, outcome=outcome)
         if self._schedule_runtime is not None:
-            self._accept_runtime_token(token)
-            if delay is not None:
-                self._schedule_hook_flush(delay)
-        if self._hook_event_observer is not None:
-            self._hook_event_observer(event, outcome)
-        return outcome
+            self._accept_runtime_token(outcome.token)
+            if outcome.flush_delay_ms is not None:
+                self._schedule_hook_flush(outcome.flush_delay_ms)
 
     def _handle_hook_diagnostic(self, event: HookEvent) -> None:
         if event.kind != 'diagnostic':
             return
         if event.detail in ('existing_luna_injection_detected', 'cannot_attach_to_host_process'):
-            self.cancel_hook_connection_attempt(event.process_id)
+            self._cancel_hook_connection_attempt(event.process_id)
         if event.detail == 'existing_luna_injection_detected':
-            self.report_capture_problem(
+            self._report_capture_problem(
                 '対象には既にLunaHookが注入されています。ゲームを再起動してから選び直してください。')
         elif event.detail == 'cannot_attach_to_host_process':
-            self.report_capture_problem(
+            self._report_capture_problem(
                 'ゲームではないLunaHostプロセスが選択されています。実行中のゲームを選び直してください。')
 
     def handle_capture_activation_error(self, message: str = '') -> None:
         """Translate a capture-service activation failure into product state."""
         if self._runtime_capture_problem is None:
-            self.report_capture_problem('ゲームから会話を取得できません。取得の復旧を確認してください。')
+            self._report_capture_problem('ゲームから会話を取得できません。取得の復旧を確認してください。')
         if message:
             self._emit_runtime_event('capture_activation_failed', None, reason=message)
 
-    def handle_hook_error(self, message: str = '') -> None:
+    def _handle_hook_error(self, message: str = '') -> None:
         """Expose a Host failure as a user-actionable capture problem.
 
         The UI adapter may log the native diagnostic, but it must not decide
@@ -1886,8 +1949,8 @@ class AutoAdvApplication:
 
     def _handle_hook_closed(self) -> None:
         self.stop_monitoring('host_changed')
-        self.reset_hook_connection()
-        self.report_capture_problem('ゲームからの台詞取得が停止しました。')
+        self._reset_hook_connection()
+        self._report_capture_problem('ゲームからの台詞取得が停止しました。')
 
     def target_resolution_needed(self) -> bool:
         connection = self._hook_connection
@@ -1903,32 +1966,32 @@ class AutoAdvApplication:
 
     def start_recovery_hook_search(self, boundary_module: str = '') -> None:
         pid = self._connected_hook_pid()
-        self.hook_command('find_hooks', pid=pid, boundary_module=boundary_module,
+        self._hook_command('find_hooks', pid=pid, boundary_module=boundary_module,
                           parameters={'maxRecords': 64})
 
     def insert_pc_recovery_hooks(self) -> None:
         pid = self._connected_hook_pid()
-        self.hook_command('insert_pc_hooks', pid=pid)
+        self._hook_command('insert_pc_hooks', pid=pid)
         self._record_pc_hooks_inserted()
 
     def insert_recovery_hook(self, code: str, *, discovered: bool = False) -> bool:
         code = code.strip()
         if not code:
             return False
-        if discovered and not self.begin_recovery_hook_trial(code):
+        if discovered and not self._begin_recovery_hook_trial(code):
             return False
         try:
             pid = self._connected_hook_pid()
-            self.hook_command('insert_hook', pid=pid, code=code)
+            self._hook_command('insert_hook', pid=pid, code=code)
             self._record_inserted_hook(code)
-            self.mark_recovery_hook_inserted(code)
+            self._mark_recovery_hook_inserted(code)
             return True
         except Exception:
             if discovered:
-                self.recovery_hook_trial_failed(code)
+                self._recovery_hook_trial_failed(code)
             raise
 
-    def begin_recovery_hook_trial(self, code: str) -> bool:
+    def _begin_recovery_hook_trial(self, code: str) -> bool:
         code = code.strip()
         if (not code or code in self._searched_hook_codes or
                 (self.capture is not None and self.capture.has_hook_code(code))):
@@ -1936,10 +1999,10 @@ class AutoAdvApplication:
         self._searched_hook_codes.add(code)
         return True
 
-    def recovery_hook_trial_failed(self, code: str) -> None:
+    def _recovery_hook_trial_failed(self, code: str) -> None:
         self._searched_hook_codes.discard(code.strip())
 
-    def mark_recovery_hook_inserted(self, code: str) -> None:
+    def _mark_recovery_hook_inserted(self, code: str) -> None:
         code = code.strip()
         if code:
             self._trial_hook_codes.add(code)
@@ -1947,8 +2010,11 @@ class AutoAdvApplication:
     def set_capture_field_source(self, field: str, identity: str | None, address: int | None = None) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
+        providers_before = self.capture.selected_provider_ids()
         source = self.capture.source(identity, address) if identity is not None and address is not None else None
         self.capture.set_field_source(field, identity, address)
+        if self.capture.selected_provider_ids() != providers_before:
+            self._invalidate_hook_group_evidence()
         if source is not None and source.hook_code in self._trial_hook_codes:
             self.capture.adopt_inserted_hook(source.hook_code)
         self._reconcile_hook_sync()
@@ -2007,7 +2073,7 @@ class AutoAdvApplication:
             speaker_source=view.speaker_source, dirty=view.dirty, can_commit=view.can_commit,
             problem=self._runtime_capture_problem)
 
-    def report_capture_problem(self, message: str, action: str = 'open_capture_recovery') -> None:
+    def _report_capture_problem(self, message: str, action: str = 'open_capture_recovery') -> None:
         message = message.strip()
         self._runtime_capture_problem = CaptureProblemView(message, action) if message else None
 
@@ -2078,7 +2144,7 @@ class AutoAdvApplication:
         self._reconcile_hook_sync()
         self._apply_persisted_profile_change(previous, updated)
         if self.runtime_state().profile is None:
-            self.reconcile_monitoring(updated)
+            self._reconcile_monitoring(updated)
         return updated
 
     def _update_profile(self, mutate: Callable[[Profile], None]) -> Profile:
@@ -2316,7 +2382,7 @@ class AutoAdvApplication:
             # The raw profile did not change, but the effective runtime contract did.
             state = self.runtime_state()
             if state.profile is not None and state.profile.id == current_profile.id:
-                if self.runtime_capture_matches(updated_effective):
+                if self._runtime_capture_matches(updated_effective):
                     self.controller.stage_profile(updated_effective)
                     self._notify_runtime()
                 else:

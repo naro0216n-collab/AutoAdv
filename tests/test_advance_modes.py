@@ -208,7 +208,7 @@ class ControllerModes(unittest.TestCase):
     def test_failure_pause_and_stale_token_cannot_send(self):
         self.begin(AdvanceMode.AUDIO, True)
         self.assertFalse(self.done('tts_finished', success=False))
-        self.assertEqual(self.ctrl.reason, 'tts_playback_failed')
+        self.assertEqual(self.ctrl.pause_reason, 'tts_playback_failed')
         self.assertFalse(self.ctrl.try_advance())
         old = self.token
         self.ctrl.begin(make_profile(), Target(11, 22), 'second', 1)

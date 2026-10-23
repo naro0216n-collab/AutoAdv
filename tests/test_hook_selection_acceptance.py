@@ -118,12 +118,12 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.application.select_primary_target(101, 0x1234)
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
-                window.application.begin_hook_connection(101, window.current_profile())
+                self.assertEqual(window.application.activate_selected_target(), 'connecting')
                 window.application.handle_hook_event(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 existing = source('A', 1)
                 window.application.handle_hook_event(HookEvent('output', 'host', 7, 2, 200,
                                          process_id=101, source=existing, text='台詞A'))
-                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
+                QApplication.processEvents()
                 self.assertEqual(window.source_table.rowCount(), 1)
                 self.assertEqual(window.source_table.item(0, 0).text(), '台詞A')
                 self.assertEqual(window.source_table.item(0, 1).text(), '—')
@@ -156,7 +156,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.application.select_primary_target(101, 0x1234)
                 commands = Mock()
                 window.application.hook_host = SimpleNamespace(command=commands, child=SimpleNamespace(poll=lambda: None))
-                window.application.begin_hook_connection(101, window.current_profile())
+                self.assertEqual(window.application.activate_selected_target(), 'connecting')
                 window.application.handle_hook_event(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 window.btn_recovery_search.click()
                 window.application.handle_hook_event(HookEvent('hook_found', 'host', 7, 2, 200,
@@ -166,7 +166,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 found = source('B', 5)
                 window.application.handle_hook_event(HookEvent('output', 'host', 7, 3, 300,
                                          process_id=101, source=found, text='台詞B'))
-                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
+                QApplication.processEvents()
                 idx = next(i for i in range(window.capture_body_source.count())
                            if window.capture_body_source.itemData(i) == (found.identity, found.address))
                 window.capture_body_source.setCurrentIndex(idx)
@@ -200,7 +200,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
             try:
                 window.application.select_primary_target(101, 0x1234)
                 window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
-                window.application.begin_hook_connection(101, window.current_profile())
+                self.assertEqual(window.application.activate_selected_target(), 'connecting')
                 window.application.handle_hook_event(HookEvent('connected', 'host', 3, 1, 100, process_id=101))
                 speaker_source = source('S', 1)
                 body_source = source('T', 5, address=0x200)
@@ -210,7 +210,7 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                                          process_id=101, source=speaker_source, text=speaker_raw))
                 window.application.handle_hook_event(HookEvent('output', 'host', 3, 3, 220,
                                          process_id=101, source=body_source, text=body_raw))
-                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
+                QApplication.processEvents()
                 body_index = next(i for i in range(window.capture_body_source.count())
                                   if window.capture_body_source.itemData(i) ==
                                   (body_source.identity, body_source.address))
@@ -219,6 +219,16 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                                      (speaker_source.identity, speaker_source.address))
                 window.capture_body_source.setCurrentIndex(body_index)
                 window.capture_speaker_source.setCurrentIndex(speaker_index)
+                QApplication.processEvents()
+                # Pre-selection observations are candidate discovery only. Final
+                # composition starts from new output after Luna synchronization.
+                self.assertEqual(window.capture_result_table.rowCount(), 0)
+                window.application.handle_hook_event(HookEvent('output', 'host', 3, 4, 300,
+                                         process_id=101, source=speaker_source, text=speaker_raw))
+                window.application.handle_hook_event(HookEvent('output', 'host', 3, 5, 320,
+                                         process_id=101, source=body_source, text=body_raw))
+                from PySide6.QtTest import QTest
+                QTest.qWait(120)
                 QApplication.processEvents()
                 self.assertEqual(window.capture_result_table.rowCount(), 1)
                 self.assertEqual(window.capture_result_table.item(0, 0).text(), 'きぬ')
@@ -252,12 +262,12 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
             try:
                 window.application.select_primary_target(101, 0x1234)
                 window.application.hook_host = SimpleNamespace(command=Mock(), child=SimpleNamespace(poll=lambda: None))
-                window.application.begin_hook_connection(101, window.current_profile())
+                self.assertEqual(window.application.activate_selected_target(), 'connecting')
                 window.application.handle_hook_event(HookEvent('connected', 'host', 7, 1, 100, process_id=101))
                 combined = source('C', 1)
                 window.application.handle_hook_event(HookEvent('output', 'host', 7, 2, 200,
                                          process_id=101, source=combined, text=raw))
-                window.application.flush_hook_outputs(); window.refresh_capture_workspace()
+                QApplication.processEvents()
                 window.source_table.selectRow(0)
                 QApplication.processEvents()
                 self.assertEqual(window.source_extraction_preview.rowCount(), 1)

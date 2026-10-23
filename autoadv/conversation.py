@@ -47,7 +47,6 @@ class Controller:
         self.native_playing = False
         self.fallback_elapsed = False
         self.sent = False
-        self.reason = 'not_monitoring'
         self.pause_reason: str | None = None
         self.line_no = 0
         self.awaiting_next = False
@@ -66,7 +65,6 @@ class Controller:
         self.pending_profile = None
         self.source_generation, self.connection_generation = host_generation, connection_generation
         self.pause_reason = None if self.authorized else 'advance_not_authorized'
-        self.reason = 'presenting' if self.authorized else 'advance_not_authorized'
         return self.session
 
     def close(self, reason: str = 'stopped') -> None:
@@ -88,7 +86,6 @@ class Controller:
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.pause_reason = reason if self.authorized else 'advance_not_authorized'
-        self.reason = self.pause_reason
 
     def stage_profile(self, profile: Profile) -> None:
         """Apply non-capture edits at the next utterance boundary."""
@@ -255,10 +252,8 @@ class Controller:
         self.awaiting_next = False
         if self.authorized:
             self.pause_reason = None
-            self.reason = 'presenting'
         else:
             self.pause_reason = 'advance_not_authorized'
-            self.reason = 'advance_not_authorized'
         return Token(self.session, self.line_no)
 
     def confirm_external_advance(self, token: Token) -> bool:
@@ -277,7 +272,6 @@ class Controller:
         self.native_playing = False
         self.pause_reason = None
         self.awaiting_next = True
-        self.reason = 'awaiting_next_line'
         return True
 
     def take_external_transition(self, token: Token) -> int:
@@ -365,8 +359,6 @@ class Controller:
     def _presentation_done(self, reason: str) -> bool:
         self.completed = True
         self.presentation_reason = reason
-        self.reason = ('ready' if self.authorized and self.pause_reason is None
-                       else (self.pause_reason or 'awaiting_permission'))
         return True
 
     @property
@@ -390,17 +382,10 @@ class Controller:
         else:
             self.authorized = False
             self.pause_reason = 'advance_not_authorized'
-        if not self.authorized:
-            self.reason = 'advance_not_authorized'
-        elif self.pause_reason:
-            self.reason = self.pause_reason
-        else:
-            self.reason = 'ready' if self.completed else 'presenting'
 
     def pause(self, reason: str) -> None:
         """Hold automatic input without changing the user's mode choice."""
         self.pause_reason = reason
-        self.reason = reason
 
     def expire_next_line(self, token: Token) -> bool:
         """Hold further input after an unanswered advance.
@@ -430,5 +415,4 @@ class Controller:
             self.pause('input_failure_no_retry')
             return False
         self.awaiting_next = True
-        self.reason = 'awaiting_next_line'
         return True

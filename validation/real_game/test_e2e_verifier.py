@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import unittest
-from autoadv.validation_trace import text_digest
+from validation.real_game.trace import text_digest
 from validation.real_game.verify_trace import validate as _validate, scenario_for_phase
 from validation.real_game._synthetic_checker_oracle import synthetic_game_observations
 

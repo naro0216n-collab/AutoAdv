@@ -18,7 +18,7 @@ def synthetic_game_observations(records, *, phase='mixed', start_line=None):
     if not utterances:
         return []
     hashes = [r.get('body_hash') for r in utterances]
-    from autoadv.validation_trace import text_digest
+    from validation.real_game.trace import text_digest
     if start_line is not None:
         candidates = [start_line - 1] if 1 <= start_line <= len(scenario) else []
     else:

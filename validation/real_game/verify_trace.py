@@ -11,7 +11,7 @@ import json
 import math
 from pathlib import Path
 from typing import Sequence
-from autoadv.validation_trace import text_digest
+from validation.real_game.trace import text_digest
 
 HERE = Path(__file__).resolve().parent
 PHASES = ('hook', 'reading', 'native', 'tts', 'mixed', 'stress')

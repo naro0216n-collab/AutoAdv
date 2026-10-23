@@ -80,8 +80,9 @@ class LiveGuiSessionContract(unittest.TestCase):
             runtime_state=lambda: SimpleNamespace(profile=SimpleNamespace(id='p')),
         )
         window = SimpleNamespace(application=product)
+        trace = SimpleNamespace(emit=lambda *args, **kwargs: None)
         driver = SessionDriver(window, SimpleNamespace(),
-                               {'timeout_seconds': 30, 'phase': 'reading'})
+                               {'timeout_seconds': 30, 'phase': 'reading'}, trace)
         self.assertTrue(driver._select_calibration_source())
         self.assertEqual(calls, [
             ('preset', ('hook-a', 91, 'auto')),
@@ -96,13 +97,12 @@ class LiveGuiSessionContract(unittest.TestCase):
         def permit():
             actions.append('permit')
             runtime.authorized = True
-        window = SimpleNamespace(
-            application=product, permit=permit,
-            validation_trace=SimpleNamespace(emit=lambda name, **fields:
-                                              actions.append(('trace', name, fields))))
+        window = SimpleNamespace(application=product, permit=permit)
+        trace = SimpleNamespace(emit=lambda name, **fields:
+                                actions.append(('trace', name, fields)))
         driver = SessionDriver(window, SimpleNamespace(),
                                {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 16,
-                                'force_continue_on_failure': True},
+                                'force_continue_on_failure': True}, trace,
                                clock=lambda: 0.0)
         driver.state = 'activate'
         driver._release = actions.append
@@ -119,15 +119,13 @@ class LiveGuiSessionContract(unittest.TestCase):
                                   target=SimpleNamespace(hwnd=77),
                                   profile=SimpleNamespace(input_key=13))
         product = SimpleNamespace(runtime_state=lambda: runtime)
-        window = SimpleNamespace(
-            application=product, close=lambda: actions.append('close'),
-            validation_trace=SimpleNamespace(
-                emit=lambda name, **fields: traces.append((name, fields))))
+        window = SimpleNamespace(application=product, close=lambda: actions.append('close'))
+        trace = SimpleNamespace(emit=lambda name, **fields: traces.append((name, fields)))
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
         driver = SessionDriver(
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True},
+             'force_continue_on_failure': True}, trace,
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: (
                 boundaries.append(state.token.line), setattr(runtime, 'pause_reason', None)))
@@ -156,14 +154,13 @@ class LiveGuiSessionContract(unittest.TestCase):
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=3),
                                   pause_reason='native_inconclusive_hold', sent=False)
         product = SimpleNamespace(runtime_state=lambda: runtime)
-        window = SimpleNamespace(
-            application=product, close=lambda: actions.append('close'),
-            validation_trace=SimpleNamespace(emit=lambda *args, **kwargs: None))
+        window = SimpleNamespace(application=product, close=lambda: actions.append('close'))
+        trace = SimpleNamespace(emit=lambda *args, **kwargs: None)
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
         driver = SessionDriver(
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True},
+             'force_continue_on_failure': True}, trace,
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: None)
         driver.state = 'running'
@@ -180,14 +177,13 @@ class LiveGuiSessionContract(unittest.TestCase):
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=4),
                                   pause_reason=None, sent=False)
         product = SimpleNamespace(runtime_state=lambda: runtime)
-        window = SimpleNamespace(
-            application=product, close=lambda: actions.append('close'),
-            validation_trace=SimpleNamespace(emit=lambda *args, **kwargs: None))
+        window = SimpleNamespace(application=product, close=lambda: actions.append('close'))
+        trace = SimpleNamespace(emit=lambda *args, **kwargs: None)
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
         driver = SessionDriver(
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
-             'force_continue_on_failure': True},
+             'force_continue_on_failure': True}, trace,
             clock=lambda: clock[0],
             recovery_send=lambda state: recoveries.append(state.token.line),
             recovery_confirm=lambda state: None)
@@ -215,12 +211,10 @@ class LiveGuiSessionContract(unittest.TestCase):
             hook_host_running=True,
             runtime_state=lambda: runtime,
         )
-        window = SimpleNamespace(
-            application=product,
-            validation_trace=SimpleNamespace(emit=lambda name, **kwargs: recorded.append((name, kwargs))),
-            close=lambda: closed.append('window'))
+        window = SimpleNamespace(application=product, close=lambda: closed.append('window'))
+        trace = SimpleNamespace(emit=lambda name, **kwargs: recorded.append((name, kwargs)))
         qt_app = SimpleNamespace(exit=lambda code: closed.append(code))
-        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native'})
+        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native'}, trace)
         driver.state = 'calibration'
         driver.fail('finite live-run timeout before requested validation collection completed')
         self.assertEqual(closed, ['window', 3])

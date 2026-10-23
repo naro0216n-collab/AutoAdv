@@ -55,7 +55,7 @@ class MultiHookProductContract(unittest.TestCase):
     def test_ambiguous_multiple_body_values_fail_closed(self):
         self.c.permit(True)
         self.assertIsNone(self.c.observe_group([msg(TEXT, 1, '台詞A'), msg(TEXT, 2, '台詞B')]))
-        self.assertEqual(self.c.reason, 'ambiguous_multihook_lines')
+        self.assertEqual(self.c.pause_reason, 'ambiguous_multihook_lines')
         self.assertTrue(self.c.authorized)
         self.assertEqual(self.sent, [])
 
@@ -67,7 +67,7 @@ class MultiHookProductContract(unittest.TestCase):
         self.assertTrue(self.c.try_advance())
         self.assertFalse(self.c.expire_next_line(Token(self.c.session, 2)))
         self.assertTrue(self.c.expire_next_line(ticket))
-        self.assertEqual(self.c.reason, 'next_line_timeout')
+        self.assertEqual(self.c.pause_reason, 'next_line_timeout')
         self.assertTrue(self.c.authorized)
         self.assertFalse(self.c.try_advance())
         self.assertEqual(self.sent, [1])
