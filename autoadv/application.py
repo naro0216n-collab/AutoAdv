@@ -626,8 +626,12 @@ class AutoAdvApplication:
     def _accept_runtime_token(self, token: Token | None) -> None:
         if token is None or token != self.controller.token:
             return
-        self._start_presentation(token)
+        # Publish the admitted immutable Utterance before any presentation side
+        # effect can emit PCM/ASR/TTS/completion telemetry. Besides making the
+        # lifecycle causal, this gives validation a conservative reading-time
+        # origin instead of timestamping the line after its timer has started.
         self._emit_runtime_event('utterance', token)
+        self._start_presentation(token)
 
     def _schedule(self, delay_ms: int, callback: Callable[[], None]) -> None:
         if self._schedule_runtime is None:

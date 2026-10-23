@@ -341,6 +341,11 @@ class Controller:
         if event == 'native_finished':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
+            # The deadline hold means only that endpoint evidence was
+            # inconclusive at that moment. A later definitive NativeAudio end
+            # supersedes exactly that hold; unrelated safety/input failures
+            # remain owned by their own recovery paths.
+            self._resolve_pause('native_inconclusive_hold')
             return self._presentation_done('native')
         if event == 'fallback_elapsed':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
@@ -386,6 +391,13 @@ class Controller:
     def pause(self, reason: str) -> None:
         """Hold automatic input without changing the user's mode choice."""
         self.pause_reason = reason
+
+    def _resolve_pause(self, reason: str) -> bool:
+        """Resolve one runtime hold only when its own recovery fact arrives."""
+        if self.pause_reason != reason:
+            return False
+        self.pause_reason = None if self.authorized else 'advance_not_authorized'
+        return True
 
     def expire_next_line(self, token: Token) -> bool:
         """Hold further input after an unanswered advance.

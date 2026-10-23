@@ -426,6 +426,26 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertFalse(any('PCM is not valid captured frames' in issue
                              for issue in result['quality_issues']))
 
+    def test_native_pcm_keeps_session_provenance_after_monitor_ends(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        records.append({
+            'event': 'monitor_ended', 'session': 1, 'reason': 'validation_complete',
+        })
+        result = validate(resequence(records), phase='native')
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertFalse(any('PCM is not valid captured frames' in issue
+                             for issue in result['quality_issues']))
+
+    def test_pcm_emitted_after_monitor_end_is_not_rehabilitated_by_session_history(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        records.extend((
+            {'event': 'monitor_ended', 'session': 1, 'reason': 'validation_complete'},
+            {'event': 'native_pcm', 'session': 1, 'line': 1, 'frames': 960, 'audio_pid': 50},
+        ))
+        result = validate(resequence(records), phase='native')
+        self.assertTrue(any('PCM is not valid captured frames for (1, 1)' in issue
+                            for issue in result['quality_issues']))
+
     def test_post_collection_pcm_is_ignored_only_after_matching_out_of_scope_utterance(self):
         records = contract_records(0, 4, lines=NATIVE_SCENARIO)
         records.insert(4, {

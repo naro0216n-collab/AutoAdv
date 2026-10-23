@@ -521,23 +521,6 @@ class NativeAudio:
         fused = 1.0 - (1.0 - timestamp) * (1.0 - vad_endpoint) * (1.0 - stability_endpoint)
         return fused, vad_endpoint, stability_endpoint
 
-    @staticmethod
-    def _content_completion_supported(progress, length_score: float) -> bool:
-        """Require coherent target progress, not exact ASR text.
-
-        A matcher terminal candidate is the normal path. Noisy/whispered speech
-        can instead qualify when pronunciation, target-relative recognition
-        length, attribution and contradiction jointly support the same target.
-        """
-        if progress.terminal_candidate:
-            return True
-        return (
-            progress.phonetic_coverage >= .65
-            and length_score >= .85
-            and progress.attribution_score >= .60
-            and progress.contradiction_score <= .25
-        )
-
     def _infer(self, token, generation, samples, submitted_ns=0,
                submitted_tail_ms=None, submitted_end_ms=None):
         started_ns = time.perf_counter_ns() if self.on_inference else 0
@@ -592,8 +575,12 @@ class NativeAudio:
                     max(progress.phonetic_coverage, progress.coverage) >= .55
                     and progress.matched_phonemes >= min(4, max(1, progress.target_units))
                 )
-                content_supported = self._content_completion_supported(progress, length_score)
-                if (sufficient_progress and content_supported
+                # Length, attribution, completion and contradiction are already
+                # continuous evidence in ``evidence_score``. Do not turn any of
+                # them back into a second binary completion gate: noisy Japanese
+                # ASR can omit target material while the combined evidence still
+                # strongly identifies both the utterance and its endpoint.
+                if (sufficient_progress
                         and endpoint_score >= self.ENDPOINT_EVIDENCE_THRESHOLD
                         and evidence_score >= self.COMPLETION_EVIDENCE_THRESHOLD):
                     self.completed = True

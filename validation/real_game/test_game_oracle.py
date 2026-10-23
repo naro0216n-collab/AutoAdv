@@ -26,7 +26,7 @@ class IndependentGameOracleContract(unittest.TestCase):
                             for item in observation['diagnostics']))
         self.assertTrue(self.verify()['ok'])  # checker-only positive fixture
 
-    def test_game_dismissal_is_optional_observation_not_input_success(self):
+    def test_game_dismissal_is_diagnostic_not_input_success(self):
         real = self.verify()
         first = real['line_results'][0]
         self.assertTrue(first['game_dismissed_after_input'])
@@ -34,8 +34,8 @@ class IndependentGameOracleContract(unittest.TestCase):
         observed = self.verify(game=missing)
         self.assertTrue(observed['collection_valid'], observed['errors'])
         self.assertFalse(observed['line_results'][0]['game_dismissed_after_input'])
-        self.assertFalse(any('game dialogue dismissal' in x
-                             for x in observed['diagnostics']))
+        self.assertTrue(any('not followed by observed game dialogue dismissal' in x
+                            for x in observed['diagnostics']))
         self.assertEqual(observed['confirmed_advance_to_next_hook'], 2)
 
     def test_attempt_without_confirmed_send_cannot_count_as_game_dismissal(self):

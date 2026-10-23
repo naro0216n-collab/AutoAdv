@@ -214,6 +214,13 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                   'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= actual_input)
                                             if actual_input is not None else None),
                   'outcome': 'unadvanced'}
+        # Dismissal is not product input success—the following selected Hook is
+        # the continuation contract—but it is an independent game observation.
+        # Keep absence visible as an oracle diagnostic instead of suppressing a
+        # disagreement merely because product continuation was observed.
+        if actual_input is not None and (dismissal is None or dismissal['at_ns'] < actual_input):
+            diagnostics.append(
+                f'confirmed advance input not followed by observed game dialogue dismissal: {key}')
         if attempt is not None and key not in sent:
             diagnostics.append(f'input attempt has no confirmed advance input: {key}')
         # The product's targeted input and following LunaHook already verify the
@@ -357,14 +364,19 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     # The active-session and provenance checks reject old-session, OCR and
     # unmatched candidate-HOOK events as evidence of a live Luna dialogue.
     connections: set[tuple] = set()
-    monitoring: dict[object, dict] = {}
+    # Active lifetime and immutable session provenance are different facts.
+    # The active map answers "was this event emitted while monitoring?" while
+    # the historical map remains available after monitor_ended for deferred
+    # cross-event validation such as PCM -> Utterance association.
+    active_monitoring: dict[object, dict] = {}
+    monitor_sessions: dict[object, dict] = {}
     game_pid_by_session: dict[object, int] = {}
     source_outputs: dict[tuple, int] = {}
     utterances: dict[tuple, dict] = {}
     utterance_order: list[tuple] = []
     complete: set[tuple] = set()
     pcm: set[tuple] = set()
-    pcm_records: list[dict] = []
+    pcm_records: list[tuple[dict, dict | None]] = []
     native: set[tuple] = set()
     tts: set[tuple] = set()
     attempts: dict[tuple, int] = {}
@@ -424,17 +436,18 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             connection = (record.get('hook_pid'), record.get('generation'), record.get('connection'))
             if connection not in connections:
                 errors.append(f'monitor {session} lacks actual Host connected notification')
-            if session in monitoring:
+            if session in monitor_sessions:
                 errors.append(f'duplicate monitor session {session}')
-            monitoring[session] = record
+            active_monitoring[session] = record
+            monitor_sessions[session] = record
             # Hook, audio and UI PIDs may legitimately differ for a game.
             # The independent game observer identifies the input/window PID;
             # capture evidence is checked against its separately selected PID.
             game_pid_by_session[session] = record.get('input_pid')
         elif event == 'monitor_ended':
-            monitoring.pop(session, None)
+            active_monitoring.pop(session, None)
         elif event == 'hook_output':
-            monitor = monitoring.get(session)
+            monitor = active_monitoring.get(session)
             if (not monitor or record.get('pid') != monitor.get('hook_pid') or
                     record.get('generation') != monitor.get('generation') or
                     record.get('connection') != monitor.get('connection') or
@@ -455,7 +468,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             utterances[key] = record
             utterance_order.append(key)
             timestamps[key] = at
-            if session not in monitoring:
+            if session not in active_monitoring:
                 errors.append(f'utterance outside HOOK monitoring: {key}')
             source = (session, record.get('source'), record.get('hook_sequence'), record.get('raw_hash'))
             if source not in source_outputs:
@@ -463,13 +476,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         elif event == 'native_ready':
             if 'vad_only' in record:
                 product_issue(f'removed VAD-only audio configuration in product trace: {session}')
-            if session in monitoring and record.get('audio_pid') == monitoring[session].get('audio_pid'):
+            if (session in active_monitoring and
+                    record.get('audio_pid') == active_monitoring[session].get('audio_pid')):
                 readiness.add(session)
                 audio_methods[session] = 'asr'
                 audio_targets[session] = record.get('audio_pid')
         elif event == 'native_pcm':
             # PCM callbacks can precede the corresponding queued Utterance.
-            pcm_records.append(record)
+            pcm_records.append((record, active_monitoring.get(session)))
         elif event == 'asr_inference':
             if key in utterances:
                 asr_counts[key] = asr_counts.get(key, 0) + 1
@@ -551,7 +565,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     input_completion_reasons[key] = causal_reason
             if key not in utterances:
                 errors.append(f'input without observed utterance: {key}')
-            if session not in monitoring:
+            if session not in active_monitoring:
                 errors.append(f'input outside active monitored game session: {key}')
         elif event == 'validation_recovery_input':
             if key not in utterances:
@@ -591,15 +605,19 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
 
     # Validate captured PCM after all queued Utterances have been collected.
     # Post-collection PCM may precede the out-of-scope Utterance record.
-    for record in pcm_records:
+    for record, active_monitor in pcm_records:
         key = _key(record)
         if key not in utterances and key in out_of_scope_utterances:
             continue
         session = record.get('session')
+        monitor = monitor_sessions.get(session)
         if (key not in utterances or type(record.get('frames')) is not int
                 or record['frames'] <= 0
+                or active_monitor is None
+                or monitor is None
                 or record.get('audio_pid') != audio_targets.get(session)
-                or record.get('audio_pid') != monitoring.get(session, {}).get('audio_pid')):
+                or record.get('audio_pid') != monitor.get('audio_pid')
+                or active_monitor.get('audio_pid') != monitor.get('audio_pid')):
             product_issue(f'PCM is not valid captured frames for {key}')
         else:
             pcm.add(key)

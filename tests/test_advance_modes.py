@@ -188,6 +188,25 @@ class ControllerModes(unittest.TestCase):
         self.assertIsNone(self.ctrl.presentation_reason)
         self.assertFalse(self.ctrl.try_advance())
 
+    def test_late_native_finish_resolves_only_the_inconclusive_native_hold(self):
+        self.begin(AdvanceMode.AUDIO, False, False)
+        self.assertFalse(self.done('fallback_elapsed'))
+        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+
+        self.assertTrue(self.done('native_finished'))
+        self.assertIsNone(self.ctrl.pause_reason)
+        self.assertEqual(self.ctrl.presentation_reason, 'native')
+        self.assertTrue(self.ctrl.try_advance())
+
+    def test_late_native_finish_does_not_clear_an_unrelated_safety_hold(self):
+        self.begin(AdvanceMode.AUDIO, False, False)
+        self.ctrl.pause('target_unavailable')
+
+        self.assertTrue(self.done('native_finished'))
+        self.assertEqual(self.ctrl.pause_reason, 'target_unavailable')
+        self.assertEqual(self.ctrl.presentation_reason, 'native')
+        self.assertFalse(self.ctrl.try_advance())
+
     def test_stale_correlated_voice_never_counts_as_native_completion(self):
         for opt_in in (False, True):
             with self.subTest(opt_in=opt_in):

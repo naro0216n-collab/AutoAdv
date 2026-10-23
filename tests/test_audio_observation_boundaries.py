@@ -537,7 +537,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             release.set()
             native.close()
 
-    def test_partial_asr_with_short_recognition_length_does_not_complete_from_vad_alone(self):
+    def test_partial_asr_can_complete_with_independent_vad_endpoint_evidence(self):
         events = []
         metrics = []
         clock = [1000]
@@ -575,12 +575,14 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                     time.sleep(.005)
                 self.assertFalse(busy, 'partial ASR inference did not finish')
             self.assertIn('started', events)
-            self.assertNotIn('completed', events)
-            self.assertFalse(native.completed)
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
             self.assertFalse(metrics[-1]['terminal_candidate'])
             self.assertAlmostEqual(metrics[-1]['phonetic_coverage'], 4 / 6, places=3)
             self.assertLess(metrics[-1]['length_score'], .85)
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .70)
+            self.assertGreaterEqual(
+                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
         finally:
             native.close()
 
@@ -595,11 +597,11 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
 
         progress = ASRProgress(
             coverage=.6667, onset_score=.75, tail_confidence=0.0, monotonic=True,
-            matched_chars=4, observed='え嘘でし', edit_count=2, length_ratio=.90,
+            matched_chars=4, observed='え嘘でし', edit_count=2, length_ratio=.6667,
             terminal_candidate=False, phonetic_coverage=.7778, matched_phonemes=7,
             phonetic_edit_count=2, attribution_score=.7529, completion_score=.72,
             contradiction_score=.1444, reading_rank=0, target_units=9,
-            pronunciation_length_ratio=.90, observed_token_count=4)
+            pronunciation_length_ratio=.7778, observed_token_count=4)
 
         native = NativeAudio(
             11, Path('unused'), Path('unused'), Path('unused'),
@@ -631,6 +633,8 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             self.assertIn('completed', events)
             self.assertTrue(native.completed)
             self.assertAlmostEqual(metrics[-1]['attribution_score'], .7529, places=4)
+            self.assertAlmostEqual(metrics[-1]['length_score'], .7778, places=4)
+            self.assertLess(metrics[-1]['length_score'], .85)
             self.assertGreaterEqual(metrics[-1]['vad_tail_ms'], 400)
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
             self.assertGreaterEqual(

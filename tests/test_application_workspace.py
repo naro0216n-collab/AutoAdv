@@ -997,6 +997,29 @@ def test_application_owns_text_presentation_deadline_and_next_line_timeout():
     assert app.runtime_state().pause_reason == 'next_line_timeout'
     assert any(name == 'next_line_timeout' for name, _, _ in events)
 
+
+def test_utterance_is_published_before_presentation_side_effects_begin():
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    text = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_source = profile.hooks[0].identity
+    timeline = []
+    app.configure_runtime_loop(
+        schedule=lambda delay, callback: timeline.append(('schedule', delay, callback)))
+    app.configure_telemetry(
+        lambda name, token, detail: timeline.append(('event', name, token)))
+    connect_hook(app, profile)
+    timeline.clear()
+
+    token = runtime_hook(app, text, '本文', 2, received_ns=100)
+    assert token is not None
+    utterance_at = next(i for i, item in enumerate(timeline)
+                        if item[0] == 'event' and item[1] == 'utterance')
+    first_presentation_effect = next(i for i, item in enumerate(timeline)
+                                     if item[0] == 'schedule')
+    assert utterance_at < first_presentation_effect
+
 def test_application_owns_uncertain_audio_fallback_policy():
     app, _ = app_with_game()
     profile = app.current_profile()
