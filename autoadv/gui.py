@@ -427,7 +427,7 @@ def run_gui() -> int:
             self.native_helper=QLineEdit(); self.asr_model=QLineEdit(); self.asr_tokens=QLineEdit()
             from .native_runtime import managed_paths
             managed_native = managed_paths()
-            self.native_helper.setPlaceholderText(managed_native.helper_executable)
+            self.native_helper.setPlaceholderText(managed_native.helper_dll)
             self.asr_model.setPlaceholderText(managed_native.asr_model)
             self.asr_tokens.setPlaceholderText(managed_native.asr_tokens)
             audio_details.addRow('Process Loopback helper 上書き',setting_row('native_helper', self.native_helper)); audio_details.addRow('ASRモデル 上書き',setting_row('asr_model', self.asr_model)); audio_details.addRow('ASR語彙 上書き',setting_row('asr_tokens', self.asr_tokens))

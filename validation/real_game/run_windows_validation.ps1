@@ -245,7 +245,7 @@ try {
     try { $runtimeInfo = ($runtimeLines | Select-Object -Last 1) | ConvertFrom-Json }
     catch { throw "Standard AutoAdv runtime result cannot be parsed: $($_.Exception.Message)" }
     $python = [string]$runtimeInfo.python
-    $managedHelper = [string]$runtimeInfo.native.paths.helper_executable
+    $managedHelper = [string]$runtimeInfo.native.paths.helper_dll
     $managedAsrModel = [string]$runtimeInfo.native.paths.asr_model
     $managedAsrTokens = [string]$runtimeInfo.native.paths.asr_tokens
     foreach ($required in @($python, $managedHelper, $managedAsrModel, $managedAsrTokens)) {
@@ -366,9 +366,7 @@ if (-not $NoUpload -and $hasProductRun) {
     Write-Warning 'Upload skipped: product validation never started. The local summary remains available.'
 }
 $finalError = $null
-if ($uploadError) {
-    $finalError = "AutoAdv result upload failed: $uploadError"
-} elseif ($errorText) {
+if ($errorText) {
     $finalError = "AutoAdv validation setup failed: $errorText"
 } else {
     $unmeasurable = @($results.ToArray() | Where-Object {

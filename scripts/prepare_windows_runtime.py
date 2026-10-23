@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 import venv
 
 
@@ -16,10 +17,26 @@ def runtime_root() -> Path:
     return base / "AutoAdv" / "runtime"
 
 
+RUNTIME_EXTRAS = ("gui", "audio", "ocr", "native")
+
+
+def runtime_requirements(repo: Path) -> tuple[str, ...]:
+    data = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    project = data.get("project", {})
+    requirements: list[str] = list(project.get("dependencies", ()))
+    optional = project.get("optional-dependencies", {})
+    for extra in RUNTIME_EXTRAS:
+        requirements.extend(optional.get(extra, ()))
+    return tuple(dict.fromkeys(str(item) for item in requirements))
+
+
 def dependency_fingerprint(repo: Path) -> str:
     digest = hashlib.sha256()
-    digest.update((repo / "pyproject.toml").read_bytes())
-    digest.update(f"python={sys.version_info.major}.{sys.version_info.minor}".encode())
+    digest.update(b"autoadv-runtime-dependencies-v2\0")
+    digest.update(f"python={sys.version_info.major}.{sys.version_info.minor}\0".encode())
+    for requirement in runtime_requirements(repo):
+        digest.update(requirement.encode("utf-8"))
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -38,11 +55,15 @@ def ensure_environment(repo: Path, root: Path) -> Path:
         venv.EnvBuilder(with_pip=True, clear=True).create(environment)
         installed = None
     if installed != expected:
+        requirements = runtime_requirements(repo)
         subprocess.run([
             str(python), "-m", "pip", "install", "--disable-pip-version-check",
-            "--only-binary=:all:", ".[gui,audio,ocr,native]",
+            "--only-binary=:all:", *requirements,
         ], cwd=repo, check=True)
-        marker.write_text(json.dumps({"fingerprint": expected}, indent=2) + "\n", encoding="utf-8")
+        marker.write_text(json.dumps({
+            "fingerprint": expected,
+            "requirements": requirements,
+        }, indent=2) + "\n", encoding="utf-8")
     return python
 
 

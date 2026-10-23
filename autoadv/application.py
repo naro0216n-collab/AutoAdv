@@ -1147,7 +1147,7 @@ class AutoAdvApplication:
             return False
         from .native_runtime import managed_paths
         managed = managed_paths()
-        native_helper = profile.native_helper or managed.helper_executable
+        native_helper = profile.native_helper or managed.helper_dll
         asr_model = profile.asr_model or managed.asr_model
         asr_tokens = profile.asr_tokens or managed.asr_tokens
         state = self.runtime_state()

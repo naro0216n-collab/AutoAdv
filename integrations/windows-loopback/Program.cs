@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
-// Distributed as a source-digest-keyed self-contained win-x64 executable; user machines never compile it.
 // Dedicated process, outside the target game's PID tree. stdout is a binary
 // protocol (the 16-byte fixed header + PCM); stderr is diagnostic only.
 // Header: 4-byte little-endian payload length, 8-byte monotonic milliseconds,

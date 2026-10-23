@@ -100,6 +100,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('$_.measurement_valid -ne $true', orchestrator)
         self.assertNotIn('$_.voice_safety_verified -ne $true', orchestrator)
         self.assertNotIn('$_.automatic_continuation_verified -ne $true', orchestrator)
+        self.assertNotIn('AutoAdv result upload failed:', orchestrator)
         driver = (ROOT / 'validation' / 'real_game' / 'gui_session.py').read_text(encoding='utf-8')
         self.assertIn("'validation_recovery_input'", driver)
         self.assertIn('confirm_external_advance', driver)
