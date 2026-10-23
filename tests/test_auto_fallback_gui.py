@@ -44,12 +44,16 @@ class TwoModeGuiTests(unittest.TestCase):
                 c.target_ready = lambda *_: True
                 app.begin_runtime(profile, Target(100, 200), 'ocr', 1)
                 app.set_auto_advance(True)
-                token = app.handle_runtime_ocr_output(sequence=1, text='「こんにちは！」', pid=100, session=app.runtime_state().session)
                 requests = []
-                window.application.start_voice = lambda token, reading, voice: requests.append((token, reading, voice))
+                app.start_voice = lambda token, reading, voice: requests.append((token, reading, voice))
                 if native is not None:
-                    window.application._native_audio = native
-                window.display_utterance(token)
+                    app._native_audio = native
+                token = app.handle_runtime_ocr_output(
+                    sequence=1, text='「こんにちは！」', pid=100,
+                    session=app.runtime_state().session)
+                # Application owns presentation start and emits the same
+                # utterance event consumed by the real GUI event adapter.
+                app._accept_runtime_token(token)
                 self.assertEqual(c.utterance.character_count, 5)
                 self.assertIn('500 ms', window.wait_preview.text())
                 self.assertIn('こんにちは', window.preview.toPlainText())

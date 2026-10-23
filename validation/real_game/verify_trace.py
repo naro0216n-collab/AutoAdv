@@ -126,7 +126,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 errors.append('invalid independent game line sequence')
                 return result
             lines[number] = {'start': record, 'voice_onsets': [], 'voice_ends': [],
-                             'dismissed': None, 'interrupted': False}
+                             'interruptions': [], 'dismissed': None}
             ordered.append(number)
         elif event in ('voice_started', 'voice_ended', 'voice_interrupted', 'line_dismissed'):
             if number not in lines:
@@ -143,7 +143,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                     errors.append(f'bad game playback endpoint interval: {number}')
                 line['voice_ends'].append(record)
             elif event == 'voice_interrupted':
-                line['interrupted'] = True
+                line['interruptions'].append(record)
             else:
                 if line['dismissed'] is not None:
                     errors.append(f'duplicate game line dismissal: {number}')
@@ -184,9 +184,23 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         dismissal = line['dismissed']
         voice_onsets = line['voice_onsets']
         voice_ends = line['voice_ends']
+        interruptions = line['interruptions']
+        # A voice lifecycle belongs to one game line from start until observed
+        # end/replacement.  Multiple starts, interruptions, or an end for a
+        # different file make the endpoint ambiguous; never pick the first end
+        # and silently certify it as the current line's voice.
+        lifecycle_end = None
+        lifecycle_ambiguous = bool(interruptions) or len(voice_onsets) > 1 or len(voice_ends) > 1
+        if len(voice_onsets) == 1 and len(voice_ends) == 1 and not lifecycle_ambiguous:
+            if voice_onsets[0].get('file') == voice_ends[0].get('file'):
+                lifecycle_end = voice_ends[0]
+            else:
+                lifecycle_ambiguous = True
+        elif voice_ends and not voice_onsets:
+            lifecycle_ambiguous = True
         origin = (key[0], utterances[key].get('source'),
                   utterances[key].get('hook_sequence'), utterances[key].get('raw_hash'))
-        if voice_onsets:
+        if len(voice_onsets) == 1:
             if (ms := _signed_elapsed_ms(voice_onsets[0]['at_ns'],
                                          source_outputs.get(origin))) is not None:
                 result['latencies'].setdefault('game_voice_onset_to_hook_ms', []).append(ms)
@@ -232,23 +246,26 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             # inactive sample], not an exact source-audio termination timestamp.
             # Preserve the signed latency to the first inactive observation as
             # a diagnostic; do not use it to classify overlap as success/failure.
-            end = voice_ends[0] if voice_ends else None
-            if voice_ends:
-                observed = voice_ends[0]
-                ms = _signed_elapsed_ms(observed['at_ns'], actual_input)
+            end = lifecycle_end
+            if end is not None:
+                ms = _signed_elapsed_ms(end['at_ns'], actual_input)
                 result['latencies'].setdefault('game_voice_end_to_input_ms', []).append(ms)
                 detail['game_end_to_input_ms'] = ms
                 if (decision := presentation_at.get(key)) is not None:
                     result['latencies'].setdefault('game_voice_end_to_decision_ms', []).append(
-                        _signed_elapsed_ms(observed['at_ns'], decision))
+                        _signed_elapsed_ms(end['at_ns'], decision))
                 if (estimated := native_end_estimates.get(key)) is not None:
                     result['latencies'].setdefault('game_voice_end_to_native_estimate_ms', []).append(
-                        _signed_elapsed_ms(observed['at_ns'], estimated))
+                        _signed_elapsed_ms(end['at_ns'], estimated))
             active_at_dismiss = bool(dismissal and dismissal.get('voice_active'))
             if active_at_dismiss or (end and actual_input < end['last_active_at_ns']):
                 result['early_inputs'] += 1
                 detail['outcome'] = 'early_input'
                 errors.append(f'input while the game voice was still playing: {key}')
+            elif lifecycle_ambiguous:
+                result['unverified_voice_ends'] += 1
+                detail['outcome'] = 'voice_end_unverified'
+                diagnostics.append(f'ambiguous independent game voice lifecycle for input: {key}')
             elif not end:
                 result['unverified_voice_ends'] += 1
                 detail['outcome'] = 'voice_end_unverified'
@@ -476,13 +493,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')
             # These are product-side process-loopback estimates, not known game
-            # source playback endpoints. ASR timestamps are decode-window token
-            # positions; VAD/stability are supporting evidence. Bounds are
-            # checked, but an acoustic onset is optional when VAD never fires.
+            # source playback endpoints. SenseVoice timestamps are token starts,
+            # so the current product may report an endpoint estimate only from
+            # independently observed VAD acoustic evidence. Bounds are checked;
+            # an acoustic onset remains optional because VAD can miss whispers.
             if (key not in utterances or type(estimate) is not int or
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
-                    evidence not in ('asr_timestamp', 'asr_vad')):
+                    evidence != 'asr_vad'):
                 errors.append(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
                 errors.append(f'duplicate native endpoint: {key}')

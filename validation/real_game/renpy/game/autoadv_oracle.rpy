@@ -12,6 +12,7 @@ init -1 python:
     _adv_oracle_line = 0
     _adv_oracle_current = None
     _adv_oracle_voice = None
+    _adv_oracle_voice_line = None
     _adv_oracle_last_active = None
 
     def _adv_oracle_write(event, **fields):
@@ -38,36 +39,48 @@ init -1 python:
         return filename
 
     def _adv_oracle_sample():
-        global _adv_oracle_voice, _adv_oracle_last_active
-        if not _adv_oracle_path or _adv_oracle_current is None:
+        global _adv_oracle_voice, _adv_oracle_voice_line, _adv_oracle_last_active
+        if not _adv_oracle_path:
             return
         playing = _adv_oracle_playing()
         if playing:
             if _adv_oracle_voice is None:
+                # A new voice can only be attributed while a dialogue is
+                # current.  Once started, its ownership survives line changes
+                # until the audio engine reports an actual end/replacement.
+                if _adv_oracle_current is None:
+                    return
                 _adv_oracle_voice = playing
-                _adv_oracle_write("voice_started", line=_adv_oracle_current, file=playing)
+                _adv_oracle_voice_line = _adv_oracle_current
+                _adv_oracle_write("voice_started", line=_adv_oracle_voice_line, file=playing)
             elif playing != _adv_oracle_voice:
-                _adv_oracle_write("voice_interrupted", line=_adv_oracle_current,
+                _adv_oracle_write("voice_interrupted", line=_adv_oracle_voice_line,
                                   file=_adv_oracle_voice, replacement=playing)
+                if _adv_oracle_current is None:
+                    _adv_oracle_voice = None
+                    _adv_oracle_voice_line = None
+                    _adv_oracle_last_active = None
+                    return
                 _adv_oracle_voice = playing
+                _adv_oracle_voice_line = _adv_oracle_current
+                _adv_oracle_write("voice_started", line=_adv_oracle_voice_line, file=playing)
             _adv_oracle_last_active = _adv_time.monotonic_ns()
         elif _adv_oracle_voice is not None:
-            _adv_oracle_write("voice_ended", line=_adv_oracle_current,
+            _adv_oracle_write("voice_ended", line=_adv_oracle_voice_line,
                               file=_adv_oracle_voice,
                               last_active_at_ns=_adv_oracle_last_active)
             _adv_oracle_voice = None
+            _adv_oracle_voice_line = None
             _adv_oracle_last_active = None
 
     def _adv_oracle_character(event, **kwargs):
         global _adv_oracle_line, _adv_oracle_current
-        global _adv_oracle_voice, _adv_oracle_last_active
+        global _adv_oracle_voice, _adv_oracle_voice_line, _adv_oracle_last_active
         if not _adv_oracle_path:
             return
         if event == "begin":
             _adv_oracle_line += 1
             _adv_oracle_current = _adv_oracle_line
-            _adv_oracle_voice = None
-            _adv_oracle_last_active = None
             what = kwargs.get("what", "")
             normalized = _adv_unicode.normalize("NFKC", what).strip()
             _adv_oracle_write("line_started", line=_adv_oracle_current,
@@ -76,11 +89,10 @@ init -1 python:
         elif event == "interact_done" and _adv_oracle_current is not None:
             # Sample BEFORE a subsequent statement can replace the voice channel.
             _adv_oracle_sample()
+            playing = _adv_oracle_playing()
             _adv_oracle_write("line_dismissed", line=_adv_oracle_current,
-                voice_active=bool(_adv_oracle_playing()))
+                voice_active=bool(playing), voice_file=playing)
             _adv_oracle_current = None
-            _adv_oracle_voice = None
-            _adv_oracle_last_active = None
 
     if _adv_oracle_path:
         config.all_character_callbacks.append(_adv_oracle_character)

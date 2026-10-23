@@ -79,6 +79,17 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
                 verify_runtime(runtime, source=source)
 
 
+    def test_game_oracle_keeps_voice_lifecycle_owner_across_dialogue_boundary(self):
+        source = Path('validation/real_game/renpy/game/autoadv_oracle.rpy').read_text(encoding='utf-8')
+        self.assertIn('_adv_oracle_voice_line = _adv_oracle_current', source)
+        self.assertIn('"voice_ended", line=_adv_oracle_voice_line', source)
+        begin = source.index('if event == "begin":')
+        done = source.index('elif event == "interact_done"', begin)
+        begin_block = source[begin:done]
+        self.assertNotIn('_adv_oracle_voice = None', begin_block)
+        self.assertNotIn('_adv_oracle_last_active = None', begin_block)
+
+
     def test_live_workflow_consumes_prebuilt_fixture_and_keeps_construction_separate(self):
         live = Path('.github/workflows/live-advancement.yml').read_text(encoding='utf-8')
         fixture = Path('.github/workflows/validation-fixture.yml').read_text(encoding='utf-8')

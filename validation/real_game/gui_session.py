@@ -90,7 +90,6 @@ class SessionDriver:
         self.recovery_confirm = recovery_confirm or self._confirm_validation_recovery
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
-        self.done_idle = None
         self.audio_deadline = None
         self.recovery_pending = None
         self.collection_target_emitted = False
@@ -309,6 +308,14 @@ class SessionDriver:
                 target_count = int(self.options.get('dialogues', 0))
                 line_no = runtime.token.line if runtime.token is not None else 0
                 final_line = target_count > 0 and line_no >= target_count
+                if target_count > 0 and line_no > target_count:
+                    # A following fixture line can arrive between the final
+                    # AutoAdv input and this polling tick. The requested
+                    # collection is already complete; do not keep the restarted
+                    # fixture alive as another product utterance.
+                    self.w.close()
+                    self.qt_app.quit()
+                    return
                 if runtime.token is not None and runtime.pause_reason:
                     # For RealAudio data collection, a product hold remains a
                     # failure but the harness may advance the fixture once so
@@ -323,13 +330,12 @@ class SessionDriver:
                 else:
                     self.recovery_pending = None
                 if final_line and (runtime.sent or runtime.pause_reason):
-                    if self.done_idle is None:
-                        self.done_idle = self.clock()
-                    if self.clock() - self.done_idle >= .6:
-                        self.w.close()
-                        self.qt_app.quit()
-                elif not final_line:
-                    self.done_idle = None
+                    # The final requested line has reached a terminal product
+                    # outcome. Close immediately; waiting here only gives a
+                    # looping fixture time to create an out-of-scope Utterance.
+                    self.w.close()
+                    self.qt_app.quit()
+                    return
         except Exception as error:
             self.fail(str(error))
 

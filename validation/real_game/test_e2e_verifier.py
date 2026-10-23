@@ -470,15 +470,16 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(metric['ok'], metric['errors'])
         self.assertLess(metric['performance']['hook_to_native_onset_ms']['p50'], 0)
 
-    def test_timestamp_endpoint_does_not_require_vad_onset(self):
+    def test_sensevoice_timestamp_is_not_native_endpoint_evidence(self):
         records = contract_records(0, 3, lines=NATIVE_SCENARIO)
         endpoint = next(r for r in records
                         if r['event'] == 'native_voice_end_estimate' and r['line'] == 1)
         endpoint['evidence'] = 'asr_timestamp'
         endpoint['onset_estimated_at_ns'] = None
         result = validate(records, phase='native')
-        self.assertTrue(result['ok'], result['errors'])
-        self.assertEqual(result['performance']['hook_to_native_onset_ms']['count'], 2)
+        self.assertFalse(result['collection_valid'])
+        self.assertTrue(any('invalid native endpoint evidence' in error
+                            for error in result['errors']))
 
     def test_wrong_origin_and_wrong_dialogue_cannot_claim_success(self):
         records = contract_records(0, 3, mode='reading')

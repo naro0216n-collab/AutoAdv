@@ -333,7 +333,7 @@ class PacketVadBoundaryTests(unittest.TestCase):
         ctrl.permit(True)
         events = []
         readings = iter(['え嘘でしょ', 'え嘘でしょ'])
-        vad_frames = iter([VADDecision(True, 0), VADDecision(False, 340)])
+        vad_frames = iter([VADDecision(True, 0), VADDecision(False, 400)])
         clock = [1000]
 
         def notify(observed, event, detail):
@@ -589,6 +589,10 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         events = []
         metrics = []
         clock = [1000]
+        decisions = iter((
+            VADDecision(True, 0, contains_speech=True),
+            VADDecision(False, 400, contains_speech=False),
+        ))
 
         progress = ASRProgress(
             coverage=.6667, onset_score=.75, tail_confidence=0.0, monotonic=True,
@@ -603,8 +607,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             lambda _t, event, _detail: events.append(event),
             recognizer=SimpleNamespace(recognize=lambda _: ASRResult('え嘘でし')),
             activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: VADDecision(
-                    False, 400, contains_speech=True),
+                observe_float32_stereo=lambda _frames: next(decisions),
                 reset=lambda: None),
             clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
         try:
@@ -612,29 +615,31 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             token = Token(1, 1)
             native.begin(token, 'えっ嘘でしょ')
             native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
-            clock[0] = 1600
-            pcm = PCMChunk(1600, bytes(4800 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertFalse(busy, 'combined-evidence inference did not finish')
+            for when in (1100, 1600):
+                clock[0] = when
+                pcm = PCMChunk(when, bytes(4800 * 8), 48000, 2, 4)
+                native.history.push(pcm, target_pid=11)
+                native.feed(pcm)
+                end = time.monotonic() + 2
+                while time.monotonic() < end:
+                    with native._lock:
+                        busy = native._inflight
+                    if not busy:
+                        break
+                    time.sleep(.005)
+                self.assertFalse(busy, 'combined-evidence inference did not finish')
             self.assertIn('started', events)
             self.assertIn('completed', events)
             self.assertTrue(native.completed)
             self.assertAlmostEqual(metrics[-1]['attribution_score'], .7529, places=4)
+            self.assertGreaterEqual(metrics[-1]['vad_tail_ms'], 400)
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
             self.assertGreaterEqual(
                 metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
         finally:
             native.close()
 
-    def test_token_timestamps_can_complete_target_while_vad_stays_active(self):
+    def test_token_timestamps_do_not_complete_target_while_vad_stays_active(self):
         events = []
         metrics = []
         end_observations = []
@@ -663,8 +668,9 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             native.history.start(11)
             token = Token(1, 1)
             native.begin(token, 'えっ嘘でしょ')
-            # One 1-second packet: target endpoint is bounded by the first
-            # background token at 0.70s, with 300ms of captured mix after it.
+            # SenseVoice timestamps are token starts. Even a following
+            # background token cannot prove that the target's final acoustic
+            # realization has ended while the process mix remains active.
             clock[0] = 2000
             pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
             native.history.push(pcm, target_pid=11)
@@ -677,11 +683,12 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                     break
                 time.sleep(.005)
             self.assertIn('started', events)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
+            self.assertNotIn('completed', events)
+            self.assertFalse(native.completed)
+            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
+            self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
             self.assertEqual(metrics[-1]['target_token_count'], 6)
-            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
+            self.assertEqual(end_observations, [])
         finally:
             native.close()
 
@@ -729,11 +736,11 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             self.assertNotIn('completed', events)
             self.assertFalse(native.completed)
             self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
-            self.assertEqual(metrics[-1]['trailing_after_target_ms'], 0.0)
+            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
         finally:
             native.close()
 
-    def test_token_timestamps_can_complete_without_any_vad_positive(self):
+    def test_token_timestamps_do_not_complete_without_any_vad_endpoint(self):
         events = []
         metrics = []
         end_observations = []
@@ -759,9 +766,8 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
         try:
             native.history.start(11)
             native.begin(Token(1, 1), 'えっ嘘でしょ')
-            # ASR is allowed to run after a bounded PCM window even if VAD
-            # never reports speech. The token endpoint and lexical evidence
-            # still identify and complete this utterance.
+            # ASR still runs without VAD-positive frames and can attribute
+            # the line, but token starts alone cannot certify acoustic end.
             clock[0] = 2000
             pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
             native.history.push(pcm, target_pid=11)
@@ -774,29 +780,59 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
                     break
                 time.sleep(.005)
             self.assertIn('started', events)
-            self.assertIn('completed', events)
+            self.assertNotIn('completed', events)
+            self.assertFalse(native.completed)
             self.assertEqual(native.capture_status()['vad_positive_packets'], 0)
-            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
-            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
-            self.assertIsNone(end_observations[-1]['estimated_onset_ms'])
+            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
+            self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
+            self.assertEqual(end_observations, [])
         finally:
             native.close()
 
-    def test_asr_timestamp_uses_pcm_duration_not_wall_clock_gap(self):
-        first = PCMChunk(1000, bytes(4800 * 8), 48000, 2, 4)   # 100ms, 900..1000
-        second = PCMChunk(2000, bytes(4800 * 8), 48000, 2, 4)  # 100ms, 1900..2000
-        result = ASRResult('対象後', ('対象', '後'), (0.05, 0.18))
-        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
-            (first, second), result, observed_token_count=1, target_reached=True)
-        # 180ms into concatenated PCM lies 80ms into the second packet, not
-        # 180ms after the first packet's 900ms wall-clock start.
-        self.assertEqual(endpoint, 1980)
-        self.assertAlmostEqual(trailing, 20.0)
-        self.assertLess(score, .60)
+    def test_vad_tail_not_token_timestamp_establishes_acoustic_endpoint(self):
+        events = []
+        metrics = []
+        end_observations = []
+        clock = [1000]
 
-        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
-            (first, second), result, observed_token_count=1, target_reached=False)
-        self.assertEqual((endpoint, trailing, score), (-1, 0.0, 0.0))
+        class Recognizer:
+            def recognize(self, chunks):
+                return ASRResult(
+                    'えっ嘘でしょ', tuple('えっ嘘でしょ'),
+                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46))
+
+        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
+            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _frames: VADDecision(
+                    False, 400, contains_speech=False),
+                reset=lambda: None),
+            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m),
+            on_voice_end=lambda _t, m: end_observations.append(m))
+        try:
+            native.history.start(11)
+            native.rise_ms = 1000
+            native.begin(Token(1, 1), 'えっ嘘でしょ')
+            native.rise_ms = 1000
+            native.voice_end_estimate_ms = 1200
+            clock[0] = 1600
+            pcm = PCMChunk(1600, bytes(4800 * 8), 48000, 2, 4)
+            native.history.push(pcm, target_pid=11)
+            native.feed(pcm)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with native._lock:
+                    busy = native._inflight
+                if not busy:
+                    break
+                time.sleep(.005)
+            self.assertFalse(busy, 'VAD endpoint inference did not finish')
+            self.assertIn('completed', events)
+            self.assertTrue(native.completed)
+            self.assertEqual(metrics[-1]['vad_tail_ms'], 400.0)
+            self.assertEqual(end_observations[-1]['source'], 'asr_vad')
+        finally:
+            native.close()
 
     def test_later_vad_state_cannot_retroactively_complete_decode_snapshot(self):
         from threading import Event

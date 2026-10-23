@@ -1,9 +1,10 @@
 """Process-scoped native audio recognition for non-TTS audio-judgment utterances.
 
 Actual audio is captured by Windows Process Loopback, then analyzed in one
-worker. Pronunciation alignment, ASR token timing/stability, and acoustic cues
-are combined for the active Utterance. Global mix silence is not required;
-neither capture silence nor a timer asserts voice absence.
+worker. Pronunciation alignment, recognition stability, and acoustic cues are
+combined for the active Utterance. SenseVoice token timestamps are alignment
+starts, not acoustic end times; they never certify playback completion. Global
+mix silence is not required, and a timer never asserts voice absence.
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
@@ -433,78 +434,16 @@ class NativeAudio:
         self._dispatch(item)
 
     @staticmethod
-    def _audio_offset_to_wall_ms(samples, offset_ms: float) -> float | None:
-        """Map concatenated ASR-audio offset back onto captured packet time.
-
-        SenseVoice timestamps address the waveform passed to the recognizer.
-        Process Loopback packets need not be wall-clock contiguous, so a gap
-        between packets must not be counted as captured trailing audio.
-        """
-        if offset_ms < 0:
-            return None
-        consumed = 0.0
-        for chunk in samples:
-            duration = chunk.duration_ms
-            if offset_ms <= consumed + duration + 1e-6:
-                inside = max(0.0, min(duration, offset_ms - consumed))
-                return (chunk.at_ms - duration) + inside
-            consumed += duration
-        return None
-
-    @staticmethod
     def _length_evidence(progress) -> float:
         """Score target-relative ASR length without requiring exact wording.
 
         Surface length is useful when orthography is preserved; pronunciation
-        length is more reliable across kanji/kana spelling changes.  Length is
+        length is more reliable across kanji/kana spelling changes. Length is
         supporting evidence only and can never attribute unrelated speech.
         """
         ratios = (progress.length_ratio, progress.pronunciation_length_ratio)
         return max((max(0.0, min(1.0, 1.0 - abs(ratio - 1.0)))
                     for ratio in ratios if ratio > 0), default=0.0)
-
-    @classmethod
-    def _timestamp_endpoint(cls, samples, result: ASRResult,
-                            observed_token_count: int, *,
-                            target_reached: bool) -> tuple[int, float, float]:
-        """Return target-local endpoint estimate, trailing PCM, and confidence.
-
-        SenseVoice exposes per-token timestamps in seconds. They are positions
-        in the concatenated decode waveform, not device playback timestamps.
-        A following token bounds the *selected ASR prefix* locally, but that
-        prefix is not necessarily the end of the target: ASR can omit an
-        unrecognized target suffix. Timestamp-derived trailing audio therefore
-        becomes target-end evidence only after lexical/phonetic matching says
-        the selected prefix plausibly reaches the target tail. If the target is
-        last, a conservative token-duration guard must itself be present in
-        captured PCM before it counts as endpoint evidence. Packet gaps never
-        strengthen this score.
-        """
-        if (not target_reached or not samples or observed_token_count <= 0 or not result.timestamps
-                or observed_token_count > len(result.timestamps)):
-            return -1, 0.0, 0.0
-        usable = result.timestamps[:observed_token_count]
-        if (not usable or any(t < 0 for t in usable)
-                or any(a > b for a, b in zip(result.timestamps, result.timestamps[1:]))):
-            return -1, 0.0, 0.0
-        total_audio_ms = sum(chunk.duration_ms for chunk in samples)
-        target_last_start_ms = usable[-1] * 1000.0
-        if observed_token_count < len(result.timestamps):
-            endpoint_offset_ms = result.timestamps[observed_token_count] * 1000.0
-            if endpoint_offset_ms < target_last_start_ms:
-                return -1, 0.0, 0.0
-            trailing_ms = max(0.0, total_audio_ms - endpoint_offset_ms)
-            score = .55 + .45 * min(1.0, trailing_ms / 220.0)
-        else:
-            endpoint_offset_ms = target_last_start_ms + 220.0
-            if endpoint_offset_ms > total_audio_ms + 1e-6:
-                return -1, 0.0, 0.0
-            trailing_ms = max(0.0, total_audio_ms - endpoint_offset_ms)
-            score = min(1.0, trailing_ms / 320.0)
-        endpoint_ms = cls._audio_offset_to_wall_ms(samples, endpoint_offset_ms)
-        if endpoint_ms is None:
-            return -1, 0.0, 0.0
-        return int(round(endpoint_ms)), trailing_ms, score
 
     def _infer(self, token, generation, samples, submitted_ns=0,
                submitted_tail_ms=None, submitted_end_ms=None):
@@ -515,10 +454,7 @@ class NativeAudio:
             result = _coerce_asr_result(self.asr.recognize(samples))
             decoded_ns = time.perf_counter_ns() if self.on_inference else 0
             events = []
-            endpoint_ms = -1
             endpoint_source = ''
-            trailing_after_target_ms = 0.0
-            timestamp_score = 0.0
             with self._lock:
                 if (self._closed or self._generation != generation or token != self.token
                         or not self.matcher or not self.history.healthy):
@@ -535,23 +471,25 @@ class NativeAudio:
                             self._last_active_ms = self.clock()
                         events.append('started')
 
-                endpoint_ms, trailing_after_target_ms, timestamp_score = (
-                    self._timestamp_endpoint(
-                        samples, result, progress.observed_token_count,
-                        target_reached=progress.terminal_candidate))
-                tail_at_decode = self.tail_ms if submitted_tail_ms is None else submitted_tail_ms
-                vad_score = min(1.0, max(0, tail_at_decode) / 400.0)
+                tail_at_decode = max(0, self.tail_ms if submitted_tail_ms is None
+                                     else submitted_tail_ms)
+                vad_score = min(1.0, tail_at_decode / 400.0)
                 stability_score = min(1.0, progress.tail_confidence)
-                # Silence is a useful bonus, never a global-mix requirement.
-                endpoint_score = max(timestamp_score, .75 * vad_score, .65 * stability_score)
+                # SenseVoice timestamps are token *start* positions and expose
+                # no token durations for this model.  They remain useful for
+                # alignment diagnostics but cannot establish acoustic end.
+                # Repeated ASR stability is also only supporting evidence: a
+                # final vowel can continue while the transcript stays stable.
+                acoustic_endpoint = tail_at_decode >= 400.0
+                endpoint_score = max(.75 * vad_score, .65 * stability_score)
                 length_score = self._length_evidence(progress)
                 # ASR is one source of evidence, not a transcription acceptance
-                # test.  Target-relative progress/length, token timing or VAD,
-                # and recognition consistency can jointly establish completion.
-                # ``terminal_candidate`` is not a completion gate: a bounded
-                # partial transcript may still complete when an independent VAD
-                # endpoint is strong. It only controls whether token timestamps
-                # can truthfully be interpreted as lying beyond the target tail.
+                # test. Target-relative progress/length, an independently
+                # observed acoustic tail, and recognition consistency jointly
+                # establish completion.
+                # ``terminal_candidate`` remains supporting evidence rather than
+                # a hard gate; a bounded partial transcript may still complete
+                # when an independently observed acoustic endpoint is strong.
                 evidence_score = max(0.0, min(1.0,
                     .50 * progress.completion_score
                     + .18 * progress.attribution_score
@@ -563,18 +501,15 @@ class NativeAudio:
                     max(progress.phonetic_coverage, progress.coverage) >= .55
                     and progress.matched_phonemes >= min(4, max(1, progress.target_units))
                 )
-                if (sufficient_progress and endpoint_score >= .45
+                if (sufficient_progress and acoustic_endpoint
+                        and endpoint_score >= .45
                         and evidence_score >= self.COMPLETION_EVIDENCE_THRESHOLD):
                     self.completed = True
                     events.append('completed')
-                    if endpoint_ms >= 0:
-                        voice_end_estimate = endpoint_ms
-                        endpoint_source = 'asr_timestamp'
-                    else:
-                        voice_end_estimate = (self.voice_end_estimate_ms if submitted_end_ms is None
-                                              else submitted_end_ms)
-                        endpoint_source = ('asr_vad' if voice_end_estimate >= 0
-                                           else 'asr_stability')
+                    voice_end_estimate = (self.voice_end_estimate_ms if submitted_end_ms is None
+                                          else submitted_end_ms)
+                    if voice_end_estimate >= 0:
+                        endpoint_source = 'asr_vad'
                 else:
                     voice_end_estimate = -1
             if self.on_voice_end and 'completed' in events and voice_end_estimate >= 0:
@@ -601,7 +536,7 @@ class NativeAudio:
                     'evidence_score': round(evidence_score, 4),
                     'asr_token_timestamp_count': len(result.timestamps),
                     'target_token_count': progress.observed_token_count,
-                    'trailing_after_target_ms': round(trailing_after_target_ms, 3),
+                    'vad_tail_ms': round(tail_at_decode, 3),
                     'monotonic': progress.monotonic,
                     'tail_confidence': progress.tail_confidence,
                     'matched_chars': progress.matched_chars,

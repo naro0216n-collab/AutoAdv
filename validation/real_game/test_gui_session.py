@@ -168,7 +168,25 @@ class LiveGuiSessionContract(unittest.TestCase):
             recovery_confirm=lambda state: None)
         driver.state = 'running'
         driver.tick()
-        clock[0] = 1.7
+        self.assertEqual(recoveries, [])
+        self.assertEqual(actions, ['close', 'quit'])
+
+    def test_dialogue_after_collection_target_closes_without_processing_recovery(self):
+        actions, recoveries = [], []
+        runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=4),
+                                  pause_reason=None, sent=False)
+        product = SimpleNamespace(runtime_state=lambda: runtime)
+        window = SimpleNamespace(
+            application=product, close=lambda: actions.append('close'),
+            validation_trace=SimpleNamespace(emit=lambda *args, **kwargs: None))
+        qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
+        driver = SessionDriver(
+            window, qt_app,
+            {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
+             'force_continue_on_failure': True},
+            recovery_send=lambda state: recoveries.append(state.token.line),
+            recovery_confirm=lambda state: None)
+        driver.state = 'running'
         driver.tick()
         self.assertEqual(recoveries, [])
         self.assertEqual(actions, ['close', 'quit'])

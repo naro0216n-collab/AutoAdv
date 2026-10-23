@@ -181,7 +181,7 @@ class NativeAudioSessionTests(unittest.TestCase):
             def __init__(self): self.index = 0
             def observe_float32_stereo(self, frames):
                 self.index += 1
-                return VADDecision(self.index == 1, 300 if self.index > 1 else 0)
+                return VADDecision(self.index == 1, 400 if self.index > 1 else 0)
         events = []
         audio = NativeAudio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
                  lambda token, event, reason: events.append((token, event)),

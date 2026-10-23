@@ -91,9 +91,35 @@ class IndependentGameOracleContract(unittest.TestCase):
 
     def test_fixture_audio_filename_is_not_an_autoadv_acceptance_condition(self):
         game = [dict(x) for x in self.game]
-        next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)['file'] = 'audio/voice/other.wav'
+        for record in game:
+            if record.get('line') == 1 and record['event'] in ('voice_started', 'voice_ended'):
+                record['file'] = 'audio/voice/other.wav'
         result = self.verify(game=game)
         self.assertTrue(result['ok'], result['errors'])
+
+    def test_mixed_voice_lifecycles_on_one_line_are_never_certified_safe(self):
+        game = [dict(x) for x in self.game]
+        first_start = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
+        first_end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
+        # Reproduce the old oracle failure mode: a previous line's channel is
+        # spuriously started/ended under the current line before the current
+        # foreground voice lifecycle. The verifier must not select the first
+        # convenient end and certify the input as safe.
+        game.extend((
+            dict(first_start, at_ns=first_start['at_ns'] + 1,
+                 file='audio/voice/previous.wav'),
+            dict(first_end, at_ns=first_start['at_ns'] + 2,
+                 last_active_at_ns=first_start['at_ns'] + 1,
+                 file='audio/voice/previous.wav'),
+        ))
+        game.sort(key=lambda x: x['at_ns'])
+        result = self.verify(game=game)
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertFalse(result['voice_safety_verified'])
+        self.assertEqual(result['game_evidence']['unverified_voice_ends'], 1)
+        self.assertEqual(result['game_evidence']['lines'][0]['outcome'], 'voice_end_unverified')
+        self.assertTrue(any('ambiguous independent game voice lifecycle' in item
+                            for item in result['diagnostics']))
 
     def test_input_within_observer_poll_interval_is_indeterminate_not_early_or_safe(self):
         game = [dict(x) for x in self.game]
