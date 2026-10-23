@@ -519,15 +519,18 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                             measured['tts_synthesis_rtf'].append(duration / record['audio_ms'])
                     elif record.get('stage') == 'playback':
                         measured['tts_playback_ms'].append(duration)
-        elif event == 'native_event':
+        elif event == 'voice_assessment':
             if record.get('method') != 'asr':
-                product_issue(f'native event without ASR judgement method: {key}')
-            if record.get('status') == 'started':
+                product_issue(f'voice assessment without ASR judgement method: {key}')
+            state = record.get('state')
+            if state in ('playing', 'ended'):
                 audio_started_at.setdefault(key, at)
-            if record.get('status') == 'completed':
+            if state == 'ended':
                 audio_completed_at[key] = at
                 methods[key] = record.get('method', '')
                 native.add(key)
+            elif state not in ('playing', 'inconclusive'):
+                product_issue(f'invalid voice assessment state: {key}')
         elif event == 'native_voice_end_estimate':
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')

@@ -1,8 +1,9 @@
-"""Bounded lexical/pronunciation cues for associating ASR with an utterance.
+"""Pure target alignment and acoustic observations for native audio.
 
-Recognition text is not an end-of-speech signal. Target attribution and target
-completion are scored here; timing/acoustic evidence and session ownership stay
-with NativeAudio, while game-input authority stays with Controller.
+TargetMatcher does not decide whether a voice is playing or ended. It only
+normalizes the configured target and an ASR hypothesis, then reports bounded
+surface/pronunciation alignment measurements. Temporal/acoustic observations
+and progression policy live outside this module.
 """
 from __future__ import annotations
 from dataclasses import dataclass, replace
@@ -42,44 +43,89 @@ def _align(expected, observed):
 
 
 @dataclass(frozen=True)
-class ASRProgress:
-    coverage: float
-    onset_score: float
-    tail_confidence: float
-    monotonic: bool
-    matched_chars: int
-    observed: str
-    edit_count: int = 0
-    length_ratio: float = 0.0
-    terminal_candidate: bool = False
-    phonetic_coverage: float = 0.0
-    matched_phonemes: int = 0
-    phonetic_edit_count: int = 0
-    attribution_score: float = 0.0
-    completion_score: float = 0.0
-    contradiction_score: float = 0.0
+class TargetAlignment:
+    """Measurements from aligning one ASR hypothesis to one target utterance.
+
+    All fields are observations or edit-alignment counts. There is deliberately
+    no ``terminal``, ``playing`` or ``completed`` flag here. Those meanings are
+    assigned exactly once by the voice-evidence assessment model.
+    """
+    observed: str = ''
+    surface_matches: int = 0
+    surface_target_units: int = 0
+    surface_observed_units: int = 0
+    surface_prefix_units: int = 0
+    surface_edits: int = 0
+    phonetic_matches: int = 0
+    phonetic_target_units: int = 0
+    phonetic_observed_units: int = 0
+    phonetic_prefix_units: int = 0
+    phonetic_edits: int = 0
     reading_rank: int = 0
-    target_units: int = 0
-    pronunciation_length_ratio: float = 0.0
     observed_token_count: int = 0
+
+    @property
+    def coverage(self) -> float:
+        return self.surface_matches / max(1, self.surface_target_units, self.surface_observed_units)
+
+    @property
+    def onset_score(self) -> float:
+        return self.surface_matches / max(1, self.surface_prefix_units, self.surface_observed_units)
+
+    @property
+    def matched_chars(self) -> int:
+        return self.surface_matches
+
+    @property
+    def edit_count(self) -> int:
+        return self.surface_edits
+
+    @property
+    def length_ratio(self) -> float:
+        return self.surface_observed_units / max(1, self.surface_target_units)
+
+    @property
+    def phonetic_coverage(self) -> float:
+        return self.phonetic_matches / max(1, self.phonetic_target_units, self.phonetic_observed_units)
+
+    @property
+    def phonetic_onset_score(self) -> float:
+        return self.phonetic_matches / max(1, self.phonetic_prefix_units, self.phonetic_observed_units)
+
+    @property
+    def matched_phonemes(self) -> int:
+        return self.phonetic_matches
+
+    @property
+    def phonetic_edit_count(self) -> int:
+        return self.phonetic_edits
+
+    @property
+    def target_units(self) -> int:
+        return self.phonetic_target_units
+
+    @property
+    def pronunciation_length_ratio(self) -> float:
+        return self.phonetic_observed_units / max(1, self.phonetic_target_units)
+
+    @property
+    def signature(self) -> tuple:
+        return (
+            self.phonetic_matches, self.phonetic_target_units, self.phonetic_observed_units,
+            self.phonetic_prefix_units, self.phonetic_edits, self.reading_rank,
+            self.observed_token_count, self.observed,
+        )
 
 
 class TargetMatcher:
-    """Align ASR using surface spelling and Japanese pronunciation evidence.
+    """Pure bounded surface/G2P alignment for one configured utterance.
 
-    Surface spelling remains useful when ASR preserves orthography. A swappable
-    G2P backend makes kanji/hiragana/katakana variants comparable. Bounded
-    dictionary reading alternatives may rescue an on/kun/context mismatch, but
-    arbitrary readings and unrestricted substring/LCS matching are not allowed.
-
-    If ASR tokenization is available, prefixes are evaluated so speech after a
-    completed target can be treated as later/background material. Leading
-    unrelated speech is still charged as edit/contradiction evidence.
+    Candidate selection chooses the best *alignment* only. It never decides that
+    the selected voice exists, is still playing, or has ended.
     """
     MAX_CHARS = 512
     MAX_PHONEMES = 1024
     MAX_TOKEN_PREFIXES = 128
-    TERMINAL_LOOKAHEAD_TOKENS = 4
 
     def __init__(self, target: str, g2p=_DEFAULT_G2P):
         from .g2p import default_g2p
@@ -88,130 +134,101 @@ class TargetMatcher:
         self._target_pronunciations = ()
         if self._g2p is not None:
             self._target_pronunciations = self._g2p.candidates(target, max_candidates=4)
-        self._previous_signature = None
-        self._previous_coverage = 0.0
 
-    def _evaluate(self, hypothesis: str) -> ASRProgress:
+    @staticmethod
+    def _reading_rank(*, matches: int, target_units: int, observed_units: int,
+                      prefix_units: int, edits: int, reading_rank: int) -> tuple:
+        target_fraction = matches / max(1, target_units)
+        error_ratio = edits / max(1, prefix_units, observed_units)
+        length_error = abs(observed_units - target_units) / max(1, target_units)
+        return (
+            target_fraction - .25 * error_ratio - .025 * reading_rank,
+            matches, -edits, -length_error, -reading_rank,
+        )
+
+    def _evaluate(self, hypothesis: str) -> TargetAlignment:
         key = surface_key(hypothesis)
         n, m = len(self.target), len(key)
         if not n or not m or n > self.MAX_CHARS or m > self.MAX_CHARS:
-            return ASRProgress(0, 0, 0, False, 0, key)
+            return TargetAlignment(observed=key, surface_target_units=n, surface_observed_units=m)
 
         matched, prefix_len, errors = _align(self.target, key)
-        surface_coverage = matched / max(n, m)
-        surface_onset = matched / max(1, prefix_len, m)
-        surface_length_ratio = m / n
-
         best_phone = None
         if self._g2p is not None and self._target_pronunciations:
-            observed = self._g2p.candidates(hypothesis, max_candidates=1)
-            if observed:
-                observed_phones = observed[0].phonemes
+            observed_candidates = self._g2p.candidates(hypothesis, max_candidates=1)
+            if observed_candidates:
+                observed_phones = observed_candidates[0].phonemes
                 if 0 < len(observed_phones) <= self.MAX_PHONEMES:
                     for candidate in self._target_pronunciations:
                         target_phones = candidate.phonemes
                         if not target_phones or len(target_phones) > self.MAX_PHONEMES:
                             continue
                         pm, pprefix, perrors = _align(target_phones, observed_phones)
-                        pn, po = len(target_phones), len(observed_phones)
-                        pcoverage = pm / max(pn, po)
-                        ponset = pm / max(1, pprefix, po)
-                        perror_ratio = perrors / max(1, pprefix, po)
-                        rank_penalty = min(.08, .025 * candidate.rank)
-                        completion = max(0.0, min(1.0,
-                            .92 * pcoverage + .08 * surface_coverage
-                            - .22 * perror_ratio - rank_penalty))
-                        contradiction = max(0.0, min(1.0,
-                            .65 * perror_ratio + .35 * max(0.0, po / pn - 1.15)))
-                        score = completion - .20 * contradiction
-                        item = (score, pcoverage, ponset, pm, pprefix, perrors,
-                                po / pn, completion, contradiction, candidate.rank, pn)
-                        if best_phone is None or item[0] > best_phone[0]:
-                            best_phone = item
+                        item = TargetAlignment(
+                            observed=key,
+                            surface_matches=matched,
+                            surface_target_units=n,
+                            surface_observed_units=m,
+                            surface_prefix_units=prefix_len,
+                            surface_edits=errors,
+                            phonetic_matches=pm,
+                            phonetic_target_units=len(target_phones),
+                            phonetic_observed_units=len(observed_phones),
+                            phonetic_prefix_units=pprefix,
+                            phonetic_edits=perrors,
+                            reading_rank=candidate.rank,
+                        )
+                        rank = self._reading_rank(
+                            matches=pm, target_units=len(target_phones),
+                            observed_units=len(observed_phones), prefix_units=pprefix,
+                            edits=perrors, reading_rank=candidate.rank)
+                        if best_phone is None or rank > best_phone[0]:
+                            best_phone = (rank, item)
 
-        if best_phone is None:
-            phonetic_coverage = surface_coverage
-            phonetic_onset = surface_onset
-            matched_phonemes = matched
-            phonetic_errors = errors
-            phonetic_ratio = surface_length_ratio
-            completion_score = max(0.0, min(1.0,
-                surface_coverage - .20 * (errors / max(1, prefix_len, m))))
-            contradiction_score = min(1.0, errors / max(1, prefix_len, m))
-            reading_rank = 0
-            phone_prefix = prefix_len
-            phone_target_len = n
-        else:
-            (_, phonetic_coverage, phonetic_onset, matched_phonemes, phone_prefix,
-             phonetic_errors, phonetic_ratio, completion_score,
-             contradiction_score, reading_rank, phone_target_len) = best_phone
-
-        attribution_score = max(
-            surface_onset,
-            phonetic_onset * .88 + surface_onset * .12 - .08 * contradiction_score)
-
-        trailing_allowance = max(1, phone_target_len // 10)
-        terminal = (
-            len(self.target) >= 3
-            and matched_phonemes >= max(
-                3, phone_target_len - trailing_allowance - max(1, phone_target_len // 8))
-            and phone_prefix >= phone_target_len - trailing_allowance
-            and .72 <= phonetic_ratio <= 1.28
-            and phonetic_errors <= max(2, phone_target_len // 6)
-            and completion_score >= .78
-            and contradiction_score <= .35
-        )
-        return ASRProgress(
-            surface_coverage, surface_onset, 0.0, False,
-            matched, key, errors, surface_length_ratio, terminal,
-            phonetic_coverage, matched_phonemes, phonetic_errors,
-            attribution_score, completion_score, contradiction_score,
-            reading_rank, phone_target_len, phonetic_ratio, 0)
-
-    @staticmethod
-    def _rank(progress: ASRProgress, token_count: int):
-        # Completion is the desired endpoint; on ties choose the earliest ASR
-        # prefix so trailing background speech is not absorbed into the target.
-        return (
-            int(progress.terminal_candidate),
-            progress.completion_score - .18 * progress.contradiction_score,
-            progress.attribution_score,
-            progress.phonetic_coverage,
-            progress.matched_phonemes,
-            -progress.phonetic_edit_count,
-            -token_count,
+        if best_phone is not None:
+            return best_phone[1]
+        # Surface-only operation remains an explicit test/investigation fallback.
+        return TargetAlignment(
+            observed=key,
+            surface_matches=matched,
+            surface_target_units=n,
+            surface_observed_units=m,
+            surface_prefix_units=prefix_len,
+            surface_edits=errors,
+            phonetic_matches=matched,
+            phonetic_target_units=n,
+            phonetic_observed_units=m,
+            phonetic_prefix_units=prefix_len,
+            phonetic_edits=errors,
         )
 
-    def _select_token_prefix(self, hypothesis: str, tokens) -> ASRProgress:
+    @classmethod
+    def _prefix_rank(cls, alignment: TargetAlignment, token_count: int) -> tuple:
+        p = cls._reading_rank(
+            matches=alignment.phonetic_matches,
+            target_units=alignment.phonetic_target_units,
+            observed_units=alignment.phonetic_observed_units,
+            prefix_units=alignment.phonetic_prefix_units,
+            edits=alignment.phonetic_edits,
+            reading_rank=alignment.reading_rank)
+        surface_fraction = alignment.surface_matches / max(1, alignment.surface_target_units)
+        # On equal alignment quality choose the earliest ASR prefix so trailing
+        # background speech is not absorbed into the target observation.
+        return (*p, surface_fraction, -token_count)
+
+    def align(self, hypothesis: str, *, tokens=()) -> TargetAlignment:
         tokens = tuple(str(t) for t in (tokens or ()))
         if not tokens or surface_key(''.join(tokens)) != surface_key(hypothesis):
             return self._evaluate(hypothesis)
         best = None
-        first_terminal = None
         prefix = ''
         for index, token in enumerate(tokens[:self.MAX_TOKEN_PREFIXES], 1):
             prefix += token
-            progress = replace(self._evaluate(prefix), observed_token_count=index)
-            if best is None or self._rank(progress, index) > self._rank(best, best.observed_token_count):
-                best = progress
-            if progress.terminal_candidate and first_terminal is None:
-                first_terminal = index
-            if first_terminal is not None and index >= first_terminal + self.TERMINAL_LOOKAHEAD_TOKENS:
-                break
-        return best if best is not None else self._evaluate(hypothesis)
-
-    def observe(self, hypothesis: str, *, tokens=()) -> ASRProgress:
-        progress = self._select_token_prefix(hypothesis, tokens)
-        signature = (
-            round(progress.phonetic_coverage, 4), progress.matched_phonemes,
-            progress.phonetic_edit_count, progress.reading_rank,
-            progress.observed_token_count, progress.observed,
-        )
-        stable = progress.terminal_candidate and self._previous_signature == signature
-        monotonic = progress.phonetic_coverage >= self._previous_coverage - .15
-        self._previous_signature = signature
-        self._previous_coverage = progress.phonetic_coverage
-        return replace(progress, tail_confidence=float(stable), monotonic=monotonic)
+            alignment = replace(self._evaluate(prefix), observed_token_count=index)
+            rank = self._prefix_rank(alignment, index)
+            if best is None or rank > best[0]:
+                best = (rank, alignment)
+        return best[1] if best is not None else self._evaluate(hypothesis)
 
 
 @dataclass(frozen=True)

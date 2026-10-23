@@ -43,8 +43,8 @@ def checker_only_records():
             add('native_pcm', **key, audio_pid=41, frames=960)
             add('asr_inference', **key, audio_ms=1200, decode_ms=121, queue_ms=6)
             if case['id'] == 'clean_control':
-                add('native_event', **key, status='started', method='asr')
-                add('native_event', **key, status='completed', method='asr')
+                add('voice_assessment', **key, state='playing', method='asr')
+                add('voice_assessment', **key, state='ended', method='asr')
         if case['id'] in ('stress-intro', 'clean_control'):
             add('presentation_complete', **key, success=True,
                 reason='text' if case['advance_mode'] == 'text' else 'native')

@@ -18,6 +18,7 @@ from typing import Callable
 from collections.abc import Sequence
 
 from .conversation import Controller, Target, Token
+from .audio_evidence import VoiceEvidence, assess_voice
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
@@ -744,15 +745,20 @@ class AutoAdvApplication:
         self._notify_runtime()
         return expired
 
-    def _runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
-        completed = self.controller.presentation_event(token, event, success=success)
+    def _finish_presentation_transition(self, token: Token, completed: bool) -> bool:
         if completed:
+            if self._native_audio is not None:
+                self._native_audio.finish_line(token)
             self._emit_runtime_event('presentation_complete', token,
                                      reason=self.controller.presentation_reason)
             self._attempt_advance()
         else:
             self._notify_runtime()
         return completed
+
+    def _runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
+        completed = self.controller.presentation_event(token, event, success=success)
+        return self._finish_presentation_transition(token, completed)
 
     def set_auto_advance(self, enabled: bool) -> None:
         self.controller.permit(enabled)
@@ -761,23 +767,19 @@ class AutoAdvApplication:
         else:
             self._notify_runtime()
 
-    def _fallback_due(self, token: Token) -> None:
+    def _audio_deadline_due(self, token: Token) -> None:
+        """Apply the one text-derived fallback boundary to current voice state."""
         state = self.runtime_state()
         utterance = state.utterance
         if (token != state.token or utterance is None or utterance.use_tts or
                 utterance.advance_mode.value != 'audio' or state.completed or state.sent):
             return
-        if self._native_audio_holds_deadline(token):
-            self._schedule(200, lambda t=token: self._fallback_due(t))
-            return
-        self._runtime_presentation_event(token, 'fallback_elapsed')
-        # The deadline has now resolved either to an explicit uncertain-text
-        # completion or to an inconclusive hold. Full-line PCM is no longer
-        # needed; keep only bounded rolling history for any genuinely late
-        # observation and for the next external transition.
-        if self._native_audio is not None:
-            self._native_audio.release_line_retention(token)
-        if self.runtime_state().pause_reason == 'native_inconclusive_hold':
+        self._emit_runtime_event('audio_deadline_elapsed', token,
+                                 text_wait_ms=utterance.text_wait_ms)
+        completed = self.controller.presentation_event(token, 'audio_deadline_elapsed')
+        self._finish_presentation_transition(token, completed)
+        if (not completed and
+                self.runtime_state().pause_reason == 'native_inconclusive_hold'):
             self._emit_native_capture_summary(token)
 
     @staticmethod
@@ -812,7 +814,7 @@ class AutoAdvApplication:
                     lookback_ms = self._native_replay_lookback_ms(state.profile)
                     replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
                 self._begin_native_audio(token, utterance.match_text, replay_from_ms=replay_from_ms)
-            self._schedule(utterance.text_wait_ms, lambda t=token: self._fallback_due(t))
+            self._schedule(utterance.text_wait_ms, lambda t=token: self._audio_deadline_due(t))
         if utterance.use_tts:
             if not utterance.voice:
                 self._runtime_presentation_event(token, 'tts_finished', success=False)
@@ -1163,15 +1165,41 @@ class AutoAdvApplication:
             return (epoch == self._native_audio_epoch and now.session == session and
                     now.target is not None and (now.target.audio_pid or now.target.pid) == pid)
 
-        def consume_event(token: Token | None, event: str, detail: str) -> None:
+        def consume_error(token: Token | None, detail: str) -> None:
             if not current():
                 return
-            self._handle_native_event(token, event, detail)
-            self._emit_runtime_event('native_event', token, status=event, reason=detail)
+            self._emit_runtime_event('native_audio_error', token, reason=detail)
+            self._handle_native_error(token, detail)
 
-        def publish_event(token: Token | None, event: str, detail: str) -> None:
+        def publish_error(token: Token | None, detail: str) -> None:
             if current():
-                self._dispatch_runtime(lambda: consume_event(token, event, detail))
+                self._dispatch_runtime(lambda: consume_error(token, detail))
+
+        def consume_evidence(token: Token, evidence: VoiceEvidence) -> None:
+            if not current():
+                return
+            assessment = assess_voice(evidence)
+            self._emit_runtime_event(
+                'voice_assessment', token, state=assessment.state.value, method='asr',
+                association=round(assessment.association_score, 4),
+                completion=round(assessment.completion_score, 4),
+                contradiction=round(assessment.contradiction_score, 4),
+                endpoint=round(assessment.endpoint_score, 4),
+                evidence=round(assessment.evidence_score, 4),
+                endpoint_source=assessment.endpoint_source)
+            if assessment.state.value == 'ended' and assessment.estimated_end_ms is not None:
+                self._emit_telemetry(
+                    'native_voice_end_estimate', token,
+                    estimated_at_ns=assessment.estimated_end_ms * 1_000_000,
+                    onset_estimated_at_ns=(evidence.vad_onset_ms * 1_000_000
+                        if evidence.vad_onset_ms is not None else None),
+                    evidence=assessment.endpoint_source)
+            completed = self.controller.voice_assessment(token, assessment.state)
+            self._finish_presentation_transition(token, completed)
+
+        def publish_evidence(token: Token, evidence: VoiceEvidence) -> None:
+            if current():
+                self._dispatch_runtime(lambda: consume_evidence(token, evidence))
 
         def publish_pcm(token: Token, frames: int) -> None:
             if current():
@@ -1180,16 +1208,6 @@ class AutoAdvApplication:
         def publish_inference(token: Token, metrics: dict) -> None:
             if current():
                 self._emit_telemetry('asr_inference', token, **metrics)
-
-        def publish_voice_end(token: Token, metrics: dict) -> None:
-            if not current():
-                return
-            self._emit_telemetry(
-                'native_voice_end_estimate', token,
-                estimated_at_ns=metrics['estimated_end_ms'] * 1_000_000,
-                onset_estimated_at_ns=(metrics['estimated_onset_ms'] * 1_000_000
-                    if metrics.get('estimated_onset_ms') is not None else None),
-                evidence=metrics['source'])
 
         def activate(native: NativeAudio) -> None:
             if not current():
@@ -1201,12 +1219,6 @@ class AutoAdvApplication:
                     not now.completed and now.utterance.advance_mode.value == 'audio' and
                     not now.utterance.use_tts):
                 native.begin(now.token, now.utterance.match_text)
-                # If the line already reached its uncertainty deadline before
-                # NativeAudio became ready, there is no full-line interval to
-                # preserve retroactively. Continue observing from bounded
-                # rolling history without pinning an already-held dialogue.
-                if now.pause_reason == 'native_inconclusive_hold':
-                    native.release_line_retention(now.token)
             self._emit_runtime_event('native_ready', None, session=session, ready=True,
                                      reason='', audio_pid=pid)
 
@@ -1225,11 +1237,11 @@ class AutoAdvApplication:
             try:
                 native = NativeAudio(
                     pid, Path(native_helper), Path(asr_model), Path(asr_tokens),
-                    publish_event,
+                    publish_error,
                     replay_lookback_ms=self._native_replay_lookback_ms(profile),
                     on_pcm=publish_pcm,
                     on_inference=publish_inference,
-                    on_voice_end=publish_voice_end)
+                    on_evidence=publish_evidence)
                 native.start()
                 self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:
@@ -1256,9 +1268,6 @@ class AutoAdvApplication:
         self._native_audio.begin(token, match_text, replay_from_ms=replay_from_ms)
         return True
 
-    def _native_audio_holds_deadline(self, token: Token) -> bool:
-        return bool(self._native_audio and self._native_audio.holds_deadline(token))
-
     def _emit_native_capture_summary(self, token: Token) -> None:
         if self._native_audio is None:
             return
@@ -1266,27 +1275,18 @@ class AutoAdvApplication:
             'native_capture_summary', token, audio_pid=self._native_audio.pid,
             **self._native_audio.capture_status())
 
-    def _handle_native_event(self, token: Token | None, event: str, detail: str = '') -> bool:
-        """Apply native evidence and drive completion/advance in Application."""
+    def _handle_native_error(self, token: Token | None, detail: str = '') -> bool:
+        """Route an acquisition/recognition failure through Controller policy."""
         state = self.runtime_state()
         if token is None or token != state.token or state.utterance is None:
             return False
         utterance = state.utterance
         if utterance.advance_mode.value != 'audio' or utterance.use_tts:
             return False
-        if event == 'error':
-            if self._native_audio is not None:
-                self._native_audio.release_line_retention(token)
-            completed = self._runtime_presentation_event(token, 'native_failed')
-            if not utterance.uncertain_text_fallback:
-                self._emit_native_capture_summary(token)
-            return completed
-        if event == 'completed':
-            return self._runtime_presentation_event(token, 'native_finished')
-        # started/quiet remain NativeAudio observations for telemetry and
-        # validation. They do not form a second presentation state machine.
-        self._notify_runtime()
-        return False
+        completed = self._runtime_presentation_event(token, 'native_failed')
+        if not utterance.uncertain_text_fallback:
+            self._emit_native_capture_summary(token)
+        return completed
 
     def _start_ocr(self, profile: Profile) -> bool:
         """Own OCR acquisition, Controller admission and presentation dispatch."""

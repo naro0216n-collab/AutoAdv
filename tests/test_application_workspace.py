@@ -495,7 +495,7 @@ def test_application_starts_and_stops_native_audio_from_monitor_lifecycle(monkey
     assert native.pid == 202
     assert native.started
     assert app.native_audio_available
-    assert {'on_pcm', 'on_inference', 'on_voice_end'} <= set(native.callbacks)
+    assert {'on_pcm', 'on_inference', 'on_evidence'} <= set(native.callbacks)
     assert any(name == 'native_ready' and detail['ready']
                for name, _, detail in runtime_events)
 
@@ -1140,22 +1140,15 @@ def test_application_owns_uncertain_audio_fallback_policy():
                     if delay == app.runtime_state().utterance.text_wait_ms)
     class RetainedNative:
         pid = 101
-        def __init__(self):
-            self.released = []
-        def holds_deadline(self, _token):
-            return False
-        def release_line_retention(self, released_token):
-            self.released.append(released_token)
-            return True
         def capture_status(self):
             return {}
+        def finish_line(self, _token):
+            raise AssertionError('an inconclusive hold must retain the active audio line')
 
-    retained = RetainedNative()
-    app._native_audio = retained
+    app._native_audio = RetainedNative()
     deadline()
     assert app.runtime_state().pause_reason == 'native_inconclusive_hold'
     assert not app.runtime_state().sent
-    assert retained.released == [token]
 
 def test_application_auto_advance_can_complete_without_gui_runtime_policy():
     app, _ = app_with_game()

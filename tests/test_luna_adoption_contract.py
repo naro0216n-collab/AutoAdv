@@ -10,6 +10,7 @@ from autoadv.storage import Catalog, save, load
 from autoadv.native_audio import NativeAudio
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_match import VADDecision
+from autoadv.audio_evidence import VoiceState, assess_voice
 
 
 TEXT = ThreadSource(31, 0x100, 1, 2, 'HT', 'text')
@@ -94,7 +95,7 @@ class NativeRecognitionContract(unittest.TestCase):
                         Path('missing.tokens'), lambda *_: None)
 
     def test_vad_activity_and_silence_cannot_complete_without_matching_asr(self):
-        events = []
+        assessments = []
         decisions = iter([VADDecision(True, 0), VADDecision(True, 0),
                           VADDecision(False, 450)])
 
@@ -107,16 +108,21 @@ class NativeRecognitionContract(unittest.TestCase):
                 return ''
 
         audio = NativeAudio(31, Path('unused.dll'), Path('missing.onnx'),
-                            Path('missing.tokens'), lambda _t, name, _d: events.append(name),
-                            activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0)
+                            Path('missing.tokens'), lambda *_: None,
+                            activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0,
+                            g2p=None, on_evidence=lambda _t, e: assessments.append(assess_voice(e).state))
         try:
             audio.begin(Token(1, 1), '台詞')
             for ms in (100, 500, 1000):
                 audio.feed(PCMChunk(ms, bytes(8), 48000, 2, 4))
-            self.assertFalse(audio.is_confirmed_playing(Token(1, 1)))
-            self.assertFalse(audio.completed)
-            self.assertNotIn('completed', events)
-            self.assertNotIn('started', events)
+            import time
+            for _ in range(200):
+                with audio._lock:
+                    busy = audio._inflight
+                if not busy:
+                    break
+                time.sleep(.001)
+            self.assertNotIn(VoiceState.ENDED, assessments)
         finally:
             audio.close()
 

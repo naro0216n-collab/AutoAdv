@@ -47,8 +47,8 @@ class PerformanceObservationTests(unittest.TestCase):
                              on_inference=lambda ticket, measurements: reports.append((ticket, measurements)))
         try:
             native.history.start(101)
-            native.history.push(chunk, target_pid=101)
             native.begin(token, '猫はにゃーにゃーと鳴く。')
+            native.history.push(chunk, target_pid=101)
             native._infer(token, native._generation, (chunk,))
             self.assertEqual(len(reports), 1)
             measured = reports[0][1]
@@ -56,7 +56,7 @@ class PerformanceObservationTests(unittest.TestCase):
             self.assertEqual(measured['audio_ms'], 20)
             self.assertGreaterEqual(measured['decode_ms'], 0)
             self.assertGreaterEqual(measured['queue_ms'], 0)
-            self.assertTrue(measured['monotonic'])
+            self.assertIn('phonetic_progress_delta', measured)
             self.assertNotIn('recognized', measured)
         finally:
             native.close()

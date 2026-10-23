@@ -1,4 +1,4 @@
-"""Real recorded Japanese audio through AutoAdv's native activity path.
+"""Real recorded Japanese audio through AutoAdv's native observation path.
 
 This does NOT certify live LunaHook, Windows Process Loopback, GUI or targeted input.
 No game build or launch is performed. The independent live suite handles those
@@ -8,11 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import time
 import unittest
 import wave
 from types import SimpleNamespace
 
 from autoadv.audio_buffer import PCMChunk
+from autoadv.audio_evidence import VoiceState, assess_voice
 from autoadv.conversation import Token
 from autoadv.native_audio import NativeAudio
 
@@ -20,16 +22,31 @@ GAME = Path(__file__).parent / "renpy" / "game"
 MANIFEST = Path(__file__).parent / "VOICE_MANIFEST.json"
 
 
+def _wait_for_inference(native: NativeAudio) -> None:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        with native._lock:
+            busy = native._inflight
+        if not busy:
+            return
+        time.sleep(.002)
+    raise TimeoutError('native observation did not settle')
+
+
 def replay_pcm_into_real_native_activity(file: Path, token: Token):
     import numpy as np
-    events = []
+    errors = []
+    evidence = []
     native = NativeAudio(
         42, Path("not-used-for-offline-samples.dll"),
         Path("unused-asr.onnx"), Path("unused-asr.tokens"),
-        lambda t, name, reason: events.append((t, name, reason)), recognizer=SimpleNamespace(recognize=lambda _: ''),
+        lambda t, reason: errors.append((t, reason)),
+        recognizer=SimpleNamespace(recognize=lambda _: ''),
+        on_evidence=lambda t, item: evidence.append((t, item)),
         clock=lambda: 0,
     )
     try:
+        native.history.start(42)
         native.begin(token, "台詞")
         with wave.open(str(file), "rb") as wav:
             assert wav.getnchannels() == 1 and wav.getsampwidth() == 2
@@ -37,22 +54,23 @@ def replay_pcm_into_real_native_activity(file: Path, token: Token):
             audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
         for frame in range(0, len(audio) - 959, 960):
             samples = audio[frame:frame + 960].astype("<f4") / 32768.0
-            # Native process-loopback PCM ABI: float32 stereo at 48 kHz
             stereo = np.column_stack((samples, samples)).astype("<f4").tobytes()
-            native.feed(PCMChunk(frame // 48, stereo, 48000, 2, 4))
-        before_tail = tuple(events)
+            chunk = PCMChunk(frame // 48, stereo, 48000, 2, 4)
+            native.history.push(chunk, target_pid=42)
+            native.feed(chunk)
         start = (len(audio) // 960) * 20
         for ms in range(start, start + 1200, 20):
-            native.feed(PCMChunk(ms, bytes(960 * 2 * 4), 48000, 2, 4))
-        after_tail = tuple(events)
-        native.cancel()
-        return before_tail, after_tail, native.rise_ms, native.tail_ms
+            chunk = PCMChunk(ms, bytes(960 * 2 * 4), 48000, 2, 4)
+            native.history.push(chunk, target_pid=42)
+            native.feed(chunk)
+        _wait_for_inference(native)
+        return tuple(errors), tuple(evidence), native.vad_onset_ms, native.vad_tail_ms
     finally:
         native.close()
 
 
 class RealRecordedAudioContracts(unittest.TestCase):
-    def test_real_recordings_provide_activity_but_vad_alone_never_completes(self):
+    def test_real_recordings_produce_vad_observations_without_fabricating_target_end(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["samples"]), 14)
         kinds = set()
@@ -63,39 +81,54 @@ class RealRecordedAudioContracts(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(file.read_bytes()).hexdigest(), sample["sha256"])
                 kinds.add(sample["speaker"])
                 ticket = Token(777, 1)
-                before, after, onset, tail_ms = replay_pcm_into_real_native_activity(file, ticket)
+                errors, evidence, onset, vad_tail_ms = replay_pcm_into_real_native_activity(file, ticket)
+                self.assertFalse(errors)
                 self.assertGreaterEqual(onset, 0, 'recorded speech should be detected by VAD')
-                self.assertGreaterEqual(tail_ms, 300)
-                self.assertFalse(any(kind == 'completed' for _, kind, _ in after),
-                                 'VAD without matching ASR must never complete a line')
+                self.assertGreaterEqual(vad_tail_ms, 300)
+                self.assertTrue(evidence)
+                self.assertTrue(all(t == ticket for t, _ in evidence))
+                self.assertFalse(any(
+                    assess_voice(item).state is VoiceState.ENDED
+                    for _, item in evidence
+                ), 'VAD plus an empty ASR alignment must not fabricate target completion')
         self.assertEqual(kinds, {"normal", "whisper"})
 
-    def test_cancelled_utterance_cannot_emit_completion_from_old_recording(self):
+    def test_cancelled_utterance_cannot_emit_new_evidence_for_old_recording(self):
         import numpy as np
         file = GAME / "audio" / "voice" / "normal_001.wav"
         with wave.open(str(file), "rb") as wav:
             audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
-        events = []
+        errors = []
+        evidence = []
         observed_pcm = []
         native = NativeAudio(
             42, Path("not-used.dll"), Path("unused.onnx"), Path("unused.tokens"),
-            lambda token, kind, _: events.append((token, kind)), recognizer=SimpleNamespace(recognize=lambda _: ''),
+            lambda token, reason: errors.append((token, reason)),
+            recognizer=SimpleNamespace(recognize=lambda _: ''),
             on_pcm=lambda token, frames: observed_pcm.append((token, frames)),
+            on_evidence=lambda token, item: evidence.append((token, item)),
             clock=lambda: 0,
         )
         old = Token(20, 5)
         try:
+            native.history.start(42)
             native.begin(old, "えっ嘘でしょ。")
             for index in range(0, len(audio) - 959, 960):
                 pcm = audio[index:index + 960].astype("<f4") / 32768.0
                 frames = np.column_stack((pcm, pcm)).astype("<f4").tobytes()
-                native.feed(PCMChunk(index // 48, frames, 48000, 2, 4))
+                chunk = PCMChunk(index // 48, frames, 48000, 2, 4)
+                native.history.push(chunk, target_pid=42)
+                native.feed(chunk)
             self.assertEqual(len(observed_pcm), 1)
             self.assertEqual(observed_pcm[0], (old, 960))
+            _wait_for_inference(native)
+            before_cancel = len(evidence)
             native.cancel()
             for ms in range(2000, 3200, 20):
                 native.feed(PCMChunk(ms, bytes(960 * 8), 48000, 2, 4))
-            self.assertNotIn((old, "completed"), events)
+            time.sleep(.01)
+            self.assertEqual(len(evidence), before_cancel)
+            self.assertFalse(errors)
         finally:
             native.close()
 

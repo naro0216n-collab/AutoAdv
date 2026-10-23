@@ -81,6 +81,18 @@ def _mix(case: dict, audio: dict):
     return np.clip(out, -1, 1)
 
 
+def _benchmark_text_match(alignment) -> bool:
+    """Stress-report lexical criterion over raw alignment measurements only."""
+    target = alignment.phonetic_target_units
+    if target < 3:
+        return False
+    return bool(
+        alignment.phonetic_coverage >= .78
+        and alignment.phonetic_edits <= max(2, target // 6)
+        and .72 <= alignment.pronunciation_length_ratio <= 1.28
+    )
+
+
 def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -> dict:
     import numpy as np
     if rounds < 1:
@@ -99,11 +111,11 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
             hypothesis = recognizer.recognize((chunk,))
             duration = (time.perf_counter_ns() - started) / 1e6
             transcript, target = surface_key(hypothesis.text), surface_key(case['display'])
-            progress = TargetMatcher(case['display']).observe(
+            alignment = TargetMatcher(case['display']).align(
                 hypothesis.text, tokens=hypothesis.tokens)
-            # A lexical match is only a lexical observation. A manually labelled
-            # 'background' cannot independently prove origin for same text.
-            matching = bool(target) and progress.terminal_candidate and progress.attribution_score >= .78
+            # This is a stress-report lexical criterion over raw alignment only.
+            # It is not the product voice assessment and cannot prove speaker origin.
+            matching = bool(target) and _benchmark_text_match(alignment)
             no_foreground = case['attribution'] == 'not_foreground'
             lexical = case['kind'] == 'lexical'
             observations.append({
@@ -113,9 +125,11 @@ def run(model: Path, tokens: Path, *, selection: str = 'all', rounds: int = 1) -
                 'transcript_hash': hashlib.sha256(transcript.encode('utf-8')).hexdigest(),
                 'transcript': hypothesis.text,  # real recognizer output, not inferred from its hash
                 'recognized_characters': len(transcript), 'matches_display_text': matching,
-                'phonetic_coverage': round(progress.phonetic_coverage, 4),
-                'attribution_score': round(progress.attribution_score, 4),
-                'completion_score': round(progress.completion_score, 4),
+                'phonetic_coverage': round(alignment.phonetic_coverage, 4),
+                'phonetic_matches': alignment.phonetic_matches,
+                'phonetic_target_units': alignment.phonetic_target_units,
+                'phonetic_edit_count': alignment.phonetic_edit_count,
+                'reading_rank': alignment.reading_rank,
                 'cer': round(_edit_distance(target, transcript) / max(1, len(target)), 4)
                         if lexical else None,
                 'false_attribution_risk': no_foreground and matching,

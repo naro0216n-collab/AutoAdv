@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_buffer import AudioHistory
-from autoadv.audio_match import ASRProgress, VoiceActivity, VADDecision
+from autoadv.audio_match import TargetMatcher, VoiceActivity, VADDecision
+from autoadv.audio_evidence import VoiceEvidence, VoiceState, assess_voice
 from autoadv.conversation import Controller, Target, Token
 from autoadv.model import AdvanceMode, HookSelection, Profile
 from autoadv.native_audio import ASRResult, NativeAudio
@@ -94,7 +95,7 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
             self.assertEqual(reported, [])  # no dialogue token existed yet
             token = Token(1, 1)
             audio.begin(token, '台詞')
-            self.assertEqual(reported, [(token, 'error', 'WASAPI stream closed')])
+            self.assertEqual(reported, [(token, 'WASAPI stream closed')])
             self.assertEqual(audio.capture_status()['failure'], 'WASAPI stream closed')
         finally:
             audio.close()
@@ -111,8 +112,6 @@ class ProcessCaptureOwnershipTests(unittest.TestCase):
             audio.health(CaptureHealth(1000, True, 'helper_alive'))
             self.assertEqual(audio.capture_status()['heartbeats'], 1)
             self.assertEqual(audio.capture_status()['pcm_packets'], 0)
-            self.assertFalse(audio.is_confirmed_playing(token))
-            self.assertFalse(audio.completed)
             self.assertEqual(events, [])
             audio.health(CaptureHealth(1010, True, 'helper_alive', pcm_frames=960))
             self.assertEqual(audio.capture_status()['pcm_packets'], 1)
@@ -187,9 +186,6 @@ class PacketVadBoundaryTests(unittest.TestCase):
             self.assertTrue(decoded_windows)
             self.assertEqual(decoded_windows[-1], (1000, 3000))
 
-            self.assertTrue(native.release_line_retention(token))
-            self.assertEqual([chunk.at_ms for chunk in native.history.since(0)],
-                             [2000, 2500, 3000])
         finally:
             native.close()
 
@@ -222,7 +218,6 @@ class PacketVadBoundaryTests(unittest.TestCase):
             status = audio.capture_status()
             self.assertAlmostEqual(status['vad_input_peak'], 0.25, places=5)
             self.assertEqual(status['vad_positive_packets'], 0)
-            self.assertFalse(audio.completed)
         finally:
             audio.close()
 
@@ -254,8 +249,8 @@ class PacketVadBoundaryTests(unittest.TestCase):
             token = Token(1, 1)
             audio.begin(token, 'テスト')
             audio.feed(PCMChunk(1000, bytes(960 * 8), 48000, 2, 4))
-            self.assertEqual(audio.rise_ms, 1000)
-            self.assertFalse(audio.is_confirmed_playing(token))
+            self.assertEqual(audio.vad_onset_ms, 1000)
+            self.assertEqual(audio.vad_tail_ms, 400)
         finally:
             audio.close()
 
@@ -312,11 +307,11 @@ class PacketVadBoundaryTests(unittest.TestCase):
             t_begin.join(3)
             self.assertFalse(t_feed.is_alive() or t_begin.is_alive())
             self.assertEqual(audio.token, new)
-            self.assertEqual(audio.rise_ms, -1)
-            self.assertFalse(audio._last_vad)
+            self.assertEqual(audio.vad_onset_ms, -1)
+            self.assertFalse(audio._vad_active)
             # The old PCM's original timestamp can never enter the new line.
             audio.feed(old_chunk)
-            self.assertEqual(audio.rise_ms, -1)
+            self.assertEqual(audio.vad_onset_ms, -1)
         finally:
             release.set()
             audio.close()
@@ -377,723 +372,134 @@ class PacketVadBoundaryTests(unittest.TestCase):
                     if not busy:
                         break
                     time.sleep(.005)
-            self.assertEqual(audio.rise_ms, 1100)
+            self.assertEqual(audio.vad_onset_ms, 1100)
             self.assertEqual(audio._sample_start(), audio.window_start_ms)
         finally:
             audio.close()
 
-    def test_corrected_native_match_reports_completion_to_existing_controller_once(self):
-        sent = []
-        ctrl = Controller(lambda target, key: sent.append((target.pid, key)), lambda _: True)
-        profile = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
-                          hooks=[HookSelection('X', 1, 2)], body_source='X|1|2')
-        ctrl.begin(profile, Target(11, 2), 'host', 1)
-        source = SimpleNamespace(hook_code='X', context=1, context2=2)
-        token = ctrl.observe(generation='host', connection=1, sequence=1,
-                             source=source, text='えっ嘘でしょ', pid=11)
-        self.assertIsNotNone(token)
-        ctrl.permit(True)
-        events = []
-        readings = iter(['え嘘でしょ', 'え嘘でしょ'])
-        vad_frames = iter([VADDecision(True, 0), VADDecision(False, 400)])
-        clock = [1000]
+class VoiceEvidenceArchitectureTests(unittest.TestCase):
+    def _evidence(self, alignment, *, capture_end=2000, target_last=None,
+                  boundary=None, post=0.0, vad_tail=0, vad_end=None,
+                  stable=1, progress_delta=None):
+        return VoiceEvidence(
+            alignment=alignment, audio_ms=2000.0, capture_end_ms=capture_end,
+            target_last_token_ms=target_last, target_boundary_ms=boundary,
+            post_target_pcm_ms=post, vad_active=False, vad_contains_speech=False,
+            vad_onset_ms=None, vad_tail_ms=vad_tail, vad_end_ms=vad_end,
+            stable_alignment_observations=stable,
+            phonetic_progress_delta=progress_delta)
 
-        def notify(observed, event, detail):
-            events.append((observed, event))
-            if event == 'completed':
-                if ctrl.presentation_event(observed, 'native_finished'):
-                    ctrl.try_advance()
+    def test_recent_target_position_is_playing_without_decode_wall_clock_freshness(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようござ')
+        assessed = assess_voice(self._evidence(
+            alignment, capture_end=2000, target_last=1900))
+        self.assertEqual(assessed.state, VoiceState.PLAYING)
 
-        audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
-                            notify, recognizer=SimpleNamespace(recognize=lambda _: next(readings)),
-                            activity=SimpleNamespace(observe_float32_stereo=lambda _: next(vad_frames),
-                                                     reset=lambda: None), clock=lambda: clock[0])
-        try:
-            audio.history.start(11)
-            audio.begin(token, 'えっ嘘でしょ')
-            for when in (1000, 1600):
-                clock[0] = when
-                chunk = PCMChunk(when, bytes(960 * 8), 48000, 2, 4)
-                audio.history.push(chunk, target_pid=11)
-                audio.feed(chunk)
-                for _ in range(200):
-                    with audio._lock:
-                        busy = audio._inflight
-                    if not busy:
-                        break
-                    time.sleep(.005)
-                self.assertFalse(busy, 'product ASR observation did not finish')
-            self.assertEqual(ctrl.presentation_reason, 'native')
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sum(event == 'completed' for _, event in events), 1)
-            self.assertFalse(ctrl.presentation_event(token, 'native_finished'))
-            self.assertFalse(ctrl.try_advance())
-            self.assertEqual(len(sent), 1)
-        finally:
-            audio.close()
+    def test_late_redecode_of_old_target_does_not_mean_currently_playing(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようござ')
+        assessed = assess_voice(self._evidence(
+            alignment, capture_end=5000, target_last=1200))
+        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
 
+    def test_following_token_boundary_plus_captured_tail_can_end_without_vad_silence(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようございます')
+        assessed = assess_voice(self._evidence(
+            alignment, capture_end=2000, target_last=1200, boundary=1400, post=600))
+        self.assertEqual(assessed.state, VoiceState.ENDED)
+        self.assertEqual(assessed.estimated_end_ms, 1400)
+        self.assertEqual(assessed.endpoint_source, 'asr_timestamp')
 
-class InferenceOwnershipTests(unittest.TestCase):
-    def test_late_decode_from_old_line_cannot_release_new_line_inference_slot(self):
-        first_started = threading.Event()
-        second_started = threading.Event()
-        release_first = threading.Event()
-        release_second = threading.Event()
+    def test_alignment_stability_is_supporting_evidence_not_an_endpoint_by_itself(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('おはようございます')
+        assessed = assess_voice(self._evidence(
+            alignment, capture_end=5000, target_last=1000, stable=5))
+        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+        self.assertLess(assessed.endpoint_score, .45)
+
+    def test_process_vad_endpoint_cannot_attribute_unrelated_speech(self):
+        alignment = TargetMatcher('おはようございます', g2p=None).align('別の台詞です')
+        assessed = assess_voice(self._evidence(
+            alignment, capture_end=2000, vad_tail=500, vad_end=1500))
+        self.assertNotEqual(assessed.state, VoiceState.ENDED)
+
+    def test_token_timing_observations_are_audio_timeline_measurements(self):
+        samples = (
+            PCMChunk(1000, bytes(48000 // 10 * 8), 48000, 2, 4),
+            PCMChunk(1600, bytes(48000 // 10 * 8), 48000, 2, 4),
+        )
+        # 100 ms of PCM, then a 500 ms wall-clock gap, then 100 ms of PCM.
+        result = ASRResult('AB', ('A', 'B'), (0.05, 0.15))
+        last, boundary, post = NativeAudio._token_timing_observations(samples, result, 1)
+        self.assertEqual(last, 950)
+        self.assertEqual(boundary, 1550)
+        self.assertAlmostEqual(post, 50.0)
+
+    def test_native_audio_reports_evidence_not_completion_state(self):
+        assessments = []
+        metrics = []
+        ready = threading.Event()
 
         class Recognizer:
-            def __init__(self):
-                self.calls = 0
+            def recognize(self, _chunks):
+                return ASRResult('おはようございます背景', tuple('おはようございます背景'),
+                                 tuple(i * .1 for i in range(len('おはようございます背景'))))
 
-            def recognize(self, chunks):
-                self.calls += 1
-                if self.calls == 1:
-                    first_started.set()
-                    if not release_first.wait(3):
-                        raise TimeoutError('first inference not released')
-                else:
-                    second_started.set()
-                    if not release_second.wait(3):
-                        raise TimeoutError('second inference not released')
-                return 'テスト'
-
-        activity = SimpleNamespace(observe_float32_stereo=lambda _: VADDecision(True, 0))
-        reports = []
-        audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
-                            lambda *args: reports.append(args), recognizer=Recognizer(),
-                            activity=activity, clock=lambda: 1000)
-        try:
-            audio.history.start(11)
-            old, new = Token(1, 1), Token(1, 2)
-            audio.begin(old, 'テスト')
-            first = PCMChunk(1000, bytes(960 * 8), 48000, 2, 4)
-            audio.history.push(first, target_pid=11)
-            audio.feed(first)
-            self.assertTrue(first_started.wait(2))
-            audio.begin(new, 'テスト')
-            second = PCMChunk(1700, bytes(960 * 8), 48000, 2, 4)
-            audio.history.push(second, target_pid=11)
-            audio.feed(second)
-            with audio._lock:
-                expected = audio._generation
-                self.assertEqual(audio._inflight_generation, expected)
-            release_first.set()
-            self.assertTrue(second_started.wait(2))
-            with audio._lock:
-                self.assertEqual(audio._inflight_generation, expected)
-                self.assertTrue(audio._inflight)
-            release_second.set()
-            for _ in range(100):
-                with audio._lock:
-                    if not audio._inflight:
-                        break
-                time.sleep(.01)
-            self.assertFalse(audio._inflight)
-            self.assertFalse(any(token == old for token, *_ in reports))
-        finally:
-            release_first.set()
-            release_second.set()
-            audio.close()
-
-
-class RealControllerAudioDeadlineTests(unittest.TestCase):
-    def test_pending_native_analysis_defers_fallback_but_unrelated_speech_cannot_hold_forever(self):
-        from threading import Event
-        entered, release = Event(), Event()
-        now = [1000]
-        sent = []
-        class SlowUnrelatedASR:
-            def recognize(self, chunks):
-                entered.set()
-                if not release.wait(3):
-                    raise TimeoutError('deliberately blocked recognition')
-                return '別の話題です'
-        class ActiveVoice:
-            def observe_float32_stereo(self, frames):
-                return VADDecision(True, 0, contains_speech=True)
-            def reset(self):
-                pass
-        profile = Profile('p', 'P', advance_mode=AdvanceMode.AUDIO,
-                          uncertain_text_fallback=True,
-                          hooks=[HookSelection('X', 1, 2)], body_source='X|1|2')
-        controller = Controller(lambda *_: sent.append('input'), lambda *_: True)
-        controller.begin(profile, Target(11, 22), 'host', 1)
-        controller.permit(True)
-        source = SimpleNamespace(hook_code='X', context=1, context2=2)
-        token = controller.observe(generation='host', connection=1,
-            sequence=1, source=source, text='えっ嘘でしょ。', pid=11)
-        self.assertIsNotNone(token)
-        def notice(t, event, detail):
-            if event == 'completed':
-                controller.presentation_event(t, 'native_finished')
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            notice, recognizer=SlowUnrelatedASR(), activity=ActiveVoice(),
-            clock=lambda: now[0])
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
+            recognizer=Recognizer(), g2p=None,
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _: VADDecision(False, 0), reset=lambda: None),
+            clock=lambda: 2000,
+            on_inference=lambda _t, m: metrics.append(m),
+            on_evidence=lambda t, e: (assessments.append((t, assess_voice(e))), ready.set()))
         try:
             native.history.start(11)
-            native.boundary()
-            native.begin(token, 'えっ嘘でしょ。')
-            chunk = PCMChunk(1000, bytes(960 * 8), 48000, 2, 4)
+            token = Token(1, 1)
+            native.begin(token, 'おはようございます')
+            # 2 seconds of one cumulative audio window makes the following-token
+            # boundary leave enough captured post-target PCM for ENDED.
+            chunk = PCMChunk(2400, bytes(48000 * 2 * 8), 48000, 2, 4)
+            native.history.push(chunk, target_pid=11)
+            native.feed(chunk)
+            self.assertTrue(ready.wait(2))
+            self.assertEqual(assessments[-1][0], token)
+            self.assertEqual(assessments[-1][1].state, VoiceState.ENDED)
+            self.assertFalse(hasattr(native, 'completed'))
+            self.assertIn('target_last_token_age_ms', metrics[-1])
+            self.assertNotIn('voice_state', metrics[-1])
+            self.assertNotIn('assessment_endpoint', metrics[-1])
+        finally:
+            native.close()
+
+    def test_old_generation_inference_cannot_assess_new_line(self):
+        entered = threading.Event()
+        release = threading.Event()
+        assessments = []
+
+        class Recognizer:
+            def recognize(self, _chunks):
+                entered.set()
+                release.wait(2)
+                return ASRResult('古い台詞')
+
+        native = NativeAudio(
+            11, Path('unused'), Path('unused'), Path('unused'), lambda *_: None,
+            recognizer=Recognizer(), g2p=None,
+            activity=SimpleNamespace(
+                observe_float32_stereo=lambda _: VADDecision(True, 0), reset=lambda: None),
+            clock=lambda: 1000, on_evidence=lambda t, e: assessments.append((t, assess_voice(e).state)))
+        try:
+            native.history.start(11)
+            old = Token(1, 1)
+            native.begin(old, '古い台詞')
+            chunk = PCMChunk(1400, bytes(48000 * 8), 48000, 2, 4)
             native.history.push(chunk, target_pid=11)
             native.feed(chunk)
             self.assertTrue(entered.wait(1))
-            # Product audio says hold; production Controller has neither
-            # finished nor authorized a send at the fallback deadline.
-            now[0] = 1700
-            self.assertTrue(native.holds_deadline(token))
-            self.assertFalse(controller.completed)
-            self.assertFalse(controller.try_advance())
-            self.assertEqual(sent, [])
-            # After the bounded grace period, the product still labels an
-            # optional send as uncertain, NEVER as native completion.
-            now[0] = 3101
-            self.assertFalse(native.holds_deadline(token))
-            controller.presentation_event(token, 'fallback_elapsed')
-            self.assertEqual(controller.presentation_reason, 'uncertain_text_fallback')
-            self.assertTrue(controller.try_advance())
-            self.assertEqual(sent, ['input'])
-        finally:
-            native.cancel()
+            native.begin(Token(1, 2), '新しい台詞')
             release.set()
-            native.close()
-        self.assertEqual(sent, ['input'])
-
-    def test_pending_real_pcm_asr_gets_bounded_fallback_grace_without_vad(self):
-        entered = threading.Event()
-        release = threading.Event()
-        now = [1000]
-
-        class SlowRecognizer:
-            def recognize(self, chunks):
-                entered.set()
-                if not release.wait(3):
-                    raise TimeoutError('test ASR was not released')
-                return ASRResult('別の話題')
-
-        class NeverActive:
-            def observe_float32_stereo(self, frames):
-                return VADDecision(False, 0, contains_speech=False)
-            def reset(self):
-                pass
-
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda *_: None, recognizer=SlowRecognizer(), activity=NeverActive(),
-            clock=lambda: now[0])
-        try:
-            native.history.start(11)
-            token = Token(1, 1)
-            native.begin(token, 'えっ嘘でしょ')
-            now[0] = 1400
-            pcm = PCMChunk(1400, bytes(960 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            self.assertTrue(entered.wait(1))
-            now[0] = 1700
-            self.assertTrue(native.holds_deadline(token))
-            now[0] = 3401
-            self.assertFalse(native.holds_deadline(token))
-        finally:
-            release.set()
-            native.close()
-
-    def test_partial_asr_can_complete_with_independent_vad_endpoint_evidence(self):
-        events = []
-        metrics = []
-        clock = [1000]
-        decisions = iter((
-            VADDecision(True, 0, contains_speech=True),
-            VADDecision(False, 400, contains_speech=False),
-        ))
-
-        class Recognizer:
-            def recognize(self, chunks):
-                # Four of six normalized target characters are recognized.
-                # This is intentionally not a matcher terminal candidate.
-                return ASRResult('えっ嘘で')
-
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: next(decisions),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
-        try:
-            native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ')
-            for when in (1100, 1600):
-                clock[0] = when
-                pcm = PCMChunk(when, bytes(4800 * 8), 48000, 2, 4)
-                native.history.push(pcm, target_pid=11)
-                native.feed(pcm)
-                end = time.monotonic() + 2
-                while time.monotonic() < end:
-                    with native._lock:
-                        busy = native._inflight
-                    if not busy:
-                        break
-                    time.sleep(.005)
-                self.assertFalse(busy, 'partial ASR inference did not finish')
-            self.assertIn('started', events)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertFalse(metrics[-1]['terminal_candidate'])
-            self.assertAlmostEqual(metrics[-1]['phonetic_coverage'], 4 / 6, places=3)
-            self.assertLess(metrics[-1]['length_score'], .85)
-            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .70)
-            self.assertGreaterEqual(
-                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
-        finally:
-            native.close()
-
-    def test_current_combined_evidence_completes_without_prior_attribution_latch(self):
-        events = []
-        metrics = []
-        clock = [1000]
-        decisions = iter((
-            VADDecision(True, 0, contains_speech=True),
-            VADDecision(False, 400, contains_speech=False),
-        ))
-
-        progress = ASRProgress(
-            coverage=.6667, onset_score=.75, tail_confidence=0.0, monotonic=True,
-            matched_chars=4, observed='え嘘でし', edit_count=2, length_ratio=.6667,
-            terminal_candidate=False, phonetic_coverage=.7778, matched_phonemes=7,
-            phonetic_edit_count=2, attribution_score=.7529, completion_score=.72,
-            contradiction_score=.1444, reading_rank=0, target_units=9,
-            pronunciation_length_ratio=.7778, observed_token_count=4)
-
-        native = NativeAudio(
-            11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event),
-            recognizer=SimpleNamespace(recognize=lambda _: ASRResult('え嘘でし')),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: next(decisions),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
-        try:
-            native.history.start(11)
-            token = Token(1, 1)
-            native.begin(token, 'えっ嘘でしょ')
-            native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
-            for when in (1100, 1600):
-                clock[0] = when
-                pcm = PCMChunk(when, bytes(4800 * 8), 48000, 2, 4)
-                native.history.push(pcm, target_pid=11)
-                native.feed(pcm)
-                end = time.monotonic() + 2
-                while time.monotonic() < end:
-                    with native._lock:
-                        busy = native._inflight
-                    if not busy:
-                        break
-                    time.sleep(.005)
-                self.assertFalse(busy, 'combined-evidence inference did not finish')
-            self.assertIn('started', events)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertAlmostEqual(metrics[-1]['attribution_score'], .7529, places=4)
-            self.assertAlmostEqual(metrics[-1]['length_score'], .7778, places=4)
-            self.assertLess(metrics[-1]['length_score'], .85)
-            self.assertGreaterEqual(metrics[-1]['vad_tail_ms'], 400)
-            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .45)
-            self.assertGreaterEqual(
-                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
-        finally:
-            native.close()
-
-
-    def test_whisper_like_partial_alignment_completes_with_strong_vad_endpoint(self):
-        events = []
-        metrics = []
-        clock = [1000]
-        progress = ASRProgress(
-            coverage=.3636, onset_score=.61, tail_confidence=0.0, monotonic=True,
-            matched_chars=4, observed='whisper-like', edit_count=7, length_ratio=.9091,
-            terminal_candidate=False, phonetic_coverage=.6667, matched_phonemes=12,
-            phonetic_edit_count=6, attribution_score=.6130, completion_score=.5691,
-            contradiction_score=.2167, reading_rank=0, target_units=18,
-            pronunciation_length_ratio=.9091, observed_token_count=10)
-
-        native = NativeAudio(
-            11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event),
-            recognizer=SimpleNamespace(recognize=lambda _: ASRResult('whisper-like')),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: VADDecision(
-                    False, 300, contains_speech=False),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
-        try:
-            native.history.start(11)
-            token = Token(1, 1)
-            native.begin(token, '囁き声の対象台詞')
-            native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
-            clock[0] = 1500
-            pcm = PCMChunk(1500, bytes(24000 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertFalse(busy, 'whisper-like inference did not finish')
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertFalse(metrics[-1]['terminal_candidate'])
-            self.assertGreaterEqual(metrics[-1]['length_score'], .85)
-            self.assertGreaterEqual(metrics[-1]['endpoint_score'], .55)
-            self.assertGreaterEqual(
-                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
-        finally:
-            native.close()
-
-    def test_stable_terminal_asr_combines_with_short_timestamp_tail_under_bgm(self):
-        events = []
-        metrics = []
-        end_observations = []
-        clock = [1000]
-
-        class Recognizer:
-            def recognize(self, chunks):
-                total_ms = sum(chunk.duration_ms for chunk in chunks)
-                next_token = max(.42, total_ms / 1000.0 - .08)
-                return ASRResult(
-                    'えっ嘘でしょ背', tuple('えっ嘘でしょ背'),
-                    (0.05, 0.12, 0.20, 0.28, 0.34, next_token - .07, next_token))
-
-        native = NativeAudio(
-            11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: VADDecision(
-                    True, 0, contains_speech=True),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m),
-            on_voice_end=lambda _t, m: end_observations.append(m))
-        try:
-            native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ')
-            for when in (1500, 2000):
-                clock[0] = when
-                pcm = PCMChunk(when, bytes(24000 * 8), 48000, 2, 4)
-                native.history.push(pcm, target_pid=11)
-                native.feed(pcm)
-                end = time.monotonic() + 2
-                while time.monotonic() < end:
-                    with native._lock:
-                        busy = native._inflight
-                    if not busy:
-                        break
-                    time.sleep(.005)
-                self.assertFalse(busy, 'stable terminal inference did not finish')
-            self.assertEqual(len(metrics), 2)
-            self.assertLess(metrics[0]['endpoint_score'], NativeAudio.ENDPOINT_EVIDENCE_THRESHOLD)
-            self.assertEqual(metrics[0]['tail_confidence'], 0.0)
-            self.assertEqual(metrics[1]['tail_confidence'], 1.0)
-            self.assertAlmostEqual(metrics[1]['timestamp_endpoint_score'], .25, places=2)
-            self.assertGreaterEqual(
-                metrics[1]['endpoint_score'], NativeAudio.ENDPOINT_EVIDENCE_THRESHOLD)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
-        finally:
-            native.close()
-
-    def test_timestamp_endpoint_can_complete_with_post_target_pcm_while_vad_stays_active(self):
-        events = []
-        metrics = []
-        end_observations = []
-        clock = [1000]
-
-        class Recognizer:
-            def recognize(self, chunks):
-                # The selected target prefix is followed by process-mix speech.
-                # The following token bounds the target prefix in the decode
-                # waveform; 300ms of captured PCM follows that boundary.
-                return ASRResult(
-                    'えっ嘘でしょ背景', tuple('えっ嘘でしょ背景'),
-                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46, 0.70, 0.82))
-
-        class AlwaysActive:
-            def observe_float32_stereo(self, frames):
-                return VADDecision(True, 0, contains_speech=True)
-            def reset(self):
-                pass
-
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=AlwaysActive(), clock=lambda: clock[0],
-            on_inference=lambda _t, m: metrics.append(m),
-            on_voice_end=lambda _t, m: end_observations.append(m))
-        try:
-            native.history.start(11)
-            token = Token(1, 1)
-            native.begin(token, 'えっ嘘でしょ')
-            clock[0] = 2000
-            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertIn('started', events)
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
-            self.assertGreaterEqual(metrics[-1]['timestamp_endpoint_score'], .45)
-            self.assertEqual(metrics[-1]['target_token_count'], 6)
-            self.assertEqual(end_observations[-1]['source'], 'asr_timestamp')
-        finally:
-            native.close()
-
-    def test_short_post_target_timestamp_tail_does_not_complete_while_vad_stays_active(self):
-        events = []
-        metrics = []
-        clock = [1000]
-
-        class Recognizer:
-            def recognize(self, chunks):
-                # Only 80ms of captured PCM follows the next-token boundary.
-                # This reproduces the premature first-terminal inference seen in
-                # actual-machine accuracy measurement without forbidding timestamp evidence altogether.
-                return ASRResult(
-                    'えっ嘘でしょ背', tuple('えっ嘘でしょ背'),
-                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46, 0.92))
-
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: VADDecision(
-                    True, 0, contains_speech=True),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
-        try:
-            native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ')
-            clock[0] = 2000
-            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertFalse(busy, 'short-tail timestamp inference did not finish')
-            self.assertIn('started', events)
-            self.assertNotIn('completed', events)
-            self.assertFalse(native.completed)
-            self.assertAlmostEqual(metrics[-1]['trailing_after_target_ms'], 80.0, places=3)
-            self.assertLess(metrics[-1]['timestamp_endpoint_score'], .45)
-        finally:
-            native.close()
-
-    def test_partial_match_token_timestamps_do_not_turn_unrecognized_suffix_into_trailing_audio(self):
-        events = []
-        metrics = []
-        clock = [1000]
-        progress = ASRProgress(
-            coverage=.6957, onset_score=.78, tail_confidence=0.0, monotonic=True,
-            matched_chars=8, observed='途中まで', edit_count=2, length_ratio=.70,
-            terminal_candidate=False, phonetic_coverage=.7442, matched_phonemes=8,
-            phonetic_edit_count=2, attribution_score=.80, completion_score=.7403,
-            contradiction_score=.10, reading_rank=0, target_units=11,
-            pronunciation_length_ratio=.74, observed_token_count=4)
-
-        native = NativeAudio(
-            11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event),
-            recognizer=SimpleNamespace(recognize=lambda _: ASRResult(
-                '途中まで背景', ('途', '中', 'ま', 'で', '背', '景'),
-                (0.05, 0.15, 0.25, 0.35, 0.55, 0.70))),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: VADDecision(
-                    True, 0, contains_speech=True),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m))
-        try:
-            native.history.start(11)
-            token = Token(1, 1)
-            native.begin(token, '途中まで続く対象台詞')
-            native.matcher = SimpleNamespace(observe=lambda *_args, **_kwargs: progress)
-            clock[0] = 2000
-            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertFalse(busy, 'partial timestamp inference did not finish')
-            self.assertIn('started', events)
-            self.assertNotIn('completed', events)
-            self.assertFalse(native.completed)
-            self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
-            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
-        finally:
-            native.close()
-
-    def test_final_token_start_without_following_token_is_not_endpoint(self):
-        events = []
-        metrics = []
-        end_observations = []
-        clock = [1000]
-
-        class Recognizer:
-            def recognize(self, chunks):
-                return ASRResult(
-                    'えっ嘘でしょ', tuple('えっ嘘でしょ'),
-                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46))
-
-        class NeverActive:
-            def observe_float32_stereo(self, frames):
-                return VADDecision(False, 0, contains_speech=False)
-            def reset(self):
-                pass
-
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=NeverActive(), clock=lambda: clock[0],
-            on_inference=lambda _t, m: metrics.append(m),
-            on_voice_end=lambda _t, m: end_observations.append(m))
-        try:
-            native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ')
-            # ASR still runs without VAD-positive frames and can attribute
-            # the line, but token starts alone cannot certify acoustic end.
-            clock[0] = 2000
-            pcm = PCMChunk(2000, bytes(48000 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertIn('started', events)
-            self.assertNotIn('completed', events)
-            self.assertFalse(native.completed)
-            self.assertEqual(native.capture_status()['vad_positive_packets'], 0)
-            self.assertEqual(metrics[-1]['vad_tail_ms'], 0.0)
-            self.assertEqual(metrics[-1]['endpoint_score'], 0.0)
-            self.assertEqual(end_observations, [])
-        finally:
-            native.close()
-
-    def test_vad_tail_not_token_timestamp_establishes_acoustic_endpoint(self):
-        events = []
-        metrics = []
-        end_observations = []
-        clock = [1000]
-
-        class Recognizer:
-            def recognize(self, chunks):
-                return ASRResult(
-                    'えっ嘘でしょ', tuple('えっ嘘でしょ'),
-                    (0.05, 0.12, 0.20, 0.30, 0.38, 0.46))
-
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event), recognizer=Recognizer(),
-            activity=SimpleNamespace(
-                observe_float32_stereo=lambda _frames: VADDecision(
-                    False, 400, contains_speech=False),
-                reset=lambda: None),
-            clock=lambda: clock[0], on_inference=lambda _t, m: metrics.append(m),
-            on_voice_end=lambda _t, m: end_observations.append(m))
-        try:
-            native.history.start(11)
-            native.rise_ms = 1000
-            native.begin(Token(1, 1), 'えっ嘘でしょ')
-            native.rise_ms = 1000
-            native.voice_end_estimate_ms = 1200
-            clock[0] = 1600
-            pcm = PCMChunk(1600, bytes(4800 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertFalse(busy, 'VAD endpoint inference did not finish')
-            self.assertIn('completed', events)
-            self.assertTrue(native.completed)
-            self.assertEqual(metrics[-1]['vad_tail_ms'], 400.0)
-            self.assertEqual(end_observations[-1]['source'], 'asr_vad')
-        finally:
-            native.close()
-
-    def test_asr_timestamp_uses_pcm_duration_not_wall_clock_gap(self):
-        first = PCMChunk(1000, bytes(4800 * 8), 48000, 2, 4)
-        second = PCMChunk(2000, bytes(4800 * 8), 48000, 2, 4)
-        result = ASRResult('対象後', ('対象', '後'), (0.05, 0.18))
-        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
-            (first, second), result, observed_token_count=1, target_reached=True)
-        self.assertEqual(endpoint, 1980)
-        self.assertAlmostEqual(trailing, 20.0)
-        self.assertLess(score, .45)
-
-        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
-            (first, second), result, observed_token_count=1, target_reached=False)
-        self.assertEqual((endpoint, trailing, score), (-1, 0.0, 0.0))
-
-        # A final token start has no duration in SenseVoice and cannot be
-        # converted into an endpoint by adding a guessed token length.
-        endpoint, trailing, score = NativeAudio._timestamp_endpoint(
-            (first, second), ASRResult('対象', ('対象',), (0.05,)),
-            observed_token_count=1, target_reached=True)
-        self.assertEqual((endpoint, trailing, score), (-1, 0.0, 0.0))
-
-    def test_later_vad_state_cannot_retroactively_complete_decode_snapshot(self):
-        from threading import Event
-        gate, release = Event(), Event()
-        events = []
-        class SlowRecognizer:
-            def recognize(self, chunks):
-                gate.set()
-                release.wait(2)
-                return 'えっ嘘でしょ。'
-        class Activity:
-            def observe_float32_stereo(self, frames):
-                return VADDecision(True, 0, contains_speech=True)
-        native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-            lambda _t, event, _detail: events.append(event),
-            recognizer=SlowRecognizer(), activity=Activity())
-        try:
-            native.history.start(11)
-            native.begin(Token(1, 1), 'えっ嘘でしょ。')
-            pcm = PCMChunk(native.clock(), bytes(960 * 8), 48000, 2, 4)
-            native.history.push(pcm, target_pid=11)
-            native.feed(pcm)
-            self.assertTrue(gate.wait(1))
-            # Even if later captured audio seems quiet, this inference's
-            # snapshot has no endpoint. It must not complete a dialogue.
-            with native._lock:
-                native.tail_ms = 400
-            release.set()
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                with native._lock:
-                    busy = native._inflight
-                if not busy:
-                    break
-                time.sleep(.005)
-            self.assertNotIn('completed', events)
+            time.sleep(.05)
+            self.assertFalse(any(t == old for t, _ in assessments))
         finally:
             release.set()
             native.close()
@@ -1119,17 +525,18 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
                 recognition.append(tuple(c.at_ms for c in chunks))
                 return '合図です'
 
-        def report(token, status, detail):
-            events.append((token, status))
-            if status == 'completed':
+        def report(token, evidence):
+            assessment = assess_voice(evidence)
+            events.append((token, assessment.state))
+            if assessment.state is VoiceState.ENDED:
+                end_observations.append((token, assessment, evidence))
                 ready.set()
 
         audio = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
-                            report, recognizer=Recognizer(),
+                            lambda *_: None, recognizer=Recognizer(),
                             activity=SimpleNamespace(observe_float32_stereo=lambda _: next(activity),
                                                      reset=lambda: None),
-                            clock=lambda: moments[0],
-                            on_voice_end=lambda t, m: end_observations.append((t, m)))
+                            clock=lambda: moments[0], on_evidence=report)
         try:
             audio.history.start(11)
             audio.boundary()  # prior advance input, long before Luna's flush
@@ -1143,10 +550,10 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
             audio.begin(token, '合図です')
             self.assertTrue(ready.wait(2), events)
             self.assertEqual(recognition, [(1100, 1300, 1500)])
-            self.assertEqual([v for v in events if v[1] == 'completed'], [(token, 'completed')])
-            self.assertEqual(end_observations[0][1]['estimated_end_ms'], 1100)
-            self.assertLess(audio.rise_ms, audio.start_ms)
-            self.assertEqual(end_observations[0][1]['source'], 'asr_vad')
+            self.assertEqual([v for v in events if v[1] is VoiceState.ENDED], [(token, VoiceState.ENDED)])
+            self.assertEqual(end_observations[0][1].estimated_end_ms, 1100)
+            self.assertLess(audio.vad_onset_ms, audio.start_ms)
+            self.assertEqual(end_observations[0][1].endpoint_source, 'asr_vad')
         finally:
             audio.close()
 
@@ -1171,7 +578,7 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
             audio.feed(current)  # previously captured packet, no double VAD
             audio.feed(old)  # old packet, cannot change new token
             self.assertEqual(viewed, ['frame'])
-            self.assertEqual(audio.rise_ms, 1100)
+            self.assertEqual(audio.vad_onset_ms, 1100)
         finally:
             audio.close()
 
@@ -1186,6 +593,6 @@ class AdvanceOriginAudioWindowTests(unittest.TestCase):
             audio.history.start(11)
             audio.history.push(PCMChunk(1200, bytes(960 * 8), 48000, 2, 4), target_pid=11)
             audio.begin(Token(2, 1), '新しい本文')  # no observed advance
-            self.assertEqual(audio.rise_ms, -1)
+            self.assertEqual(audio.vad_onset_ms, -1)
         finally:
             audio.close()

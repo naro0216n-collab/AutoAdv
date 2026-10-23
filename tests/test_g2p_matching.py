@@ -59,11 +59,10 @@ class PhoneticMatcherTests(unittest.TestCase):
             '東京へ行く': [PronunciationCandidate(phones)],
             'とうきょうへいく': [PronunciationCandidate(phones)],
         })
-        progress = TargetMatcher('東京へ行く', g2p=g2p).observe('とうきょうへいく')
+        progress = TargetMatcher('東京へ行く', g2p=g2p).align('とうきょうへいく')
         self.assertLess(progress.coverage, .5)
         self.assertEqual(progress.phonetic_coverage, 1)
-        self.assertGreater(progress.attribution_score, .85)
-        self.assertTrue(progress.terminal_candidate)
+        self.assertEqual(progress.phonetic_edit_count, 0)
 
     def test_dictionary_alternative_handles_context_reading_mismatch_without_unbounded_onkun(self):
         shijou = ('sh', 'i', 'j', 'o', 'o', 'e', 'i', 'k', 'u')
@@ -72,27 +71,25 @@ class PhoneticMatcherTests(unittest.TestCase):
             '市場へ行く': [PronunciationCandidate(shijou, 0), PronunciationCandidate(ichiba, 1)],
             'いちばへいく': [PronunciationCandidate(ichiba, 0)],
         })
-        progress = TargetMatcher('市場へ行く', g2p=g2p).observe('いちばへいく')
+        progress = TargetMatcher('市場へ行く', g2p=g2p).align('いちばへいく')
         self.assertEqual(progress.reading_rank, 1)
         self.assertEqual(progress.phonetic_coverage, 1)
-        self.assertTrue(progress.terminal_candidate)
-        self.assertLess(progress.completion_score, 1)
+        self.assertEqual(progress.phonetic_edit_count, 0)
 
     def test_trailing_background_is_excluded_by_asr_token_endpoint(self):
         g2p = RuleG2P()
         tokens = tuple('えっうそでしょ背景音')
         matcher = TargetMatcher('えっ嘘でしょ', g2p=g2p)
-        progress = matcher.observe(''.join(tokens), tokens=tokens)
-        self.assertTrue(progress.terminal_candidate)
+        progress = matcher.align(''.join(tokens), tokens=tokens)
         self.assertEqual(progress.observed_token_count, len('えっうそでしょ'))
         self.assertGreater(progress.phonetic_coverage, .9)
 
     def test_unrelated_lead_in_remains_contradictory(self):
         g2p = RuleG2P()
         tokens = tuple('別のえっうそでしょ')
-        progress = TargetMatcher('えっ嘘でしょ', g2p=g2p).observe(''.join(tokens), tokens=tokens)
-        self.assertFalse(progress.terminal_candidate)
-        self.assertGreater(progress.contradiction_score, .15)
+        progress = TargetMatcher('えっ嘘でしょ', g2p=g2p).align(''.join(tokens), tokens=tokens)
+        self.assertGreater(progress.phonetic_edit_count, 0)
+        self.assertLess(progress.phonetic_onset_score, .9)
 
 
 

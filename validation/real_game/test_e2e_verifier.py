@@ -53,12 +53,12 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
             use_tts=chosen=='tts', text_wait_ms=500, characters=5, uncertain_text_fallback=False, speaker='明日香')
         if chosen == 'native':
             add('native_pcm', **key, frames=960, audio_pid=50)
-            add('native_event', **key, status='started', method='asr')
+            add('voice_assessment', **key, state='playing', method='asr')
             add('asr_inference', **key, audio_ms=500, decode_ms=50, queue_ms=5)
             observed_time = len(records) * 1_000_000_000
             add('native_voice_end_estimate', **key, estimated_at_ns=observed_time - 300_000_000,
                 onset_estimated_at_ns=observed_time - 1_000_000_000, evidence='asr_vad')
-            add('native_event', **key, status='completed', method='asr')
+            add('voice_assessment', **key, state='ended', method='asr')
         elif chosen == 'tts':
             add('tts_result', **key, success=True)
         add('presentation_complete', **key, success=True, reason='tts' if chosen=='tts' else ('native' if chosen=='native' else 'text'))
@@ -132,7 +132,7 @@ class RealGameVerifierContract(unittest.TestCase):
                 r['reason'] = 'native'
         # Product trace itself must still satisfy the native completion contract.
         first_input = next(i for i, r in enumerate(records) if r.get('event') == 'advance_attempt')
-        completion = dict(records[first_input-1], event='native_event', status='completed', method='asr')
+        completion = dict(records[first_input-1], event='voice_assessment', state='ended', method='asr')
         # Do not manufacture valid native capture: either failure is conclusive.
         records.insert(first_input, completion)
         for i, r in enumerate(records):
@@ -161,14 +161,14 @@ class RealGameVerifierContract(unittest.TestCase):
                     record = dict(record, uncertain_text_fallback=True)
                 if record['event'] == 'native_voice_end_estimate':
                     continue
-                if record['event'] == 'native_event' and record.get('status') == 'completed':
+                if record['event'] == 'voice_assessment' and record.get('state') == 'ended':
                     continue
                 if record['event'] == 'presentation_complete':
                     record = dict(record, reason='uncertain_text_fallback')
                 if drop_audio and record['event'] in ('native_pcm', 'asr_inference'):
                     continue
                 if not ACCURACY_SCENARIO[index]['process_audio_expected'] and record['event'] in (
-                        'native_pcm', 'native_event', 'asr_inference'):
+                        'native_pcm', 'voice_assessment', 'asr_inference'):
                     continue
             rewritten.append(record)
         records = resequence(rewritten)
@@ -251,7 +251,7 @@ class RealGameVerifierContract(unittest.TestCase):
         records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
         key = (1, 1)
         completed = next(r for r in records
-                         if r['event'] == 'native_event' and r.get('status') == 'completed'
+                         if r['event'] == 'voice_assessment' and r.get('state') == 'ended'
                          and (r.get('session'), r.get('line')) == key)
         presentation = next(r for r in records
                             if r['event'] == 'presentation_complete'
@@ -325,8 +325,8 @@ class RealGameVerifierContract(unittest.TestCase):
              'continue_collection': True},
         ]
         final_completion = next(r for r in records
-                                if r.get('event') == 'native_event'
-                                and r.get('status') == 'completed' and r.get('line') == 3)
+                                if r.get('event') == 'voice_assessment'
+                                and r.get('state') == 'ended' and r.get('line') == 3)
         records.remove(final_completion)
         final_presentation = next(i for i, r in enumerate(records)
                                   if r.get('event') == 'presentation_complete'
@@ -436,8 +436,8 @@ class RealGameVerifierContract(unittest.TestCase):
         records = [r for r in contract_records(0, 3, lines=ACCURACY_SCENARIO)
                    if not (r['event'] == 'asr_inference' and r.get('line') == 1)]
         for record in records:
-            if record['event'] == 'native_event' and record['line'] == 1:
-                record['status'] = 'started'
+            if record['event'] == 'voice_assessment' and record['line'] == 1:
+                record['state'] = 'playing'
         report = validate(records, phase='accuracy')
         self.assertFalse(report['collection_valid'])  # genuine product order violation
         first = report['line_results'][0]
@@ -462,8 +462,8 @@ class RealGameVerifierContract(unittest.TestCase):
         # counters explain the product handoff; they must not certify audio.
         records = contract_records(0, 1, lines=ACCURACY_SCENARIO, advance=False)
         for record in records:
-            if record['event'] == 'native_event':
-                record['status'] = 'started'
+            if record['event'] == 'voice_assessment':
+                record['state'] = 'playing'
         records.append({'event': 'native_capture_summary', 'seq': len(records),
                         'at_ns': records[-1]['at_ns'] + 1_000_000,
                         'session': 1, 'line': 1, 'scope': 'capture_since_start',
@@ -477,7 +477,7 @@ class RealGameVerifierContract(unittest.TestCase):
     def test_vad_alone_never_confirms_a_matching_native_utterance(self):
         records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
         for record in records:
-            if record['event'] == 'native_event':
+            if record['event'] == 'voice_assessment':
                 record['method'] = 'vad'
             if record['event'] == 'native_voice_end_estimate':
                 record['evidence'] = 'vad_only'
@@ -500,7 +500,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(validate(records, phase='accuracy')['ok'])
         without_pcm = [r for r in records if not (r['event'] == 'native_pcm' and r['line'] == 1)]
         self.assertFalse(validate(without_pcm, phase='accuracy')['ok'])
-        vad = [dict(r, method='vad') if r['event'] == 'native_event' else r for r in records]
+        vad = [dict(r, method='vad') if r['event'] == 'voice_assessment' else r for r in records]
         self.assertFalse(validate(vad, phase='accuracy')['ok'])
         missing_capture = [r for r in records if r['event'] != 'native_pcm']
         self.assertFalse(validate(missing_capture, phase='accuracy')['ok'])

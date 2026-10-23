@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
+from .audio_evidence import VoiceState
 from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
                     extract_source_fields, interpret)
 
@@ -45,6 +46,8 @@ class Controller:
         self.presentation_reason: str | None = None
         self.text_elapsed = False
         self.tts_finished = False
+        self.voice_state = VoiceState.INCONCLUSIVE
+        self.audio_deadline_elapsed = False
         self.sent = False
         self.hold_reason: str | None = None
         self.line_no = 0
@@ -84,6 +87,8 @@ class Controller:
         self.confirmed_external_boundary = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
+        self.voice_state = VoiceState.INCONCLUSIVE
+        self.audio_deadline_elapsed = False
         self.hold_reason = reason
 
     def stage_profile(self, profile: Profile) -> None:
@@ -234,6 +239,8 @@ class Controller:
         self.completed = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
+        self.voice_state = VoiceState.INCONCLUSIVE
+        self.audio_deadline_elapsed = False
         self.sent = False
         self.awaiting_next = False
         self.hold_reason = None
@@ -297,23 +304,18 @@ class Controller:
             if self.tts_finished:
                 return self._presentation_done('tts_and_text')
             return False
-        if event == 'native_finished':
+        if event == 'audio_deadline_elapsed':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
-            # The deadline hold means only that endpoint evidence was
-            # inconclusive at that moment. A later definitive NativeAudio end
-            # supersedes exactly that hold; unrelated safety/input failures
-            # remain owned by their own recovery paths.
-            self._resolve_pause('native_inconclusive_hold')
-            return self._presentation_done('native')
-        if event == 'fallback_elapsed':
-            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+            self.audio_deadline_elapsed = True
+            if self.voice_state is VoiceState.ENDED:
+                self._resolve_pause('native_inconclusive_hold')
+                return self._presentation_done('native')
+            if self.voice_state is VoiceState.PLAYING:
+                self._resolve_pause('native_inconclusive_hold')
                 return False
             if u.uncertain_text_fallback:
                 return self._presentation_done('uncertain_text_fallback')
-            # NativeAudio owns whether positive continuation evidence still
-            # justifies extending this deadline. Reaching this event means it
-            # no longer does; Controller owns only the resulting product hold.
             self.pause('native_inconclusive_hold')
             return False
         if event in ('native_unavailable', 'native_failed'):
@@ -324,6 +326,32 @@ class Controller:
                            else 'native_audio_failure')
             return False
         raise ValueError(f'unknown presentation event: {event}')
+
+
+    def voice_assessment(self, token: Token, state: VoiceState) -> bool:
+        """Apply the one semantic native-voice assessment to progression.
+
+        Evidence production and assessment do not own presentation completion.
+        Controller combines the assessment with the one text-derived deadline.
+        """
+        if token != self.token or self.sent or self.completed or not self.utterance:
+            return False
+        u = self.utterance
+        if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+            return False
+        self.voice_state = VoiceState(state)
+        if self.voice_state is VoiceState.ENDED:
+            self._resolve_pause('native_inconclusive_hold')
+            return self._presentation_done('native')
+        if not self.audio_deadline_elapsed:
+            return False
+        if self.voice_state is VoiceState.PLAYING:
+            self._resolve_pause('native_inconclusive_hold')
+            return False
+        if u.uncertain_text_fallback:
+            return self._presentation_done('uncertain_text_fallback')
+        self.pause('native_inconclusive_hold')
+        return False
 
     def _presentation_done(self, reason: str) -> bool:
         self.completed = True

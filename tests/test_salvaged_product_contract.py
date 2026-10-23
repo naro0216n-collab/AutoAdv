@@ -14,6 +14,7 @@ from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
 from autoadv.audio_match import TargetMatcher, surface_key, VADDecision
+from autoadv.audio_evidence import VoiceState, assess_voice
 from autoadv.audio_buffer import PCMChunk
 from autoadv.native_audio import NativeAudio
 
@@ -139,13 +140,12 @@ class AcquisitionAndInputTests(unittest.TestCase):
 
     def test_target_matcher_does_not_complete_unrelated_or_unstable_voice(self):
         m = TargetMatcher('おはようございます', g2p=None)
-        self.assertLess(m.observe('明日').coverage, .9)
+        self.assertLess(m.align('明日').coverage, .9)
         m2 = TargetMatcher('おはよう', g2p=None)
-        m2.observe('おは')
-        a = m2.observe('おはよう')
-        b = m2.observe('おはよう')
+        a = m2.align('おはよう')
+        b = m2.align('おはよう')
         self.assertGreaterEqual(b.coverage, .9)
-        self.assertEqual(b.tail_confidence, 1.0)
+        self.assertEqual(a, b)
 
 
 class NativeAudioSessionTests(unittest.TestCase):
@@ -182,10 +182,10 @@ class NativeAudioSessionTests(unittest.TestCase):
             def observe_float32_stereo(self, frames):
                 self.index += 1
                 return VADDecision(self.index == 1, 300 if self.index > 1 else 0)
-        events = []
+        assessments = []
         audio = NativeAudio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
-                 lambda token, event, reason: events.append((token, event)),
-                 recognizer=Recognizer(), activity=VAD(), clock=lambda: 1000)
+                 lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 1000,
+                 g2p=None, on_evidence=lambda token, e: assessments.append((token, assess_voice(e).state)))
         from autoadv.conversation import Token
         token = Token(1, 2)
         try:
@@ -202,8 +202,7 @@ class NativeAudioSessionTests(unittest.TestCase):
                         busy = audio._inflight
                     if not busy: break
                     time.sleep(.001)
-            self.assertIn((token, 'started'), events)
-            self.assertIn((token, 'completed'), events)
+            self.assertIn((token, VoiceState.ENDED), assessments)
             audio.cancel()
             self.assertIsNone(audio.token)
         finally:

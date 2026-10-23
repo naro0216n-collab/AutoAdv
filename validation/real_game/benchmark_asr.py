@@ -100,17 +100,18 @@ def run(model: Path, tokens: Path, *, conditions: tuple[str, ...], rounds: int, 
                 elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
                 expected = surface_key(sample['text'])
                 actual = surface_key(recognized.text)
-                progress = TargetMatcher(sample['text']).observe(
+                alignment = TargetMatcher(sample['text']).align(
                     recognized.text, tokens=recognized.tokens)
                 results.append({
                     'id': sample['id'], 'condition': condition, 'round': repetition + 1,
                     'audio_ms': round(audio_ms, 3), 'decode_ms': round(elapsed_ms, 3),
                     'rtf': round(elapsed_ms / audio_ms, 4),
                     'cer': round(_edit_distance(expected, actual) / max(1, len(expected)), 4),
-                    'phonetic_coverage': round(progress.phonetic_coverage, 4),
-                    'attribution_score': round(progress.attribution_score, 4),
-                    'completion_score': round(progress.completion_score, 4),
-                    'terminal_candidate': progress.terminal_candidate,
+                    'phonetic_coverage': round(alignment.phonetic_coverage, 4),
+                    'phonetic_matches': alignment.phonetic_matches,
+                    'phonetic_target_units': alignment.phonetic_target_units,
+                    'phonetic_edit_count': alignment.phonetic_edit_count,
+                    'reading_rank': alignment.reading_rank,
                     'recognized_hash': hashlib.sha256(actual.encode('utf-8')).hexdigest(),
                 })
     by_condition = {}

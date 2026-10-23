@@ -417,7 +417,7 @@ def run_gui() -> int:
             self.input_key=QSpinBox(); self.input_key.setRange(1,254)
             self.next_line_timeout=QSpinBox(); self.next_line_timeout.setRange(1000,120000)
             self.repeat=QComboBox(); self.repeat.addItem('連続同文は重複として扱う','distinct_only'); self.repeat.addItem('送り後の同文は別台詞','each_after_input')
-            game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('1文字待機',setting_row('per_character_wait_ms', self.per_character_wait_ms)); game_settings.addRow('最低表示時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('次台詞待ち',setting_row('next_line_timeout_ms', self.next_line_timeout)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
+            game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('1文字待機',setting_row('per_character_wait_ms', self.per_character_wait_ms)); game_settings.addRow('文字待機の最低時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('次台詞待ち',setting_row('next_line_timeout_ms', self.next_line_timeout)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
 
             target_details = group('別プロセスを使う作品', page='game', section='target_details', detail=True)
             self.game_exe=QLineEdit(); self.audio_exe=QLineEdit(); self.input_exe=QLineEdit()
@@ -440,7 +440,7 @@ def run_gui() -> int:
 
             common = group('共通の既定値', page='settings', section='common_advance')
             self.common_controls={}
-            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき文字数時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'最低表示時間 (ms)','per_character_wait_ms':'1文字あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','asr_model':'日本語ASRモデル','asr_tokens':'ASR語彙ファイル','input_key':'送りキーコード','next_line_timeout_ms':'次台詞待ち (ms)'}
+            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき文字数時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'文字待機の最低時間 (ms)','per_character_wait_ms':'1文字あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','asr_model':'日本語ASRモデル','asr_tokens':'ASR語彙ファイル','input_key':'送りキーコード','next_line_timeout_ms':'次台詞待ち (ms)'}
             for key in COMMON_FIELDS:
                 value=getattr(self.catalog.common,key)
                 if key=='advance_mode':
@@ -1948,9 +1948,8 @@ def run_gui() -> int:
                     self.note('Process audio helper started; waiting for actual captured PCM')
                 else:
                     self.note('Native audio unavailable: ' + detail.get('reason', ''))
-            elif event == 'native_event' and token is not None:
-                if detail.get('status') == 'error':
-                    self.note('Native audio: ' + detail.get('reason', ''))
+            elif event == 'native_audio_error' and token is not None:
+                self.note('Native audio: ' + detail.get('reason', ''))
             elif event == 'utterance' and token is not None:
                 self.display_utterance(token)
             elif event == 'hook_group_flushed':

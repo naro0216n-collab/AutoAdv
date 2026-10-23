@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.application import HookEventOutcome, CaptureHostEventOutcome
+from autoadv.conversation import Token
 from validation.real_game.trace import ProductTraceObserver, ValidationTrace, text_digest
 from validation.real_game.verify_trace import validate
 
@@ -24,6 +25,35 @@ class EvidenceIntegrityTests(unittest.TestCase):
             self.assertTrue(records[-1]["at_ns"] >= records[0]["at_ns"])
             with self.assertRaises(FileExistsError):
                 ValidationTrace(str(path))
+
+    def test_trace_keeps_raw_audio_observation_separate_from_voice_assessment(self):
+        class Application:
+            def configure_telemetry(self, observer):
+                self.observer = observer
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'run.jsonl'
+            app = Application()
+            observer = ProductTraceObserver(ValidationTrace(path), app)
+            observer.install()
+            token = Token(4, 2)
+            app.observer('asr_inference', token, {
+                'phonetic_coverage': .75, 'phonetic_progress_delta': .12,
+                'target_last_token_age_ms': 80, 'vad_tail_ms': 0,
+            })
+            app.observer('voice_assessment', token, {
+                'state': 'playing', 'method': 'asr', 'association': .91,
+                'completion': .72, 'contradiction': .04, 'endpoint': .10,
+                'evidence': .67, 'endpoint_source': '',
+            })
+            records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+            raw = next(record for record in records if record['event'] == 'asr_inference')
+            judged = next(record for record in records if record['event'] == 'voice_assessment')
+            self.assertEqual(raw['phonetic_coverage'], .75)
+            self.assertNotIn('state', raw)
+            self.assertEqual(judged['state'], 'playing')
+            self.assertEqual(judged['association'], .91)
+            self.assertNotIn('phonetic_coverage', judged)
 
     def test_no_actual_autoadv_events_is_always_unverified(self):
         result = validate([])
