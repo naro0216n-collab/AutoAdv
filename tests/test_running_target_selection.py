@@ -85,7 +85,8 @@ class RunningTargetGuiTests(unittest.TestCase):
                 window.use_running_target(next_target)
                 self.assertEqual(len(starts), 2)
                 commands.assert_any_call('connect', pid=next_target.pid)
-                self.assertEqual(window.application.hook_connection_state().connecting_pid, next_target.pid)
+                self.assertEqual(window.application.runtime_target_state().hook_pid, next_target.pid)
+                self.assertEqual(window.application.activate_selected_target(), 'connecting')
                 self.assertFalse(window.application.runtime_state().authorized)
                 self.assertTrue(window.application.hook_host_running)
             finally:

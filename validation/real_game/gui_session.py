@@ -82,12 +82,12 @@ def select_game_window(windows, class_name):
 
 class SessionDriver:
     def __init__(self, window, qt_app, options, *, clock=time.monotonic,
-                 recovery_send=None, recovery_boundary=None):
+                 recovery_send=None, recovery_confirm=None):
         self.w, self.qt_app, self.options = window, qt_app, options
         self.product = window.application
         self.clock = clock
         self.recovery_send = recovery_send or self._send_validation_recovery
-        self.recovery_boundary = recovery_boundary or self._mark_validation_recovery_boundary
+        self.recovery_confirm = recovery_confirm or self._confirm_validation_recovery
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.done_idle = None
@@ -97,10 +97,8 @@ class SessionDriver:
 
     def fail(self, why):
         candidates = self.product.capture_view().candidates
-        connection = self.product.hook_connection_state()
         runtime = self.product.runtime_state()
         details = dict(
-            luna_connected=connection.connected,
             candidate_hooks=len(candidates),
             sampled_hooks=sum(bool(candidate.history) for candidate in candidates),
             ambiguous_hooks=sum(candidate.ambiguous for candidate in candidates),
@@ -140,9 +138,9 @@ class SessionDriver:
     def _send_validation_recovery(runtime):
         """Advance only the validation fixture after the product has failed.
 
-        This deliberately bypasses Controller state and is never exposed as a
-        product input.  The next LunaHook output therefore enters AutoAdv as an
-        external transition, while the failed product line remains failed.
+        This bypasses the normal AutoAdv input path and is never exposed as a
+        product send.  The harness separately confirms only the known boundary
+        so an identical next Hook can still be collected after forced progress.
         """
         from autoadv.windows_input import WindowsAdvancementInput
         if runtime.target is None or runtime.profile is None:
@@ -150,14 +148,9 @@ class SessionDriver:
         WindowsAdvancementInput(
             runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
 
-    def _mark_validation_recovery_boundary(self, runtime):
+    def _confirm_validation_recovery(self, runtime):
         token = runtime.token
-        if token is None:
-            raise RuntimeError('validation recovery lost the active utterance boundary')
-        # Match the ordinary product input ordering: invalidate the old audio
-        # interval immediately before the input, then wait for the next Hook.
-        self.product.native_audio_boundary()
-        if not self.product.confirm_external_advance(token):
+        if token is None or not self.product.confirm_external_advance(token):
             raise RuntimeError('validation recovery lost the active utterance boundary')
 
     def _recover_failed_line(self, runtime):
@@ -181,7 +174,9 @@ class SessionDriver:
         self.w.validation_trace.emit(
             'validation_recovery_attempt', session=token.session, line=token.line,
             reason=reason)
-        self.recovery_boundary(runtime)
+        # Establish the known test-only boundary immediately before the forced
+        # input, matching the product input/audio-boundary ordering.
+        self.recovery_confirm(runtime)
         self.recovery_send(runtime)
         self.w.validation_trace.emit(
             'validation_recovery_input', session=token.session, line=token.line,
@@ -241,6 +236,7 @@ class SessionDriver:
         state = self.product.activate_selected_target()
         if state not in ('connecting', 'connected', 'monitoring'):
             raise RuntimeError('could not activate the selected validation game')
+        return state
 
     def _select_calibration_source(self):
         candidate = choose_calibration_source(self.product.capture_view().candidates)
@@ -271,10 +267,15 @@ class SessionDriver:
             if self.state == 'select_target':
                 target = self._game_target()
                 if target:
-                    self._configure_product(target)
-                    self.state = 'attach'
+                    state = self._configure_product(target)
+                    if state in ('connected', 'monitoring'):
+                        self._release('.attached')
+                        self.state = 'calibration'
+                    else:
+                        self.state = 'attach'
             elif self.state == 'attach':
-                if self.product.hook_connection_state().connected:
+                state = self.product.activate_selected_target()
+                if state in ('connected', 'monitoring'):
                     self._release('.attached')
                     self.state = 'calibration'
             elif self.state == 'calibration':

@@ -226,7 +226,11 @@ public static class AudioRenderProbe {
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }
-        python -m autoadv
+        if ($Automated) {
+            python -m validation.real_game.gui_entry
+        } else {
+            python -m autoadv
+        }
         $guiExit = $LASTEXITCODE
         $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace,
                        '--phase', $Phase, '--report', $Report)

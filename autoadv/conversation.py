@@ -284,13 +284,13 @@ class Controller:
         return Token(self.session, self.line_no)
 
     def confirm_external_advance(self, token: Token) -> bool:
-        """Record an externally known dialogue boundary without claiming input.
+        """Mark one test/validation-forced advance as an authoritative boundary.
 
-        Normal product operation deliberately does not monitor global user
-        input, so this is inert unless an adapter already has authoritative
-        knowledge that the visible line was advanced. It lets the next equal
-        text be admitted as a distinct Utterance while preserving the fact
-        that AutoAdv itself did not send the advance.
+        Normal product operation never calls this.  It exists only for a test
+        harness that is about to send a forced game input and therefore knows
+        that the current dialogue boundary is authoritative even when the next
+        Hook text is identical.  The forced input is not credited as an AutoAdv
+        send.
         """
         if token != self.token or self.utterance is None:
             return False

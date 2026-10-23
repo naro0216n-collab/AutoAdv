@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 from pathlib import PureWindowsPath
 import unittest
@@ -67,6 +68,34 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('validation_recovery_inputs = if ($measurement)', orchestrator)
         self.assertIn('jump continuation', fixture)
         self.assertNotIn('autoadv_case_', fixture)
+
+
+    def test_product_entrypoint_has_no_validation_driver_or_test_only_runtime_wrappers(self):
+        main = (ROOT / 'autoadv' / '__main__.py').read_text(encoding='utf-8')
+        gui = (ROOT / 'autoadv' / 'gui.py').read_text(encoding='utf-8')
+        application = (ROOT / 'autoadv' / 'application.py').read_text(encoding='utf-8')
+        live = (ROOT / 'validation' / 'real_game' / 'run_live_check.ps1').read_text(encoding='utf-8')
+
+        self.assertNotIn('AUTOADV_VALIDATION_SESSION', main)
+        self.assertNotIn('validation.real_game', main)
+        self.assertNotIn('session_driver', gui)
+        self.assertIn('python -m validation.real_game.gui_entry', live)
+        tree = ast.parse(application)
+        application_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == 'AutoAdvApplication')
+        methods = {node.name for node in application_class.body if isinstance(node, ast.FunctionDef)}
+        self.assertIn('confirm_external_advance', methods)
+        for retired in (
+            'stage_runtime_profile', 'hold_runtime',
+            'observe_runtime_hook', 'observe_runtime_group',
+            'observe_runtime_ocr', 'expire_next_line', 'try_advance',
+            'native_audio_boundary', 'hook_connection_state',
+            'observe_capture_group', 'capture_has_identity',
+            'capture_has_output', 'rebase_profile_settings',
+            'take_external_transition', 'adopt_inserted_hook',
+        ):
+            self.assertNotIn(retired, methods)
 
     def test_hosted_and_broad_ci_do_not_run_real_audio(self):
         live = (ROOT / '.github' / 'workflows' / 'live-advancement.yml').read_text(encoding='utf-8')

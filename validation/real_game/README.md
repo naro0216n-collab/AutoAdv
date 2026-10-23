@@ -55,7 +55,7 @@ RealAudioはGitHub hosted runnerでは実行せず、実際にAutoAdvを利用�
   -AsrTokens C:\path\to\tokens.txt
 ```
 
-通常の実機検収は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行する。AutoAdv自身の送りが成立しない台詞ではその失敗を保持し、検証driverが`validation_recovery_input`を記録してから一度だけゲームを進め、後続ケースのPCM/ASR/VAD/Controller観測を継続する。回復入力後の次HookはAutoAdv成功に数えず、run全体の「データ収集完了」と「無介入連続自動進行成功」を分離して報告する。ケース別再起動は行わない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
+通常の実機検収は配布用 `AutoAdv-Windows-Validate.cmd` を使う。このCMDは検証実装を内蔵せず、起動時に最新 `develop` を隔離checkoutし、Git管理下の `validation/real_game/run_windows_validation.ps1` を実行するだけのbootstrapとする。Git側PowerShellがprebuilt fixture取得、Process Loopback helper build、固定ASR runtime準備、`reading` / `native` phase、Issueへの結果送信を所有する。`native` は全原音ケースを一つのゲーム・一つのAutoAdvセッションで連続実行する。AutoAdv自身の送りが成立しない台詞ではその失敗を保持し、検証driverが`validation_recovery_input`を記録してから一度だけゲームを進め、後続ケースのPCM/ASR/VAD/Controller観測を継続する。回復入力後の次HookはAutoAdv成功に数えず、run全体の「データ収集完了」と「無介入連続自動進行成功」を分離して報告する。強制入力の直前に`confirm_external_advance()`で既知の境界だけを通知し、同一本文の後続ケースも収集可能にするが、AutoAdvの送り成功や音声判断へは算入しない。ケース別再起動は行わない。`run_live_check.ps1` 自身はhelper buildやASR取得を行わない。このため検証経路を改修した場合にCMDを再配布して手順を二重管理しない。
 
 RealAudioはFast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／Fullテストへ含めない。Hosted runnerの音声endpoint有無を製品のNativeAudio成否に読み替えない。
 

@@ -20,7 +20,7 @@ from .validation_trace import ValidationTrace, text_digest
 from .application import AutoAdvApplication
 
 
-def run_gui(session_driver=None) -> int:
+def run_gui() -> int:
     from PySide6.QtCore import QObject, Signal, QTimer, Qt
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
@@ -2248,6 +2248,4 @@ def run_gui(session_driver=None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    if session_driver is not None:
-        QTimer.singleShot(0, lambda: session_driver(window, app))
     return app.exec()

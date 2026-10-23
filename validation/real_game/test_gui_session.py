@@ -129,7 +129,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
              'force_continue_on_failure': True},
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
-            recovery_boundary=lambda state: (
+            recovery_confirm=lambda state: (
                 boundaries.append(state.token.line), setattr(runtime, 'pause_reason', None)))
         driver.state = 'running'
         driver.tick()
@@ -165,7 +165,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
              'force_continue_on_failure': True},
             clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
-            recovery_boundary=lambda state: None)
+            recovery_confirm=lambda state: None)
         driver.state = 'running'
         driver.tick()
         clock[0] = 1.7
@@ -184,7 +184,6 @@ class LiveGuiSessionContract(unittest.TestCase):
         product = SimpleNamespace(
             capture_view=lambda: SimpleNamespace(candidates=(candidate,)),
             capture_source=lambda identity, address, require_unique=False: source,
-            hook_connection_state=lambda: SimpleNamespace(connected=True),
             hook_host_running=True,
             runtime_state=lambda: runtime,
         )
@@ -203,7 +202,6 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(fields['candidate_hooks'], 1)
         self.assertEqual(fields['sampled_hooks'], 1)
         self.assertEqual(fields['calibration_matches'], 0)
-        self.assertTrue(fields['luna_connected'])
         self.assertTrue(fields['luna_host_alive'])
 
     def test_driver_has_no_retired_gui_runtime_ownership_dependencies(self):
@@ -219,7 +217,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             self.assertNotIn(expression, source)
         for api in (
             'self.product.select_primary_target(', 'self.product.activate_selected_target()',
-            'self.product.hook_connection_state()', 'self.product.capture_view()',
+            'self.product.capture_view()',
             'self.product.set_capture_field_source(', 'self.product.commit_capture()',
             'self.product.runtime_state()', 'self.w.permit()',
         ):

@@ -673,9 +673,6 @@ class AutoAdvApplication:
             active_body_source=c.active_body_source,
             presentation_reason=c.presentation_reason, pause_reason=c.pause_reason)
 
-    def stage_runtime_profile(self, profile: Profile) -> None:
-        self.controller.stage_profile(profile)
-
     def runtime_capture_matches(self, profile: Profile) -> bool:
         active = self.runtime_state().profile
         if active is None or active.id != profile.id:
@@ -725,31 +722,25 @@ class AutoAdvApplication:
             else:
                 self._request_capture_transition()
 
-    def hold_runtime(self, reason: str) -> None:
-        self.controller.pause(reason)
-
     def begin_runtime(self, profile: Profile, target: Target, generation: str, connection: int,
                       available_sources: tuple[str, ...] = ()) -> int:
         return self.controller.begin(profile, target, generation, connection, available_sources)
 
-    def observe_runtime_hook(self, **kwargs) -> Token | None:
-        return self.controller.observe(**kwargs)
-
-    def observe_runtime_group(self, events: Sequence[HookEvent]) -> Token | None:
-        return self.controller.observe_group(events)
-
-    def observe_runtime_ocr(self, **kwargs) -> Token | None:
-        return self.controller.observe_ocr(**kwargs)
-
-    def take_external_transition(self, token: Token) -> int:
-        return self.controller.take_external_transition(token)
-
     def confirm_external_advance(self, token: Token) -> bool:
-        """Admit one externally known boundary without crediting AutoAdv input."""
+        """Prepare one test/validation-forced advance without product credit.
+
+        This is the deliberate test-only exception to the normal runtime API.
+        The harness calls it immediately before its forced game input.  It
+        closes the native-audio observation interval first, then records the
+        known dialogue boundary, but never emits AutoAdv input evidence.
+        """
+        if self._native_audio is not None:
+            self._native_audio.boundary()
         confirmed = self.controller.confirm_external_advance(token)
-        if confirmed:
-            self._notify_runtime()
-        return confirmed
+        if not confirmed:
+            return False
+        self._notify_runtime()
+        return True
 
     def _attempt_advance(self) -> bool:
         sent = self.controller.try_advance()
@@ -770,9 +761,6 @@ class AutoAdvApplication:
         self._notify_runtime()
         return expired
 
-    def expire_next_line(self, token: Token) -> bool:
-        return self._expire_next_line(token)
-
     def runtime_presentation_event(self, token: Token, event: str, *, success: bool = True) -> bool:
         completed = self.controller.presentation_event(token, event, success=success)
         if completed:
@@ -782,9 +770,6 @@ class AutoAdvApplication:
         else:
             self._notify_runtime()
         return completed
-
-    def try_advance(self) -> bool:
-        return self._attempt_advance()
 
     def set_auto_advance(self, enabled: bool) -> None:
         self.controller.permit(enabled)
@@ -983,10 +968,6 @@ class AutoAdvApplication:
             self.report_capture_problem('ゲームからの台詞取得が切断されました。')
         return transition
 
-    @property
-    def capture_transition_pending(self) -> bool:
-        return self._capture_transition_pending
-
     def defer_capture_transition(self) -> bool:
         """Hold input and remember that capture/runtime services need rebuilding.
 
@@ -1182,10 +1163,6 @@ class AutoAdvApplication:
     def native_audio_holds_deadline(self, token: Token) -> bool:
         return bool(self._native_audio and self._native_audio.holds_deadline(token))
 
-    def native_audio_boundary(self) -> None:
-        if self._native_audio is not None:
-            self._native_audio.boundary()
-
     def native_audio_capture_status(self) -> dict:
         return self._native_audio.capture_status() if self._native_audio is not None else {}
 
@@ -1207,10 +1184,6 @@ class AutoAdvApplication:
         if presentation is None:
             return False
         return self.runtime_presentation_event(token, presentation)
-
-    @property
-    def ocr_running(self) -> bool:
-        return self._ocr_worker is not None
 
     def start_ocr(self, profile: Profile, *, on_text: Callable[[int, int, int, str], None],
                   on_error: Callable[[str], None]) -> bool:
@@ -1286,9 +1259,6 @@ class AutoAdvApplication:
     def cancel_voice_preview(self) -> None:
         if self._preview_jobs is not None:
             self._preview_jobs.cancel()
-
-    def hook_connection_state(self) -> HookConnectionState:
-        return self._hook_connection
 
     def runtime_target_state(self) -> RuntimeTargetState:
         return self._runtime_target
@@ -1429,10 +1399,6 @@ class AutoAdvApplication:
         return bool(state.connected and event.process_id == state.attached_pid and
                     event.host_generation == state.host_generation and
                     event.connection_generation == state.connection_generation)
-
-    @property
-    def host_epoch(self) -> int:
-        return self._host_epoch
 
     @property
     def hook_host_running(self) -> bool:
@@ -1710,10 +1676,6 @@ class AutoAdvApplication:
             self.capture.observe(source, text, sequence=sequence)
             self._reconcile_hook_sync()
 
-    def observe_capture_group(self, events: Sequence[HookEvent]) -> None:
-        if self.capture:
-            self.capture.observe_group(events)
-
     def queue_capture_output(self, event: HookEvent) -> int | None:
         if not self.capture or event.kind != 'output' or event.source is None:
             return None
@@ -1757,12 +1719,6 @@ class AutoAdvApplication:
 
     def capture_identity_is_ambiguous(self, identity: str) -> bool:
         return bool(self.capture and self.capture.identity_is_ambiguous(identity))
-
-    def capture_has_identity(self, identity: str) -> bool:
-        return bool(self.capture and self.capture.has_identity(identity))
-
-    def capture_has_output(self, identity: str) -> bool:
-        return bool(self.capture and self.capture.has_output(identity))
 
     def capture_saved_sources_ready(self, profile: Profile) -> bool:
         if not self.capture:
@@ -2014,18 +1970,10 @@ class AutoAdvApplication:
                 issue = CaptureProblemView(*resolved)
         return PlayView(authorized, dialogue, issue)
 
-    def adopt_inserted_hook(self, code: str) -> None:
-        if self.capture:
-            self.capture.adopt_inserted_hook(code)
-
     def _update_capture_recipe(self, mutate: Callable[[Profile], None]) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
         self.capture.mutate_recipe(mutate)
-
-    def rebase_profile_settings(self, profile: Profile) -> None:
-        if self.capture and profile.id == self.profile_id:
-            self.capture.rebase_settings(profile)
 
     def commit_capture(self) -> Profile:
         current = self.current_profile()

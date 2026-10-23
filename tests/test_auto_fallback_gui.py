@@ -44,7 +44,7 @@ class TwoModeGuiTests(unittest.TestCase):
                 c.target_ready = lambda *_: True
                 app.begin_runtime(profile, Target(100, 200), 'ocr', 1)
                 app.set_auto_advance(True)
-                token = app.observe_runtime_ocr(sequence=1, text='「こんにちは！」', pid=100, session=app.runtime_state().session)
+                token = app.handle_runtime_ocr_output(sequence=1, text='「こんにちは！」', pid=100, session=app.runtime_state().session)
                 requests = []
                 window.application.start_voice = lambda token, reading, voice: requests.append((token, reading, voice))
                 if native is not None:
