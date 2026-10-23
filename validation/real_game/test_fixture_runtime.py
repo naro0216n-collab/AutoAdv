@@ -120,10 +120,11 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
         self.assertIn('_adv_oracle_voice_line = _adv_oracle_current', source)
         self.assertIn('"voice_ended", line=_adv_oracle_voice_line', source)
         begin = source.index('if event == "begin":')
-        done = source.index('elif event == "interact_done"', begin)
+        done = source.index('elif event == "end"', begin)
         begin_block = source[begin:done]
         self.assertNotIn('_adv_oracle_voice = None', begin_block)
         self.assertNotIn('_adv_oracle_last_active = None', begin_block)
+        self.assertNotIn('line_dismissed', source)
 
 
     def test_gateway_dispatches_fixture_build_and_local_runner_has_no_release_registration_copy(self):

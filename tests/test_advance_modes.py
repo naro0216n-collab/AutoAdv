@@ -155,21 +155,17 @@ class ControllerModes(unittest.TestCase):
 
     def test_audio_without_tts_confirmed_native_end(self):
         self.begin(AdvanceMode.AUDIO, False)
-        self.assertFalse(self.done('native_started'))
         self.assertFalse(self.ctrl.try_advance())
         self.assertTrue(self.done('native_finished'))
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertTrue(self.ctrl.try_advance())
 
-    def test_audio_fallback_requires_explicit_optin_and_no_positive_playing(self):
+    def test_audio_fallback_requires_explicit_optin(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('fallback_elapsed'))
         self.assertFalse(self.ctrl.try_advance())
         self.begin(AdvanceMode.AUDIO, False, True)
-        self.assertFalse(self.done('native_started'))
-        self.assertFalse(self.done('fallback_elapsed'))
-        self.assertFalse(self.ctrl.try_advance())
-        self.assertTrue(self.done('native_quiet'))
+        self.assertTrue(self.done('fallback_elapsed'))
         self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
         self.assertTrue(self.ctrl.try_advance())
 
@@ -200,29 +196,51 @@ class ControllerModes(unittest.TestCase):
 
     def test_late_native_finish_does_not_clear_an_unrelated_safety_hold(self):
         self.begin(AdvanceMode.AUDIO, False, False)
-        self.ctrl.pause('target_unavailable')
+        self.ctrl.pause('host_changed')
 
         self.assertTrue(self.done('native_finished'))
-        self.assertEqual(self.ctrl.pause_reason, 'target_unavailable')
+        self.assertEqual(self.ctrl.pause_reason, 'host_changed')
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertFalse(self.ctrl.try_advance())
 
-    def test_stale_correlated_voice_never_counts_as_native_completion(self):
-        for opt_in in (False, True):
-            with self.subTest(opt_in=opt_in):
-                self.begin(AdvanceMode.AUDIO, False, opt_in)
-                self.assertFalse(self.done('native_started'))
-                self.assertFalse(self.done('fallback_elapsed'))
-                self.assertTrue(self.ctrl.native_playing)
-                self.assertFalse(self.ctrl.try_advance())
-                self.assertEqual(self.done('native_evidence_stale'), opt_in)
-                self.assertEqual(self.ctrl.presentation_reason,
-                                 'uncertain_text_fallback' if opt_in else None)
-                if not opt_in:
-                    self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
-                    self.assertFalse(self.ctrl.try_advance())
-                else:
-                    self.assertTrue(self.ctrl.try_advance())
+    def test_native_failure_policy_is_owned_by_controller(self):
+        self.begin(AdvanceMode.AUDIO, False, False)
+        self.assertFalse(self.done('native_failed'))
+        self.assertEqual(self.ctrl.pause_reason, 'native_audio_failure')
+        self.assertFalse(self.ctrl.try_advance())
+
+        self.begin(AdvanceMode.AUDIO, False, True)
+        self.assertFalse(self.done('native_failed'))
+        self.assertIsNone(self.ctrl.pause_reason)
+        self.assertTrue(self.done('fallback_elapsed'))
+        self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
+
+    def test_existing_runtime_hold_is_not_replaced_by_later_unrelated_failure(self):
+        self.begin(AdvanceMode.AUDIO, False, False)
+        self.ctrl.pause('target_unavailable')
+        self.assertFalse(self.done('native_failed'))
+        self.assertEqual(self.ctrl.pause_reason, 'target_unavailable')
+
+    def test_runtime_hold_survives_auto_off_on_cycle(self):
+        self.begin(AdvanceMode.AUDIO, False, False)
+        self.ctrl.permit(False)
+        self.assertFalse(self.ctrl.authorized)
+        self.assertFalse(self.done('fallback_elapsed'))
+        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+
+        self.ctrl.permit(True)
+        self.assertTrue(self.ctrl.authorized)
+        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+        self.assertFalse(self.ctrl.try_advance())
+
+    def test_tts_failure_remains_actionable_while_auto_is_off(self):
+        self.begin(AdvanceMode.TEXT, True)
+        self.ctrl.permit(False)
+        self.assertFalse(self.done('tts_finished', success=False))
+        self.assertEqual(self.ctrl.pause_reason, 'tts_playback_failed')
+        self.ctrl.permit(True)
+        self.assertEqual(self.ctrl.pause_reason, 'tts_playback_failed')
+        self.assertFalse(self.ctrl.try_advance())
 
     def test_failure_pause_and_stale_token_cannot_send(self):
         self.begin(AdvanceMode.AUDIO, True)

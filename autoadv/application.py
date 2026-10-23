@@ -23,7 +23,8 @@ from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
 from .model import (HookSelection, OCRSettings, Profile, ReplacementRule, StructureRule,
-                    Utterance, EXTRACTION_PRESETS, extract_fields, interpret)
+                    Utterance, EXTRACTION_PRESETS, assemble_dialogue_fields,
+                    extract_fields, interpret)
 from .native_audio import NativeAudio
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
@@ -87,7 +88,6 @@ class RuntimeState:
     authorized: bool
     sent: bool
     completed: bool
-    native_playing: bool
     ocr_blank: bool
     source_generation: str
     connection_generation: int
@@ -322,6 +322,9 @@ class CaptureWorkspace:
         return any(record.ambiguous for (candidate_identity, _), record in self._observed.items()
                    if candidate_identity == identity)
 
+    def has_source(self, identity: str) -> bool:
+        return self._record_for_identity(identity) is not None
+
     def has_output(self, identity: str) -> bool:
         record = self._record_for_identity(identity)
         return bool(record and record.history)
@@ -419,29 +422,19 @@ class CaptureWorkspace:
         body_identity = self._draft.body_source
         if not body_identity:
             return None
-        body_events = [event for event in events if event.source and
-                       event.source.identity == body_identity and event.text.strip()]
-        body_values = [(event, self._extract(event.text, body_identity)) for event in body_events]
-        body_values = [(event, fields) for event, fields in body_values if fields.body]
-        if len(body_values) != 1:
+        candidates = [event for event in events if event.source and event.text.strip()]
+        extracted = [
+            (event.source.identity, self._extract(event.text, event.source.identity))
+            for event in candidates
+        ]
+        assembly = assemble_dialogue_fields(
+            extracted, body_source=body_identity, speaker_source=self._draft.speaker_source)
+        if assembly.problem or assembly.body_index is None:
             return None
-        body_event, body_fields = body_values[0]
-        speaker_source: str | None = None
-        speaker = ''
-        if self._draft.speaker_source:
-            speaker_source = self._draft.speaker_source
-            speaker_events = [event for event in events if event.source and
-                              event.source.identity == speaker_source and event.text.strip()]
-            values = [(event, self._extract(event.text, speaker_source)) for event in speaker_events]
-            values = [(event, fields) for event, fields in values if fields.speaker]
-            if len(values) > 1:
-                return None
-            if values:
-                speaker = values[0][1].speaker
-        else:
-            speaker = body_fields.speaker
-            speaker_source = body_identity if speaker else None
-        return CaptureAssemblyView(body_event.sequence, speaker, body_fields.body,
+        body_event = candidates[assembly.body_index]
+        speaker_source = (self._draft.speaker_source or
+                          (body_identity if assembly.speaker else None))
+        return CaptureAssemblyView(body_event.sequence, assembly.speaker, assembly.body,
                                    body_identity, speaker_source)
 
     def _assembly(self) -> tuple[CaptureAssemblyView, ...]:
@@ -660,7 +653,7 @@ class AutoAdvApplication:
         return RuntimeState(
             session=c.session, token=c.token, target=c.target, profile=c.profile,
             utterance=c.utterance, authorized=c.authorized, sent=c.sent,
-            completed=c.completed, native_playing=c.native_playing, ocr_blank=c.ocr_blank,
+            completed=c.completed, ocr_blank=c.ocr_blank,
             source_generation=c.source_generation, connection_generation=c.connection_generation,
             presentation_reason=c.presentation_reason, pause_reason=c.pause_reason)
 
@@ -777,8 +770,6 @@ class AutoAdvApplication:
         if self._native_audio_holds_deadline(token):
             self._schedule(200, lambda t=token: self._fallback_due(t))
             return
-        if state.native_playing:
-            self._runtime_presentation_event(token, 'native_evidence_stale')
         self._runtime_presentation_event(token, 'fallback_elapsed')
         if self.runtime_state().pause_reason == 'native_inconclusive_hold':
             self._emit_native_capture_summary(token)
@@ -964,25 +955,29 @@ class AutoAdvApplication:
         return transition
 
     def _defer_capture_transition(self) -> bool:
-        """Hold input and remember that capture/runtime services need rebuilding.
+        """Remember a runtime rebuild without changing the current Utterance.
 
-        Returns True when no current unsent utterance needs to be preserved and
-        the transition can be scheduled immediately by the event-loop adapter.
+        The accepted Utterance is immutable. A setting that requires rebuilding
+        capture/audio services becomes active only after that line has been sent
+        or an independently observed next dialogue boundary arrives.
         """
-        self.controller.pause('settings_changed')
         self._capture_transition_pending = True
         state = self.runtime_state()
         return state.utterance is None or state.sent
 
-    def _capture_transition_boundary(self, event: HookEvent, profile: Profile | None) -> bool:
-        if not self._capture_transition_pending or not profile or profile.source != 'hook':
+    def _capture_transition_boundary(self, event: HookEvent) -> bool:
+        if not self._capture_transition_pending:
+            return False
+        state = self.runtime_state()
+        active = state.profile
+        if not active or active.source != 'hook':
             return False
         if event.kind != 'output' or event.source is None or not event.text.strip():
             return False
-        selected = next((h for h in profile.hooks if h.identity == profile.body_source and h.matches(event.source)), None)
+        selected = next((h for h in active.hooks
+                         if h.identity == active.body_source and h.matches(event.source)), None)
         if selected is None:
             return False
-        state = self.runtime_state()
         return state.utterance is None or state.sent or event.text != state.utterance.raw
 
     def _consume_capture_transition(self) -> bool:
@@ -1052,8 +1047,7 @@ class AutoAdvApplication:
 
     def _handle_hook_output(self, event: HookEvent) -> tuple[Token | None, int | None]:
         """Admit one Host output and share one bounded multi-source group."""
-        profile = self.current_profile()
-        if self._capture_transition_boundary(event, profile):
+        if self._capture_transition_boundary(event):
             self._apply_capture_transition()
         state = self.runtime_state()
         runtime_profile, target = state.profile, state.target
@@ -1197,10 +1191,8 @@ class AutoAdvApplication:
             if not current():
                 return
             now = self.runtime_state()
-            utterance = now.utterance
-            if (utterance is not None and utterance.advance_mode.value == 'audio' and
-                    not utterance.use_tts and not utterance.uncertain_text_fallback):
-                self.controller.pause('native_audio_unavailable_hold')
+            if now.token is not None:
+                self._runtime_presentation_event(now.token, 'native_unavailable')
             self._emit_runtime_event('native_ready', None, session=session, ready=False,
                                      reason=reason, audio_pid=pid)
             self._notify_runtime()
@@ -1259,16 +1251,16 @@ class AutoAdvApplication:
         if utterance.advance_mode.value != 'audio' or utterance.use_tts:
             return False
         if event == 'error':
+            completed = self._runtime_presentation_event(token, 'native_failed')
             if not utterance.uncertain_text_fallback:
-                self.controller.pause('native_audio_failure')
                 self._emit_native_capture_summary(token)
-            self._notify_runtime()
-            return False
-        mapping = {'started': 'native_started', 'quiet': 'native_quiet', 'completed': 'native_finished'}
-        presentation = mapping.get(event)
-        if presentation is None:
-            return False
-        return self._runtime_presentation_event(token, presentation)
+            return completed
+        if event == 'completed':
+            return self._runtime_presentation_event(token, 'native_finished')
+        # started/quiet remain NativeAudio observations for telemetry and
+        # validation. They do not form a second presentation state machine.
+        self._notify_runtime()
+        return False
 
     def _start_ocr(self, profile: Profile) -> bool:
         """Own OCR acquisition, Controller admission and presentation dispatch."""
@@ -1844,20 +1836,26 @@ class AutoAdvApplication:
         return bool(self.capture and self.capture.identity_is_ambiguous(identity))
 
     def _capture_saved_sources_ready(self, profile: Profile) -> bool:
-        if not self.capture:
+        if not self.capture or not profile.body_source:
             return False
-        identity = profile.body_source
-        return bool(identity and not self.capture.identity_is_ambiguous(identity) and
-                    self.capture.has_output(identity))
+        if (self.capture.identity_is_ambiguous(profile.body_source) or
+                not self.capture.has_output(profile.body_source)):
+            return False
+        return (not profile.speaker_source or
+                (not self.capture.identity_is_ambiguous(profile.speaker_source) and
+                 self.capture.has_source(profile.speaker_source)))
 
     def _handle_capture_host_event(self, event: HookEvent) -> CaptureHostEventOutcome:
         """Own capture-source state transitions for one current Host event."""
         if event.source is None or not self._capture_event_matches_connection(event):
             return CaptureHostEventOutcome()
         identity = event.source.identity
+        runtime_profile = self.runtime_state().profile
+        active_sources = ({value for value in
+                           (runtime_profile.body_source, runtime_profile.speaker_source) if value}
+                          if runtime_profile else set())
         if event.kind == 'removed':
-            runtime_profile = self.runtime_state().profile
-            active_removed = bool(runtime_profile and runtime_profile.body_source == identity)
+            active_removed = identity in active_sources
             self._remove_capture_source(identity, event.source.address)
             resumed = False
             if active_removed:
@@ -1875,12 +1873,13 @@ class AutoAdvApplication:
         was_ambiguous = self._capture_identity_is_ambiguous(identity)
         self._observe_capture(event.source, event.text if event.kind == 'output' else '', sequence=event.sequence)
         new_ambiguity = self._capture_identity_is_ambiguous(identity) and not was_ambiguous
-        if new_ambiguity and self.runtime_state().profile is not None:
+        active_ambiguity = new_ambiguity and identity in active_sources
+        if active_ambiguity:
             self.stop_monitoring('host_changed')
-            self._report_capture_problem('同じ識別子の取得元が複数あり、台詞を一意に選べません。')
+            self._report_capture_problem('使用中の取得元を一意に識別できません。取得の復旧を確認してください。')
         resumed = self._reconcile_monitoring(self.current_profile()) is not None
         return CaptureHostEventOutcome(
-            changed=True, new_ambiguity=new_ambiguity, monitor_started=resumed)
+            changed=True, new_ambiguity=active_ambiguity, monitor_started=resumed)
 
     def _apply_hook_event(self, event: HookEvent) -> HookEventOutcome:
         """Apply one Host event and return its semantic outcome internally."""

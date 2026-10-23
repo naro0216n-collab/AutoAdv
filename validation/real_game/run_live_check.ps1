@@ -57,11 +57,10 @@ if ($GameExecutable -and $StartLine -eq 0) {
         default  { 1 }
     }
 }
-# Text-mode targeted input without a following Hook needs existing game-side
-# dismissal evidence to distinguish unhandled input from missed text capture.
-# This is diagnostics only, not a new game-state acceptance criterion.
-if ($GameExecutable -and ($Phase -in @('native', 'mixed', 'stress') -or
-        ($Automated -and $Phase -eq 'reading')) -and -not $Oracle) {
+# The independent game observer is required only where native voice playback
+# must be compared with AutoAdv input timing. Text advancement is established
+# by the product input followed by the next selected Hook, not game dismissal.
+if ($GameExecutable -and $Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {
     $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
 if ($Phase -in @('native', 'mixed', 'stress') -and -not $Oracle) {

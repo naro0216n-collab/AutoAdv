@@ -84,9 +84,9 @@ fixtureソースとprebuilt runtimeが一致しない、または対応assetが�
 
 `reading` は文字時間による通常送り、`native` はTTS非使用の原音16件を同一セッションで連続実行する。説明文と手動選択肢はnative専用fixture条件では表示せず、各原音台詞はAutoAdvの通常Controller入力だけで次へ進む。`tts` は実IrodoriサーバーとVoiceを必要とする。`mixed` は原音・TTS・文字待機の混在、`stress` は背景発話、非言語発声、誤帰属、不確実状態を扱う。
 
-`native` / `mixed` / `stress` ではゲーム側oracleによる音声エンジン上の原音再生終了の独立観測を必要とする。物理出力の可聴性は要求しない。`hook` / `reading` / `tts` では原音終了oracleを合否条件にしない。ゲーム側oracleは `autoadv_oracle.rpy` にあり、台詞表示、再生状態、dismissalを記録するだけでゲーム進行を変更しない。
+`native` / `mixed` / `stress` ではゲーム側oracleによる音声エンジン上の原音再生終了の独立観測を必要とする。物理出力の可聴性は要求しない。`hook` / `reading` / `tts` では原音終了oracleを合否条件にしない。ゲーム側oracleは `autoadv_oracle.rpy` にあり、台詞表示と原音再生状態だけを記録し、ゲーム進行を変更しない。
 
-原音が不確実なケースでテスト側が入力して後続場面へ進めることは禁止する。安全停止した時点で未到達の後続台詞を検査済み扱いしない。`line_results` の `no_autoadv_input` や外部dismissalを製品成功へ読み替えない。
+原音が不確実なケースでテスト側が入力して後続場面へ進めることは禁止する。安全停止した時点で未到達の後続台詞を検査済み扱いしない。`line_results` の `no_autoadv_input` や外部進行を製品成功へ読み替えない。
 
 ## ASRモデルの準備
 

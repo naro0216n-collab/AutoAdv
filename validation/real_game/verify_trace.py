@@ -85,7 +85,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       recovery_inputs: dict,
                       max_voice_hold_ms: int | None = None,
                       measurement_only: bool = False) -> dict:
-    """Compare actual game playback/dismissal with actual AutoAdv inputs.
+    """Compare independent game playback with actual AutoAdv inputs.
 
     The Ren'Py callback/polling stream is independent of the product. It is
     observational, not an alternate source of audio or input for AutoAdv.
@@ -99,10 +99,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
               'diagnostics': diagnostics, 'latencies': {}, 'lines': [], 'early_inputs': 0,
               'unverified_voice_ends': 0, 'indeterminate_voice_end': 0,
               'overholds': 0, 'misattributions': 0,
-              'manual_or_unadvanced': 0, 'manual_or_external_advances': 0,
-              'validation_recovery_advances': 0,
-              'undismissed_lines': 0, 'confirmed_voice_safe_inputs': 0,
-              'unaligned_lines': 0}
+              'confirmed_voice_safe_inputs': 0, 'unaligned_lines': 0}
     if not oracle_records:
         diagnostics.append('independent game playback evidence unavailable; voice safety unverified')
         return result
@@ -129,9 +126,9 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 errors.append('invalid independent game line sequence')
                 return result
             lines[number] = {'start': record, 'voice_onsets': [], 'voice_ends': [],
-                             'interruptions': [], 'dismissed': None}
+                             'interruptions': []}
             ordered.append(number)
-        elif event in ('voice_started', 'voice_ended', 'voice_interrupted', 'line_dismissed'):
+        elif event in ('voice_started', 'voice_ended', 'voice_interrupted'):
             if number not in lines:
                 errors.append(f'game event without a line: {number}')
                 return result
@@ -147,10 +144,6 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 line['voice_ends'].append(record)
             elif event == 'voice_interrupted':
                 line['interruptions'].append(record)
-            else:
-                if line['dismissed'] is not None:
-                    errors.append(f'duplicate game line dismissal: {number}')
-                line['dismissed'] = record
     # Align *each* game dialogue using only independently observed source text
     # and monotonic timing. A lost/changed HOOK or one faulty parsing rule must
     # not discard observations of every other utterance in the session.
@@ -166,8 +159,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             result['unaligned_lines'] += 1
             result['lines'].append({
                 'scenario': None, 'game_line': None, 'sent': key in sent,
-                'voice_observed': None, 'dismissed_after_input': None,
-                'outcome': 'game_playback_unaligned',
+                'voice_observed': None, 'outcome': 'game_playback_unaligned',
             })
             diagnostics.append(f'no unique playback observation for HOOK line {key}; voice safety unverified')
             continue
@@ -184,7 +176,6 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         actual_input = sent.get(key)
         strict_native = (utterances[key].get('advance_mode') == 'audio' and
                          not utterances[key].get('use_tts'))
-        dismissal = line['dismissed']
         voice_onsets = line['voice_onsets']
         voice_ends = line['voice_ends']
         interruptions = line['interruptions']
@@ -211,44 +202,22 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                   'completion_reason': reasons.get(key), 'sent': key in sent,
                   'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
                   'validation_recovery_input': key in recovery_inputs,
-                  'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= actual_input)
-                                            if actual_input is not None else None),
                   'outcome': 'unadvanced'}
-        # Dismissal is not product input success—the following selected Hook is
-        # the continuation contract—but it is an independent game observation.
-        # Keep absence visible as an oracle diagnostic instead of suppressing a
-        # disagreement merely because product continuation was observed.
-        if actual_input is not None and (dismissal is None or dismissal['at_ns'] < actual_input):
-            diagnostics.append(
-                f'confirmed advance input not followed by observed game dialogue dismissal: {key}')
         if attempt is not None and key not in sent:
             diagnostics.append(f'input attempt has no confirmed advance input: {key}')
-        # The product's targeted input and following LunaHook already verify the
-        # advance. Game dismissal and the fixture's chosen sound-file name are
-        # not AutoAdv acceptance criteria. Retain playback state solely to
-        # compare a native-voice advance with independently observed voice end.
+        # The product's targeted input and following LunaHook verify the
+        # advance. The fixture observer is retained solely to compare native
+        # input timing with independently observed voice playback.
         if want_voice is False and not voice_onsets and reasons.get(key) == 'native':
             result['misattributions'] += 1
             detail['outcome'] = 'background_voice_misattributed'
             diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
         elif actual_input is None:
-            result['manual_or_unadvanced'] += 1
-            if dismissal is not None:
-                # A validation recovery input is deliberately outside the
-                # product Controller. It can expose later real-audio cases but
-                # can never upgrade the failed line to an AutoAdv success.
-                if key in recovery_inputs:
-                    result['validation_recovery_advances'] += 1
-                    detail['outcome'] = 'validation_recovery_advance'
-                else:
-                    # The game moved without AutoAdv input. That can be an
-                    # intended manual choice or another external input, but
-                    # never an AutoAdv success.
-                    result['manual_or_external_advances'] += 1
-                    detail['outcome'] = 'game_dismissed_without_autoadv_input'
-            else:
-                result['undismissed_lines'] += 1
-                detail['outcome'] = 'still_presented_without_autoadv_input'
+            # Advancement without AutoAdv input is already represented by the
+            # product trace (including explicit validation recovery). The game
+            # observer does not reconstruct a second progression contract.
+            detail['outcome'] = ('validation_recovery_input'
+                                 if key in recovery_inputs else 'no_autoadv_input')
         elif strict_native:
             # Each sampled end is an interval (last audible sample, first
             # inactive sample], not an exact source-audio termination timestamp.
@@ -265,8 +234,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 if (estimated := native_end_estimates.get(key)) is not None:
                     result['latencies'].setdefault('game_voice_end_to_native_estimate_ms', []).append(
                         _signed_elapsed_ms(end['at_ns'], estimated))
-            active_at_dismiss = bool(dismissal and dismissal.get('voice_active'))
-            if active_at_dismiss or (end and actual_input < end['last_active_at_ns']):
+            if end and actual_input < end['last_active_at_ns']:
                 result['early_inputs'] += 1
                 detail['outcome'] = 'early_input'
                 issue = f'input while the game voice was still playing: {key}'
@@ -803,11 +771,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         for name, values in game_evidence['latencies'].items():
             durations.setdefault(name, []).extend(values)
         game_evidence = {k: v for k, v in game_evidence.items() if k != 'latencies'}
-        if phase == 'stress' and game_evidence['manual_or_external_advances']:
-            # Manual progression through unresolved lines may help inspect
-            # subsequent cases, but it is not a successful unattended
-            # auto-advance run. Report observations without upgrading them.
-            diagnostics.append('stress coverage contains game progression without AutoAdv input')
     else:
         game_evidence = None
     performance = {name: stats for name, samples in durations.items()
@@ -855,8 +818,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         }
         if game_evidence is not None and offset < len(game_evidence['lines']):
             line_result['game_outcome'] = game_evidence['lines'][offset]['outcome']
-            line_result['game_dismissed_after_input'] = (
-                game_evidence['lines'][offset].get('dismissed_after_input'))
             if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
                 line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
         line_results.append(line_result)

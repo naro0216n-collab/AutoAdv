@@ -89,6 +89,23 @@ def test_one_source_can_supply_both_speaker_and_body_without_exclusive_role():
     assert view.assembly[0].body == 'あれカレー屋を荒らしてくれた女だ...... ボク達と同じ学校だったんだ'
 
 
+def test_explicit_same_source_supplies_both_fields_in_runtime_too():
+    app, _ = app_with_game()
+    combined = source('COMBINED', 1)
+    profile = app.current_profile()
+    profile.hooks = [HookSelection('COMBINED', 1, 2)]
+    profile.body_source = combined.identity
+    profile.speaker_source = combined.identity
+    app.select_profile(app.game_id, app.profile_id)
+    connect_hook(app, app.current_profile())
+
+    token = runtime_hook(app, combined, '大和「おはよう」', 2, received_ns=20)
+
+    assert token is not None
+    assert app.runtime_state().utterance.speaker == '大和'
+    assert app.runtime_state().utterance.text == 'おはよう'
+
+
 def test_different_sources_can_supply_only_the_correct_field_from_each_mixed_output():
     app, _ = app_with_game()
     speaker = source('S', 1)
@@ -318,27 +335,27 @@ def test_capture_runtime_problem_is_semantic_and_recovery_action_is_explicit():
 def test_play_view_hides_normal_internal_state_and_surfaces_only_actionable_hold():
     app, _ = app_with_game()
     app.controller.authorized = True
-    app.controller.pause_reason = None
+    app.controller.hold_reason = None
     view = app.play_view()
     assert view.advance_authorized
     assert view.issue is None
-    app.controller.pause_reason = 'native_inconclusive_hold'
+    app.controller.hold_reason = 'native_inconclusive_hold'
     view = app.play_view()
     assert view.issue is not None
     assert '原音の終了' in view.issue.message
     assert view.issue.action == 'open_audio_policy'
-    app.controller.pause_reason = 'ocr_failure'
+    app.controller.hold_reason = 'ocr_failure'
     view = app.play_view()
     assert view.issue is not None
     assert view.issue.action == 'open_capture'
-    app.controller.pause_reason = 'presenting'
+    app.controller.hold_reason = 'presenting'
     assert app.play_view().issue is None
 
 
 def test_play_view_keeps_tts_failure_actionable_even_when_auto_is_off():
     app, _ = app_with_game()
     app.controller.authorized = False
-    app.controller.pause_reason = 'tts_playback_failed'
+    app.controller.hold_reason = 'tts_playback_failed'
     view = app.play_view()
     assert view.issue is not None
     assert view.issue.action == 'open_voice'
@@ -804,6 +821,33 @@ def test_profile_selection_invalidates_pending_capture_group_epoch():
     assert app.capture_view().assembly == ()
     assert not hasattr(app, 'flush_hook_outputs')
 
+def test_runtime_rebuild_setting_does_not_pause_or_rewrite_active_utterance():
+    app, _ = app_with_game()
+    text = source('T', 1)
+    profile = app.current_profile()
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_source = profile.hooks[0].identity
+    app.select_profile(app.game_id, app.profile_id)
+    scheduled = []
+    app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+    connect_hook(app, app.current_profile())
+    app.set_auto_advance(True)
+
+    token = runtime_hook(app, text, 'first', 2, received_ns=100)
+    assert token is not None
+    assert app.runtime_state().utterance.advance_mode == AdvanceMode.TEXT
+    text_timer = next(callback for delay, callback in scheduled if delay > 0)
+
+    app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    state = app.runtime_state()
+    assert state.token == token
+    assert state.utterance.advance_mode == AdvanceMode.TEXT
+    assert state.pause_reason is None
+
+    text_timer()
+    assert app.runtime_state().sent
+
+
 def test_capture_transition_rebuilds_only_at_next_distinct_hook_line():
     app, _ = app_with_game()
     text = source('T', 1)
@@ -1237,6 +1281,47 @@ def test_selected_body_source_removal_does_not_fall_back_to_an_unselected_provid
     app.handle_hook_event(HookEvent('output', 'host', 1, 5, 40, 101, primary, 'A2'))
     assert app.runtime_state().profile is not None
     assert app.runtime_state().profile.body_source == primary.identity
+
+def test_unselected_candidate_ambiguity_does_not_interrupt_active_monitoring():
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    primary = source('A', 1, address=1)
+    profile.hooks = [HookSelection('A', 1, 2)]
+    profile.body_source = primary.identity
+    app.select_profile(app.game_id, app.profile_id)
+    connect_hook(app, app.current_profile())
+    runtime_hook(app, primary, 'active', 2, received_ns=20)
+    session = app.runtime_state().session
+
+    unused_a = source('B', 3, address=10)
+    unused_b = source('B', 3, address=11)
+    app.handle_hook_event(HookEvent('created', 'host', 1, 3, 30, 101, unused_a))
+    app.handle_hook_event(HookEvent('created', 'host', 1, 4, 40, 101, unused_b))
+
+    assert app.capture.identity_is_ambiguous(unused_a.identity)
+    assert app.runtime_state().session == session
+    assert app.runtime_state().utterance.raw == 'active'
+
+
+def test_active_speaker_source_removal_invalidates_runtime_like_body_source():
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    body = source('B', 1, address=1)
+    speaker = source('S', 5, address=2)
+    profile.hooks = [HookSelection('B', 1, 2), HookSelection('S', 5, 6)]
+    profile.body_source = body.identity
+    profile.speaker_source = speaker.identity
+    app.select_profile(app.game_id, app.profile_id)
+    connect_hook(app, app.current_profile())
+    app.handle_hook_event(HookEvent('output', 'host', 1, 2, 20, 101, body, '本文'))
+    app.handle_hook_event(HookEvent('output', 'host', 1, 3, 25, 101, speaker, '話者'))
+    assert app.runtime_state().profile is not None
+
+    app.handle_hook_event(HookEvent('removed', 'host', 1, 4, 30, 101, speaker))
+
+    assert app.runtime_state().profile is None
+    assert app.capture_view().problem is not None
+
 
 def test_public_profile_setting_api_cannot_bypass_capture_workspace_transaction():
     import pytest

@@ -47,6 +47,4 @@ def synthetic_game_observations(records, *, phase='mixed', start_line=None):
             end_at = ((sent['at_ns'] - 100) if sent else (u['at_ns'] + 1000))
             add('voice_ended', end_at, line=i+1, file=case.get('foreground_file', 'unknown'),
                 last_active_at_ns=end_at-2)
-        if sent:
-            add('line_dismissed', sent['at_ns']+1, line=i+1, voice_active=False)
     return sorted(events, key=lambda r: r['at_ns'])

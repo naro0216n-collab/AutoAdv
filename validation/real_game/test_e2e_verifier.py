@@ -211,8 +211,12 @@ class RealGameVerifierContract(unittest.TestCase):
         }]
         records = resequence(records)
         oracle = synthetic_game_observations(records, phase='native', start_line=1)
-        first = next(r for r in oracle if r['event'] == 'line_dismissed' and r['line'] == 1)
-        first['voice_active'] = True
+        first_end = next(r for r in oracle if r['event'] == 'voice_ended' and r['line'] == 1)
+        first_input = next(r['at_ns'] for r in records
+                           if r['event'] == 'advance_input' and r.get('line') == 1)
+        first_end['last_active_at_ns'] = first_input + 1_000_000
+        first_end['at_ns'] = first_input + 5_000_000
+        oracle.sort(key=lambda item: item['at_ns'])
         result = _validate(records, phase='native', start_line=1, oracle_records=oracle,
                            measurement_only=True)
         self.assertTrue(result['ok'], result['errors'])

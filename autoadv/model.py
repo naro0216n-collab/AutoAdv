@@ -69,6 +69,53 @@ class ExtractedFields:
 
 
 @dataclass(frozen=True)
+class DialogueAssembly:
+    """One deterministic field selection from a synchronized source group."""
+    body_index: int | None = None
+    speaker_index: int | None = None
+    body: str = ''
+    speaker: str = ''
+    problem: str = ''
+
+
+def assemble_dialogue_fields(
+        samples: Sequence[tuple[str, ExtractedFields]], *,
+        body_source: str, speaker_source: str = '') -> DialogueAssembly:
+    """Select final dialogue fields once for Preview and runtime admission.
+
+    Missing optional speaker data is valid. Multiple candidates for a selected
+    field are ambiguous and must never be guessed or merged.
+    """
+    body_indexes = [
+        index for index, (identity, fields) in enumerate(samples)
+        if identity == body_source and fields.body
+    ]
+    if not body_indexes:
+        return DialogueAssembly(problem='missing_body')
+    if len(body_indexes) != 1:
+        return DialogueAssembly(problem='ambiguous_body')
+    body_index = body_indexes[0]
+    body_fields = samples[body_index][1]
+
+    if speaker_source:
+        speaker_indexes = [
+            index for index, (identity, fields) in enumerate(samples)
+            if identity == speaker_source and fields.speaker
+        ]
+        if len(speaker_indexes) > 1:
+            return DialogueAssembly(problem='ambiguous_speaker')
+        speaker_index = speaker_indexes[0] if speaker_indexes else None
+        speaker = samples[speaker_index][1].speaker if speaker_index is not None else ''
+    else:
+        speaker_index = body_index if body_fields.speaker else None
+        speaker = body_fields.speaker
+
+    return DialogueAssembly(
+        body_index=body_index, speaker_index=speaker_index,
+        body=body_fields.body, speaker=speaker)
+
+
+@dataclass(frozen=True)
 class ReplacementRule:
     pattern: str
     replacement: str

@@ -167,7 +167,7 @@ class DialogueContractTests(unittest.TestCase):
         self.assertFalse(c.authorized)
         c.permit(True)
         self.assertTrue(c.authorized)
-        self.assertEqual(c.pause_reason, 'not_monitoring')
+        self.assertIsNone(c.pause_reason)
         c.begin(profile(), Target(101, 202), 'host-a', 1)
         self.assertTrue(c.authorized)
         self.assertFalse(c.try_advance())
@@ -176,7 +176,7 @@ class DialogueContractTests(unittest.TestCase):
         self.assertEqual(c.pause_reason, 'session_changed')
         c.permit(False)
         self.assertFalse(c.authorized)
-        self.assertEqual(c.pause_reason, 'advance_not_authorized')
+        self.assertEqual(c.pause_reason, 'session_changed')
 
     def test_duplicate_selected_hook_is_rejected(self):
         p = profile()

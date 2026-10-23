@@ -338,10 +338,8 @@ class PacketVadBoundaryTests(unittest.TestCase):
 
         def notify(observed, event, detail):
             events.append((observed, event))
-            if event in ('started', 'completed'):
-                accepted = ctrl.presentation_event(
-                    observed, 'native_finished' if event == 'completed' else 'native_started')
-                if accepted:
+            if event == 'completed':
+                if ctrl.presentation_event(observed, 'native_finished'):
                     ctrl.try_advance()
 
         audio = NativeAudio(11, Path('unused.dll'), Path('unused.onnx'), Path('unused.tokens'),
@@ -463,9 +461,7 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             sequence=1, source=source, text='えっ嘘でしょ。', pid=11)
         self.assertIsNotNone(token)
         def notice(t, event, detail):
-            if event == 'started':
-                controller.presentation_event(t, 'native_started')
-            elif event == 'completed':
+            if event == 'completed':
                 controller.presentation_event(t, 'native_finished')
         native = NativeAudio(11, Path('unused'), Path('unused'), Path('unused'),
             notice, recognizer=SlowUnrelatedASR(), activity=ActiveVoice(),

@@ -86,12 +86,12 @@ init -1 python:
             _adv_oracle_write("line_started", line=_adv_oracle_current,
                 body_hash=_adv_hashlib.sha256(normalized.encode("utf-8")).hexdigest())
             _adv_oracle_sample()
-        elif event == "interact_done" and _adv_oracle_current is not None:
-            # Sample BEFORE a subsequent statement can replace the voice channel.
+        elif event == "end" and _adv_oracle_current is not None:
+            # End only closes attribution of *new* playback to this dialogue.
+            # The already-owned voice lifecycle remains observable until the
+            # audio engine reports end/replacement; no dialogue-dismissal event
+            # is recorded or used as an independent advancement contract.
             _adv_oracle_sample()
-            playing = _adv_oracle_playing()
-            _adv_oracle_write("line_dismissed", line=_adv_oracle_current,
-                voice_active=bool(playing), voice_file=playing)
             _adv_oracle_current = None
 
     if _adv_oracle_path:

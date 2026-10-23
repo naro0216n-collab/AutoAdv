@@ -26,27 +26,13 @@ class IndependentGameOracleContract(unittest.TestCase):
                             for item in observation['diagnostics']))
         self.assertTrue(self.verify()['ok'])  # checker-only positive fixture
 
-    def test_game_dismissal_is_diagnostic_not_input_success(self):
-        real = self.verify()
-        first = real['line_results'][0]
-        self.assertTrue(first['game_dismissed_after_input'])
-        missing = [dict(x) for x in self.game if not (x['event'] == 'line_dismissed' and x['line'] == 1)]
-        observed = self.verify(game=missing)
-        self.assertTrue(observed['collection_valid'], observed['errors'])
-        self.assertFalse(observed['line_results'][0]['game_dismissed_after_input'])
-        self.assertTrue(any('not followed by observed game dialogue dismissal' in x
-                            for x in observed['diagnostics']))
-        self.assertEqual(observed['confirmed_advance_to_next_hook'], 2)
-
-    def test_attempt_without_confirmed_send_cannot_count_as_game_dismissal(self):
+    def test_attempt_without_confirmed_send_cannot_count_as_safe_input(self):
         product = [dict(x) for x in self.product if not (
             x['event'] == 'advance_input' and x.get('line') == 1)]
         for i, record in enumerate(product):
             if i:
                 record['seq'] = i
         observed = self.verify(product=product)
-        first = observed['line_results'][0]
-        self.assertIsNone(first['game_dismissed_after_input'])
         self.assertTrue(any('input attempt has no confirmed advance input' in d
                             for d in observed['diagnostics']))
         # The second line still has a confirmed send; the first is unverified.
@@ -67,14 +53,13 @@ class IndependentGameOracleContract(unittest.TestCase):
         self.assertGreaterEqual(result['performance']['game_voice_end_to_input_ms']['p50'], 0)
         self.assertEqual(result['game_evidence']['early_inputs'], 0)
 
-    def test_game_dismissal_without_autoadv_input_is_not_an_advance_success(self):
+    def test_line_without_autoadv_input_is_not_an_advance_success(self):
         result = self.verify()
         # Last acquired dialogue has no controller input in this checker-only
-        # record; it is a pending game line, not a manual advance or a pass.
-        self.assertEqual(result['game_evidence']['undismissed_lines'], 1)
-        self.assertEqual(result['game_evidence']['manual_or_external_advances'], 0)
+        # record. The playback observer does not invent a second advancement
+        # fact from game-internal dialogue state.
         self.assertEqual(result['game_evidence']['lines'][-1]['outcome'],
-                         'still_presented_without_autoadv_input')
+                         'no_autoadv_input')
 
     def test_input_before_voice_end_fails_despite_production_asr_completion(self):
         game = [dict(x) for x in self.game]

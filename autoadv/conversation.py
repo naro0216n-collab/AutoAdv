@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
-from .model import AdvanceMode, Profile, Utterance, extract_source_fields, interpret
+from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
+                    extract_source_fields, interpret)
 
 
 @dataclass(frozen=True)
@@ -44,10 +45,8 @@ class Controller:
         self.presentation_reason: str | None = None
         self.text_elapsed = False
         self.tts_finished = False
-        self.native_playing = False
-        self.fallback_elapsed = False
         self.sent = False
-        self.pause_reason: str | None = None
+        self.hold_reason: str | None = None
         self.line_no = 0
         self.awaiting_next = False
         self.ocr_blank = False
@@ -64,7 +63,7 @@ class Controller:
         self.profile, self.target = deepcopy(profile), target
         self.pending_profile = None
         self.source_generation, self.connection_generation = host_generation, connection_generation
-        self.pause_reason = None if self.authorized else 'advance_not_authorized'
+        self.hold_reason = None
         return self.session
 
     def close(self, reason: str = 'stopped') -> None:
@@ -84,8 +83,8 @@ class Controller:
         self.external_transition_ns = 0
         self.confirmed_external_boundary = False
         self.presentation_reason = None
-        self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
-        self.pause_reason = reason if self.authorized else 'advance_not_authorized'
+        self.text_elapsed = self.tts_finished = False
+        self.hold_reason = reason
 
     def stage_profile(self, profile: Profile) -> None:
         """Apply non-capture edits at the next utterance boundary."""
@@ -127,7 +126,7 @@ class Controller:
             self.highest_sequence = max(self.highest_sequence, sequence)
             return None
         self.highest_sequence = sequence
-        speaker = fields.speaker if not self.profile.speaker_source else ''
+        speaker = (fields.speaker if self.profile.speaker_source in ('', identity) else '')
         return self._accept_line(sequence=sequence, raw=text, body=fields.body, speaker=speaker,
                                  origin=identity, verified_boundary=False, received_ns=received_ns)
 
@@ -159,40 +158,27 @@ class Controller:
             self.highest_sequence = ordered[-1].sequence
             return None
 
-        extracted: dict[int, object] = {
-            id(event): extract_source_fields(event.text, self.profile, event.source.identity)
+        extracted = [
+            (event.source.identity,
+             extract_source_fields(event.text, self.profile, event.source.identity))
             for event in matching
-        }
-        chosen = self.profile.body_source
-        primary = [event for event in matching
-                   if event.source.identity == chosen and extracted[id(event)].body]
-        if not primary:
+        ]
+        assembly = assemble_dialogue_fields(
+            extracted, body_source=self.profile.body_source,
+            speaker_source=self.profile.speaker_source)
+        if assembly.problem:
             self.highest_sequence = ordered[-1].sequence
-            return None
-        if len(primary) != 1:
-            self.highest_sequence = ordered[-1].sequence
-            self.pause('ambiguous_multihook_lines')
-            return None
-        body_event = primary[0]
-        body_fields = extracted[id(body_event)]
-
-        speaker = ''
-        if self.profile.speaker_source:
-            candidates = [event for event in matching
-                          if event.source.identity == self.profile.speaker_source and
-                          extracted[id(event)].speaker]
-            if len(candidates) > 1:
-                self.highest_sequence = ordered[-1].sequence
+            if assembly.problem == 'ambiguous_body':
+                self.pause('ambiguous_multihook_lines')
+            elif assembly.problem == 'ambiguous_speaker':
                 self.pause('ambiguous_multihook_speakers')
-                return None
-            if candidates:
-                speaker = extracted[id(candidates[0])].speaker
-        else:
-            speaker = body_fields.speaker
+            return None
+        assert assembly.body_index is not None
+        body_event = matching[assembly.body_index]
 
         result = self._accept_line(
-            sequence=body_event.sequence, raw=body_event.text, body=body_fields.body,
-            speaker=speaker, origin=chosen, verified_boundary=False,
+            sequence=body_event.sequence, raw=body_event.text, body=assembly.body,
+            speaker=assembly.speaker, origin=self.profile.body_source, verified_boundary=False,
             received_ns=body_event.received_ns)
         self.highest_sequence = max(self.highest_sequence, ordered[-1].sequence)
         return result
@@ -247,13 +233,10 @@ class Controller:
             sequence=sequence, speaker_override=speaker, body_override=body)
         self.completed = False
         self.presentation_reason = None
-        self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
+        self.text_elapsed = self.tts_finished = False
         self.sent = False
         self.awaiting_next = False
-        if self.authorized:
-            self.pause_reason = None
-        else:
-            self.pause_reason = 'advance_not_authorized'
+        self.hold_reason = None
         return Token(self.session, self.line_no)
 
     def confirm_external_advance(self, token: Token) -> bool:
@@ -269,8 +252,7 @@ class Controller:
             return False
         self.confirmed_external_boundary = True
         self.completed = False
-        self.native_playing = False
-        self.pause_reason = None
+        self.hold_reason = None
         self.awaiting_next = True
         return True
 
@@ -315,29 +297,6 @@ class Controller:
             if self.tts_finished:
                 return self._presentation_done('tts_and_text')
             return False
-        if event == 'native_started':
-            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
-                return False
-            self.native_playing = True
-            return False
-        if event == 'native_quiet':
-            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
-                return False
-            self.native_playing = False
-            if self.fallback_elapsed and u.uncertain_text_fallback:
-                return self._presentation_done('uncertain_text_fallback')
-            return False
-        if event == 'native_evidence_stale':
-            # Expired positive evidence is not a VAD-observed end, and cannot
-            # justify a native completion. It only releases an uncertain hold.
-            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
-                return False
-            self.native_playing = False
-            if self.fallback_elapsed:
-                if u.uncertain_text_fallback:
-                    return self._presentation_done('uncertain_text_fallback')
-                self.pause('native_inconclusive_hold')
-            return False
         if event == 'native_finished':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
@@ -350,14 +309,19 @@ class Controller:
         if event == 'fallback_elapsed':
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
-            self.fallback_elapsed = True
-            if not self.native_playing:
-                if u.uncertain_text_fallback:
-                    return self._presentation_done('uncertain_text_fallback')
-                # No automatic input: give the user a useful stopped state
-                # instead of an indefinitely ambiguous "presenting" state.
-                if self.authorized:
-                    self.pause('native_inconclusive_hold')
+            if u.uncertain_text_fallback:
+                return self._presentation_done('uncertain_text_fallback')
+            # NativeAudio owns whether positive continuation evidence still
+            # justifies extending this deadline. Reaching this event means it
+            # no longer does; Controller owns only the resulting product hold.
+            self.pause('native_inconclusive_hold')
+            return False
+        if event in ('native_unavailable', 'native_failed'):
+            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+                return False
+            if not u.uncertain_text_fallback:
+                self.pause('native_audio_unavailable_hold' if event == 'native_unavailable'
+                           else 'native_audio_failure')
             return False
         raise ValueError(f'unknown presentation event: {event}')
 
@@ -372,31 +336,25 @@ class Controller:
             return None
         return Token(self.session, self.utterance.line)
 
-    def permit(self, allowed: bool) -> None:
-        """Change only the user's automatic-advance authorization.
+    @property
+    def pause_reason(self) -> str | None:
+        """Runtime hold reason, independent of the user's AUTO ON/OFF choice."""
+        return self.hold_reason
 
-        Runtime uncertainty is represented by ``pause_reason`` and must not
-        silently turn the user's mode switch off.
-        """
-        if allowed:
-            self.authorized = True
-            # Re-enabling is an explicit user operation and may retry a
-            # previously held line. With no active monitor it is simply an ON
-            # preference waiting for a session; no input can be emitted.
-            self.pause_reason = None if self.profile is not None else 'not_monitoring'
-        else:
-            self.authorized = False
-            self.pause_reason = 'advance_not_authorized'
+    def permit(self, allowed: bool) -> None:
+        """Change only the user's automatic-advance authorization."""
+        self.authorized = bool(allowed)
 
     def pause(self, reason: str) -> None:
-        """Hold automatic input without changing the user's mode choice."""
-        self.pause_reason = reason
+        """Record the first runtime fact that blocks this Utterance."""
+        if self.hold_reason is None:
+            self.hold_reason = reason
 
     def _resolve_pause(self, reason: str) -> bool:
         """Resolve one runtime hold only when its own recovery fact arrives."""
-        if self.pause_reason != reason:
+        if self.hold_reason != reason:
             return False
-        self.pause_reason = None if self.authorized else 'advance_not_authorized'
+        self.hold_reason = None
         return True
 
     def expire_next_line(self, token: Token) -> bool:
@@ -412,10 +370,19 @@ class Controller:
         return True
 
     def try_advance(self) -> bool:
-        if not (self.authorized and self.completed and self.utterance and self.target and not self.sent
-                and self.pause_reason is None):
+        if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):
             return False
-        if not self.target_ready(self.target):
+        ready = None
+        if self.hold_reason == 'target_unavailable':
+            ready = self.target_ready(self.target)
+            if not ready:
+                return False
+            self._resolve_pause('target_unavailable')
+        elif self.hold_reason is not None:
+            return False
+        if ready is None:
+            ready = self.target_ready(self.target)
+        if not ready:
             self.pause('target_unavailable')
             return False
         # Reserve the line before external I/O. An exception never causes an unsafe retry.
