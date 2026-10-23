@@ -158,8 +158,7 @@ label standard_voice:
     voice "audio/voice/normal_022.wav"
     a "猫はにゃーにゃーと鳴く。"
 
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") != "native":
-        "ここからはBGMが流れる状態で、ゲーム内の原音を再生します。"
+    "ここからはBGMが流れる状態で、ゲーム内の原音を再生します。"
 label bgm_voice:
     play music "audio/music/original_synth_loop.wav" fadein 0.2
     voice "audio/voice/normal_026.wav"
@@ -168,8 +167,7 @@ label bgm_voice:
     a "彼女はスタッフをまとめていけると思いますか？"
     stop music fadeout 0.2
 
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") != "native":
-        "同一の表示台詞を、異なる音声収録条件で連続して再生します。"
+    "同一の表示台詞を、異なる音声収録条件で連続して再生します。"
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
     voice "audio/voice/whisper_001.wav"
@@ -179,15 +177,11 @@ label bgm_voice:
     voice "audio/voice/whisper_022.wav"
     s "猫はにゃーにゃーと鳴く。"
 
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") != "native":
-        "同じ取得本文が連続する区間です。二重送りと台詞取りこぼしに注意してください。"
+    "同じ取得本文が連続する区間です。二重送りと台詞取りこぼしに注意してください。"
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
-
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "accuracy":
-        jump continuation
 
     # Normal AutoAdv progression ends here in the test-run scene. The original
     # player-facing menu remains unchanged when no test scene is selected.
@@ -215,8 +209,6 @@ label continuation:
     a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
     voice "audio/voice/normal_035.wav"
     a "彼女は息子に家で行儀よくするように言った。"
-    if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "accuracy":
-        return
     "検証用シナリオを終了します。"
     return
 

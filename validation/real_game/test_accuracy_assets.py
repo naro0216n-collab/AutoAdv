@@ -140,6 +140,12 @@ class AdvancementAccuracyScenarioTests(unittest.TestCase):
         self.assertEqual([line['id'] for line in unvoiced],
                          ['unvoiced-clean', 'unvoiced-background-speech'])
         self.assertTrue(all(line['speaker_family'] == 'unvoiced' for line in unvoiced))
+        self.assertFalse(next(line for line in scenario if line['id'] == 'unvoiced-clean')
+                         ['process_audio_expected'])
+        self.assertTrue(next(line for line in scenario
+                             if line['id'] == 'unvoiced-background-speech')
+                        ['process_audio_expected'])
+        self.assertEqual(sum(bool(line['process_audio_expected']) for line in scenario), 22)
         families = {line['speaker_family'] for line in scenario}
         self.assertTrue({'amitaro', 'amitaro_whisper', 'jvs001', 'jvs002', 'jvs003'} <= families)
         environments = {line['environment'] for line in scenario}
@@ -160,6 +166,14 @@ class AdvancementAccuracyScenarioTests(unittest.TestCase):
         self.assertIn(
             'play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop',
             script)
+        clean = script.index('p "これは音声のない台詞です。"')
+        background = script.index(
+            'play sound "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop', clean)
+        interfered = script.index('p "この台詞にも原音はありません。"', background)
+        stop = script.index('stop sound fadeout 0.15', interfered)
+        self.assertLess(clean, background)
+        self.assertLess(background, interfered)
+        self.assertLess(interfered, stop)
 
     def test_every_external_foreground_file_is_backed_by_the_runtime_manifest(self):
         manifest_paths = {asset['runtime_path'].removeprefix('game/')

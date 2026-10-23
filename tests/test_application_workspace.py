@@ -504,6 +504,61 @@ def test_application_starts_and_stops_native_audio_from_monitor_lifecycle(monkey
     assert not app.native_audio_available
 
 
+def test_application_resolves_managed_native_runtime_when_profile_overrides_are_empty(monkeypatch):
+    import autoadv.application as application_module
+    import autoadv.native_runtime as native_runtime_module
+    from types import SimpleNamespace
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+        def start(self):
+            self.target()
+
+    class FakeNative:
+        instances = []
+        def __init__(self, pid, helper, model, tokens, notify, **callbacks):
+            self.pid, self.helper, self.model, self.tokens = pid, helper, model, tokens
+            self.closed = False
+            FakeNative.instances.append(self)
+        def start(self):
+            pass
+        def close(self):
+            self.closed = True
+        def cancel(self):
+            pass
+        def boundary(self):
+            pass
+        def capture_status(self):
+            return {'packets': 0}
+
+    managed = SimpleNamespace(
+        helper_dll='C:/AutoAdv/runtime/native/loopback/helper.dll',
+        asr_model='C:/AutoAdv/runtime/native/asr/model.int8.onnx',
+        asr_tokens='C:/AutoAdv/runtime/native/asr/tokens.txt',
+    )
+    monkeypatch.setattr(application_module.threading, 'Thread', ImmediateThread)
+    monkeypatch.setattr(application_module, 'NativeAudio', FakeNative)
+    monkeypatch.setattr(native_runtime_module, 'managed_paths', lambda: managed)
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    profile.source = 'ocr'
+    app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    assert app.current_profile().native_helper == ''
+    assert app.current_profile().asr_model == ''
+    assert app.current_profile().asr_tokens == ''
+    app.select_primary_target(101, 500)
+    monkeypatch.setattr(app, '_start_ocr', lambda _profile: True)
+    app.configure_runtime_loop(schedule=lambda _delay, callback: callback())
+
+    assert app.activate_selected_target() == 'monitoring'
+    native = FakeNative.instances[-1]
+    assert str(native.helper) == managed.helper_dll
+    assert str(native.model) == managed.asr_model
+    assert str(native.tokens) == managed.asr_tokens
+    assert app.native_audio_available
+
+
 def test_application_owns_ocr_worker_admission_and_failure_policy(monkeypatch):
     import autoadv.application as application_module
 
@@ -1079,7 +1134,10 @@ def test_application_owns_uncertain_audio_fallback_policy():
     token = runtime_hook(app, text, '本文', 2)
     assert token is not None
     app.set_auto_advance(True)
-    assert len(scheduled) == 1
+    # Managed NativeAudio startup and the uncertainty deadline are independent
+    # scheduled transitions. This test owns only the deadline policy.
+    deadline = next(callback for delay, callback in scheduled
+                    if delay == app.runtime_state().utterance.text_wait_ms)
     class RetainedNative:
         pid = 101
         def __init__(self):
@@ -1094,7 +1152,7 @@ def test_application_owns_uncertain_audio_fallback_policy():
 
     retained = RetainedNative()
     app._native_audio = retained
-    scheduled.pop(0)[1]()
+    deadline()
     assert app.runtime_state().pause_reason == 'native_inconclusive_hold'
     assert not app.runtime_state().sent
     assert retained.released == [token]

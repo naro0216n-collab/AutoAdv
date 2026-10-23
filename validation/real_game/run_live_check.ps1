@@ -210,7 +210,10 @@ public static class AudioRenderProbe {
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool]$UncertainFallback
             }
-            if ($Phase -in @('accuracy', 'mixed', 'stress')) {
+            # Accuracy deliberately exercises the same managed native runtime
+            # resolution as ordinary product use. Only the legacy/manual mixed
+            # and stress entrypoints accept explicit native-path overrides.
+            if ($Phase -in @('mixed', 'stress')) {
                 foreach ($dependency in @(
                     @{ name = 'Process Loopback helper'; path = $ProcessLoopbackHelper },
                     @{ name = 'ASR model'; path = $AsrModel },

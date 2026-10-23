@@ -50,6 +50,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
         if chosen == 'native':
             add('native_pcm', **key, frames=960, audio_pid=50)
             add('native_event', **key, status='started', method='asr')
+            add('asr_inference', **key, audio_ms=500, decode_ms=50, queue_ms=5)
             observed_time = len(records) * 1_000_000_000
             add('native_voice_end_estimate', **key, estimated_at_ns=observed_time - 300_000_000,
                 onset_estimated_at_ns=observed_time - 1_000_000_000, evidence='asr_vad')
@@ -153,6 +154,9 @@ class RealGameVerifierContract(unittest.TestCase):
             if record.get('line') in (1, 2):
                 if record['event'] == 'utterance':
                     record = dict(record, uncertain_text_fallback=True)
+                if record.get('line') == 1 and record['event'] in (
+                        'native_pcm', 'native_event', 'asr_inference', 'native_voice_end_estimate'):
+                    continue
                 if record['event'] == 'native_voice_end_estimate':
                     continue
                 if record['event'] == 'native_event' and record.get('status') == 'completed':
@@ -173,18 +177,64 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['line_results'][0]['completion_reason'], 'uncertain_text_fallback')
         self.assertEqual(result['line_results'][1]['completion_reason'], 'uncertain_text_fallback')
         self.assertEqual(result['quality']['safe_automatic_advances'], 2)
+        self.assertEqual(result['quality']['process_audio_observation_rate'], 1.0)
+        self.assertEqual(result['quality']['asr_observation_rate'], 1.0)
+        self.assertFalse(result['line_results'][0]['process_audio_expected'])
+        self.assertTrue(result['line_results'][1]['process_audio_expected'])
+        self.assertEqual(result['line_results'][1]['asr_inference_count'], 1)
 
     def test_unvoiced_accuracy_case_native_completion_is_counted_as_misattribution(self):
-        records = resequence(contract_records(20, 22, lines=ACCURACY_SCENARIO))
+        # Target the background-speech/no-foreground case specifically. A
+        # native completion here means the mixed ASR path attributed background
+        # speech to the displayed line.
+        records = resequence(contract_records(21, 23, lines=ACCURACY_SCENARIO))
+        oracle = synthetic_game_observations(records, phase='accuracy', start_line=22)
+
+        result = _validate(records, phase='accuracy', start_line=22,
+                           oracle_records=oracle, measurement_only=True)
+
+        self.assertEqual(result['game_evidence']['misattributions'], 1)
+        self.assertEqual(result['line_results'][0]['scenario'], 'unvoiced-background-speech')
+        self.assertEqual(result['line_results'][0]['game_outcome'], 'no_foreground_voice_misattributed')
+        self.assertEqual(result['quality']['safe_automatic_advances'], 0)
+        self.assertGreater(result['quality']['misattribution_rate'], 0)
+
+    def test_safe_fallback_does_not_hide_missing_process_audio_or_asr_observation(self):
+        records = contract_records(20, 23, lines=ACCURACY_SCENARIO)
+        rewritten = []
+        for record in records:
+            if record.get('line') in (1, 2):
+                if record['event'] == 'utterance':
+                    record = dict(record, uncertain_text_fallback=True)
+                if record['event'] in ('native_voice_end_estimate',):
+                    continue
+                if record['event'] == 'native_event' and record.get('status') == 'completed':
+                    continue
+                if record['event'] == 'presentation_complete':
+                    record = dict(record, reason='uncertain_text_fallback')
+            # Simulate the exact regression the live suite must expose: the
+            # background-speech line still progresses by fallback, but neither
+            # Process Loopback PCM nor ASR inference reaches that Utterance.
+            if record.get('line') == 2 and record['event'] in ('native_pcm', 'asr_inference'):
+                continue
+            if record.get('line') == 1 and record['event'] in (
+                    'native_pcm', 'native_event', 'asr_inference'):
+                continue
+            rewritten.append(record)
+        records = resequence(rewritten)
         oracle = synthetic_game_observations(records, phase='accuracy', start_line=21)
 
         result = _validate(records, phase='accuracy', start_line=21,
                            oracle_records=oracle, measurement_only=True)
 
-        self.assertEqual(result['game_evidence']['misattributions'], 1)
-        self.assertEqual(result['line_results'][0]['game_outcome'], 'background_voice_misattributed')
-        self.assertEqual(result['quality']['safe_automatic_advances'], 0)
-        self.assertGreater(result['quality']['misattribution_rate'], 0)
+        self.assertTrue(result['measurement_valid'], result['errors'])
+        self.assertEqual(result['quality']['safe_automatic_advances'], 2)
+        self.assertEqual(result['quality']['process_audio_observation_rate'], 0.5)
+        self.assertEqual(result['quality']['asr_observation_rate'], 0.5)
+        self.assertTrue(any('expected process audio PCM not observed: unvoiced-background-speech'
+                            in issue for issue in result['quality_issues']))
+        self.assertTrue(any('expected ASR inference not observed: unvoiced-background-speech'
+                            in issue for issue in result['quality_issues']))
 
     def test_nonadvancement_reports_controller_handoff_and_fallback_setting(self):
         records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
@@ -385,7 +435,8 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['confirmed_advance_to_next_hook'], 2)
 
     def test_audio_evidence_fields_report_unobserved_inference_without_fabrication(self):
-        records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
+        records = [r for r in contract_records(0, 3, lines=ACCURACY_SCENARIO)
+                   if not (r['event'] == 'asr_inference' and r.get('line') == 1)]
         for record in records:
             if record['event'] == 'native_event' and record['line'] == 1:
                 record['status'] = 'started'
@@ -580,7 +631,7 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(metrics['utterance_to_presentation_ms']['count'], 3)
         self.assertEqual(metrics['native_estimated_end_to_decision_ms']['count'], 3)
         self.assertEqual(metrics['native_estimated_end_to_input_ms']['count'], 2)
-        self.assertNotIn('asr_decode_ms', metrics)  # Older traces cannot invent inference speed.
+        self.assertEqual(metrics['asr_decode_ms']['count'], 3)
         # Optional real measurements must not convert a valid input sequence into FAIL.
         at = records[-1]['at_ns'] + 100
         records.append({'event': 'asr_inference', 'seq': len(records), 'at_ns': at,
@@ -589,7 +640,7 @@ class RealGameVerifierContract(unittest.TestCase):
         result = validate(records, phase='accuracy')
         self.assertTrue(result['ok'], result['errors'])
         self.assertEqual(result['performance']['asr_rtf']['p95'], 2.0)
-        self.assertEqual(result['performance']['asr_decode_ms']['count'], 1)
+        self.assertEqual(result['performance']['asr_decode_ms']['count'], 4)
 
     def test_voice_timing_cannot_be_fabricated_or_misclassified(self):
         records = contract_records(0, 3, lines=ACCURACY_SCENARIO)

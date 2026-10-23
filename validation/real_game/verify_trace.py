@@ -211,7 +211,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         if want_voice is False and not voice_onsets and actual_input is not None:
             if reasons.get(key) == 'native':
                 result['misattributions'] += 1
-                detail['outcome'] = 'background_voice_misattributed'
+                detail['outcome'] = 'no_foreground_voice_misattributed'
                 diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
             elif reasons.get(key) == 'uncertain_text_fallback':
                 detail['outcome'] = 'no_foreground_voice_fallback'
@@ -638,7 +638,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             product_issue(f'unknown native completion reason: {key}')
 
     for key in native:
-        if (key[0] not in readiness or key not in pcm or
+        if (key[0] not in readiness or key not in pcm or asr_counts.get(key, 0) <= 0 or
                 methods.get(key) != audio_methods.get(key[0])):
             product_issue(f'native completion lacks matching real PCM and ASR evidence: {key}')
 
@@ -794,6 +794,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         scenario_id = scenario_case.get('id') if scenario_case is not None else None
         line_result = {
             'session': key[0], 'line': key[1], 'scenario': scenario_id,
+            'foreground_voice': (scenario_case.get('foreground_voice')
+                                 if scenario_case is not None else None),
+            'process_audio_expected': (scenario_case.get('process_audio_expected')
+                                       if scenario_case is not None else None),
             'speaker_family': (scenario_case.get('speaker_family')
                                if scenario_case is not None else None),
             'audio_environment': (scenario_case.get('environment')
@@ -827,6 +831,20 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
                 line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
         line_results.append(line_result)
+
+    # Accuracy is a product-path measurement, not merely a progression count.
+    # A safe text fallback can keep the game moving after an audio regression,
+    # so preserve independent coverage of the Process Loopback/ASR path rather
+    # than allowing fallback success to masquerade as audio observation.
+    expected_audio_lines = [line for line in line_results
+                            if line.get('process_audio_expected') is True]
+    for line in expected_audio_lines:
+        label = line.get('scenario') or f"{line.get('session')}:{line.get('line')}"
+        if not line.get('pcm_observed'):
+            quality_issues.append(f'expected process audio PCM not observed: {label}')
+        if not line.get('asr_inference_count'):
+            quality_issues.append(f'expected ASR inference not observed: {label}')
+
     collection_valid = not errors
     advancement_observed = bool(links)
     voice_safety_verified = (game_evidence is not None and
@@ -855,8 +873,19 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if line.get('game_outcome') in ('voice_end_confirmed_then_input', 'overheld',
                                               'no_foreground_voice_fallback'):
             safe_automatic_advances += 1
+    def fraction(count: int, total: int) -> float | None:
+        return round(count / total, 4) if total else None
     def rate(count: int) -> float | None:
-        return round(count / requested_cases, 4) if requested_cases else None
+        return fraction(count, requested_cases)
+    foreground_lines = [line for line in line_results if line.get('foreground_voice') is True]
+    foreground_native = sum(line.get('completion_reason') == 'native' for line in foreground_lines)
+    foreground_fallback = sum(
+        line.get('completion_reason') == 'uncertain_text_fallback' for line in foreground_lines)
+    unvoiced_lines = [line for line in line_results if line.get('foreground_voice') is False]
+    unvoiced_fallback = sum(
+        line.get('completion_reason') == 'uncertain_text_fallback' for line in unvoiced_lines)
+    pcm_observed = sum(bool(line.get('pcm_observed')) for line in expected_audio_lines)
+    asr_observed = sum(int(line.get('asr_inference_count') or 0) > 0 for line in expected_audio_lines)
     quality = {
         'requested_cases': requested_cases,
         'observed_cases': len(utterance_order),
@@ -868,6 +897,16 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'automatic_advance_rate': rate(len(links)),
         'safe_automatic_advance_rate': rate(safe_automatic_advances),
         'recovery_rate': rate(len(recovery_inputs)),
+        'process_audio_expected_cases': len(expected_audio_lines),
+        'process_audio_observed_cases': pcm_observed,
+        'asr_observed_cases': asr_observed,
+        'process_audio_observation_rate': fraction(pcm_observed, len(expected_audio_lines)),
+        'asr_observation_rate': fraction(asr_observed, len(expected_audio_lines)),
+        'foreground_voice_cases': len(foreground_lines),
+        'foreground_native_completion_rate': fraction(foreground_native, len(foreground_lines)),
+        'foreground_fallback_rate': fraction(foreground_fallback, len(foreground_lines)),
+        'unvoiced_cases': len(unvoiced_lines),
+        'unvoiced_fallback_rate': fraction(unvoiced_fallback, len(unvoiced_lines)),
         'early_input_rate': rate(game_evidence['early_inputs']) if game_evidence is not None else None,
         'overhold_rate': rate(game_evidence['overholds']) if game_evidence is not None else None,
         'misattribution_rate': rate(game_evidence['misattributions']) if game_evidence is not None else None,

@@ -111,6 +111,41 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(actions[0][0:2], ('trace', 'validation_collection_target'))
         self.assertEqual(actions[1:], ['permit', '.monitoring'])
 
+    def test_accuracy_configures_real_hook_and_managed_native_defaults_without_path_override(self):
+        settings = []
+        target = SimpleNamespace(pid=321, hwnd=654)
+        profile = SimpleNamespace(
+            ocr=SimpleNamespace(executable='', language='jpn', region=None, stable_samples=2),
+            insert_pc_hooks=False, hook_codepage=932, hook_max_buffer=4096,
+            hook_max_history=32,
+        )
+        product = SimpleNamespace(
+            create_game=lambda *_: SimpleNamespace(id='g', default_profile='default'),
+            select_profile=lambda *_: None,
+            select_primary_target=lambda *_: None,
+            set_profile_setting=lambda name, value: settings.append((name, value)),
+            current_profile=lambda: profile,
+            set_capture_environment=lambda **_: None,
+            activate_selected_target=lambda: 'connecting',
+        )
+        driver = SessionDriver(
+            SimpleNamespace(application=product), SimpleNamespace(),
+            {'timeout_seconds': 30, 'phase': 'accuracy', 'fallback': True,
+             'executable': 'validation-game.exe'},
+            SimpleNamespace(emit=lambda *args, **kwargs: None),
+        )
+
+        state = driver._configure_product(target)
+
+        self.assertEqual(state, 'connecting')
+        self.assertIn(('source', 'hook'), settings)
+        self.assertIn(('uncertain_text_fallback', True), settings)
+        self.assertEqual(next(value for name, value in settings if name == 'advance_mode').value,
+                         'audio')
+        self.assertFalse(any(name in {'native_helper', 'asr_model', 'asr_tokens'}
+                             for name, _ in settings),
+                         'accuracy must exercise Application managed-runtime resolution')
+
     def test_native_product_handoff_forces_one_recovery_and_keeps_run_alive(self):
         actions, traces, recoveries, boundaries = [], [], [], []
         clock = [1.0]

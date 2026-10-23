@@ -27,6 +27,9 @@ def _phase(name: str, *, report_present: bool = True, eligible_accuracy: bool = 
             "observed_cases": 23 if name == "accuracy" else 3,
             "automatic_advance_rate": 1.0,
             "safe_automatic_advance_rate": 1.0,
+            "process_audio_observation_rate": 1.0 if name == "accuracy" else None,
+            "asr_observation_rate": 1.0 if name == "accuracy" else None,
+            "foreground_native_completion_rate": 1.0 if name == "accuracy" else None,
             "recovery_rate": 0.0,
             "early_input_rate": 0.0 if name == "accuracy" else None,
             "overhold_rate": 0.0 if name == "accuracy" else None,
@@ -93,6 +96,7 @@ class IssueReportingContract(unittest.TestCase):
                     "audio_environment": "clean",
                     "outcome": "no_autoadv_input",
                     "completion_reason": None,
+                    "pcm_observed": True,
                     "asr_inference_count": 4,
                     # game_outcome and game_end_to_input_ms are intentionally absent.
                 }],
@@ -107,7 +111,7 @@ class IssueReportingContract(unittest.TestCase):
             snapshot = issue_reporting.format_snapshot(root, "a" * 40)
 
             self.assertIn("| clean-local-short | amitaro | clean | no_autoadv_input |", snapshot.body)
-            self.assertIn("| 4 | - | - |", snapshot.body)
+            self.assertIn("| yes | 4 | - | - |", snapshot.body)
             self.assertIn("voice-end not independently observed", snapshot.body)
 
     def test_setup_failure_without_accuracy_report_is_still_uploadable(self):
@@ -175,6 +179,18 @@ class IssueReportingContract(unittest.TestCase):
 
             self.assertEqual([op["role"] for op in plan["operations"]], ["history", "baseline"])
             self.assertEqual(plan["operations"][1]["comment_id"], 2000)
+
+    def test_missing_audio_coverage_cannot_replace_known_good_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "20261023T134156Z-b10d6904"
+            root.mkdir()
+            accuracy = _phase("accuracy", eligible_accuracy=True)
+            accuracy["quality"]["asr_observation_rate"] = 0.9565
+            _write_summary(root, accuracy=accuracy)
+
+            plan = issue_reporting.build_upload_plan(root, "e" * 40, _comments())
+
+            self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
 
     def test_windows_runner_delegates_testable_planning_and_has_no_rotation_loop(self):
         source = RUNNER.read_text(encoding="utf-8")

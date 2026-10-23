@@ -206,7 +206,7 @@ class SessionDriver:
             hook_max_history=profile.hook_max_history,
         )
 
-        if self.options['phase'] in ('accuracy', 'mixed', 'stress'):
+        if self.options['phase'] in ('mixed', 'stress'):
             for field in ('helper', 'model', 'tokens'):
                 path = self.options.get(field, '')
                 if not path or not Path(path).is_file():

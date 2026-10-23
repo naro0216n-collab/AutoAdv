@@ -9,7 +9,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_001.wav",
       "speaker_family": "amitaro",
-      "environment": "clean"
+      "environment": "clean",
+      "process_audio_expected": true
     },
     {
       "id": "clean-jvs001",
@@ -19,7 +20,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs001",
-      "environment": "clean"
+      "environment": "clean",
+      "process_audio_expected": true
     },
     {
       "id": "clean-jvs002",
@@ -29,7 +31,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs002",
-      "environment": "clean"
+      "environment": "clean",
+      "process_audio_expected": true
     },
     {
       "id": "clean-jvs003",
@@ -39,7 +42,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs003",
-      "environment": "clean"
+      "environment": "clean",
+      "process_audio_expected": true
     },
     {
       "id": "heavenly-local",
@@ -49,7 +53,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_017.wav",
       "speaker_family": "amitaro",
-      "environment": "instrumental_bgm_soft"
+      "environment": "instrumental_bgm_soft",
+      "process_audio_expected": true
     },
     {
       "id": "heavenly-jvs001",
@@ -59,7 +64,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs001",
-      "environment": "instrumental_bgm_soft"
+      "environment": "instrumental_bgm_soft",
+      "process_audio_expected": true
     },
     {
       "id": "lofi-local-long",
@@ -69,7 +75,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_026.wav",
       "speaker_family": "amitaro",
-      "environment": "instrumental_bgm_dense"
+      "environment": "instrumental_bgm_dense",
+      "process_audio_expected": true
     },
     {
       "id": "lofi-jvs002",
@@ -79,7 +86,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs002",
-      "environment": "instrumental_bgm_dense"
+      "environment": "instrumental_bgm_dense",
+      "process_audio_expected": true
     },
     {
       "id": "lofi-whisper",
@@ -89,7 +97,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/whisper_001.wav",
       "speaker_family": "amitaro_whisper",
-      "environment": "instrumental_bgm_dense"
+      "environment": "instrumental_bgm_dense",
+      "process_audio_expected": true
     },
     {
       "id": "machine-local",
@@ -99,7 +108,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_028.wav",
       "speaker_family": "amitaro",
-      "environment": "machine_ambient"
+      "environment": "machine_ambient",
+      "process_audio_expected": true
     },
     {
       "id": "machine-jvs003",
@@ -109,7 +119,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs003",
-      "environment": "machine_ambient"
+      "environment": "machine_ambient",
+      "process_audio_expected": true
     },
     {
       "id": "machine-whisper",
@@ -119,7 +130,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/whisper_017.wav",
       "speaker_family": "amitaro_whisper",
-      "environment": "machine_ambient"
+      "environment": "machine_ambient",
+      "process_audio_expected": true
     },
     {
       "id": "crowd-local",
@@ -129,7 +141,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_022.wav",
       "speaker_family": "amitaro",
-      "environment": "background_conversation"
+      "environment": "background_conversation",
+      "process_audio_expected": true
     },
     {
       "id": "crowd-jvs001",
@@ -139,7 +152,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs001",
-      "environment": "background_conversation_outlasts_foreground"
+      "environment": "background_conversation_outlasts_foreground",
+      "process_audio_expected": true
     },
     {
       "id": "japanese-background-local",
@@ -149,7 +163,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_010.wav",
       "speaker_family": "amitaro",
-      "environment": "japanese_background_voice"
+      "environment": "japanese_background_voice",
+      "process_audio_expected": true
     },
     {
       "id": "japanese-background-jvs002",
@@ -159,7 +174,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs002",
-      "environment": "japanese_background_voice"
+      "environment": "japanese_background_voice",
+      "process_audio_expected": true
     },
     {
       "id": "repeat-first-background-voice",
@@ -169,7 +185,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_020.wav",
       "speaker_family": "amitaro",
-      "environment": "japanese_background_voice_same_text_boundary"
+      "environment": "japanese_background_voice_same_text_boundary",
+      "process_audio_expected": true
     },
     {
       "id": "repeat-second-background-voice",
@@ -179,7 +196,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_020.wav",
       "speaker_family": "amitaro",
-      "environment": "japanese_background_voice_same_text_boundary"
+      "environment": "japanese_background_voice_same_text_boundary",
+      "process_audio_expected": true
     },
     {
       "id": "impact-whisper",
@@ -189,7 +207,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/whisper_022.wav",
       "speaker_family": "amitaro_whisper",
-      "environment": "transient_sfx_outlasts_short_voice"
+      "environment": "transient_sfx_outlasts_short_voice",
+      "process_audio_expected": true
     },
     {
       "id": "door-jvs003",
@@ -199,7 +218,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
       "speaker_family": "jvs003",
-      "environment": "door_sfx"
+      "environment": "door_sfx",
+      "process_audio_expected": true
     },
     {
       "id": "unvoiced-clean",
@@ -208,7 +228,8 @@
       "use_tts": false,
       "foreground_voice": false,
       "speaker_family": "unvoiced",
-      "environment": "no_foreground_voice_clean"
+      "environment": "no_foreground_voice_clean",
+      "process_audio_expected": false
     },
     {
       "id": "unvoiced-background-speech",
@@ -217,7 +238,8 @@
       "use_tts": false,
       "foreground_voice": false,
       "speaker_family": "unvoiced",
-      "environment": "no_foreground_voice_with_background_speech"
+      "environment": "no_foreground_voice_with_background_speech",
+      "process_audio_expected": true
     },
     {
       "id": "clean-recovery",
@@ -227,7 +249,8 @@
       "foreground_voice": true,
       "foreground_file": "audio/voice/normal_035.wav",
       "speaker_family": "amitaro",
-      "environment": "clean_after_complex_mix"
+      "environment": "clean_after_complex_mix",
+      "process_audio_expected": true
     }
   ]
 }

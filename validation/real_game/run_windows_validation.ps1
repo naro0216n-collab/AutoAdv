@@ -245,10 +245,10 @@ try {
     try { $runtimeInfo = ($runtimeLines | Select-Object -Last 1) | ConvertFrom-Json }
     catch { throw "Standard AutoAdv runtime result cannot be parsed: $($_.Exception.Message)" }
     $python = [string]$runtimeInfo.python
-    $helper = [string]$runtimeInfo.native.paths.helper_dll
-    $asrModel = [string]$runtimeInfo.native.paths.asr_model
-    $asrTokens = [string]$runtimeInfo.native.paths.asr_tokens
-    foreach ($required in @($python, $helper, $asrModel, $asrTokens)) {
+    $managedHelper = [string]$runtimeInfo.native.paths.helper_dll
+    $managedAsrModel = [string]$runtimeInfo.native.paths.asr_model
+    $managedAsrTokens = [string]$runtimeInfo.native.paths.asr_tokens
+    foreach ($required in @($python, $managedHelper, $managedAsrModel, $managedAsrTokens)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "Standard AutoAdv runtime asset missing: $required"
         }
@@ -294,9 +294,7 @@ try {
                     '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
                     '-TimeoutSeconds','360'
                 )
-                if ($currentPhase -eq 'accuracy') {
-                    $arguments += @('-ProcessLoopbackHelper',$helper,'-AsrModel',$asrModel,'-AsrTokens',$asrTokens,'-UncertainFallback')
-                }
+                if ($currentPhase -eq 'accuracy') { $arguments += '-UncertainFallback' }
                 & powershell.exe @arguments
                 if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
             } catch {
