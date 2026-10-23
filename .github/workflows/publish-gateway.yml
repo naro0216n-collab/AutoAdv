@@ -67,23 +67,6 @@ jobs:
           python scripts/publish_gateway_validate.py --verify-trusted-workflow
           git push origin "${PUBLISH_COMMIT}:refs/heads/${TARGET_BRANCH}"
 
-      - name: Dispatch validation fixture build when fixture inputs changed
-        if: ${{ env.TARGET_BRANCH == 'develop' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet "${TARGET_BEFORE}" "${PUBLISH_COMMIT}" -- \
-              validation/real_game/renpy \
-              validation/real_game/fixture_runtime.py; then
-            exit 0
-          fi
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/validation-fixture.yml/dispatches" \
-            -f ref="${TARGET_BRANCH}"
-
       - name: Dispatch Fast CI for published branch
         env:
           GH_TOKEN: ${{ github.token }}
