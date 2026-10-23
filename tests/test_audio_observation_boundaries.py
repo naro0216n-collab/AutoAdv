@@ -543,7 +543,8 @@ class RealControllerAudioDeadlineTests(unittest.TestCase):
             self.assertFalse(metrics[-1]['terminal_candidate'])
             self.assertAlmostEqual(metrics[-1]['phonetic_coverage'], 4 / 6, places=3)
             self.assertGreaterEqual(metrics[-1]['endpoint_score'], .70)
-            self.assertGreaterEqual(metrics[-1]['evidence_score'], .72)
+            self.assertGreaterEqual(
+                metrics[-1]['evidence_score'], NativeAudio.COMPLETION_EVIDENCE_THRESHOLD)
         finally:
             native.close()
 

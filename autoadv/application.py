@@ -744,6 +744,13 @@ class AutoAdvApplication:
     def take_external_transition(self, token: Token) -> int:
         return self.controller.take_external_transition(token)
 
+    def confirm_external_advance(self, token: Token) -> bool:
+        """Admit one externally known boundary without crediting AutoAdv input."""
+        confirmed = self.controller.confirm_external_advance(token)
+        if confirmed:
+            self._notify_runtime()
+        return confirmed
+
     def _attempt_advance(self) -> bool:
         sent = self.controller.try_advance()
         state = self.runtime_state()

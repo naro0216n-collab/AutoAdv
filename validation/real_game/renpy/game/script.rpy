@@ -14,7 +14,7 @@ init python:
 label start:
     scene black
     # Optional fixture readiness barrier. Only the first unmeasured calibration
-    # output is produced here. No test code advances any measured dialogue.
+    # output is produced here. The fixture itself never advances any measured dialogue.
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_CONTROL_FILE"):
         $ _adv_gate = _autoadv_fixture_os.environ["AUTOADV_VALIDATION_CONTROL_FILE"]
         while not _autoadv_fixture_os.path.isfile(_adv_gate + ".attached"):

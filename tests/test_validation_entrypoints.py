@@ -50,7 +50,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         for stale in ('RenPySdk', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
             self.assertNotIn(stale, source)
 
-    def test_realaudio_is_one_continuous_native_session_without_case_bypass(self):
+    def test_realaudio_is_one_continuous_native_session_with_marked_post_failure_recovery(self):
         orchestrator = (ROOT / 'validation' / 'real_game' / 'run_windows_validation.ps1').read_text(encoding='utf-8')
         live = (ROOT / 'validation' / 'real_game' / 'run_live_check.ps1').read_text(encoding='utf-8')
         fixture = (ROOT / 'validation' / 'real_game' / 'renpy' / 'game' / 'script.rpy').read_text(encoding='utf-8')
@@ -58,6 +58,13 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertNotIn('NativeCase', live)
         self.assertNotIn('AUTOADV_VALIDATION_CASE', fixture)
         self.assertIn("'native' { 16 }", live)
+        self.assertIn("force_continue_on_failure = ($Phase -eq 'native')", live)
+        driver = (ROOT / 'validation' / 'real_game' / 'gui_session.py').read_text(encoding='utf-8')
+        self.assertIn("'validation_recovery_input'", driver)
+        self.assertIn('confirm_external_advance', driver)
+        self.assertIn('collection_complete = if ($measurement)', orchestrator)
+        self.assertIn('automatic_continuation_verified = if ($measurement)', orchestrator)
+        self.assertIn('validation_recovery_inputs = if ($measurement)', orchestrator)
         self.assertIn('jump continuation', fixture)
         self.assertNotIn('autoadv_case_', fixture)
 

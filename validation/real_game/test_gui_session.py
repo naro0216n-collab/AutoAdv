@@ -96,27 +96,74 @@ class LiveGuiSessionContract(unittest.TestCase):
         def permit():
             actions.append('permit')
             runtime.authorized = True
-        window = SimpleNamespace(application=product, permit=permit)
+        window = SimpleNamespace(
+            application=product, permit=permit,
+            validation_trace=SimpleNamespace(emit=lambda name, **fields:
+                                              actions.append(('trace', name, fields))))
         driver = SessionDriver(window, SimpleNamespace(),
-                               {'timeout_seconds': 30, 'phase': 'native'},
+                               {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 16,
+                                'force_continue_on_failure': True},
                                clock=lambda: 0.0)
         driver.state = 'activate'
         driver._release = actions.append
         driver.tick()
         self.assertEqual(driver.state, 'running')
-        self.assertEqual(actions, ['permit', '.monitoring'])
+        self.assertEqual(actions[0][0:2], ('trace', 'validation_collection_target'))
+        self.assertEqual(actions[1:], ['permit', '.monitoring'])
 
-    def test_actual_product_handoff_ends_run_without_fake_game_input(self):
-        actions = []
+    def test_native_product_handoff_forces_one_recovery_and_keeps_run_alive(self):
+        actions, traces, recoveries = [], [], []
+        clock = [1.0]
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
-                                  pause_reason='native_inconclusive_manual_handoff')
+                                  pause_reason='native_inconclusive_hold', sent=False,
+                                  target=SimpleNamespace(hwnd=77),
+                                  profile=SimpleNamespace(input_key=13))
         product = SimpleNamespace(runtime_state=lambda: runtime)
-        window = SimpleNamespace(application=product, close=lambda: actions.append('close'))
+        window = SimpleNamespace(
+            application=product, close=lambda: actions.append('close'),
+            validation_trace=SimpleNamespace(
+                emit=lambda name, **fields: traces.append((name, fields))))
         qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
-        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native',
-                                                'dialogues': 3}, clock=lambda: 1)
+        driver = SessionDriver(
+            window, qt_app,
+            {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
+             'force_continue_on_failure': True},
+            clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
+            recovery_boundary=lambda state: None)
         driver.state = 'running'
         driver.tick()
+        self.assertEqual(recoveries, [])
+        clock[0] = 1.3
+        driver.tick()
+        self.assertEqual(recoveries, [1])
+        self.assertEqual(actions, [])
+        self.assertEqual(traces[-1][0], 'validation_recovery_input')
+        self.assertEqual(traces[-1][1]['reason'], 'native_inconclusive_hold')
+        clock[0] = 1.8
+        driver.tick()
+        self.assertEqual(recoveries, [1])
+
+    def test_final_native_handoff_finishes_collection_without_extra_input(self):
+        actions, recoveries = [], []
+        clock = [1.0]
+        runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=3),
+                                  pause_reason='native_inconclusive_hold', sent=False)
+        product = SimpleNamespace(runtime_state=lambda: runtime)
+        window = SimpleNamespace(
+            application=product, close=lambda: actions.append('close'),
+            validation_trace=SimpleNamespace(emit=lambda *args, **kwargs: None))
+        qt_app = SimpleNamespace(quit=lambda: actions.append('quit'))
+        driver = SessionDriver(
+            window, qt_app,
+            {'timeout_seconds': 30, 'phase': 'native', 'dialogues': 3,
+             'force_continue_on_failure': True},
+            clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
+            recovery_boundary=lambda state: None)
+        driver.state = 'running'
+        driver.tick()
+        clock[0] = 1.7
+        driver.tick()
+        self.assertEqual(recoveries, [])
         self.assertEqual(actions, ['close', 'quit'])
 
     def test_failure_diagnostics_read_application_state_not_retired_gui_state(self):
@@ -141,7 +188,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         qt_app = SimpleNamespace(exit=lambda code: closed.append(code))
         driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'native'})
         driver.state = 'calibration'
-        driver.fail('finite live-run timeout; no manual game input substituted')
+        driver.fail('finite live-run timeout before requested validation collection completed')
         self.assertEqual(closed, ['window', 3])
         name, fields = recorded[0]
         self.assertEqual(name, 'validation_driver_failure')

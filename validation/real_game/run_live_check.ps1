@@ -190,13 +190,13 @@ public static class AudioRenderProbe {
         }
         Write-Host "Validation game launched (scene=$scene)"
     } else {
-        Write-Host 'Using an already running game; no game input is driven by the checker.'
+        Write-Host 'Using an already running game; normal advancement remains product-owned.'
     }
 
     $env:AUTOADV_VALIDATION_TRACE = $Trace
     Push-Location $repo
     try {
-        # All advancement remains in the production GUI Controller.
+        # Normal advancement remains in the production GUI Controller. Native RealAudio may use a separately traced recovery input only after a product hold/failure, solely to expose later collection cases.
         if ($Automated) {
             $gameExe = $resolvedGameExe
             $config = @{
@@ -206,6 +206,7 @@ public static class AudioRenderProbe {
                     'hook' { 1 }; 'reading' { 3 }; 'native' { 16 };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
+                force_continue_on_failure = ($Phase -eq 'native');
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool]$UncertainFallback
             }

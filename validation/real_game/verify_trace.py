@@ -54,6 +54,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       reference_start: int | None, scenario: Sequence[dict], *,
                       game_pid_by_session: dict, presentation_at: dict,
                       native_end_estimates: dict, source_outputs: dict,
+                      recovery_inputs: dict,
                       max_voice_hold_ms: int | None = None) -> dict:
     """Compare actual game playback/dismissal with actual AutoAdv inputs.
 
@@ -68,6 +69,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
               'unverified_voice_ends': 0, 'indeterminate_voice_end': 0,
               'overholds': 0, 'misattributions': 0,
               'manual_or_unadvanced': 0, 'manual_or_external_advances': 0,
+              'validation_recovery_advances': 0,
               'undismissed_lines': 0, 'confirmed_voice_safe_inputs': 0,
               'unaligned_lines': 0}
     if not oracle_records:
@@ -163,6 +165,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         detail = {'scenario': contract.get('id'), 'game_line': game_number,
                   'completion_reason': reasons.get(key), 'sent': key in sent,
                   'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
+                  'validation_recovery_input': key in recovery_inputs,
                   'dismissed_after_input': (bool(dismissal and dismissal['at_ns'] >= actual_input)
                                             if actual_input is not None else None),
                   'outcome': 'unadvanced'}
@@ -181,11 +184,18 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         elif actual_input is None:
             result['manual_or_unadvanced'] += 1
             if dismissal is not None:
-                # The game moved without AutoAdv input. That can be an intended
-                # manual choice or another external input, but never an AutoAdv
-                # success and never equivalent to leaving the dialogue open.
-                result['manual_or_external_advances'] += 1
-                detail['outcome'] = 'game_dismissed_without_autoadv_input'
+                # A validation recovery input is deliberately outside the
+                # product Controller. It can expose later real-audio cases but
+                # can never upgrade the failed line to an AutoAdv success.
+                if key in recovery_inputs:
+                    result['validation_recovery_advances'] += 1
+                    detail['outcome'] = 'validation_recovery_advance'
+                else:
+                    # The game moved without AutoAdv input. That can be an
+                    # intended manual choice or another external input, but
+                    # never an AutoAdv success.
+                    result['manual_or_external_advances'] += 1
+                    detail['outcome'] = 'game_dismissed_without_autoadv_input'
             else:
                 result['undismissed_lines'] += 1
                 detail['outcome'] = 'still_presented_without_autoadv_input'
@@ -302,6 +312,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     tts: set[tuple] = set()
     attempts: dict[tuple, int] = {}
     sent: dict[tuple, int] = {}
+    input_completion_reasons: dict[tuple, str] = {}
     timestamps: dict[tuple, int] = {}
     readiness: set[object] = set()
     audio_methods: dict[object, str] = {}
@@ -309,6 +320,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     authorized: set[object] = set()
     timeouts: set[tuple] = set()
     handoffs: dict[tuple, str] = {}
+    recovery_inputs: dict[tuple, int] = {}
+    collection_target: int | None = None
     capture_summaries: dict[tuple, dict] = {}
     methods: dict[tuple, str] = {}
     reasons: dict[tuple, str] = {}
@@ -459,43 +472,32 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if key in sent:
                 errors.append(f'double advance input for one line: {key}')
             sent[key] = at
+            causal_reason = record.get('presentation_reason')
+            if causal_reason is not None:
+                if not isinstance(causal_reason, str) or not causal_reason:
+                    errors.append(f'invalid input completion reason: {key}')
+                else:
+                    input_completion_reasons[key] = causal_reason
             if key not in utterances:
                 errors.append(f'input without observed utterance: {key}')
-            if key not in complete:
-                errors.append(f'input before presentation completion: {key}')
             if session not in monitoring or session not in authorized:
                 errors.append(f'input without active authorized game session: {key}')
-            u = utterances.get(key)
-            if u:
-                mode, uses_tts = u.get('advance_mode'), u.get('use_tts')
-                completed = next((r for r in records[1:] if r.get('event') == 'presentation_complete' and _key(r) == key), None)
-                completion_reason = completed.get('reason') if completed else None
-                if mode not in ('text', 'audio') or type(uses_tts) is not bool:
-                    errors.append(f'invalid two-mode Utterance policy: {key}')
-                elif mode == 'text':
-                    expected_reason = 'tts_and_text' if uses_tts else 'text'
-                    if completion_reason != expected_reason:
-                        errors.append(f'text-mode completion contract not observed: {key}')
-                    if uses_tts and key not in tts:
-                        errors.append(f'TTS advance input before actual playback completion: {key}')
-                    wait = u.get('text_wait_ms')
-                    if (type(wait) is not int or wait <= 0 or not completed or
-                            completed['at_ns'] - timestamps[key] < wait * 1_000_000):
-                        errors.append(f'text advance input before computed reading time: {key}')
-                elif uses_tts:
-                    if key not in tts or completion_reason != 'tts':
-                        errors.append(f'audio-judgment TTS requires playback drain: {key}')
-                elif completion_reason == 'native':
-                    if key not in native:
-                        errors.append(f'native completion lacks observed audio judgement end: {key}')
-                elif completion_reason == 'uncertain_text_fallback':
-                    wait = u.get('text_wait_ms')
-                    if (u.get('uncertain_text_fallback') is not True or
-                            type(wait) is not int or wait <= 0 or not completed or
-                            completed['at_ns'] - timestamps[key] < wait * 1_000_000):
-                        errors.append(f'unpermitted or early uncertain fallback: {key}')
-                else:
-                    errors.append(f'unknown native completion reason: {key}')
+        elif event == 'validation_recovery_input':
+            if key not in utterances:
+                errors.append(f'validation recovery without observed utterance: {key}')
+            elif key in recovery_inputs:
+                errors.append(f'duplicate validation recovery input: {key}')
+            elif not isinstance(record.get('reason'), str) or not record['reason']:
+                errors.append(f'validation recovery lacks product failure reason: {key}')
+            else:
+                recovery_inputs[key] = at
+        elif event == 'validation_collection_target':
+            dialogues = record.get('dialogues')
+            if (record.get('phase') != phase or type(dialogues) is not int or dialogues <= 0 or
+                    (collection_target is not None and collection_target != dialogues)):
+                errors.append('invalid validation collection target')
+            else:
+                collection_target = dialogues
         elif event == 'next_line_timeout':
             timeouts.add(key)
         elif event == 'controller_handoff':
@@ -512,6 +514,55 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     ('scope', 'pcm_packets', 'pcm_frames', 'heartbeats',
                      'vad_positive_packets', 'vad_input_peak', 'capture_stereo_peak', 'failure')
                 }
+        elif event == 'validation_driver_failure':
+            reason = record.get('reason')
+            errors.append('validation driver failed: ' + (reason if isinstance(reason, str) else 'unknown'))
+
+    # GUI diagnostic signals are delivered through different threads/Qt queues.
+    # Their append order is therefore not a causal contract. Validate the final
+    # per-Utterance event set after collection rather than requiring diagnostic
+    # completion records to have been physically written before ``advance_input``.
+    for key in sent:
+        u = utterances.get(key)
+        if u is None:
+            continue
+        if key not in complete:
+            errors.append(f'input without presentation completion evidence: {key}')
+            continue
+        mode, uses_tts = u.get('advance_mode'), u.get('use_tts')
+        completion_reason = reasons.get(key)
+        completed_at = presentation_at.get(key)
+        causal_reason = input_completion_reasons.get(key)
+        if completed_at is not None and completed_at > sent[key] and causal_reason is None:
+            errors.append(f'input before presentation completion: {key}')
+        if causal_reason is not None and causal_reason != completion_reason:
+            errors.append(f'input completion reason disagrees with presentation evidence: {key}')
+        if mode not in ('text', 'audio') or type(uses_tts) is not bool:
+            errors.append(f'invalid two-mode Utterance policy: {key}')
+        elif mode == 'text':
+            expected_reason = 'tts_and_text' if uses_tts else 'text'
+            if completion_reason != expected_reason:
+                errors.append(f'text-mode completion contract not observed: {key}')
+            if uses_tts and key not in tts:
+                errors.append(f'TTS advance input lacks actual playback completion: {key}')
+            wait = u.get('text_wait_ms')
+            if (type(wait) is not int or wait <= 0 or completed_at is None or
+                    completed_at - timestamps[key] < wait * 1_000_000):
+                errors.append(f'text advance input before computed reading time: {key}')
+        elif uses_tts:
+            if key not in tts or completion_reason != 'tts':
+                errors.append(f'audio-judgment TTS requires playback drain: {key}')
+        elif completion_reason == 'native':
+            if key not in native:
+                errors.append(f'native completion lacks observed audio judgement end: {key}')
+        elif completion_reason == 'uncertain_text_fallback':
+            wait = u.get('text_wait_ms')
+            if (u.get('uncertain_text_fallback') is not True or
+                    type(wait) is not int or wait <= 0 or completed_at is None or
+                    completed_at - timestamps[key] < wait * 1_000_000):
+                errors.append(f'unpermitted or early uncertain fallback: {key}')
+        else:
+            errors.append(f'unknown native completion reason: {key}')
 
     for key in native:
         if (key[0] not in readiness or key not in pcm or
@@ -537,7 +588,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     # Source provenance, the product's input, and the subsequent Hook event
     # establish the actual continuation, independent of fixture text identity.
     for offset, key in enumerate(utterance_order):
-        if key not in sent or offset + 1 >= len(utterance_order):
+        if key not in sent or key in recovery_inputs or offset + 1 >= len(utterance_order):
             continue
         subsequent = utterance_order[offset + 1]
         next_u = utterances[subsequent]
@@ -553,12 +604,19 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     # regardless of what line number or expected scene was selected.
     for offset, key in enumerate(utterance_order):
         if key in sent and key not in links:
-            diagnostics.append(f'input sent but following HOOK not observed: {key}')
+            if key in recovery_inputs:
+                diagnostics.append(f'AutoAdv input required validation recovery before continuation: {key}')
+            else:
+                diagnostics.append(f'input sent but following HOOK not observed: {key}')
+        elif key in recovery_inputs:
+            diagnostics.append(f'validation forced continuation after product handoff: {key}')
         if key in timeouts:
             diagnostics.append(f'controller handed off after next-line timeout: {key}')
         if offset:
             previous = utterance_order[offset - 1]
-            if previous not in sent and phase != 'hook':
+            if previous in recovery_inputs:
+                diagnostics.append(f'dialogue observed after validation recovery input: {previous}')
+            elif previous not in sent and phase != 'hook':
                 diagnostics.append(f'dialogue observed without preceding AutoAdv advance input: {previous}')
     confirmed_native = [k for k in links if k in native and k in pcm
                         and methods.get(k) == 'asr']
@@ -611,7 +669,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             oracle_records, utterance_order, utterances, attempts, sent, reasons,
             start, scenario, game_pid_by_session=game_pid_by_session,
             presentation_at=presentation_at, native_end_estimates=native_end_estimates,
-            source_outputs=source_outputs, max_voice_hold_ms=max_voice_hold_ms,
+            source_outputs=source_outputs, recovery_inputs=recovery_inputs,
+            max_voice_hold_ms=max_voice_hold_ms,
         )
         errors.extend(game_evidence['errors'])
         diagnostics.extend(game_evidence['diagnostics'])
@@ -665,6 +724,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'input_sent': key in sent,
             'next_hook_observed': key in links,
             'next_hook_timeout': key in timeouts,
+            'validation_recovery_input': key in recovery_inputs,
             'outcome': outcome,
         }
         if game_evidence is not None and offset < len(game_evidence['lines']):
@@ -684,10 +744,18 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         not game_evidence['misattributions'] and
         not game_evidence['unaligned_lines'] and
         len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None
+    native_collection_complete = (
+        len(utterance_order) >= collection_target if phase == 'native' and collection_target is not None
+        else None)
+    automatic_continuation_verified = (not recovery_inputs and not handoffs)
+    if phase == 'native':
+        automatic_continuation_verified = bool(
+            native_collection_complete is not False and not recovery_inputs and not handoffs)
     if phase in ('hook', 'stress'):
         accepted = collection_valid
     elif needs_oracle:
-        accepted = collection_valid and advancement_observed and voice_safety_verified is True
+        accepted = (collection_valid and advancement_observed and voice_safety_verified is True
+                    and automatic_continuation_verified)
     else:
         accepted = collection_valid and advancement_observed
     return {
@@ -699,7 +767,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'game_observer': ('required' if needs_oracle else 'optional'),
         'ok': accepted, 'phase': phase,
         'collection_valid': collection_valid,
+        'collection_complete': native_collection_complete,
         'advancement_observed': advancement_observed,
+        'automatic_continuation_verified': automatic_continuation_verified,
+        'validation_recovery_inputs': len(recovery_inputs),
         'voice_safety_verified': voice_safety_verified,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),

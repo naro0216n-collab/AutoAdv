@@ -64,6 +64,20 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
     return records
 
 
+def resequence(records):
+    """Give reordered checker-only records a fresh monotonic diagnostic clock."""
+    for i, record in enumerate(records):
+        record['at_ns'] = 1 if i == 0 else i * 1_000_000_000
+        if i:
+            record['seq'] = i
+        if record['event'] == 'hook_output':
+            record['received_ns'] = record['at_ns'] - 1
+        elif record['event'] == 'native_voice_end_estimate':
+            record['estimated_at_ns'] = record['at_ns'] - 300_000_000
+            record['onset_estimated_at_ns'] = record['at_ns'] - 1_000_000_000
+    return records
+
+
 class NativeScenarioContractTests(unittest.TestCase):
     def test_native_phase_contains_all_foreground_voice_cases_in_one_sequence(self):
         scenario = scenario_for_phase('native')
@@ -142,6 +156,52 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertEqual(result['line_results'][2]['stop_reason'], 'native_inconclusive_manual_handoff')
         self.assertIs(result['line_results'][2]['fallback_enabled'], False)
         self.assertEqual(result['line_results'][2]['outcome'], 'no_autoadv_input')
+
+    def test_async_diagnostic_append_order_does_not_fake_early_input(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        key = (1, 1)
+        completed = next(r for r in records
+                         if r['event'] == 'native_event' and r.get('status') == 'completed'
+                         and (r.get('session'), r.get('line')) == key)
+        presentation = next(r for r in records
+                            if r['event'] == 'presentation_complete'
+                            and (r.get('session'), r.get('line')) == key)
+        records.remove(completed)
+        records.remove(presentation)
+        sent_at = next(i for i, r in enumerate(records)
+                       if r['event'] == 'advance_input'
+                       and (r.get('session'), r.get('line')) == key)
+        records[sent_at]['presentation_reason'] = 'native'
+        # Qt-queued diagnostics may be appended after the synchronous product
+        # input milestone even though Controller completion caused that input.
+        records[sent_at + 1:sent_at + 1] = [presentation, completed]
+        result = validate(resequence(records), phase='native')
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertTrue(result['ok'], result['errors'])
+
+    def test_validation_recovery_collects_later_lines_without_crediting_success(self):
+        records = contract_records(0, 3, lines=NATIVE_SCENARIO)
+        first_input = next(i for i, r in enumerate(records)
+                           if r['event'] == 'advance_input' and r.get('line') == 1)
+        records[first_input + 1:first_input + 1] = [
+            {'event': 'controller_handoff', 'session': 1, 'line': 1,
+             'reason': 'next_line_timeout'},
+            {'event': 'validation_recovery_input', 'session': 1, 'line': 1,
+             'reason': 'next_line_timeout'},
+        ]
+        target_at = next(i for i, r in enumerate(records) if r['event'] == 'native_ready') + 1
+        records[target_at:target_at] = [
+            {'event': 'validation_collection_target', 'phase': 'native', 'dialogues': 3,
+             'force_continue_on_failure': True},
+        ]
+        result = validate(resequence(records), phase='native')
+        self.assertTrue(result['collection_valid'], result['errors'])
+        self.assertTrue(result['collection_complete'])
+        self.assertFalse(result['automatic_continuation_verified'])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['validation_recovery_inputs'], 1)
+        self.assertEqual(result['confirmed_advance_to_next_hook'], 1)
+        self.assertTrue(result['line_results'][0]['validation_recovery_input'])
 
     def test_json_report_preserves_success_and_failures(self):
         import contextlib

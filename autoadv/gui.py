@@ -2153,7 +2153,13 @@ def run_gui(session_driver=None) -> int:
                 self.validation_trace.emit('audio_observation_boundary',
                     session=token.session, after_line=token.line)
             elif event == 'sent':
-                self.validation_trace.emit('advance_input', session=token.session, line=token.line)
+                # Controller has already established presentation completion
+                # before entering its synchronous input path. Qt-delivered
+                # diagnostic signals may be appended later, so carry the
+                # causal completion reason on the input record itself.
+                self.validation_trace.emit(
+                    'advance_input', session=token.session, line=token.line,
+                    presentation_reason=self.application.runtime_state().presentation_reason)
 
         def permit(self):
             self.validation_trace.emit('permit_requested', session=self.application.runtime_state().session)

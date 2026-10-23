@@ -68,6 +68,17 @@ class DialogueContractTests(unittest.TestCase):
             self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
 
+    def test_authoritatively_known_external_advance_can_distinguish_same_text(self):
+        self.controller.permit(True)
+        first = self.output('同じ台詞', 1)
+        self.controller.pause('native_inconclusive_hold')
+        self.assertTrue(self.controller.confirm_external_advance(first))
+        second = self.output('同じ台詞', 2)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.controller.reason, 'presenting')
+        self.assertTrue(self.controller.authorized)
+
     def test_partial_update_invalidates_previous_presentation(self):
         a = self.output('これ', 1)
         b = self.output('これは全文', 2)

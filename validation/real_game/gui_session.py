@@ -1,8 +1,10 @@
 """Prepare and observe the ordinary AutoAdv GUI for live validation.
 
-The driver owns fixture preparation only. It never sends game input and never
-reimplements Hook, presentation, audio, or advancement policy. Runtime state is
-read and changed through AutoAdvApplication, the same owner used by the GUI.
+Normal progression is owned entirely by the product Controller.  In native
+RealAudio collection only, after the product has already entered a recorded
+hold/failure, the validation driver may send one explicitly traced recovery
+input so later fixture cases remain observable.  Recovery is never product
+success and never reimplements Hook, presentation, or audio judgement policy.
 """
 from __future__ import annotations
 
@@ -12,6 +14,12 @@ from pathlib import Path
 import time
 
 CALIBRATION = 'AutoAdvフック校正専用'
+RECOVERABLE_VALIDATION_PAUSES = frozenset((
+    'native_inconclusive_hold',
+    'native_audio_failure',
+    'input_failure_no_retry',
+    'next_line_timeout',
+))
 
 
 def calibration_candidates(candidates):
@@ -56,6 +64,9 @@ def load_session(environment=None):
         raise ValueError('invalid validation phase')
     if int(options['timeout_seconds']) < 10:
         raise ValueError('validation session must have a finite reasonable timeout')
+    if ('force_continue_on_failure' in options and
+            type(options['force_continue_on_failure']) is not bool):
+        raise ValueError('force_continue_on_failure must be boolean')
     return options
 
 
@@ -70,14 +81,20 @@ def select_game_window(windows, class_name):
 
 
 class SessionDriver:
-    def __init__(self, window, qt_app, options, *, clock=time.monotonic):
+    def __init__(self, window, qt_app, options, *, clock=time.monotonic,
+                 recovery_send=None, recovery_boundary=None):
         self.w, self.qt_app, self.options = window, qt_app, options
         self.product = window.application
         self.clock = clock
+        self.recovery_send = recovery_send or self._send_validation_recovery
+        self.recovery_boundary = recovery_boundary or self._mark_validation_recovery_boundary
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.done_idle = None
         self.audio_deadline = None
+        self.recovery_pending = None
+        self.recovered_tokens = set()
+        self.collection_target_emitted = False
 
     def fail(self, why):
         candidates = self.product.capture_view().candidates
@@ -119,6 +136,60 @@ class SessionDriver:
 
     def _release(self, suffix):
         Path(self.options['gate'] + suffix).write_text('ready', encoding='ascii')
+
+    @staticmethod
+    def _send_validation_recovery(runtime):
+        """Advance only the validation fixture after the product has failed.
+
+        This deliberately bypasses Controller state and is never exposed as a
+        product input.  The next LunaHook output therefore enters AutoAdv as an
+        external transition, while the failed product line remains failed.
+        """
+        from autoadv.windows_input import WindowsAdvancementInput
+        if runtime.target is None or runtime.profile is None:
+            raise RuntimeError('validation recovery has no bound game target')
+        WindowsAdvancementInput(
+            runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
+
+    def _mark_validation_recovery_boundary(self, runtime):
+        token = runtime.token
+        if token is None or not self.product.confirm_external_advance(token):
+            raise RuntimeError('validation recovery lost the active utterance boundary')
+        # This is a real input boundary even though it is not a product input.
+        # Reset the observation interval so later case data is not polluted by
+        # the failed line's pre-recovery PCM.
+        self.product.native_audio_boundary()
+
+    def _recover_failed_line(self, runtime):
+        token = runtime.token
+        if token is None:
+            return False
+        key = (token.session, token.line)
+        reason = runtime.pause_reason or ''
+        if (not self.options.get('force_continue_on_failure') or
+                reason not in RECOVERABLE_VALIDATION_PAUSES or
+                key in self.recovered_tokens):
+            return False
+        # Give queued product diagnostics (handoff/capture summary) one GUI
+        # turn to reach the trace before the validation-only recovery input.
+        now = self.clock()
+        pending = self.recovery_pending
+        if pending is None or pending[:2] != key or pending[2] != reason:
+            self.recovery_pending = (token.session, token.line, reason, now)
+            return True
+        if now - pending[3] < .25:
+            return True
+        self.w.validation_trace.emit(
+            'validation_recovery_attempt', session=token.session, line=token.line,
+            reason=reason)
+        self.recovery_send(runtime)
+        self.recovery_boundary(runtime)
+        self.w.validation_trace.emit(
+            'validation_recovery_input', session=token.session, line=token.line,
+            reason=reason)
+        self.recovered_tokens.add(key)
+        self.recovery_pending = None
+        return True
 
     def _configure_product(self, target):
         from autoadv.model import AdvanceMode
@@ -196,7 +267,7 @@ class SessionDriver:
 
     def tick(self):
         if self.clock() > self.deadline:
-            self.fail('finite live-run timeout; no manual game input substituted')
+            self.fail('finite live-run timeout before requested validation collection completed')
             return
         try:
             if self.state == 'select_target':
@@ -221,6 +292,13 @@ class SessionDriver:
                 elif self.clock() >= self.audio_deadline:
                     raise RuntimeError('product process audio did not become ready within 30 seconds')
             elif self.state == 'activate':
+                if not self.collection_target_emitted:
+                    self.w.validation_trace.emit(
+                        'validation_collection_target', phase=self.options['phase'],
+                        dialogues=int(self.options.get('dialogues', 0)),
+                        force_continue_on_failure=bool(
+                            self.options.get('force_continue_on_failure', False)))
+                    self.collection_target_emitted = True
                 if self.options['phase'] != 'hook':
                     self.w.permit()
                     if not self.product.runtime_state().authorized:
@@ -229,18 +307,30 @@ class SessionDriver:
                 self.state = 'running'
             elif self.state == 'running':
                 runtime = self.product.runtime_state()
-                if runtime.token is not None and runtime.pause_reason:
-                    self.w.close()
-                    self.qt_app.quit()
-                    return
                 target_count = int(self.options.get('dialogues', 0))
                 line_no = runtime.token.line if runtime.token is not None else 0
-                if target_count > 0 and line_no >= target_count:
+                final_line = target_count > 0 and line_no >= target_count
+                if runtime.token is not None and runtime.pause_reason:
+                    # For RealAudio data collection, a product hold remains a
+                    # failure but the harness may advance the fixture once so
+                    # later cases are still observed in this same product
+                    # session. Never do this after the final requested case.
+                    if not final_line and self._recover_failed_line(runtime):
+                        return
+                    if not final_line:
+                        self.w.close()
+                        self.qt_app.quit()
+                        return
+                else:
+                    self.recovery_pending = None
+                if final_line and (runtime.sent or runtime.pause_reason):
                     if self.done_idle is None:
                         self.done_idle = self.clock()
                     if self.clock() - self.done_idle >= .6:
                         self.w.close()
                         self.qt_app.quit()
+                elif not final_line:
+                    self.done_idle = None
         except Exception as error:
             self.fail(str(error))
 

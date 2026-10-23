@@ -245,8 +245,12 @@ try {
         }
         $results.Add([pscustomobject]@{
             phase = $currentPhase
+            ok = if ($measurement) { $measurement.ok } else { $false }
             collection_valid = if ($measurement) { $measurement.collection_valid } else { $null }
+            collection_complete = if ($measurement) { $measurement.collection_complete } else { $null }
             advancement_observed = if ($measurement) { $measurement.advancement_observed } else { $null }
+            automatic_continuation_verified = if ($measurement) { $measurement.automatic_continuation_verified } else { $null }
+            validation_recovery_inputs = if ($measurement) { $measurement.validation_recovery_inputs } else { $null }
             voice_safety_verified = if ($measurement) { $measurement.voice_safety_verified } else { $null }
             report_present = [bool]$measurement
             runner_error = $phaseError
@@ -255,9 +259,10 @@ try {
                 (-not $measurement -or $measurement.collection_valid -ne $true)) {
             Write-Warning 'Native phase skipped: reading phase did not obtain a real dialogue Hook.'
             $results.Add([pscustomobject]@{
-                phase = 'native'; collection_valid = $false
-                advancement_observed = $false; voice_safety_verified = $null
-                report_present = $false
+                phase = 'native'; ok = $false; collection_valid = $false
+                collection_complete = $false; advancement_observed = $false
+                automatic_continuation_verified = $false; validation_recovery_inputs = 0
+                voice_safety_verified = $null; report_present = $false
                 runner_error = 'skipped_after_reading_hook_failure'
             })
             break
@@ -307,9 +312,10 @@ if (-not $NoUpload -and $hasProductRun) {
 if ($uploadError) { throw "AutoAdv result upload failed: $uploadError" }
 if ($errorText) { throw "AutoAdv validation setup failed: $errorText" }
 $unsuccessful = @($results.ToArray() | Where-Object {
-    $_.runner_error -or $_.collection_valid -ne $true -or
+    $_.runner_error -or $_.ok -ne $true -or $_.collection_valid -ne $true -or
     $_.advancement_observed -ne $true -or
-    ($_.phase -eq 'native' -and $_.voice_safety_verified -ne $true)
+    ($_.phase -eq 'native' -and ($_.collection_complete -ne $true -or
+        $_.automatic_continuation_verified -ne $true -or $_.voice_safety_verified -ne $true))
 })
 if ($results.Count -ne $phaseNames.Count -or $unsuccessful.Count -gt 0) {
     throw "AutoAdv validation did NOT pass ($($unsuccessful.Count) unsuccessful phase(s)); see local/uploaded reports"

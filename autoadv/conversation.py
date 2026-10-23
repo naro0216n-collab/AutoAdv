@@ -54,6 +54,7 @@ class Controller:
         self.ocr_blank = False
         self.active_body_source: str | None = None
         self.external_transition_ns = 0
+        self.confirmed_external_boundary = False
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int,
               available_sources: tuple[str, ...] = ()) -> int:
@@ -88,6 +89,7 @@ class Controller:
         self.ocr_blank = False
         self.active_body_source = None
         self.external_transition_ns = 0
+        self.confirmed_external_boundary = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = self.native_playing = self.fallback_elapsed = False
         self.pause_reason = reason if self.authorized else 'advance_not_authorized'
@@ -247,7 +249,12 @@ class Controller:
     def _accept_line(self, *, sequence: int, raw: str, body: str, speaker: str, origin: str,
                      verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
         old = self.utterance
-        external_transition = bool(old and not self.sent and raw != old.raw and received_ns > 0)
+        known_boundary = self.confirmed_external_boundary
+        verified_boundary = verified_boundary or known_boundary
+        external_transition = bool(
+            old and not self.sent and verified_boundary and received_ns > 0)
+        if old and not self.sent and raw != old.raw and received_ns > 0:
+            external_transition = True
         if old and not self.sent and old.raw == raw and not verified_boundary:
             return None
         if self.pending_profile is not None:
@@ -258,6 +265,7 @@ class Controller:
                 self.pause('ambiguous_identical_line')
                 return None
         self.external_transition_ns = received_ns if external_transition else 0
+        self.confirmed_external_boundary = False
         self.line_no += 1
         self.utterance = interpret(
             raw, self.profile, session=self.session, line=self.line_no, source=origin,
@@ -274,6 +282,20 @@ class Controller:
             self.pause_reason = 'advance_not_authorized'
             self.reason = 'advance_not_authorized'
         return Token(self.session, self.line_no)
+
+    def confirm_external_advance(self, token: Token) -> bool:
+        """Record an externally known dialogue boundary without claiming input.
+
+        Normal product operation deliberately does not monitor global user
+        input, so this is inert unless an adapter already has authoritative
+        knowledge that the visible line was advanced. It lets the next equal
+        text be admitted as a distinct Utterance while preserving the fact
+        that AutoAdv itself did not send the advance.
+        """
+        if token != self.token or self.utterance is None:
+            return False
+        self.confirmed_external_boundary = True
+        return True
 
     def take_external_transition(self, token: Token) -> int:
         """Return the HOOK arrival time that replaced an unsent line once.

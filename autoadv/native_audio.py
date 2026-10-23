@@ -66,6 +66,7 @@ class JapaneseASR:
 
 class NativeAudio:
     """Owns one process's capture and one active line; never injects game input."""
+    COMPLETION_EVIDENCE_THRESHOLD = .70
     def __init__(self, pid: int, helper: Path, model: Path, tokens: Path,
                  notify: Callable[[Token | None, str, str], None],
                  *, recognizer=None, activity=None, g2p=None, clock=None,
@@ -562,7 +563,8 @@ class NativeAudio:
                     and progress.matched_phonemes >= min(4, max(1, progress.target_units))
                 )
                 if (self.attributed and sufficient_progress
-                        and endpoint_score >= .45 and evidence_score >= .72):
+                        and endpoint_score >= .45
+                        and evidence_score >= self.COMPLETION_EVIDENCE_THRESHOLD):
                     self.completed = True
                     events.append('completed')
                     if endpoint_ms >= 0:
