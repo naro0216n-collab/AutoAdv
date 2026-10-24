@@ -4,7 +4,7 @@ import numpy as np
 
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_knowledge import NativeAudioObservation, NativeVoiceKnowledge, reduce_native_voice_knowledge
-from autoadv.forced_alignment import TargetConditionedAligner
+from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import PronunciationCandidate
 
 
@@ -149,3 +149,36 @@ def test_transport_observation_never_manufactures_association_or_end():
     knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observation)
     assert not knowledge.target_associated
     assert not knowledge.target_end_confirmed
+
+
+class _FakeOnnxSession:
+    def __init__(self, output):
+        self.output = output
+
+    def run(self, names, feeds):
+        return [self.output]
+
+
+def _onnx_adapter_with_output(output, *, vocab=None):
+    model = object.__new__(OnnxPhoneCTCModel)
+    model.vocab = vocab or {'PAD': 0, 'a': 1, 'b': 2}
+    model.session = _FakeOnnxSession(np.asarray(output, dtype=np.float32))
+    model.input_name = 'input_values'
+    model.output_name = 'logits'
+    return model
+
+
+def test_onnx_adapter_normalizes_single_batch_logits_to_posterior_contract():
+    adapter = _onnx_adapter_with_output(np.zeros((1, 4, 3), dtype=np.float32))
+    result = adapter.infer(chunks(1))
+    assert result.shape == (4, 3)
+
+
+def test_onnx_adapter_rejects_logits_outside_posterior_contract():
+    adapter = _onnx_adapter_with_output(np.zeros((2, 4, 3), dtype=np.float32))
+    try:
+        adapter.infer(chunks(1))
+    except ValueError as exc:
+        assert 'unsupported logits shape' in str(exc)
+    else:
+        raise AssertionError('batched logits must be rejected by the model adapter')

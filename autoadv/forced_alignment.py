@@ -383,8 +383,6 @@ class TargetConditionedAligner:
         if not self._encoded:
             raise RuntimeError("alignment target is not set")
         logits = np.asarray(self.model.infer(chunks), dtype=np.float32)
-        if logits.ndim == 3 and logits.shape[0] == 1:
-            logits = logits[0]
         if logits.ndim != 2 or not logits.shape[0]:
             raise ValueError("alignment model returned no frame posterior")
         log_probs = _log_softmax(logits)
@@ -489,5 +487,12 @@ class OnnxPhoneCTCModel:
         waveform = self._waveform(chunks)
         if not waveform.size:
             return np.empty((0, len(self.vocab)), dtype=np.float32)
-        output = self.session.run([self.output_name], {self.input_name: waveform[None, :]})[0]
-        return np.asarray(output, dtype=np.float32)
+        output = np.asarray(
+            self.session.run([self.output_name], {self.input_name: waveform[None, :]})[0],
+            dtype=np.float32,
+        )
+        if output.ndim == 3 and output.shape[0] == 1:
+            output = output[0]
+        if output.ndim != 2 or output.shape[1] != len(self.vocab):
+            raise ValueError("alignment model returned unsupported logits shape")
+        return output
