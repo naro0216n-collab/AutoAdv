@@ -133,7 +133,7 @@ function Set-IssueComment([long] $commentId, [string] $content) {
     }
     Write-Host "Uploaded: $($response.html_url)"
 }
-function Get-IssueUploadPlan([string] $root, [string] $sha) {
+function Get-IssueUploadPlan([string] $root, [string] $sha, [string] $pythonExecutable) {
     $commentsPath = Join-Path $session ('issue-comments-' + [Guid]::NewGuid().ToString('N') + '.json')
     try {
         Ensure-GitHubLogin
@@ -154,9 +154,16 @@ function Get-IssueUploadPlan([string] $root, [string] $sha) {
             throw 'GitHub issue comments response was empty'
         }
         [IO.File]::WriteAllText($commentsPath, $raw, ([Text.UTF8Encoding]::new($false)))
-        $planLines = @(& python -m validation.real_game.issue_reporting `
-            --root $root --sha $sha --comments $commentsPath)
-        if ($LASTEXITCODE -ne 0) { throw "Issue report planner failed (exit code $LASTEXITCODE)" }
+        # issue_reporting is repository-local validation code, not part of the
+        # installed autoadv package.  Upload runs after PATH/VIRTUAL_ENV are
+        # restored, so execute it from the bootstrap checkout with the exact
+        # managed-runtime Python prepared for this validation session.
+        Push-Location $repo
+        try {
+            $planLines = @(& $pythonExecutable -m validation.real_game.issue_reporting `
+                --root $root --sha $sha --comments $commentsPath)
+            if ($LASTEXITCODE -ne 0) { throw "Issue report planner failed (exit code $LASTEXITCODE)" }
+        } finally { Pop-Location }
         $planRaw = $planLines -join "`n"
         if ([string]::IsNullOrWhiteSpace($planRaw)) { throw 'Issue report planner returned no plan' }
         return ($planRaw | ConvertFrom-Json)
@@ -164,12 +171,12 @@ function Get-IssueUploadPlan([string] $root, [string] $sha) {
         Remove-Item -LiteralPath $commentsPath -Force -ErrorAction SilentlyContinue
     }
 }
-function Upload-Result([string] $root, [string] $sha) {
+function Upload-Result([string] $root, [string] $sha, [string] $pythonExecutable) {
     # The Issue already owns four history comments and one baseline comment.
     # A normal run performs one history PATCH plus, only for an eligible
     # accuracy baseline, one baseline PATCH. Missing/duplicate/unreadable
     # markers fail closed and leave the Issue untouched.
-    $plan = Get-IssueUploadPlan $root $sha
+    $plan = Get-IssueUploadPlan $root $sha $pythonExecutable
     foreach ($operation in @($plan.operations)) {
         [void](Set-IssueComment ([long]$operation.comment_id) ([string]$operation.body))
         if ($operation.role -eq 'history') {
@@ -338,7 +345,7 @@ $hasProductRun = (-not [string]::IsNullOrEmpty($gitSha)) -and ($results.Count -g
 $uploadError = $null
 if (-not $NoUpload -and $hasProductRun) {
     Write-Host "Uploading result to https://github.com/$repository/issues/$IssueNumber"
-    try { Upload-Result $session $gitSha }
+    try { Upload-Result $session $gitSha $python }
     catch {
         $uploadError = [string]$_.Exception.Message
         Write-Warning "GitHub upload failed: $uploadError"

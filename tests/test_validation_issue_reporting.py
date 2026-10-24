@@ -242,6 +242,11 @@ class IssueReportingContract(unittest.TestCase):
     def test_windows_runner_only_patches_preexisting_comments(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn("validation.real_game.issue_reporting", source)
+        planner = source[source.index("function Get-IssueUploadPlan"):source.index("function Upload-Result")]
+        self.assertIn("Push-Location $repo", planner)
+        self.assertIn("& $pythonExecutable -m validation.real_game.issue_reporting", planner)
+        self.assertIn("finally { Pop-Location }", planner)
+        self.assertIn("Upload-Result $session $gitSha $python", source)
         self.assertIn("foreach ($operation in @($plan.operations))", source)
         self.assertIn("'--paginate', '--slurp'", source)
         self.assertIn("Invoke-GitHubIssueApi 'PATCH'", source)
