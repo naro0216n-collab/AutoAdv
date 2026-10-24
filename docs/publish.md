@@ -14,6 +14,8 @@ workflow保守専用経路で`scripts/workflow_maintenance.py record-update`を�
 
 実装・関連検証・ローカルcommit後は`scripts/publish_request.py prepare`を実行する。publish直前のremote `develop`と`publish` HEADを取得し、helperが出力するconnector-planと固定Launcherの手順を**一切改変せず**記載順に実行する。Gateway成功後、結果を`scripts/publish_request.py record`に渡して既存ローカルrepoのpublish基点を更新し、そのrepoで次の作業を続ける。次のpublish前に直前のFast CI結果を確認し、失敗原因を解消する。標準経路に失敗した場合は`DEVELOPMENT.md`の指定手順を参照し、独自経路を作らない。
 
+同時進行で`prepare`後にremote `develop`が先へ進んだ場合は、成立済みlocal commitをrebase・reset・作り直しせず、最新`develop`を現在の`develop`へmergeして関連検証を行う。GitHub書込み開始前のstale transactionは、観測した`develop`/`publish` HEADを`scripts/publish_request.py refresh-base`へ渡して基点を前進させ、その後に新しく`prepare`する。connector-plan以後はこの回復経路を使わず、進行中transactionを完了または正規手順で診断する。
+
 Fast CIは継続検証であり設計妥当性の証明ではない。Lunaネイティブ取込み時は64bit Windows上でx86/x64ゲームプロセス向けNativeを実ビルドし、接続検証を別途実施する。x86 buildは32bit OS対応ではなく32bitゲームへの注入互換性を検証する。Windows実ゲーム検証をモック成功で代替しない。
 
 ## 継続CIと明示的な重量級検証

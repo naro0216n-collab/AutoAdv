@@ -1008,6 +1008,67 @@ def cmd_connector_segments(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_refresh_base(args: argparse.Namespace) -> int:
+    """Advance recorded publish bases after another develop publish won the race.
+
+    This recovery is intentionally limited to a prepared transaction that never
+    reached connector-plan, so no GitHub write can have originated from it.
+    The caller must first integrate the observed develop HEAD into the current
+    local history.
+    """
+    repo = _repo_from_cwd()
+    manifest = _manifest_path(repo)
+    if not manifest.exists():
+        raise PublishStateError("refresh-base requires an active prepared transaction")
+    connector_dir = _connector_dir(repo)
+    if connector_dir.exists() and any(connector_dir.iterdir()):
+        raise PublishStateError("refresh-base is only valid before connector-plan/GitHub writes")
+    if not _working_tree_clean(repo):
+        raise PublishStateError("refresh-base requires a clean working tree")
+
+    prepared = _read_prepared_request(manifest)
+    state = _read_state(repo)
+    develop_head = _require_hex_sha(args.develop_head, name="observed develop HEAD")
+    publish_head = _require_hex_sha(args.publish_head, name="observed publish HEAD")
+    for commit, name in ((develop_head, "observed develop HEAD"), (publish_head, "observed publish HEAD")):
+        _require_object(repo, f"{commit}^{{commit}}", name=name)
+
+    if prepared["base_sha"] != state["remote_commit"]:
+        raise PublishStateError("prepared transaction does not match recorded develop base")
+    if develop_head == state["remote_commit"] and publish_head == state["publish_commit"]:
+        raise PublishStateError("publish bases have not advanced; continue the active transaction")
+    if subprocess.run(
+        ["git", "merge-base", "--is-ancestor", state["remote_commit"], develop_head],
+        cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode != 0:
+        raise PublishStateError("observed develop HEAD does not advance the recorded develop base")
+    local_head = _git("rev-parse", "HEAD^{commit}", cwd=repo)
+    if subprocess.run(
+        ["git", "merge-base", "--is-ancestor", develop_head, local_head],
+        cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode != 0:
+        raise PublishStateError("integrate the observed develop HEAD into local history before refresh-base")
+
+    develop_tree = _git("rev-parse", f"{develop_head}^{{tree}}", cwd=repo)
+    publish_tree = _git("rev-parse", f"{publish_head}^{{tree}}", cwd=repo)
+    _write_state(
+        repo, remote_commit=develop_head, remote_tree=develop_tree, local_head=develop_head,
+        publish_commit=publish_head, publish_tree=publish_tree,
+    )
+    shutil.rmtree(_transaction_dir(repo))
+    print(json.dumps({
+        "refreshed": True,
+        "discarded_request_id": prepared["request_id"],
+        "remote_commit": develop_head,
+        "remote_tree": develop_tree,
+        "local_head": develop_head,
+        "publish_commit": publish_head,
+        "publish_tree": publish_tree,
+        "verified": True,
+    }, indent=2))
+    return 0
+
+
 def cmd_cancel(args: argparse.Namespace) -> int:
     repo = _repo_from_cwd()
     manifest = _manifest_path(repo)
@@ -1115,6 +1176,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "connector-segments", help="recover a previously planned large transaction as <=10-tree-call executions",
     ).set_defaults(func=cmd_connector_segments)
+
+    refresh = sub.add_parser(
+        "refresh-base",
+        help="replace a pre-connector stale transaction after integrating a newer develop HEAD",
+    )
+    refresh.add_argument("--develop-head", required=True)
+    refresh.add_argument("--publish-head", required=True)
+    refresh.set_defaults(func=cmd_refresh_base)
 
     cancel = sub.add_parser("cancel", help="cancel a pre-ref active transaction after one combined ref observation")
     cancel.add_argument("--develop-head", required=True)

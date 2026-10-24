@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from validation.real_game import issue_reporting
 
@@ -81,6 +82,30 @@ def _comments() -> list[dict]:
     ]
     comments.append({"id": 2000, "body": f"{issue_reporting.BASELINE_MARKER}\nold baseline"})
     return comments
+
+
+class _FakeIssueClient:
+    def __init__(self, comments: list[dict], *, fail_role: str | None = None):
+        self.comments = {int(comment["id"]): dict(comment) for comment in comments}
+        self.fail_role = fail_role
+        self.patched: list[int] = []
+
+    def list_comments(self) -> list[dict]:
+        return list(self.comments.values())
+
+    def patch_comment(self, comment_id: int, body: str) -> dict:
+        role = "baseline" if body.startswith(issue_reporting.BASELINE_MARKER) else "history"
+        if role == self.fail_role:
+            raise RuntimeError(f"synthetic {role} failure")
+        self.comments[comment_id]["body"] = body
+        self.patched.append(comment_id)
+        return {
+            **self.comments[comment_id],
+            "html_url": f"https://github.com/naro0216n-collab/AutoAdv/issues/2#issuecomment-{comment_id}",
+        }
+
+    def get_comment(self, comment_id: int) -> dict:
+        return dict(self.comments[comment_id])
 
 
 class IssueReportingContract(unittest.TestCase):
@@ -239,22 +264,73 @@ class IssueReportingContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "slot-4.*0"):
             issue_reporting.choose_history_slot(comments, "20261023T134156Z-b10d6904")
 
-    def test_windows_runner_only_patches_preexisting_comments(self):
+    def test_reporter_patches_and_verifies_history_without_shell_body_transport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "20261023T134156Z-b10d6904"
+            root.mkdir()
+            _write_summary(root, accuracy=_phase("accuracy"))
+            client = _FakeIssueClient(_comments())
+
+            result = issue_reporting.publish_snapshot(root, "a" * 40, client)
+
+            self.assertEqual(client.patched, [1004])
+            self.assertEqual(result["operations"][0]["role"], "history")
+            self.assertEqual(
+                issue_reporting._run_from_body(client.comments[1004]["body"]), root.name
+            )
+
+    def test_baseline_failure_preserves_verified_history_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "20261023T134156Z-b10d6904"
+            root.mkdir()
+            _write_summary(root, accuracy=_phase("accuracy", eligible_accuracy=True))
+            client = _FakeIssueClient(_comments(), fail_role="baseline")
+
+            with self.assertRaises(issue_reporting.IssuePublishError) as raised:
+                issue_reporting.publish_snapshot(root, "a" * 40, client)
+
+            self.assertEqual(client.patched, [1004])
+            self.assertEqual(raised.exception.completed[0]["role"], "history")
+            slot, comment_id = issue_reporting.choose_history_slot(
+                list(client.comments.values()), root.name
+            )
+            self.assertEqual((slot, comment_id), (4, 1004))
+
+    def test_github_cli_writes_non_ascii_issue_body_as_utf8_request_file(self):
+        captured: dict[str, str] = {}
+
+        def fake_run(command, **kwargs):
+            request_path = Path(command[command.index("--input") + 1])
+            captured.update(json.loads(request_path.read_text(encoding="utf-8")))
+            return type("Completed", (), {
+                "returncode": 0,
+                "stdout": json.dumps({"id": 1004, "html_url": "https://github.com/x/y"}).encode("utf-8"),
+                "stderr": b"",
+            })()
+
+        client = issue_reporting.GitHubCliIssueClient(
+            Path("gh.exe"), "naro0216n-collab/AutoAdv", 2
+        )
+        with patch.object(issue_reporting.subprocess, "run", side_effect=fake_run):
+            client.patch_comment(1004, "### run · 日本語")
+
+        self.assertEqual(captured["body"], "### run · 日本語")
+
+    def test_windows_runner_delegates_entire_issue_transaction_to_python(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn("validation.real_game.issue_reporting", source)
-        planner = source[source.index("function Get-IssueUploadPlan"):source.index("function Upload-Result")]
-        self.assertIn("Push-Location $repo", planner)
-        self.assertIn("& $pythonExecutable -m validation.real_game.issue_reporting", planner)
-        self.assertIn("finally { Pop-Location }", planner)
+        uploader = source[source.index("function Upload-Result"):source.index("function Get-PrebuiltFixture")]
+        self.assertIn("Ensure-GitHubLogin", uploader)
+        self.assertIn("& $pythonExecutable -m validation.real_game.issue_reporting", uploader)
+        self.assertIn("--repository $repository --issue $IssueNumber", uploader)
+        self.assertIn("--gh $script:GitHubCli --status $statusPath", uploader)
+        self.assertIn("finally { Pop-Location }", uploader)
         self.assertIn("Upload-Result $session $gitSha $python", source)
-        self.assertIn("foreach ($operation in @($plan.operations))", source)
-        self.assertIn("'--paginate', '--slurp'", source)
-        self.assertIn("Invoke-GitHubIssueApi 'PATCH'", source)
-        self.assertNotIn("Invoke-GitHubIssueApi 'POST'", source)
-        self.assertNotIn("Ensure-IssueHistorySlots", source)
-        self.assertNotIn("Find-IssueCommentByMarker", source)
-        self.assertNotIn("Get-IssueComments", source)
-        self.assertNotIn("ForEach-Object", source[source.index("function Get-IssueUploadPlan"):source.index("function Upload-Result")])
+        self.assertNotIn("Get-IssueUploadPlan", source)
+        self.assertNotIn("Invoke-GitHubIssueApi", source)
+        self.assertNotIn("Set-IssueComment", source)
+        self.assertNotIn("ConvertFrom-Json", uploader)
+        self.assertNotIn("--comments", uploader)
 
 
 if __name__ == "__main__":

@@ -104,87 +104,21 @@ function Ensure-GitHubLogin {
         if ($LASTEXITCODE -ne 0) { throw 'GitHub browser authentication was not completed' }
     }
 }
-function Invoke-GitHubIssueApi([string] $method, [string] $url, [string] $content = '') {
-    Ensure-GitHubLogin
-    $apiArgs = @('api','--method',$method,$url)
-    $requestFile = $null
-    try {
-        if ($content) {
-            $requestFile = Join-Path $session ('issue-request-' + [Guid]::NewGuid().ToString('N') + '.json')
-            $json = ConvertTo-Json -InputObject @{ body = $content } -Compress -Depth 4
-            [IO.File]::WriteAllText($requestFile, $json, ([Text.UTF8Encoding]::new($false)))
-            $apiArgs += @('--input',$requestFile)
-        }
-        $response = @(& $script:GitHubCli @apiArgs)
-        if ($LASTEXITCODE -ne 0) { throw "GitHub issue API failed ($method $url, exit code $LASTEXITCODE)" }
-        return ($response -join "`n")
-    } finally {
-        if ($requestFile) { Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue }
-    }
-}
-function Set-IssueComment([long] $commentId, [string] $content) {
-    # Normal validation never creates or repairs the fixed Issue surface.  It
-    # can only PATCH a comment ID that the planner obtained from a complete,
-    # unambiguous read of the existing Issue.
-    $raw = Invoke-GitHubIssueApi 'PATCH' "repos/$repository/issues/comments/$commentId" $content
-    $response = $raw | ConvertFrom-Json
-    if (-not $response.html_url -or $response.html_url -notmatch '^https://github\.com/') {
-        throw 'GitHub returned no valid issue comment URL'
-    }
-    Write-Host "Uploaded: $($response.html_url)"
-}
-function Get-IssueUploadPlan([string] $root, [string] $sha, [string] $pythonExecutable) {
-    $commentsPath = Join-Path $session ('issue-comments-' + [Guid]::NewGuid().ToString('N') + '.json')
-    try {
-        Ensure-GitHubLogin
-        # Keep GitHub's JSON opaque to Windows PowerShell 5.1.  Its array
-        # unrolling semantics previously turned one comments page into a nested
-        # System.Object[] and made marker absence indistinguishable from a parse
-        # problem.  Python validates all paginated pages and every fixed marker.
-        $apiArgs = @(
-            'api', '--method', 'GET', '--paginate', '--slurp',
-            "repos/$repository/issues/$IssueNumber/comments?per_page=100"
-        )
-        $responseLines = @(& $script:GitHubCli @apiArgs)
-        if ($LASTEXITCODE -ne 0) {
-            throw "GitHub issue API failed (GET comments, exit code $LASTEXITCODE)"
-        }
-        $raw = $responseLines -join "`n"
-        if ([string]::IsNullOrWhiteSpace($raw)) {
-            throw 'GitHub issue comments response was empty'
-        }
-        [IO.File]::WriteAllText($commentsPath, $raw, ([Text.UTF8Encoding]::new($false)))
-        # issue_reporting is repository-local validation code, not part of the
-        # installed autoadv package.  Upload runs after PATH/VIRTUAL_ENV are
-        # restored, so execute it from the bootstrap checkout with the exact
-        # managed-runtime Python prepared for this validation session.
-        Push-Location $repo
-        try {
-            $planLines = @(& $pythonExecutable -m validation.real_game.issue_reporting `
-                --root $root --sha $sha --comments $commentsPath)
-            if ($LASTEXITCODE -ne 0) { throw "Issue report planner failed (exit code $LASTEXITCODE)" }
-        } finally { Pop-Location }
-        $planRaw = $planLines -join "`n"
-        if ([string]::IsNullOrWhiteSpace($planRaw)) { throw 'Issue report planner returned no plan' }
-        return ($planRaw | ConvertFrom-Json)
-    } finally {
-        Remove-Item -LiteralPath $commentsPath -Force -ErrorAction SilentlyContinue
-    }
-}
 function Upload-Result([string] $root, [string] $sha, [string] $pythonExecutable) {
-    # The Issue already owns four history comments and one baseline comment.
-    # A normal run performs one history PATCH plus, only for an eligible
-    # accuracy baseline, one baseline PATCH. Missing/duplicate/unreadable
-    # markers fail closed and leave the Issue untouched.
-    $plan = Get-IssueUploadPlan $root $sha $pythonExecutable
-    foreach ($operation in @($plan.operations)) {
-        [void](Set-IssueComment ([long]$operation.comment_id) ([string]$operation.body))
-        if ($operation.role -eq 'history') {
-            Write-Host "Validation history slot $($operation.slot) updated for run $($plan.run)"
-        } elseif ($operation.role -eq 'baseline') {
-            Write-Host "Validation baseline updated for run $($plan.run)"
+    # GitHub authentication remains a launcher concern, but the repository-local
+    # Python reporter owns comment acquisition, selection, PATCH and verification.
+    # Issue bodies never cross the PowerShell/Python stdout boundary.
+    Ensure-GitHubLogin
+    $statusPath = Join-Path $root 'upload-status.json'
+    Push-Location $repo
+    try {
+        & $pythonExecutable -m validation.real_game.issue_reporting `
+            --root $root --sha $sha --repository $repository --issue $IssueNumber `
+            --gh $script:GitHubCli --status $statusPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Issue reporter failed (exit code $LASTEXITCODE); see $statusPath"
         }
-    }
+    } finally { Pop-Location }
 }
 function Get-PrebuiltFixture([string] $destination) {
     $gameLines = @(& python -m validation.real_game.fixture_runtime stage `

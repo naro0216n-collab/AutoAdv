@@ -1,17 +1,20 @@
-"""Build bounded GitHub Issue diagnostics for Windows auto-advance accuracy validation.
+"""Publish bounded GitHub Issue diagnostics for Windows accuracy validation.
 
-The Windows runner owns GitHub authentication and HTTP mutation. This module owns
-only deterministic snapshot formatting and fixed-slot selection so the behavior
-is executable on every Fast CI platform.
+The reporter owns the complete GitHub Issue transaction: acquisition, fixed-slot
+selection, PATCH and post-write verification.  PowerShell only ensures that the
+GitHub CLI is authenticated and launches this module; issue bodies never cross a
+Windows console encoding boundary.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 HISTORY_SLOT_COUNT = 4
 BASELINE_MARKER = "<!-- autoadv-validation-baseline -->"
@@ -295,17 +298,174 @@ def build_upload_plan(root: Path, sha: str,
     return {"run": snapshot.run, "operations": operations}
 
 
+class IssueClient(Protocol):
+    def list_comments(self) -> list[dict[str, Any]]: ...
+
+    def patch_comment(self, comment_id: int, body: str) -> dict[str, Any]: ...
+
+    def get_comment(self, comment_id: int) -> dict[str, Any]: ...
+
+
+class GitHubCliIssueClient:
+    """Minimal UTF-8 byte-oriented GitHub Issue client backed by ``gh api``."""
+
+    def __init__(self, executable: Path, repository: str, issue_number: int):
+        self.executable = str(executable)
+        self.repository = repository
+        self.issue_number = issue_number
+
+    def _run_json(self, args: list[str], *, input_body: str | None = None) -> Any:
+        request_path: Path | None = None
+        try:
+            command = [self.executable, "api", *args]
+            if input_body is not None:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="\n", suffix=".json", delete=False
+                ) as request:
+                    json.dump({"body": input_body}, request, ensure_ascii=False)
+                    request_path = Path(request.name)
+                command.extend(("--input", str(request_path)))
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if completed.returncode != 0:
+                diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+                diagnostic = sanitize_public_issue(diagnostic)
+                raise RuntimeError(
+                    f"GitHub issue API failed (exit code {completed.returncode})"
+                    + (f": {diagnostic}" if diagnostic else "")
+                )
+            try:
+                return json.loads(completed.stdout.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("GitHub issue API returned invalid UTF-8 JSON") from exc
+        finally:
+            if request_path is not None:
+                request_path.unlink(missing_ok=True)
+
+    def list_comments(self) -> list[dict[str, Any]]:
+        value = self._run_json([
+            "--method", "GET", "--paginate", "--slurp",
+            f"repos/{self.repository}/issues/{self.issue_number}/comments?per_page=100",
+        ])
+        return _flatten_comments(value)
+
+    def patch_comment(self, comment_id: int, body: str) -> dict[str, Any]:
+        value = self._run_json(
+            ["--method", "PATCH", f"repos/{self.repository}/issues/comments/{comment_id}"],
+            input_body=body,
+        )
+        if not isinstance(value, dict):
+            raise RuntimeError("GitHub PATCH returned a non-object response")
+        return value
+
+    def get_comment(self, comment_id: int) -> dict[str, Any]:
+        value = self._run_json([
+            "--method", "GET", f"repos/{self.repository}/issues/comments/{comment_id}"
+        ])
+        if not isinstance(value, dict):
+            raise RuntimeError("GitHub comment verification returned a non-object response")
+        return value
+
+
+class IssuePublishError(RuntimeError):
+    def __init__(self, message: str, completed: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.completed = list(completed or ())
+
+
+def _verify_operation(operation: dict[str, Any], run: str, comment: dict[str, Any]) -> None:
+    expected_id = int(operation["comment_id"])
+    if int(comment.get("id", -1)) != expected_id:
+        raise RuntimeError(f"GitHub verification returned the wrong comment for {operation['role']}")
+    body = str(comment.get("body") or "")
+    expected_marker = (
+        history_marker(int(operation["slot"]))
+        if operation["role"] == "history"
+        else BASELINE_MARKER
+    )
+    if not body.lstrip().startswith(expected_marker):
+        raise RuntimeError(f"GitHub verification lost the {operation['role']} marker")
+    if _run_from_body(body) != run:
+        raise RuntimeError(f"GitHub verification found the wrong run in {operation['role']}")
+
+
+def publish_snapshot(root: Path, sha: str, client: IssueClient) -> dict[str, Any]:
+    """Publish one run while preserving one-run-per-history-comment identity."""
+    completed: list[dict[str, Any]] = []
+    try:
+        plan = build_upload_plan(root, sha, client.list_comments())
+        for operation in plan["operations"]:
+            comment_id = int(operation["comment_id"])
+            response = client.patch_comment(comment_id, str(operation["body"]))
+            url = str(response.get("html_url") or "")
+            if not url.startswith("https://github.com/"):
+                raise RuntimeError(f"GitHub returned no valid URL for {operation['role']} comment")
+            verified = client.get_comment(comment_id)
+            _verify_operation(operation, plan["run"], verified)
+            completed.append({
+                "role": operation["role"],
+                "slot": operation.get("slot"),
+                "comment_id": comment_id,
+                "url": url,
+            })
+        return {"run": plan["run"], "operations": completed}
+    except Exception as exc:
+        if isinstance(exc, IssuePublishError):
+            raise
+        raise IssuePublishError(str(exc), completed) from exc
+
+
+def _write_status(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Plan bounded Issue #2 validation updates")
+    parser = argparse.ArgumentParser(description="Publish bounded Issue validation updates")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--comments", type=Path, required=True)
+    parser.add_argument("--repository", required=True)
+    parser.add_argument("--issue", type=int, required=True)
+    parser.add_argument("--gh", type=Path, required=True)
+    parser.add_argument("--status", type=Path)
     args = parser.parse_args()
-    with args.comments.open("r", encoding="utf-8-sig") as stream:
-        comments = _flatten_comments(json.load(stream))
-    plan = build_upload_plan(args.root, args.sha, comments)
-    print(json.dumps(plan, ensure_ascii=False))
-    return 0
+    status_path = args.status or (args.root / "upload-status.json")
+    base_status = {
+        "schema": "autoadv-issue-upload-v1",
+        "repository": args.repository,
+        "issue": args.issue,
+        "run": args.root.name,
+        "commit": args.sha,
+    }
+    try:
+        client = GitHubCliIssueClient(args.gh, args.repository, args.issue)
+        result = publish_snapshot(args.root, args.sha, client)
+        _write_status(status_path, {
+            **base_status,
+            "status": "uploaded",
+            "operations": result["operations"],
+            "error": None,
+        })
+        # Keep console output ASCII-only so locale cannot affect publication.
+        print(f"Issue upload complete: run={result['run']} operations={len(result['operations'])}")
+        return 0
+    except Exception as exc:
+        error = sanitize_public_issue(f"{type(exc).__name__}: {exc}")
+        completed = exc.completed if isinstance(exc, IssuePublishError) else []
+        _write_status(status_path, {
+            **base_status,
+            "status": "failed",
+            "operations": completed,
+            "error": error,
+        })
+        print("Issue upload failed; see upload-status.json")
+        return 1
 
 
 if __name__ == "__main__":
