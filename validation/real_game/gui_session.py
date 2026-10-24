@@ -1,10 +1,10 @@
 """Prepare and observe the ordinary AutoAdv GUI for live validation.
 
-Normal progression is owned entirely by the product Controller. In the Windows
-auto-advance accuracy measurement, a product hold is recorded as that case's outcome and
-the validation driver may then send one explicitly traced recovery input only
-to expose later fixture cases. Recovery is never product success and never
-reimplements Hook, presentation, or audio judgement policy.
+Normal progression is owned entirely by the product Controller. The validation
+driver does not interpret product state. For the continuous Windows accuracy
+fixture it only watches the fixture's authored case-start evidence and, after a
+fixed wall-clock watchdog, may send one explicitly traced recovery input so a
+failed case does not hide later cases.
 """
 from __future__ import annotations
 
@@ -82,28 +82,19 @@ class SessionDriver:
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.audio_deadline = None
-        self.recovery_pending = None
-        self.recovery_sent = set()
+        evidence = str(options.get('evidence') or '').strip()
+        self.evidence_path = Path(evidence) if evidence else None
+        self.case_watchdog_seconds = float(options.get('case_watchdog_seconds', 12.0))
+        self.final_observation_seconds = float(options.get('final_observation_seconds', 12.0))
+        self.current_case = None
+        self.current_case_seen_at = None
+        self.recovered_cases = set()
         self.collection_target_emitted = False
-        self.collection_done_at = None
+        self.non_evidence_done_at = None
 
     def fail(self, why):
-        candidates = self.product.capture_view().candidates
-        runtime = self.product.runtime_state()
-        details = dict(
-            candidate_hooks=len(candidates),
-            sampled_hooks=sum(bool(candidate.history) for candidate in candidates),
-            ambiguous_hooks=sum(candidate.ambiguous for candidate in candidates),
-            calibration_matches=len(calibration_candidates(candidates)),
-            luna_host_alive=self.product.hook_host_running,
-            runtime_session=runtime.session,
-            runtime_line=(runtime.token.line if runtime.token is not None else 0),
-            runtime_pause=runtime.pause_reason or '',
-        )
-        print('AutoAdv live measurement stopped [' + self.state + ']: ' + why
-              + ' | product state: ' + json.dumps(details, ensure_ascii=False), flush=True)
-        self.trace.emit('validation_driver_failure', reason=why,
-                                     stage=self.state, **details)
+        print('AutoAdv live measurement stopped [' + self.state + ']: ' + why, flush=True)
+        self.trace.emit('validation_driver_failure', reason=why, stage=self.state)
         self.w.close()
         self.qt_app.exit(3)
 
@@ -140,39 +131,39 @@ class SessionDriver:
         WindowsAdvancementInput(
             runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
 
-    def _continue_collection_after_hold(self, runtime):
-        token = runtime.token
-        if token is None:
+    def _fixture_cases(self):
+        """Return authored fixture-case facts without interpreting game state."""
+        if self.evidence_path is None or not self.evidence_path.is_file():
+            return []
+        records = []
+        with self.evidence_path.open('r', encoding='utf-8') as stream:
+            for raw_line in stream:
+                if not raw_line.endswith('\n'):
+                    continue
+                try:
+                    item = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if item.get('event') == 'fixture_case':
+                    records.append(item)
+        return records
+
+    def _continue_collection_by_watchdog(self, runtime, case, now):
+        if not self.options.get('continue_collection'):
             return False
-        key = (token.session, token.line)
-        reason = runtime.pause_reason or ''
-        if not self.options.get('continue_collection') or not reason:
+        case_id = str(case.get('case') or '')
+        if not case_id or case_id in self.recovered_cases:
             return False
-        if key in self.recovery_sent:
-            # Recovery is a one-shot escape hatch for one measured utterance.
-            # The product may keep reporting the same paused token until the
-            # game's next Hook reaches us; never reinterpret that delay (or a
-            # changed pause reason on the same token) as permission to send a
-            # second validation input.
-            return True
-        # Give queued product diagnostics (handoff/capture summary) one GUI
-        # turn to reach the trace before the validation-only recovery input.
-        now = self.clock()
-        pending = self.recovery_pending
-        if pending is None or pending[:2] != key or pending[2] != reason:
-            self.recovery_pending = (token.session, token.line, reason, now)
-            return True
-        if now - pending[3] < .25:
-            return True
-        self.trace.emit(
-            'validation_recovery_attempt', session=token.session, line=token.line,
-            reason=reason)
+        if self.current_case_seen_at is None or now - self.current_case_seen_at < self.case_watchdog_seconds:
+            return False
+        # This is deliberately ignorant of pause_reason, UtteranceProgress,
+        # playback state, Hook state and inferred completion. It is only a
+        # bounded fixture escape hatch after a long unchanged authored case.
         self.recovery_send(runtime)
         self.trace.emit(
-            'validation_recovery_input', session=token.session, line=token.line,
-            reason=reason)
-        self.recovery_sent.add(key)
-        self.recovery_pending = None
+            'validation_recovery_input', case=case_id,
+            watchdog_seconds=self.case_watchdog_seconds)
+        self.recovered_cases.add(case_id)
         return True
 
     def _configure_product(self, target):
@@ -288,39 +279,38 @@ class SessionDriver:
                 self.state = 'running'
             elif self.state == 'running':
                 now = self.clock()
-                if self.collection_done_at is not None:
-                    # Keep only a short observer flush after the requested final
-                    # outcome. A later fixture line cannot reset this latch or
-                    # trigger validation recovery/product-scope extension.
-                    if now - self.collection_done_at >= .6:
+                if self.evidence_path is None:
+                    # Non-accuracy phases retain only the minimum driver control
+                    # needed to stop after their requested product dialogue count.
+                    runtime = self.product.runtime_state()
+                    target_count = int(self.options.get('dialogues', 0))
+                    line_no = runtime.token.line if runtime.token is not None else 0
+                    if target_count > 0 and line_no >= target_count:
+                        if self.non_evidence_done_at is None:
+                            self.non_evidence_done_at = now
+                        elif now - self.non_evidence_done_at >= .6:
+                            self.w.close()
+                            self.qt_app.quit()
+                    return
+                cases = self._fixture_cases()
+                if not cases:
+                    return
+                latest = cases[-1]
+                case_id = str(latest.get('case') or '')
+                if case_id != self.current_case:
+                    self.current_case = case_id
+                    self.current_case_seen_at = now
+                target_count = int(self.options.get('dialogues', 0))
+                if target_count > 0 and len(cases) >= target_count:
+                    # Do not infer whether the final line succeeded. Keep a fixed
+                    # evidence window, then close the measurement process.
+                    if (self.current_case_seen_at is not None and
+                            now - self.current_case_seen_at >= self.final_observation_seconds):
                         self.w.close()
                         self.qt_app.quit()
                     return
                 runtime = self.product.runtime_state()
-                target_count = int(self.options.get('dialogues', 0))
-                line_no = runtime.token.line if runtime.token is not None else 0
-                final_line = target_count > 0 and line_no >= target_count
-                if target_count > 0 and line_no > target_count:
-                    # The final line advanced between driver polls. Latch the
-                    # completed collection instead of following the restarted
-                    # fixture; retain the same bounded observer flush.
-                    self.collection_done_at = now
-                    return
-                if runtime.token is not None and runtime.pause_reason:
-                    # A product hold is a measured outcome, not a suite stop.
-                    # Advance the fixture once only to expose later cases in the
-                    # same product session. Never do this after the final case.
-                    if not final_line and self._continue_collection_after_hold(runtime):
-                        return
-                    if not final_line:
-                        self.w.close()
-                        self.qt_app.quit()
-                        return
-                else:
-                    self.recovery_pending = None
-                if final_line and (runtime.sent or runtime.pause_reason):
-                    self.collection_done_at = now
-                    return
+                self._continue_collection_by_watchdog(runtime, latest, now)
         except Exception as error:
             self.fail(str(error))
 

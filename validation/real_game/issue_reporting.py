@@ -1,29 +1,21 @@
-"""Publish bounded GitHub Issue diagnostics for Windows accuracy validation.
+"""Publish bounded GitHub Issue evidence for Windows validation.
 
-The reporter owns the complete GitHub Issue transaction: acquisition, fixed-slot
-selection, PATCH and post-write verification.  PowerShell only ensures that the
-GitHub CLI is authenticated and launches this module; issue bodies never cross a
-Windows console encoding boundary.
+The Issue surface intentionally carries raw, compact facts that a later chat can
+inspect directly. It does not publish validation-side safety/quality verdicts.
 """
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import io
 import json
 import re
 import subprocess
 import tempfile
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 HISTORY_SLOT_COUNT = 4
 MAX_ISSUE_BODY_CHARS = 64_000
-EVIDENCE_MARKER = "<!-- autoadv-analysis-evidence:zip+base64 -->"
-BASELINE_MARKER = "<!-- autoadv-validation-baseline -->"
 RUN_MARKER_RE = re.compile(
     r"<!--\s*autoadv-validation-run:(?P<run>\d{8}T\d{6}Z-[A-Za-z0-9_-]+)\s*-->"
 )
@@ -59,17 +51,6 @@ def _cell(value: Any) -> str:
     return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", " ")
 
 
-def _limited_items(lines: list[str], heading: str, items: Iterable[Any] | None,
-                   limit: int = 12) -> None:
-    values = [str(item) for item in (items or ()) if str(item).strip()]
-    if not values:
-        return
-    lines.extend(("", f"**{heading}**"))
-    lines.extend(f"- {sanitize_public_issue(item)}" for item in values[:limit])
-    if len(values) > limit:
-        lines.append(f"- … {len(values) - limit} more")
-
-
 def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -80,101 +61,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return value
 
 
-
-
-def _analysis_evidence_archive(root: Path, sha: str) -> tuple[str, str, list[dict[str, Any]]]:
-    """Return a compact, reconstructable bundle of the evidence needed for analysis.
-
-    The bundle intentionally excludes redistributable/non-redistributable media and runtime
-    artifacts.  It contains only structured measurement evidence plus a sanitized transcript.
-    """
-    candidates: list[Path] = [
-        root / "validation-summary.json",
-        root / "autoadv-accuracy.result.json",
-        root / "autoadv-accuracy.jsonl",
-    ]
-    candidates.extend(sorted(root.glob("autoadv-game-*.jsonl")))
-
-    payloads: list[tuple[str, bytes]] = []
-    for path in candidates:
-        if path.is_file():
-            payloads.append((path.name, path.read_bytes()))
-
-    log_path = root / "validation.log"
-    if log_path.is_file():
-        sanitized = sanitize_public_issue(
-            log_path.read_text(encoding="utf-8-sig", errors="replace")
-        ).encode("utf-8")
-        payloads.append(("validation.log", sanitized))
-
-    if not payloads:
-        raise ValueError("No analysis evidence exists to upload")
-
-    manifest_files = [
-        {
-            "name": name,
-            "bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
-        }
-        for name, content in payloads
-    ]
-    manifest = {
-        "schema": "autoadv-analysis-evidence-v1",
-        "run": root.name,
-        "commit": sha,
-        "files": manifest_files,
-    }
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, separators=(",", ":")))
-        for name, content in payloads:
-            archive.writestr(name, content)
-    archive_bytes = buffer.getvalue()
-    return (
-        base64.b64encode(archive_bytes).decode("ascii"),
-        hashlib.sha256(archive_bytes).hexdigest(),
-        manifest_files,
-    )
-
-
-def _append_analysis_evidence(lines: list[str], root: Path, sha: str) -> None:
-    encoded, digest, manifest_files = _analysis_evidence_archive(root, sha)
-    listed = ", ".join(item["name"] for item in manifest_files)
-    lines.extend((
-        "",
-        "<details><summary>analysis evidence bundle</summary>",
-        "",
-        EVIDENCE_MARKER,
-        f"ZIP SHA-256: `{digest}`",
-        f"Files: `{listed}`",
-        "Decode the following base64 as a ZIP archive; `manifest.json` contains per-file SHA-256 values.",
-        "",
-        "```text",
-        encoded,
-        "```",
-        "</details>",
-    ))
-
-
-def baseline_eligible(summary: dict[str, Any]) -> bool:
-    phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "accuracy"), None)
-    if not isinstance(phase, dict):
-        return False
-    return (
-        phase.get("report_present") is True
-        and phase.get("measurement_valid") is True
-        and phase.get("collection_complete") is True
-        and phase.get("validation_recovery_inputs") == 0
-        and phase.get("voice_safety_verified") is True
-        and isinstance(phase.get("quality"), dict)
-        and phase["quality"].get("process_audio_observation_rate") == 1.0
-        and phase["quality"].get("alignment_observation_rate") == 1.0
-        and phase["quality"].get("mix_environment_observation_rate") == 1.0
-        and not phase.get("runner_error")
-    )
-
-
 @dataclass(frozen=True)
 class Snapshot:
     run: str
@@ -183,11 +69,9 @@ class Snapshot:
 
 
 def format_snapshot(root: Path, sha: str) -> Snapshot:
-    summary_path = root / "validation-summary.json"
-    summary = _read_json(summary_path)
+    summary = _read_json(root / "validation-summary.json")
     if summary is None:
         raise ValueError("No verification summary exists to upload")
-
     run = root.name
     lines: list[str] = [
         f"<!-- autoadv-validation-run:{run} -->",
@@ -195,72 +79,37 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         f"Requested: `{summary.get('phase_requested', '-')}` · "
         f"{summary.get('started_utc', '-')} → {summary.get('ended_utc', '-')}",
         "",
-        "| phase | observed/requested | collection | measurement | auto | safe | PCM | alignment | mix | progress fg | progress early | fallback fg | fallback early | recovery | early | overhold | misattr | error |",
-        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| phase | fixture/requested | hook outputs | utterances | presentations | inputs | recovery | collection | error |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for phase in summary.get("phases", ()):
-        quality = phase.get("quality") if isinstance(phase.get("quality"), dict) else {}
+        facts = phase.get("facts") if isinstance(phase.get("facts"), dict) else {}
         lines.append(
             f"| {_cell(phase.get('phase'))} | "
-            f"{_metric(quality.get('observed_cases'))}/{_metric(quality.get('requested_cases'))} | "
-            f"{_metric(phase.get('collection_valid'))} | {_metric(phase.get('measurement_valid'))} | "
-            f"{_metric(quality.get('automatic_advance_rate'))} | "
-            f"{_metric(quality.get('safe_automatic_advance_rate'))} | "
-            f"{_metric(quality.get('process_audio_observation_rate'))} | "
-            f"{_metric(quality.get('alignment_observation_rate'))} | "
-            f"{_metric(quality.get('mix_environment_observation_rate'))} | "
-            f"{_metric(quality.get('foreground_progress_completion_rate'))} | "
-            f"{_metric(quality.get('progress_early_input_rate'))} | "
-            f"{_metric(quality.get('foreground_fallback_rate'))} | "
-            f"{_metric(quality.get('fallback_early_input_rate'))} | "
-            f"{_metric(quality.get('recovery_rate'))} | {_metric(quality.get('early_input_rate'))} | "
-            f"{_metric(quality.get('overhold_rate'))} | {_metric(quality.get('misattribution_rate'))} | "
-            f"{_cell(phase.get('runner_error'))} |"
+            f"{_metric(facts.get('fixture_cases'))}/{_metric(facts.get('requested_cases'))} | "
+            f"{_metric(facts.get('hook_outputs'))} | {_metric(facts.get('utterances'))} | "
+            f"{_metric(facts.get('presentation_completions'))} | {_metric(facts.get('advance_inputs'))} | "
+            f"{_metric(facts.get('validation_recovery_inputs'))} | "
+            f"{_metric(phase.get('collection_complete'))} | {_cell(phase.get('runner_error'))} |"
         )
     if summary.get("launcher_error"):
         lines.extend(("", f"Launcher error: `{_cell(summary.get('launcher_error'))}`"))
 
-    for phase_name in ("accuracy",):
-        report = _read_json(root / f"autoadv-{phase_name}.result.json")
-        if report is None:
-            continue
-        lines.extend(("", f"<details><summary>{phase_name} diagnostics</summary>"))
-        performance = report.get("performance")
-        if isinstance(performance, dict) and performance:
-            lines.extend((
-                "",
-                "| metric | count | p50 | p95 | max |",
-                "| --- | ---: | ---: | ---: | ---: |",
-            ))
-            for name, stats in performance.items():
-                stats = stats if isinstance(stats, dict) else {}
-                lines.append(
-                    f"| {_cell(name)} | {_metric(stats.get('count'))} | {_metric(stats.get('p50'))} | "
-                    f"{_metric(stats.get('p95'))} | {_metric(stats.get('max'))} |"
-                )
-        if phase_name == "accuracy" and isinstance(report.get("line_results"), list):
-            lines.extend((
-                "",
-                "| case | scene | speaker | environment | mix | outcome | completion | PCM | alignment | game | source end→input ms |",
-                "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- | ---: |",
-            ))
-            for line in report["line_results"]:
-                if not isinstance(line, dict):
+    report = _read_json(root / "autoadv-accuracy.result.json")
+    if report is not None:
+        errors = [str(item) for item in report.get("errors", ()) if str(item).strip()]
+        if errors:
+            lines.extend(("", "**Evidence integrity errors**"))
+            lines.extend(f"- {sanitize_public_issue(item)}" for item in errors[:12])
+        timeline = report.get("timeline")
+        if isinstance(timeline, list):
+            lines.extend(("", "<details open><summary>analysis evidence timeline</summary>", "", "```jsonl"))
+            for item in timeline:
+                if not isinstance(item, dict):
                     continue
-                lines.append(
-                    f"| {_cell(line.get('scenario'))} | {_cell(line.get('scene'))} | "
-                    f"{_cell(line.get('speaker_family'))} | {_cell(line.get('audio_environment'))} | "
-                    f"{_cell(','.join(line.get('mix_channels_observed') or []))} | {_cell(line.get('outcome'))} | "
-                    f"{_cell(line.get('completion_reason'))} | {_metric(line.get('pcm_observed'))} | "
-                    f"{_metric(line.get('alignment_inference_count'))} | "
-                    f"{_cell(line.get('game_outcome'))} | {_metric(line.get('source_acoustic_end_to_input_ms'))} |"
-                )
-        _limited_items(lines, "Quality issues", report.get("quality_issues"))
-        _limited_items(lines, "Errors", report.get("errors"))
-        _limited_items(lines, "Diagnostics", report.get("diagnostics"), 8)
-        lines.extend(("", "</details>"))
-
-    _append_analysis_evidence(lines, root, sha)
+                encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+                lines.append(sanitize_public_issue(encoded))
+            lines.extend(("```", "</details>"))
 
     accuracy_phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "accuracy"), None)
     if isinstance(accuracy_phase, dict) and not accuracy_phase.get("report_present"):
@@ -280,7 +129,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
     body = "\n".join(lines)
     if len(body) > MAX_ISSUE_BODY_CHARS:
         raise ValueError(
-            f"Issue diagnostics exceed bounded comment size: {len(body)} > {MAX_ISSUE_BODY_CHARS}"
+            f"Issue evidence exceeds bounded comment size: {len(body)} > {MAX_ISSUE_BODY_CHARS}"
         )
     return Snapshot(run=run, body=body, summary=summary)
 
@@ -309,11 +158,10 @@ def _flatten_comments(value: Any) -> list[dict[str, Any]]:
     return list(items)
 
 
-def _fixed_issue_surface(comments: Iterable[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
-    """Require exactly one pre-existing comment for every machine-owned marker."""
+def _fixed_issue_surface(comments: Iterable[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Require exactly one pre-existing comment for each evidence-history slot."""
     matches: dict[str, list[dict[str, Any]]] = {
-        **{history_marker(slot): [] for slot in range(1, HISTORY_SLOT_COUNT + 1)},
-        BASELINE_MARKER: [],
+        history_marker(slot): [] for slot in range(1, HISTORY_SLOT_COUNT + 1)
     }
     for comment in comments:
         body = str(comment.get("body") or "").lstrip()
@@ -321,23 +169,14 @@ def _fixed_issue_surface(comments: Iterable[dict[str, Any]]) -> tuple[dict[int, 
             if body.startswith(marker):
                 matches[marker].append(comment)
                 break
-
-    invalid = [
-        f"{marker}: {len(found)}"
-        for marker, found in matches.items()
-        if len(found) != 1
-    ]
+    invalid = [f"{marker}: {len(found)}" for marker, found in matches.items() if len(found) != 1]
     if invalid:
         raise ValueError(
             "Validation Issue surface is not canonical; expected exactly one "
-            "comment for each fixed marker (" + ", ".join(invalid) + ")"
+            "comment for each evidence history marker (" + ", ".join(invalid) + ")"
         )
-
-    slots = {
-        slot: matches[history_marker(slot)][0]
-        for slot in range(1, HISTORY_SLOT_COUNT + 1)
-    }
-    return slots, matches[BASELINE_MARKER][0]
+    return {slot: matches[history_marker(slot)][0]
+            for slot in range(1, HISTORY_SLOT_COUNT + 1)}
 
 
 def _choose_history_slot(slots: dict[int, dict[str, Any]], run: str) -> tuple[int, int]:
@@ -365,30 +204,23 @@ def _choose_history_slot(slots: dict[int, dict[str, Any]], run: str) -> tuple[in
 
 def choose_history_slot(comments: Iterable[dict[str, Any]], run: str) -> tuple[int, int]:
     """Return the one fixed history comment to PATCH for this run."""
-    slots, _ = _fixed_issue_surface(comments)
-    return _choose_history_slot(slots, run)
+    return _choose_history_slot(_fixed_issue_surface(comments), run)
 
 
 def build_upload_plan(root: Path, sha: str,
                       comments: Iterable[dict[str, Any]]) -> dict[str, Any]:
     snapshot = format_snapshot(root, sha)
     comments = list(comments)
-    slots, baseline = _fixed_issue_surface(comments)
+    slots = _fixed_issue_surface(comments)
     history_slot, comment_id = _choose_history_slot(slots, snapshot.run)
-
-    operations = [{
+    # The old inferred "known-good baseline" is intentionally no longer
+    # maintained. Evidence history is the only machine-owned publication path.
+    return {"run": snapshot.run, "operations": [{
         "role": "history",
         "slot": history_slot,
         "comment_id": comment_id,
         "body": f"{history_marker(history_slot)}\n{snapshot.body}",
-    }]
-    if baseline_eligible(snapshot.summary):
-        operations.append({
-            "role": "baseline",
-            "comment_id": int(baseline["id"]),
-            "body": f"{BASELINE_MARKER}\n{snapshot.body}",
-        })
-    return {"run": snapshot.run, "operations": operations}
+    }]}
 
 
 class IssueClient(Protocol):
@@ -475,11 +307,7 @@ def _verify_operation(operation: dict[str, Any], run: str, comment: dict[str, An
     if int(comment.get("id", -1)) != expected_id:
         raise RuntimeError(f"GitHub verification returned the wrong comment for {operation['role']}")
     body = str(comment.get("body") or "")
-    expected_marker = (
-        history_marker(int(operation["slot"]))
-        if operation["role"] == "history"
-        else BASELINE_MARKER
-    )
+    expected_marker = history_marker(int(operation["slot"]))
     if not body.lstrip().startswith(expected_marker):
         raise RuntimeError(f"GitHub verification lost the {operation['role']} marker")
     if _run_from_body(body) != run:

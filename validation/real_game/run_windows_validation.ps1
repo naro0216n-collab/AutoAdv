@@ -219,7 +219,6 @@ try {
                     Phase = $currentPhase
                     GameExecutable = $gameExecutable
                     Automated = $true
-                    MeasurementOnly = $true
                     Trace = $trace
                     Report = $report
                     TimeoutSeconds = 360
@@ -243,12 +242,7 @@ try {
             collection_valid = if ($measurement) { $measurement.collection_valid } else { $null }
             measurement_valid = if ($measurement) { $measurement.measurement_valid } else { $null }
             collection_complete = if ($measurement) { $measurement.collection_complete } else { $null }
-            advancement_observed = if ($measurement) { $measurement.advancement_observed } else { $null }
-            automatic_continuation_verified = if ($measurement) { $measurement.automatic_continuation_verified } else { $null }
-            validation_recovery_inputs = if ($measurement) { $measurement.validation_recovery_inputs } else { $null }
-            voice_safety_verified = if ($measurement) { $measurement.voice_safety_verified } else { $null }
-            quality = if ($measurement) { $measurement.quality } else { $null }
-            quality_issues = if ($measurement) { @($measurement.quality_issues) } else { @() }
+            facts = if ($measurement) { $measurement.facts } else { $null }
             report_present = [bool]$measurement
             runner_error = $phaseError
         })
@@ -265,7 +259,7 @@ try {
 }
 
 $summary = [ordered]@{
-    schema = 'autoadv-local-validation-v3'
+    schema = 'autoadv-local-validation-v4'
     repository = $repository
     branch = 'develop'
     commit = $gitSha
@@ -307,7 +301,7 @@ if ($errorText) {
     }
 }
 if (-not $finalError) {
-    Write-Host 'AutoAdv measurement completed for all requested phases. Product accuracy and safety remain in the reported metrics.'
+    Write-Host 'AutoAdv evidence collection completed for all requested phases. Product behavior remains for later analysis.'
 } else {
     Write-Warning $finalError
     Write-Warning "Persistent log: $transcriptPath"

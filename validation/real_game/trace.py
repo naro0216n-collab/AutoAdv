@@ -1,15 +1,16 @@
-"""Validation-only serialization of product semantic and telemetry events."""
+"""Validation evidence writer.
+
+The validation layer records product facts; it does not turn those facts into a
+second success/failure state machine.  Raw selected Hook text and the actual
+Utterance produced from it are intentionally retained so a remote analysis can
+reconstruct framing/merging failures without access to the Windows run folder.
+"""
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from threading import Lock
 import time
-
-
-def text_digest(value: str) -> str:
-    return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
 class ValidationTrace:
@@ -20,8 +21,8 @@ class ValidationTrace:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open('x', encoding='utf-8') as stream:
             stream.write(json.dumps({
-                'event': 'trace_started', 'version': 2, 'at_ns': time.monotonic_ns()
-            }, ensure_ascii=False) + '\n')
+                'event': 'trace_started', 'version': 3, 'at_ns': time.monotonic_ns()
+            }, ensure_ascii=False, separators=(',', ':')) + '\n')
 
     def emit(self, event: str, **fields: object) -> None:
         with self._lock:
@@ -32,7 +33,16 @@ class ValidationTrace:
 
 
 class ProductTraceObserver:
-    """Translate generic product events into the validation JSONL contract."""
+    """Persist selected product facts without validation-side interpretation."""
+
+    _PASSTHROUGH = frozenset({
+        'monitor_started', 'monitor_ended', 'external_hook_transition',
+        'presentation_complete', 'next_line_timeout', 'advance_attempt',
+        'advance_input', 'audio_observation_boundary', 'audio_deadline_elapsed',
+        'native_capture_summary', 'native_audio_error', 'native_pcm',
+        'alignment_inference', 'native_audio_observation', 'utterance_progress',
+        'tts_timing', 'tts_result', 'controller_handoff',
+    })
 
     def __init__(self, trace: ValidationTrace, application):
         self.trace = trace
@@ -47,55 +57,24 @@ class ProductTraceObserver:
             return {}
         return {'session': token.session, 'line': token.line}
 
-    def _emit_hook(self, event, outcome) -> None:
-        if outcome.connection_transition in ('connected', 'changed'):
-            self.trace.emit(
-                'hook_connected', pid=event.process_id,
-                generation=event.host_generation, connection=event.connection_generation)
-
-        if outcome.capture.changed and event.source is not None:
-            if event.kind == 'created':
-                self.trace.emit(
-                    'hook_candidate_created', pid=event.process_id,
-                    generation=event.host_generation, connection=event.connection_generation,
-                    source=event.source.identity, hook_sequence=event.sequence)
-            elif event.kind == 'output':
-                self.trace.emit(
-                    'hook_candidate_output', pid=event.process_id,
-                    generation=event.host_generation, connection=event.connection_generation,
-                    source=event.source.identity, hook_sequence=event.sequence,
-                    raw_hash=text_digest(event.text))
-
-        if event.kind == 'diagnostic':
-            self.trace.emit(
-                'hook_native_diagnostic', pid=event.process_id,
-                generation=event.host_generation, connection=event.connection_generation,
-                info_type=event.detail.partition(':')[0][:64],
-                message_hash=text_digest(event.detail))
-
     def on_event(self, event: str, token, detail: dict) -> None:
         if event == 'selected_hook_output':
             fields = dict(detail)
-            raw = fields.pop('raw', '')
-            self.trace.emit('hook_output', **fields, raw_hash=text_digest(raw))
-            return
-
-        if event == 'hook_event':
-            self._emit_hook(detail['hook_event'], detail['outcome'])
+            self.trace.emit('hook_output', **fields)
             return
 
         if event == 'utterance' and token is not None:
-            utterance = self.application.runtime_state().utterance
-            if utterance is None or self.application.runtime_state().token != token:
+            runtime = self.application.runtime_state()
+            utterance = runtime.utterance
+            if utterance is None or runtime.token != token:
                 return
             self.trace.emit(
                 'utterance', session=token.session, line=token.line,
                 source=utterance.source, hook_sequence=utterance.sequence,
-                raw_hash=text_digest(utterance.raw), body_hash=text_digest(utterance.text),
-                speaker=utterance.speaker, advance_mode=utterance.advance_mode.value,
-                use_tts=utterance.use_tts, reading_units=utterance.reading_unit_count,
-                text_wait_ms=utterance.text_wait_ms,
-                uncertain_text_fallback=utterance.uncertain_text_fallback)
+                raw=utterance.raw, body=utterance.text, speaker=utterance.speaker,
+                advance_mode=utterance.advance_mode.value, use_tts=utterance.use_tts,
+                uncertain_text_fallback=utterance.uncertain_text_fallback,
+                reading_units=utterance.reading_unit_count, text_wait_ms=utterance.text_wait_ms)
             return
 
         if event == 'native_ready':
@@ -105,6 +84,8 @@ class ProductTraceObserver:
                     audio_pid=detail.get('audio_pid', 0))
             return
 
+        if event not in self._PASSTHROUGH:
+            return
         fields = dict(detail)
         fields.update(self._token_fields(token))
         if event == 'presentation_complete':
@@ -114,13 +95,4 @@ class ProductTraceObserver:
         if event == 'audio_observation_boundary' and token is not None:
             fields.pop('line', None)
             fields['after_line'] = token.line
-        if event in {
-            'monitor_started', 'monitor_ended', 'external_hook_transition',
-            'presentation_complete', 'next_line_timeout', 'advance_attempt',
-            'advance_input', 'audio_observation_boundary', 'audio_deadline_elapsed',
-            'native_capture_summary', 'native_audio_error',
-            'native_pcm', 'alignment_inference', 'native_audio_observation',
-            'utterance_progress', 'utterance_progress_end_estimate',
-            'tts_timing', 'tts_result', 'controller_handoff',
-        }:
-            self.trace.emit(event, **fields)
+        self.trace.emit(event, **fields)

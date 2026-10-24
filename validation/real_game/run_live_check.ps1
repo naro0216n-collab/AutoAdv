@@ -6,18 +6,15 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')]
     [string] $Phase,
-    [int] $StartLine = 0,
     [string] $Trace = '',
-    [string] $Oracle = '',
+    [string] $Evidence = '',
     [string] $Report = '',
     [string] $GameExecutable = $env:AUTOADV_VALIDATION_GAME,
     [switch] $Automated,
     [string] $Voice = '',
     [string] $IrodoriUrl = 'http://127.0.0.1:8088',
     [int] $TimeoutSeconds = 120,
-    [int] $MaxVoiceHoldMs = 0,
     [switch] $UncertainFallback,
-    [switch] $MeasurementOnly,
     [string] $PythonExecutable = 'python'
 )
 $ErrorActionPreference = 'Stop'
@@ -26,7 +23,6 @@ $scratch = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 if (-not $Trace) {
     $Trace = Join-Path $scratch ('autoadv-real-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
-if ($MaxVoiceHoldMs -lt 0) { throw 'MaxVoiceHoldMs cannot be negative' }
 if ($Automated -and -not $GameExecutable) {
     throw 'Automated real-game validation requires a prebuilt -GameExecutable'
 }
@@ -48,28 +44,20 @@ $scene = switch ($Phase) {
     'mixed'  { 'mixed' }
     default  { 'start' }
 }
-if ($GameExecutable -and $StartLine -eq 0) {
-    $StartLine = switch ($scene) {
-        'accuracy' { 1 }
-        'tts'    { 4 }
-        default  { 1 }
-    }
+# The fixture evidence file records only authored case starts. It does not inspect
+# playback, Hook state or AutoAdv decisions.
+if ($GameExecutable -and $Phase -eq 'accuracy' -and -not $Evidence) {
+    $Evidence = Join-Path $scratch ('autoadv-fixture-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
-# The independent game observer is required only where native voice playback
-# must be compared with AutoAdv input timing. Text advancement is established
-# by the product input followed by the next selected Hook, not game dismissal.
-if ($GameExecutable -and $Phase -in @('accuracy', 'mixed', 'stress') -and -not $Oracle) {
-    $Oracle = Join-Path $scratch ('autoadv-game-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+if ($Phase -eq 'accuracy' -and -not $Evidence) {
+    throw "Phase $Phase requires fixture evidence. Supply -Evidence or launch the validation fixture."
 }
-if ($Phase -in @('accuracy', 'mixed', 'stress') -and -not $Oracle) {
-    throw "Phase $Phase requires game voice observations. Supply -Oracle or launch the validation fixture."
-}
-if ($GameExecutable -and $Oracle -and (Test-Path -LiteralPath $Oracle)) {
-    throw "Refusing to reuse an existing game observation file: $Oracle"
+if ($GameExecutable -and $Evidence -and (Test-Path -LiteralPath $Evidence)) {
+    throw "Refusing to reuse an existing fixture evidence file: $Evidence"
 }
 
 $oldTrace = $env:AUTOADV_VALIDATION_TRACE
-$oldOracle = $env:AUTOADV_GAME_ORACLE
+$oldEvidence = $env:AUTOADV_GAME_EVIDENCE
 $oldScene = $env:AUTOADV_VALIDATION_SCENARIO
 $oldGate = $env:AUTOADV_VALIDATION_CONTROL_FILE
 $oldSession = $env:AUTOADV_VALIDATION_SESSION
@@ -103,90 +91,13 @@ try {
         $env:APPDATA = $settingsDir
         $env:AUTOADV_VALIDATION_CONTROL_FILE = $gate
     }
-    if ($Automated -and $Phase -eq 'accuracy') {
-        # The hosted Windows runner may have no usable render endpoint. Report
-        # the OS prerequisite separately from game and AutoAdv acceptance.
-        # This does not play audio, inspect game state, or alter the product path.
-        $audioEnvironment = [ordered]@{}
-        foreach ($serviceName in @('Audiosrv', 'AudioEndpointBuilder')) {
-            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-            $audioEnvironment[$serviceName] = if ($service) { [string]$service.Status } else { 'not_found' }
-        }
-        try {
-            $audioEnvironment['sound_devices'] = @(
-                Get-CimInstance -ClassName Win32_SoundDevice -ErrorAction Stop |
-                    ForEach-Object { [ordered]@{ name = $_.Name; status = $_.Status } }
-            )
-        } catch {
-            $audioEnvironment['sound_devices_error'] = $_.Exception.Message
-        }
-        try {
-            $audioEnvironment['audio_endpoints'] = @(
-                Get-PnpDevice -Class AudioEndpoint -ErrorAction Stop |
-                    ForEach-Object { [ordered]@{ name = $_.FriendlyName; status = [string]$_.Status } }
-            )
-        } catch {
-            $audioEnvironment['audio_endpoints_error'] = $_.Exception.Message
-        }
-        # PnP and Win32_SoundDevice do not enumerate the same objects as the
-        # Core Audio API. Query the render endpoints through IMMDeviceEnumerator
-        # itself before attributing silent Process Loopback PCM to the runner.
-        try {
-            Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-public class AudioDeviceEnumeratorClass {}
-[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IAudioDeviceEnumerator {
-    void EnumAudioEndpoints(int flow, uint mask, out IAudioDeviceCollection devices);
-    void GetDefaultAudioEndpoint(int flow, int role, out IAudioDevice device);
-}
-[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IAudioDeviceCollection {
-    void GetCount(out uint count);
-    void Item(uint index, out IAudioDevice device);
-}
-[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IAudioDevice {}
-public static class AudioRenderProbe {
-    public static string Inspect() {
-        var enumerator = (IAudioDeviceEnumerator)new AudioDeviceEnumeratorClass();
-        try {
-            // eRender=0, DEVICE_STATE_ACTIVE=1, eMultimedia=1.
-            IAudioDeviceCollection collection;
-            enumerator.EnumAudioEndpoints(0, 1, out collection);
-            uint count;
-            try { collection.GetCount(out count); }
-            finally { Marshal.ReleaseComObject(collection); }
-            string defaultResult;
-            try {
-                IAudioDevice device;
-                enumerator.GetDefaultAudioEndpoint(0, 1, out device);
-                defaultResult = "present";
-                Marshal.ReleaseComObject(device);
-            } catch (COMException e) {
-                defaultResult = "missing_hresult_0x" + ((uint)e.HResult).ToString("X8");
-            }
-            return "active_render_count=" + count + " default_multimedia_render=" + defaultResult;
-        } finally { Marshal.ReleaseComObject(enumerator); }
-    }
-}
-'@ -ErrorAction Stop
-            $audioEnvironment['wasapi_render'] = [AudioRenderProbe]::Inspect()
-        } catch {
-            $audioEnvironment['wasapi_render_probe_error'] = $_.Exception.Message
-        }
-        Write-Host ('Windows render environment (diagnostic only): ' +
-            (ConvertTo-Json -InputObject $audioEnvironment -Compress -Depth 4))
-    }
     $resolvedGameExe = ''
     if ($GameExecutable) {
         $resolvedGameExe = (Resolve-Path -LiteralPath $GameExecutable).Path
         if (-not (Test-Path -LiteralPath $resolvedGameExe -PathType Leaf)) {
             throw "Prebuilt validation game executable not found: $resolvedGameExe"
         }
-        $env:AUTOADV_GAME_ORACLE = $Oracle
+        $env:AUTOADV_GAME_EVIDENCE = $Evidence
         $env:AUTOADV_VALIDATION_SCENARIO = $scene
         # Fixture build/packaging is deliberately outside this acceptance run.
         # This step only starts an already built game process.
@@ -195,12 +106,12 @@ public static class AudioRenderProbe {
     }
     if ($null -ne $gameProcess) {
         $deadline = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($Oracle -and -not (Test-Path -LiteralPath $Oracle -PathType Leaf)) {
+        while ($Evidence -and -not (Test-Path -LiteralPath $Evidence -PathType Leaf)) {
             if ($gameProcess.HasExited) {
-                throw "Validation game exited before writing its observation start record ($($gameProcess.ExitCode))"
+                throw "Validation game exited before writing its fixture evidence start record ($($gameProcess.ExitCode))"
             }
             if ($deadline.Elapsed.TotalSeconds -gt 40) {
-                throw 'Validation game did not start observation within 40 seconds'
+                throw 'Validation game did not start fixture evidence within 40 seconds'
             }
             Start-Sleep -Milliseconds 200
         }
@@ -212,11 +123,11 @@ public static class AudioRenderProbe {
     $env:AUTOADV_VALIDATION_TRACE = $Trace
     Push-Location $repo
     try {
-        # Normal advancement remains in the production GUI Controller. Advancement-accuracy measurement may use a separately traced recovery input after a measured product hold, solely to expose later collection cases.
+        # Normal advancement remains in the production GUI Controller. Accuracy collection uses one fixed-time watchdog recovery only when the authored fixture case does not change.
         if ($Automated) {
             $gameExe = $resolvedGameExe
             $config = @{
-                oracle = $Oracle; gate = $gate; executable = $gameExe;
+                evidence = $Evidence; gate = $gate; executable = $gameExe;
                 phase = $Phase; timeout_seconds = $TimeoutSeconds;
                 dialogues = $(switch ($Phase) {
                     'hook' { 1 }; 'reading' { 3 };
@@ -225,7 +136,8 @@ public static class AudioRenderProbe {
                 });
                 continue_collection = ($Phase -eq 'accuracy');
                 voice = $Voice; irodori_url = $IrodoriUrl;
-                fallback = [bool](($Phase -eq 'accuracy') -or $UncertainFallback)
+                fallback = [bool](($Phase -eq 'accuracy') -or $UncertainFallback);
+                case_watchdog_seconds = 12.0; final_observation_seconds = 12.0
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }
@@ -236,10 +148,7 @@ public static class AudioRenderProbe {
         }
         $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace,
                        '--phase', $Phase, '--report', $Report)
-        if ($MaxVoiceHoldMs -gt 0) { $arguments += @('--max-voice-hold-ms', [string]$MaxVoiceHoldMs) }
-        if ($MeasurementOnly) { $arguments += '--measurement-only' }
-        if ($Oracle) { $arguments += @('--oracle', $Oracle) }
-        if ($StartLine -gt 0) { $arguments += @('--start-line', [string]$StartLine) }
+        if ($Evidence) { $arguments += @('--evidence', $Evidence) }
         if (Test-Path -LiteralPath $Trace) {
             $auditExit = Invoke-ValidationPython $arguments
         } else {
@@ -254,13 +163,13 @@ public static class AudioRenderProbe {
         if ($auditExit -ne 0) {
             throw "Real game measurement/verification could not complete (phase=$Phase, trace=$Trace)"
         }
-        Write-Host "Collected and audited AutoAdv product observations (phase=$Phase). Product quality is reported as measurements, independently from collection validity."
+        Write-Host "Collected AutoAdv and fixture evidence (phase=$Phase). Product behavior is left for later analysis."
     } finally {
         Pop-Location
     }
 } finally {
     $env:AUTOADV_VALIDATION_TRACE = $oldTrace
-    $env:AUTOADV_GAME_ORACLE = $oldOracle
+    $env:AUTOADV_GAME_EVIDENCE = $oldEvidence
     $env:AUTOADV_VALIDATION_SCENARIO = $oldScene
     $env:AUTOADV_VALIDATION_CONTROL_FILE = $oldGate
     $env:AUTOADV_VALIDATION_SESSION = $oldSession
