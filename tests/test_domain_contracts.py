@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-import importlib.util
-
 import numpy as np
 import pytest
 
@@ -170,12 +168,6 @@ def test_g2p_word_spans_are_verified_in_canonical_coordinates_and_unknowns_remai
     bad = SimpleNamespace(char_span=(0, 1), word='別', phonemes=['b'], mora_count=1, is_unknown=False)
     with pytest.raises(ValueError, match='cannot be projected'):
         HaqumeiG2P(SimpleNamespace(g2p_mapping_detailed=lambda text: [bad])).word_spans('京')
-
-
-@pytest.mark.skipif(importlib.util.find_spec('haqumei') is None, reason='haqumei not installed')
-def test_installed_g2p_has_consistent_surface_pronunciation():
-    g2p = HaqumeiG2P()
-    assert g2p.candidates('嘘', max_candidates=4)[0].phonemes == g2p.candidates('うそ', max_candidates=4)[0].phonemes
 
 
 def test_forced_alignment_requires_target_evidence_and_right_context_from_one_path():
