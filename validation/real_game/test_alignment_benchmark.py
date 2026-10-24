@@ -11,7 +11,8 @@ import numpy as np
 from autoadv.g2p import PronunciationCandidate
 from autoadv import native_runtime
 from validation.real_game.benchmark_alignment import (
-    _degrade, _load_endpoint_oracle, _snapshot_sample_ends, _stream_align, run,
+    CONDITIONS, _degrade, _load_endpoint_oracle, _snapshot_sample_ends, _stream_align,
+    contract_failures, run,
 )
 
 
@@ -54,8 +55,14 @@ class OnDemandAlignmentBenchmarkContracts(unittest.TestCase):
         self.assertFalse(np.array_equal(_degrade(mono, 'quiet', 7), mono))
         self.assertTrue(np.array_equal(_degrade(mono, 'bgm', 7, mono),
                                        _degrade(mono, 'bgm', 7, mono)))
-        self.assertTrue(np.array_equal(_degrade(mono, 'truncated', 7)[:120],
-                                       np.zeros(120, dtype='float32')))
+        truncated = _degrade(mono, 'truncated', 7)
+        self.assertTrue(np.array_equal(truncated[-120:], np.zeros(120, dtype='float32')))
+        self.assertTrue(np.array_equal(truncated[:120], mono[:120]))
+        explicit = _degrade(mono, 'truncated', 7, truncate_from_sample=100)
+        self.assertTrue(np.array_equal(explicit[:100], mono[:100]))
+        self.assertTrue(np.array_equal(explicit[100:], np.zeros(380, dtype='float32')))
+        with self.assertRaises(ValueError):
+            _degrade(mono, 'truncated', 7, truncate_from_sample=len(mono))
 
     def test_benchmark_measures_product_alignment_contract_not_cer(self):
         with TemporaryDirectory() as root:
@@ -83,6 +90,47 @@ class OnDemandAlignmentBenchmarkContracts(unittest.TestCase):
         self.assertGreater(report['samples'][0]['snapshot_count'], 1)
         self.assertIn('commit_capture_end_ms', report['samples'][0])
         self.assertIn('commit_observed_at_ms', report['samples'][0])
+
+
+    def test_benchmark_contract_requires_clean_and_bgm_and_rejects_missing_suffix_commit(self):
+        passing = {
+            'conditions': {
+                'clean': {'runs': 2, 'associated': 2, 'committed': 2,
+                          'early_commits': 0, 'early_decisions': 0},
+                'bgm': {'runs': 2, 'associated': 2, 'committed': 2,
+                        'early_commits': 0, 'early_decisions': 0},
+                'truncated': {'runs': 2, 'committed': 0},
+            }
+        }
+        self.assertEqual(contract_failures(passing), [])
+        unsafe = {
+            'conditions': {
+                'clean': {'runs': 1, 'associated': 1, 'committed': 1,
+                          'early_commits': 1, 'early_decisions': 0},
+                'bgm': {'runs': 1, 'associated': 1, 'committed': 0,
+                        'early_commits': 0, 'early_decisions': 0},
+                'truncated': {'runs': 1, 'committed': 1},
+            }
+        }
+        failures = contract_failures(unsafe)
+        self.assertTrue(any('early committed' in item for item in failures))
+        self.assertTrue(any('bgm target end' in item for item in failures))
+        self.assertTrue(any('missing target suffix' in item for item in failures))
+
+    def test_default_condition_set_contains_every_hard_contract_condition(self):
+        self.assertIn('clean', CONDITIONS)
+        self.assertIn('bgm', CONDITIONS)
+        self.assertIn('truncated', CONDITIONS)
+
+    def test_truncated_contract_control_removes_annotated_speech_suffix(self):
+        import json
+        manifest = json.loads((Path(__file__).parent / 'VOICE_MANIFEST.json').read_text(
+            encoding='utf-8'))
+        _, oracle = _load_endpoint_oracle(manifest)
+        for sample in manifest['samples']:
+            cutoff_ms = float(oracle[sample['id']]['speech_end_ms']) * .75
+            self.assertLess(cutoff_ms, float(oracle[sample['id']]['speech_end_ms']))
+            self.assertLess(cutoff_ms, float(sample['duration_s']) * 1000.0)
 
     def test_snapshot_schedule_matches_native_cumulative_cadence(self):
         ends = _snapshot_sample_ends(1600 * 48)

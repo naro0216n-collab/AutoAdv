@@ -43,7 +43,8 @@ def _load_pcm(file: Path, sha256: str) -> np.ndarray:
 
 
 def _degrade(mono: np.ndarray, condition: str, seed: int,
-             bgm: np.ndarray | None = None) -> np.ndarray:
+             bgm: np.ndarray | None = None, *,
+             truncate_from_sample: int | None = None) -> np.ndarray:
     signal = mono.copy()
     if condition == 'quiet':
         signal *= .125
@@ -52,7 +53,15 @@ def _degrade(mono: np.ndarray, condition: str, seed: int,
     elif condition == 'clipped':
         signal = np.clip(signal * 4, -.45, .45)
     elif condition == 'truncated':
-        signal[:round(len(signal) * .25)] = 0
+        # The benchmark supplies a cutoff derived from its independent speech
+        # endpoint oracle.  The fallback keeps this helper deterministic when
+        # exercised in isolation, but product-contract runs do not infer the
+        # missing suffix from the file boundary.
+        cutoff = (round(len(signal) * .75)
+                  if truncate_from_sample is None else int(truncate_from_sample))
+        if not (0 < cutoff < len(signal)):
+            raise ValueError('truncated condition requires an internal cutoff')
+        signal[cutoff:] = 0
     elif condition == 'bgm':
         if bgm is None or len(bgm) == 0:
             raise ValueError('BGM reference audio required')
@@ -303,6 +312,16 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
             if condition == 'bgm':
                 tail = np.zeros(round(PERSISTENT_CONTEXT_MS * 48), dtype='float32')
                 degraded = _degrade(np.concatenate((mono, tail)), condition, seed + index, bgm)
+            elif condition == 'truncated':
+                oracle = endpoint_oracle[sample['id']]
+                # Remove the final quarter of the independently annotated
+                # foreground speech interval, not merely the file tail.  This
+                # guarantees that the negative control is missing target
+                # speech even when the source file contains trailing silence.
+                truncate_from_sample = round(float(oracle['speech_end_ms']) * .75 * 48)
+                degraded = _degrade(
+                    mono, condition, seed + index, bgm,
+                    truncate_from_sample=truncate_from_sample)
             else:
                 degraded = _degrade(mono, condition, seed + index, bgm)
             observation_horizon_ms = len(degraded) / 48.0
@@ -361,6 +380,51 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
     }
 
 
+
+def contract_failures(result: dict) -> list[str]:
+    """Return product-critical alignment failures with an unambiguous oracle.
+
+    Latency and endpoint error remain measured outputs rather than being folded
+    into a synthetic score.  The hard contract only covers facts the product
+    can state without preference tuning: clean and persistent-BGM targets must
+    be found without an early commit, while a deliberately missing target
+    suffix must never be promoted to a committed end.
+    """
+    failures: list[str] = []
+    conditions = result.get('conditions', {})
+
+    def require_complete(name: str) -> None:
+        item = conditions.get(name)
+        if not isinstance(item, dict):
+            failures.append(f'{name} condition missing')
+            return
+        runs = int(item.get('runs', 0) or 0)
+        if runs <= 0:
+            failures.append(f'{name} condition has no runs')
+            return
+        if int(item.get('associated', 0) or 0) != runs:
+            failures.append(f'{name} target was not associated on every run')
+        if int(item.get('committed', 0) or 0) != runs:
+            failures.append(f'{name} target end was not committed on every run')
+        if int(item.get('early_commits', 0) or 0) != 0:
+            failures.append(f'{name} produced an early committed end')
+        if int(item.get('early_decisions', 0) or 0) != 0:
+            failures.append(f'{name} exposed an early completion decision')
+
+    require_complete('clean')
+    require_complete('bgm')
+
+    truncated = conditions.get('truncated')
+    if not isinstance(truncated, dict):
+        failures.append('truncated condition missing')
+    else:
+        runs = int(truncated.get('runs', 0) or 0)
+        if runs <= 0:
+            failures.append('truncated condition has no runs')
+        elif int(truncated.get('committed', 0) or 0) != 0:
+            failures.append('missing target suffix produced a committed end')
+    return failures
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description='On-demand target-conditioned alignment quality/speed measurement')
@@ -368,10 +432,11 @@ def main() -> int:
     parser.add_argument('--model', type=Path, default=Path(paths.alignment_model))
     parser.add_argument('--vocab', type=Path, default=Path(paths.alignment_vocab))
     parser.add_argument('--conditions', nargs='+', choices=CONDITIONS,
-                        default=['clean', 'quiet', 'noise', 'bgm'])
+                        default=list(CONDITIONS))
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--seed', type=int, default=20261024)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--assert-contract', action='store_true')
     args = parser.parse_args()
     result = run(args.model, args.vocab,
                  conditions=tuple(dict.fromkeys(args.conditions)),
@@ -381,6 +446,10 @@ def main() -> int:
     if args.output:
         args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n',
                                encoding='utf-8')
+    if args.assert_contract:
+        failures = contract_failures(result)
+        if failures:
+            raise SystemExit('Alignment benchmark contract failed: ' + '; '.join(failures))
     return 0
 
 
