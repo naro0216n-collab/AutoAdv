@@ -70,7 +70,7 @@ Windows実機計測のGitHub Issueは、チャット環境から比較・解析�
 
 ## Alignment品質・stress計測
 
-既知本文のassociation率、固定clean-source末尾annotationに対する境界誤差、早いcommit、未確認率、RTFを測り、自動進行精度とは分離して扱う。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
+既知本文のassociation率、固定clean-source末尾annotationに対する境界誤差、早いcommit、未確認率、推論費用を測り、自動進行精度とは分離して扱う。full fileを一度だけalignせず、製品と同じ300ms開始・500ms間隔の累積snapshot、単一workerの推論backpressure、PCM idle時の未解析tail drainを再生し、成立後に撤回されない**最初のassociation / committed end**を評価する。tail drainはheartbeatを音声終了証拠へ使わず、既に捕捉済みのPCMをforced alignmentへ渡すscheduler動作だけを再現する。これにより、途中で誤commitした後にfull-file alignmentだけが正常化するケースや、実行時には存在しないfile末尾強制snapshotを隠れた成功条件にしない。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
 
 ```powershell
 python -m validation.real_game.benchmark_alignment --conditions clean quiet noise clipped truncated bgm --rounds 2 --output .\alignment-performance.json

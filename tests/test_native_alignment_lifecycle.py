@@ -211,6 +211,62 @@ class NativeAlignmentLifecycleTests(unittest.TestCase):
             model.release.set()
             native.close()
 
+    def test_idle_heartbeat_drains_pcm_tail_without_becoming_endpoint_evidence(self):
+        observations = []
+        model = StaticPosterior()
+        native = make_native(model, observations)
+        token = Token(8, 1)
+        try:
+            native.history.start(42)
+            native.boundary(1000)
+            native.begin(token, 'target')
+
+            first = stereo_chunk(1300, 300)
+            native.history.push(first, target_pid=42)
+            native.feed(first)
+            wait_idle(native)
+            self.assertEqual(len(observations), 1)
+
+            tail = stereo_chunk(1600, 300)
+            native.history.push(tail, target_pid=42)
+            native.feed(tail)
+            self.assertEqual(len(observations), 1)
+
+            native.health(CaptureHealth(1700, True, '', pcm_frames=0))
+            wait_idle(native)
+            alignments = [item for _, item in observations if item.kind == 'alignment']
+            transports = [item for _, item in observations if item.kind == 'transport']
+            self.assertEqual(len(alignments), 2)
+            self.assertEqual(alignments[-1].capture_end_ms, 1600)
+            self.assertEqual(len(transports), 1)
+            self.assertEqual(transports[0].heartbeat_at_ms, 1700)
+
+            native.health(CaptureHealth(1800, True, '', pcm_frames=0))
+            wait_idle(native)
+            self.assertEqual(
+                len([item for _, item in observations if item.kind == 'alignment']), 2)
+        finally:
+            native.close()
+
+    def test_idle_heartbeat_can_analyze_shorter_than_normal_first_cadence(self):
+        observations = []
+        native = make_native(StaticPosterior(), observations)
+        token = Token(8, 2)
+        try:
+            native.history.start(42)
+            native.boundary(1000)
+            native.begin(token, 'target')
+            short = stereo_chunk(1200, 200)
+            native.history.push(short, target_pid=42)
+            native.feed(short)
+            self.assertFalse(any(item.kind == 'alignment' for _, item in observations))
+            native.health(CaptureHealth(1300, True, '', pcm_frames=0))
+            wait_idle(native)
+            self.assertEqual(
+                len([item for _, item in observations if item.kind == 'alignment']), 1)
+        finally:
+            native.close()
+
     def test_transport_heartbeat_remains_transport_observation(self):
         observations = []
         native = make_native(StaticPosterior(), observations)

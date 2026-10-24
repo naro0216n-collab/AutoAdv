@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import platform
 import time
@@ -19,12 +20,15 @@ import numpy as np
 from autoadv.audio_buffer import PCMChunk
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import default_g2p
+from autoadv.native_audio import NativeAudio
 from autoadv.native_runtime import managed_paths
 from .verify_trace import _summary
 
 HERE = Path(__file__).resolve().parent
 ENDPOINT_ORACLE = HERE / 'ALIGNMENT_ENDPOINT_ORACLE.json'
 CONDITIONS = ('clean', 'quiet', 'noise', 'clipped', 'truncated', 'bgm')
+IDLE_HEARTBEAT_MS = 100.0
+PERSISTENT_CONTEXT_MS = 1000.0
 
 
 def _load_pcm(file: Path, sha256: str) -> np.ndarray:
@@ -75,46 +79,185 @@ def _chunk(mono: np.ndarray) -> PCMChunk:
     return PCMChunk(duration_ms, stereo.tobytes(), 48000, 2, 4)
 
 
+def _snapshot_sample_ends(sample_count: int) -> tuple[int, ...]:
+    """Return nominal cumulative capture points, without inventing file-end work.
+
+    ``NativeAudio`` submits first at 300 ms and then at least 500 ms after the
+    previous submission.  A file ending between those points does not itself
+    trigger an inference; the transport heartbeat may only drain PCM that was
+    actually captured but not yet analyzed.
+    """
+    if sample_count <= 0:
+        return ()
+    first = round(NativeAudio.MIN_AUDIO_MS * 48)
+    interval = round(NativeAudio.INFERENCE_INTERVAL_MS * 48)
+    if sample_count < first:
+        return ()
+    return tuple(range(first, sample_count + 1, interval))
+
+
+def _stream_align(aligner: TargetConditionedAligner, mono: np.ndarray, *,
+                  idle_drain: bool = False) -> tuple[dict, ...]:
+    """Replay the product's cumulative scheduler, including inference backpressure.
+
+    ``observed_at_ms`` is when the scheduler can submit the snapshot in the
+    capture clock; ``completed_at_ms`` is when the resulting knowledge can be
+    available after measured inference.  When PCM becomes idle, one final
+    snapshot may analyze a previously unprocessed tail.  The heartbeat itself
+    is not part of the acoustic evidence.
+    """
+    sample_count = len(mono)
+    if sample_count <= 0:
+        return ()
+    audio_ms = sample_count / 48.0
+    snapshots = []
+    next_trigger_ms = float(NativeAudio.MIN_AUDIO_MS)
+    previous_complete_ms = 0.0
+    last_sample_end = 0
+
+    def analyze(sample_end: int, trigger_ms: float, trigger: str) -> dict:
+        chunk = _chunk(mono[:sample_end])
+        started = time.perf_counter_ns()
+        alignment = aligner.align((chunk,))
+        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+        return {
+            'capture_end_ms': sample_end / 48.0,
+            'observed_at_ms': trigger_ms,
+            'completed_at_ms': trigger_ms + elapsed_ms,
+            'trigger': trigger,
+            'alignment_ms': elapsed_ms,
+            'alignment': alignment,
+        }
+
+    while next_trigger_ms <= audio_ms + 1e-9:
+        trigger_ms = max(next_trigger_ms, previous_complete_ms)
+        if trigger_ms > audio_ms + 1e-9:
+            break
+        sample_end = min(sample_count, max(1, round(trigger_ms * 48)))
+        if sample_end <= last_sample_end:
+            break
+        snapshot = analyze(sample_end, trigger_ms, 'cadence')
+        snapshots.append(snapshot)
+        last_sample_end = sample_end
+        previous_complete_ms = snapshot['completed_at_ms']
+        # NativeAudio owns cadence from the actual submission time, not from a
+        # theoretical grid that elapsed while an earlier inference was busy.
+        next_trigger_ms = trigger_ms + float(NativeAudio.INFERENCE_INTERVAL_MS)
+
+    if idle_drain and last_sample_end < sample_count:
+        # The helper emits health heartbeats at roughly 100 ms intervals after
+        # PCM becomes idle.  Model the first heartbeat at which the single
+        # inference worker can accept the unprocessed tail.
+        behind_ms = max(0.0, previous_complete_ms - audio_ms)
+        heartbeat_ticks = max(1, int(math.ceil(behind_ms / IDLE_HEARTBEAT_MS)))
+        trigger_ms = audio_ms + heartbeat_ticks * IDLE_HEARTBEAT_MS
+        snapshot = analyze(sample_count, trigger_ms, 'idle_drain')
+        snapshots.append(snapshot)
+
+    return tuple(snapshots)
+
+
 def _result_row(sample: dict, condition: str, repetition: int,
-                alignment, elapsed_ms: float, audio_ms: float, oracle: dict) -> dict:
-    fit = alignment.fit
-    end_ms = (alignment.target_end_frame * alignment.frame_ms
-              if alignment.target_end_frame is not None else None)
+                snapshots: tuple[dict, ...], source_audio_ms: float,
+                observation_horizon_ms: float, oracle: dict) -> dict:
     oracle_end_ms = float(oracle['speech_end_ms'])
     oracle_uncertainty_ms = float(oracle['uncertainty_ms'])
-    endpoint_error_ms = (end_ms - oracle_end_ms) if end_ms is not None else None
-    committed_error = endpoint_error_ms if alignment.committed_end else None
+    if snapshots:
+        final_snapshot = snapshots[-1]
+        final_alignment = final_snapshot['alignment']
+        first_association = next((item for item in snapshots
+                                  if item['alignment'].target_associated), None)
+        first_commit = next((item for item in snapshots
+                             if item['alignment'].committed_end), None)
+    else:
+        final_snapshot = None
+        final_alignment = None
+        first_association = None
+        first_commit = None
+
+    evidence = first_commit['alignment'] if first_commit is not None else final_alignment
+    fit = evidence.fit if evidence is not None else None
+    end_ms = None
+    if first_commit is not None and evidence.target_end_frame is not None:
+        end_ms = evidence.target_end_frame * evidence.frame_ms
+    endpoint_error_ms = end_ms - oracle_end_ms if end_ms is not None else None
+    association_capture_ms = (first_association['capture_end_ms']
+                              if first_association is not None else None)
+    association_trigger_ms = (first_association['observed_at_ms']
+                              if first_association is not None else None)
+    association_at_ms = (first_association['completed_at_ms']
+                         if first_association is not None else None)
+    commit_capture_ms = first_commit['capture_end_ms'] if first_commit is not None else None
+    commit_trigger_ms = first_commit['observed_at_ms'] if first_commit is not None else None
+    commit_at_ms = first_commit['completed_at_ms'] if first_commit is not None else None
+    commit_delay_ms = commit_at_ms - oracle_end_ms if commit_at_ms is not None else None
+    capture_commit_delay_ms = (commit_capture_ms - oracle_end_ms
+                               if commit_capture_ms is not None else None)
+    cumulative_alignment_ms = sum(item['alignment_ms'] for item in snapshots)
+    final_alignment_ms = final_snapshot['alignment_ms'] if final_snapshot is not None else None
+    max_alignment_ms = max((item['alignment_ms'] for item in snapshots), default=None)
+
     return {
         'id': sample['id'],
         'condition': condition,
         'round': repetition,
-        'audio_ms': round(audio_ms, 3),
-        'alignment_ms': round(elapsed_ms, 3),
-        'rtf': round(elapsed_ms / audio_ms, 4) if audio_ms else None,
-        'target_units': alignment.target_units,
-        'aligned_target_units': alignment.aligned_target_units,
-        'target_coverage': round(alignment.coverage, 4),
-        'target_associated': alignment.target_associated,
-        'complete_alignment': alignment.complete_alignment,
-        'committed_end': alignment.committed_end,
+        'audio_ms': round(source_audio_ms, 3),
+        'observation_horizon_ms': round(observation_horizon_ms, 3),
+        'snapshot_count': len(snapshots),
+        'final_alignment_ms': round(final_alignment_ms, 3) if final_alignment_ms is not None else None,
+        'max_alignment_ms': round(max_alignment_ms, 3) if max_alignment_ms is not None else None,
+        'cumulative_alignment_ms': round(cumulative_alignment_ms, 3),
+        'final_rtf': (round(final_alignment_ms / final_snapshot['capture_end_ms'], 4)
+                      if final_alignment_ms is not None and final_snapshot
+                      and final_snapshot['capture_end_ms'] else None),
+        'cumulative_compute_ratio': (round(cumulative_alignment_ms / observation_horizon_ms, 4)
+                                     if observation_horizon_ms else None),
+        'target_units': final_alignment.target_units if final_alignment is not None else 0,
+        'aligned_target_units': final_alignment.aligned_target_units if final_alignment is not None else 0,
+        'target_coverage': round(final_alignment.coverage, 4) if final_alignment is not None else 0.0,
+        'target_associated': first_association is not None,
+        'association_capture_end_ms': (round(association_capture_ms, 3)
+                                       if association_capture_ms is not None else None),
+        'association_trigger_at_ms': (round(association_trigger_ms, 3)
+                                      if association_trigger_ms is not None else None),
+        'association_observed_at_ms': (round(association_at_ms, 3)
+                                       if association_at_ms is not None else None),
+        'complete_alignment': bool(final_alignment and final_alignment.complete_alignment),
+        'committed_end': first_commit is not None,
+        'commit_capture_end_ms': (round(commit_capture_ms, 3)
+                                  if commit_capture_ms is not None else None),
+        'commit_trigger_at_ms': (round(commit_trigger_ms, 3)
+                                 if commit_trigger_ms is not None else None),
+        'commit_observed_at_ms': round(commit_at_ms, 3) if commit_at_ms is not None else None,
+        'commit_alignment_ms': (round(first_commit['alignment_ms'], 3)
+                                if first_commit is not None else None),
+        'commit_delay_ms': round(commit_delay_ms, 3) if commit_delay_ms is not None else None,
+        'capture_commit_delay_ms': (round(capture_commit_delay_ms, 3)
+                                    if capture_commit_delay_ms is not None else None),
         'target_end_ms': round(end_ms, 3) if end_ms is not None else None,
         'oracle_end_ms': round(oracle_end_ms, 3),
         'oracle_uncertainty_ms': round(oracle_uncertainty_ms, 3),
         'endpoint_error_ms': round(endpoint_error_ms, 3) if endpoint_error_ms is not None else None,
-        'early_commit': bool(alignment.committed_end and committed_error is not None
-                             and committed_error < -oracle_uncertainty_ms),
-        'late_commit': bool(alignment.committed_end and committed_error is not None
-                            and committed_error > oracle_uncertainty_ms),
-        'endpoint_within_oracle': bool(alignment.committed_end and committed_error is not None
-                                       and abs(committed_error) <= oracle_uncertainty_ms),
-        'post_target_free_frames': alignment.post_target_free_frames,
-        'reading_rank': alignment.reading_rank,
-        'path_margin': round(fit.path_margin, 4),
-        'mean_unit_peak_margin': round(fit.mean_unit_peak_margin, 4),
-        'min_unit_peak_margin': round(fit.min_unit_peak_margin, 4),
-        'weak_units': fit.weak_units,
-        'boundary_margin': round(fit.boundary_margin, 4),
-        'rejection': alignment.rejection,
+        'early_commit': bool(commit_capture_ms is not None
+                             and commit_capture_ms < oracle_end_ms - oracle_uncertainty_ms),
+        'early_decision': bool(commit_at_ms is not None
+                               and commit_at_ms < oracle_end_ms - oracle_uncertainty_ms),
+        'late_commit': bool(commit_at_ms is not None
+                            and commit_at_ms > oracle_end_ms + oracle_uncertainty_ms),
+        'early_boundary': bool(endpoint_error_ms is not None
+                               and endpoint_error_ms < -oracle_uncertainty_ms),
+        'late_boundary': bool(endpoint_error_ms is not None
+                              and endpoint_error_ms > oracle_uncertainty_ms),
+        'endpoint_within_oracle': bool(endpoint_error_ms is not None
+                                       and abs(endpoint_error_ms) <= oracle_uncertainty_ms),
+        'post_target_free_frames': evidence.post_target_free_frames if evidence is not None else 0,
+        'reading_rank': evidence.reading_rank if evidence is not None else -1,
+        'path_margin': round(fit.path_margin, 4) if fit is not None else None,
+        'mean_unit_peak_margin': round(fit.mean_unit_peak_margin, 4) if fit is not None else None,
+        'min_unit_peak_margin': round(fit.min_unit_peak_margin, 4) if fit is not None else None,
+        'weak_units': fit.weak_units if fit is not None else 0,
+        'boundary_margin': round(fit.boundary_margin, 4) if fit is not None else None,
+        'rejection': evidence.rejection if evidence is not None else 'insufficient_audio_for_first_snapshot',
     }
 
 
@@ -155,38 +298,55 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
     results = []
     for condition in conditions:
         for index, (sample, mono) in enumerate(clips):
-            degraded = _degrade(mono, condition, seed + index, bgm)
-            chunk = _chunk(degraded)
+            source_audio_ms = len(mono) / 48.0
+            idle_drain = condition != 'bgm'
+            if condition == 'bgm':
+                tail = np.zeros(round(PERSISTENT_CONTEXT_MS * 48), dtype='float32')
+                degraded = _degrade(np.concatenate((mono, tail)), condition, seed + index, bgm)
+            else:
+                degraded = _degrade(mono, condition, seed + index, bgm)
+            observation_horizon_ms = len(degraded) / 48.0
             aligner = TargetConditionedAligner(backend, g2p=pronunciation)
             aligner.set_target(sample['text'])
             for repetition in range(1, rounds + 1):
-                start = time.perf_counter_ns()
-                alignment = aligner.align((chunk,))
-                elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
+                snapshots = _stream_align(aligner, degraded, idle_drain=idle_drain)
                 results.append(_result_row(
-                    sample, condition, repetition, alignment, elapsed_ms, chunk.duration_ms,
-                    endpoint_oracle[sample['id']]))
+                    sample, condition, repetition, snapshots, source_audio_ms,
+                    observation_horizon_ms, endpoint_oracle[sample['id']]))
 
     by_condition = {}
     for condition in conditions:
         rows = [row for row in results if row['condition'] == condition]
         by_condition[condition] = {
-            'alignment_ms': _summary([row['alignment_ms'] for row in rows]),
-            'rtf': _summary([row['rtf'] for row in rows if row['rtf'] is not None]),
+            'final_alignment_ms': _summary([row['final_alignment_ms'] for row in rows
+                                             if row['final_alignment_ms'] is not None]),
+            'max_alignment_ms': _summary([row['max_alignment_ms'] for row in rows
+                                           if row['max_alignment_ms'] is not None]),
+            'cumulative_alignment_ms': _summary([row['cumulative_alignment_ms'] for row in rows]),
+            'final_rtf': _summary([row['final_rtf'] for row in rows if row['final_rtf'] is not None]),
+            'cumulative_compute_ratio': _summary([row['cumulative_compute_ratio'] for row in rows
+                                                  if row['cumulative_compute_ratio'] is not None]),
             'target_coverage': _summary([row['target_coverage'] for row in rows]),
             'associated': sum(row['target_associated'] for row in rows),
             'complete': sum(row['complete_alignment'] for row in rows),
             'committed': sum(row['committed_end'] for row in rows),
             'unconfirmed': sum(not row['committed_end'] for row in rows),
             'early_commits': sum(row['early_commit'] for row in rows),
+            'early_decisions': sum(row['early_decision'] for row in rows),
             'late_commits': sum(row['late_commit'] for row in rows),
+            'early_boundaries': sum(row['early_boundary'] for row in rows),
+            'late_boundaries': sum(row['late_boundary'] for row in rows),
             'endpoint_within_oracle': sum(row['endpoint_within_oracle'] for row in rows),
             'endpoint_error_ms': _summary([row['endpoint_error_ms'] for row in rows
                                            if row['committed_end'] and row['endpoint_error_ms'] is not None]),
+            'commit_delay_ms': _summary([row['commit_delay_ms'] for row in rows
+                                         if row['commit_delay_ms'] is not None]),
+            'capture_commit_delay_ms': _summary([row['capture_commit_delay_ms'] for row in rows
+                                                 if row['capture_commit_delay_ms'] is not None]),
             'runs': len(rows),
         }
     return {
-        'schema': 'autoadv-alignment-benchmark-v2',
+        'schema': 'autoadv-alignment-benchmark-v3',
         'device': platform.platform(),
         'python': platform.python_version(),
         'model_sha256': hashlib.sha256(model.read_bytes()).hexdigest() if model.is_file() else None,

@@ -15,11 +15,10 @@ import time
 
 import numpy as np
 
-from autoadv.audio_buffer import PCMChunk
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import default_g2p
 from autoadv.native_runtime import managed_paths
-from .benchmark_alignment import _load_pcm
+from .benchmark_alignment import _load_pcm, _stream_align
 from .verify_trace import _summary
 
 HERE = Path(__file__).resolve().parent
@@ -93,8 +92,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
     observations = []
     for case in cases:
         mono = _mix(case, audio)
-        frames = np.column_stack((mono, mono)).astype('<f4').tobytes()
-        chunk = PCMChunk(round(len(mono) / 48), frames, 48000, 2, 4)
+        audio_ms = len(mono) / 48.0
         aligner = TargetConditionedAligner(backend, g2p=pronunciation)
         try:
             aligner.set_target(case['display'])
@@ -102,35 +100,67 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
             for repetition in range(1, rounds + 1):
                 observations.append({
                     'case': case['id'], 'kind': case['kind'], 'attribution': case['attribution'],
-                    'round': repetition, 'audio_ms': round(chunk.duration_ms, 3),
-                    'alignment_ms': 0.0, 'rtf': 0.0,
-                    'target_associated': False, 'complete_alignment': False,
-                    'committed_end': False, 'target_coverage': 0.0,
+                    'round': repetition, 'audio_ms': round(audio_ms, 3),
+                    'snapshot_count': 0, 'cumulative_alignment_ms': 0.0,
+                    'max_alignment_ms': 0.0, 'cumulative_compute_ratio': 0.0,
+                    'target_associated': False, 'association_observed_at_ms': None,
+                    'complete_alignment': False, 'committed_end': False,
+                    'commit_observed_at_ms': None, 'target_coverage': 0.0,
+                    'target_units': 0, 'aligned_target_units': 0, 'reading_rank': -1,
+                    'path_margin': None, 'boundary_margin': None,
                     'rejection': f'target_unrepresentable:{exc}',
                 })
             continue
         for repetition in range(1, rounds + 1):
-            begin = time.perf_counter_ns()
-            alignment = aligner.align((chunk,))
-            duration = (time.perf_counter_ns() - begin) / 1e6
+            snapshots = _stream_align(aligner, mono, idle_drain=case['background'] is None)
+            if snapshots:
+                final = snapshots[-1]['alignment']
+                associated = next((item for item in snapshots
+                                   if item['alignment'].target_associated), None)
+                committed = next((item for item in snapshots
+                                  if item['alignment'].committed_end), None)
+                evidence = committed['alignment'] if committed is not None else final
+                cumulative_ms = sum(item['alignment_ms'] for item in snapshots)
+                max_ms = max(item['alignment_ms'] for item in snapshots)
+            else:
+                final = None
+                associated = None
+                committed = None
+                evidence = None
+                cumulative_ms = 0.0
+                max_ms = 0.0
             observations.append({
                 'case': case['id'], 'kind': case['kind'], 'attribution': case['attribution'],
-                'round': repetition, 'audio_ms': round(chunk.duration_ms, 3),
-                'alignment_ms': round(duration, 3),
-                'rtf': round(duration / chunk.duration_ms, 4),
-                'target_associated': alignment.target_associated,
-                'complete_alignment': alignment.complete_alignment,
-                'committed_end': alignment.committed_end,
-                'target_coverage': round(alignment.coverage, 4),
-                'target_units': alignment.target_units,
-                'aligned_target_units': alignment.aligned_target_units,
-                'reading_rank': alignment.reading_rank,
-                'path_margin': round(alignment.fit.path_margin, 4),
-                'boundary_margin': round(alignment.fit.boundary_margin, 4),
-                'rejection': alignment.rejection,
+                'round': repetition, 'audio_ms': round(audio_ms, 3),
+                'snapshot_count': len(snapshots),
+                'cumulative_alignment_ms': round(cumulative_ms, 3),
+                'max_alignment_ms': round(max_ms, 3),
+                'cumulative_compute_ratio': (round(cumulative_ms / audio_ms, 4)
+                                             if audio_ms else None),
+                'target_associated': associated is not None,
+                'association_capture_end_ms': (round(associated['capture_end_ms'], 3)
+                                                 if associated is not None else None),
+                'association_observed_at_ms': (round(associated['completed_at_ms'], 3)
+                                               if associated is not None else None),
+                'complete_alignment': bool(final and final.complete_alignment),
+                'committed_end': committed is not None,
+                'commit_capture_end_ms': (round(committed['capture_end_ms'], 3)
+                                            if committed is not None else None),
+                'commit_observed_at_ms': (round(committed['completed_at_ms'], 3)
+                                          if committed is not None else None),
+                'target_coverage': round(final.coverage, 4) if final is not None else 0.0,
+                'target_units': final.target_units if final is not None else 0,
+                'aligned_target_units': final.aligned_target_units if final is not None else 0,
+                'reading_rank': evidence.reading_rank if evidence is not None else -1,
+                'path_margin': (round(evidence.fit.path_margin, 4)
+                                if evidence is not None else None),
+                'boundary_margin': (round(evidence.fit.boundary_margin, 4)
+                                    if evidence is not None else None),
+                'rejection': (evidence.rejection if evidence is not None
+                              else 'insufficient_audio_for_first_snapshot'),
             })
     return {
-        'schema': 'autoadv-alignment-stress-v1',
+        'schema': 'autoadv-alignment-stress-v2',
         'device': platform.platform(), 'python': platform.python_version(),
         'model_sha256': hashlib.sha256(model.read_bytes()).hexdigest() if model.is_file() else None,
         'vocab_sha256': hashlib.sha256(vocab.read_bytes()).hexdigest() if vocab.is_file() else None,
@@ -141,8 +171,13 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
         },
         'cases': [
             {**case,
-             'alignment': _summary([o['alignment_ms'] for o in observations if o['case'] == case['id']]),
-             'rtf': _summary([o['rtf'] for o in observations if o['case'] == case['id']]),
+             'cumulative_alignment_ms': _summary([o['cumulative_alignment_ms'] for o in observations
+                                                      if o['case'] == case['id']]),
+             'max_alignment_ms': _summary([o['max_alignment_ms'] for o in observations
+                                           if o['case'] == case['id']]),
+             'cumulative_compute_ratio': _summary([o['cumulative_compute_ratio'] for o in observations
+                                                   if o['case'] == case['id']
+                                                   and o['cumulative_compute_ratio'] is not None]),
              'associated': sum(bool(o['target_associated']) for o in observations if o['case'] == case['id']),
              'committed': sum(bool(o['committed_end']) for o in observations if o['case'] == case['id'])}
             for case in cases

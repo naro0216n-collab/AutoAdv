@@ -25,11 +25,14 @@ class StaticModel:
     vocab = {'PAD': 0, 'UNK': 1, 'SOS': 2, 'EOS': 3, 'a': 4, 'b': 5, 'c': 6}
 
     def infer(self, chunks):
-        logits = np.full((30, len(self.vocab)), -4.0, dtype=np.float32)
+        audio_ms = sum(chunk.duration_ms for chunk in chunks)
+        frames = max(1, int(audio_ms // self.frame_stride_ms))
+        logits = np.full((frames, len(self.vocab)), -4.0, dtype=np.float32)
         logits[:, 0] = 5.0
         for phone, frame in zip(('a', 'b', 'c'), (5, 10, 15)):
-            logits[frame, 0] = 0.0
-            logits[frame, self.vocab[phone]] = 7.0
+            if frame < frames:
+                logits[frame, 0] = 0.0
+                logits[frame, self.vocab[phone]] = 7.0
         return logits
 
 
@@ -87,6 +90,7 @@ class AlignmentStressScenarios(unittest.TestCase):
             report = stress_alignment.run(
                 model, vocab, selection='background',
                 model_backend=StaticModel(), g2p=StaticG2P())
+        self.assertEqual(report['schema'], 'autoadv-alignment-stress-v2')
         case = next(c for c in report['cases'] if c['id'] == 'background_only_same_text')
         self.assertEqual(case['attribution'], 'unverified')
         observation = next(o for o in report['observations']

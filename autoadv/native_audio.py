@@ -174,6 +174,7 @@ class NativeAudio:
     def health(self, status: CaptureHealth) -> None:
         observation = None
         token = None
+        drain = None
         with self._lock:
             if status.healthy:
                 if status.pcm_frames:
@@ -188,13 +189,38 @@ class NativeAudio:
                             heartbeat_at_ms=status.at_ms,
                         )
                         token = self.token
+                        drain = self._idle_drain_locked()
             else:
                 self._capture_error = status.reason
                 token = self.token
         if observation is not None and token is not None and self.on_observation is not None:
             self.on_observation(token, observation)
-        elif not status.healthy and token is not None:
+        if drain is not None:
+            self._dispatch(drain)
+        if not status.healthy and token is not None:
             self.on_error(token, status.reason)
+
+    def _idle_drain_locked(self):
+        """Analyze newly captured tail PCM when the transport becomes idle.
+
+        A heartbeat is only a scheduling opportunity.  It is not added to the
+        acoustic evidence and does not itself support association or endpoint
+        confirmation.  This closes the otherwise unprocessed tail left when a
+        short voice ends before the normal 500 ms inference cadence is due.
+        """
+        if (self._closed or self.token is None or self.aligner is None or self._inflight
+                or self._last_pcm_end_ms < 0 or self._last_pcm_end_ms <= self._inference_at):
+            return None
+        samples = self.history.since(self.window_start_ms)
+        if not samples:
+            return None
+        token, generation, aligner = self.token, self._generation, self.aligner
+        self._inflight = True
+        self._inflight_generation = generation
+        # Keep cadence in the capture clock domain.  A heartbeat time is
+        # transport evidence only and must not become an acoustic timestamp.
+        self._inference_at = self._last_pcm_end_ms
+        return token, generation, None, samples, aligner
 
     def capture_status(self) -> dict:
         with self._lock:
