@@ -14,6 +14,7 @@ import numpy as np
 
 from .audio_buffer import PCMChunk
 from .forced_alignment import _downsample_48k_to_16k
+from .utterance_progress import HumanVocalEvidence, VocalRecurrenceEvidence
 
 
 @dataclass(frozen=True)
@@ -31,32 +32,6 @@ class AcousticFingerprint:
     at_ms: int
     values: tuple[float, ...]
     vocal_relevance: float
-
-
-@dataclass(frozen=True)
-class HumanVocalEvidence:
-    """Summary of frame-level vocal observations over an explicit time interval."""
-
-    start_ms: int
-    end_ms: int
-    frame_count: int
-    mean_probability: float
-    peak_probability: float
-    active_fraction: float
-    first_active_ms: int | None
-    last_active_ms: int | None
-    pre_epoch_active_fraction: float
-
-
-@dataclass(frozen=True)
-class VocalRecurrenceEvidence:
-    """Self-similarity of vocal-weighted compact acoustic representations."""
-
-    strength: float = 0.0
-    period_ms: int | None = None
-    period_stability: float = 0.0
-    cross_epoch_persistence: float = 0.0
-    recent_strength: float = 0.0
 
 
 class VocalActivityObserver(Protocol):

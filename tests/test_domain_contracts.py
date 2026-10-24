@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from autoadv.audio_buffer import PCMChunk
-from autoadv.acoustic_observers import HumanVocalEvidence, VocalRecurrenceEvidence
+from autoadv.utterance_progress import HumanVocalEvidence, VocalRecurrenceEvidence
 from autoadv.utterance_progress import (
     LexicalProgressEvidence, NativeAudioObservation, PresentationBoundaryCertainty,
     UtteranceProgressEstimator, UtteranceProgressState,

@@ -5,7 +5,7 @@ from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
 from .g2p import G2PBackend
-from .utterance_progress import UtteranceProgress, UtteranceProgressState
+from .utterance_progress import UtteranceProgress
 from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
                     configured_speaker_names, extract_source_fields, interpret,
                     resolve_speaker_enclosed_body)

@@ -3,9 +3,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
-from .acoustic_observers import HumanVocalEvidence, VocalRecurrenceEvidence
-from .forced_alignment import TargetTimeAlignment
+if TYPE_CHECKING:
+    from .forced_alignment import TargetTimeAlignment
+
+
+@dataclass(frozen=True)
+class HumanVocalEvidence:
+    """Summary of frame-level human-vocal observations over an interval."""
+
+    start_ms: int
+    end_ms: int
+    frame_count: int
+    mean_probability: float
+    peak_probability: float
+    active_fraction: float
+    first_active_ms: int | None
+    last_active_ms: int | None
+    pre_epoch_active_fraction: float
+
+
+@dataclass(frozen=True)
+class VocalRecurrenceEvidence:
+    """Recurrence/persistence evidence for human-vocal weighted acoustics."""
+
+    strength: float = 0.0
+    period_ms: int | None = None
+    period_stability: float = 0.0
+    cross_epoch_persistence: float = 0.0
+    recent_strength: float = 0.0
 
 
 class PresentationBoundaryCertainty(str, Enum):

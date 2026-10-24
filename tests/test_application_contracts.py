@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 
 from autoadv.application import AutoAdvApplication
-from autoadv.acoustic_observers import HumanVocalEvidence, VocalRecurrenceEvidence
+from autoadv.utterance_progress import HumanVocalEvidence, VocalRecurrenceEvidence
 from autoadv.conversation import Target
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection
