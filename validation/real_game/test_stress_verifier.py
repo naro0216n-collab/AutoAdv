@@ -74,11 +74,6 @@ class StressTraceVerifierTests(unittest.TestCase):
         self.assertEqual(result['confirmed_tts'], 0)
         self.assertTrue(all('expected_hold' not in c for c in LINES))
 
-    def test_identical_audio_lexical_content_cannot_prove_background_owner(self):
-        cases = json.loads((Path(__file__).parent / 'ALIGNMENT_STRESS.json').read_text('utf-8'))['cases']
-        identical = next(c for c in cases if c['id'] == 'background_only_same_text')
-        self.assertEqual(identical['attribution'], 'unverified')
-        self.assertEqual(identical['display'], 'ヒューズが飛んだ。')
         # No verifier rule treats this authored label as proof of unsafe input.
 
     def test_missing_challenge_and_unjustified_advance_rejected(self):

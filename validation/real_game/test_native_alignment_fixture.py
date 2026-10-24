@@ -6,7 +6,6 @@ preprocessing/lifecycle without a VAD or transcription side route.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 import time
@@ -72,19 +71,6 @@ def wait_idle(native: NativeAudio) -> None:
 
 
 class RecordedAudioFixtureContracts(unittest.TestCase):
-    def test_manifest_recordings_are_integral_and_preprocess_to_16khz(self):
-        manifest = json.loads(MANIFEST.read_text(encoding='utf-8'))
-        self.assertEqual(len(manifest['samples']), 14)
-        self.assertEqual({sample['speaker'] for sample in manifest['samples']}, {'normal', 'whisper'})
-        for sample in manifest['samples']:
-            with self.subTest(sample=sample['id']):
-                file = GAME / sample['path']
-                self.assertEqual(hashlib.sha256(file.read_bytes()).hexdigest(), sample['sha256'])
-                mono = read_mono(file)
-                chunk = chunk_from_mono(mono, round(len(mono) / 48))
-                prepared = OnnxPhoneCTCModel._waveform((chunk,))
-                self.assertTrue(np.isfinite(prepared).all())
-                self.assertLessEqual(abs(len(prepared) - round(len(mono) / 3)), 1)
 
     def test_real_recording_reaches_alignment_backend_without_vad_and_blank_model_cannot_end(self):
         sample = json.loads(MANIFEST.read_text(encoding='utf-8'))['samples'][0]

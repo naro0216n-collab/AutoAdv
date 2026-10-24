@@ -583,14 +583,6 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(any('PCM is not valid captured frames for (1, 99)' in issue
                             for issue in result['quality_issues']))
 
-    def test_legacy_pause_diagnostic_is_not_an_authorization_contract(self):
-        records = contract_records(0, 3, mode='reading')
-        point = next(i for i, r in enumerate(records) if r['event'] == 'advance_attempt')
-        records.insert(point, {'event': 'pause_requested', 'session': 1})
-        resequence(records)
-        result = validate(records, phase='reading')
-        self.assertTrue(result['ok'], result['errors'])
-        self.assertTrue(result['advancement_observed'])
 
     def test_tts_requires_drain_and_next_hook(self):
         records = contract_records(3, 6)

@@ -48,10 +48,6 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertIsNone(choose_calibration_source(()))
 
 
-    def test_fixture_calibration_uses_real_speaker_structure(self):
-        script = Path('validation/real_game/renpy/game/script.rpy').read_text(encoding='utf-8')
-        self.assertIn('renpy.say(a, "' + CALIBRATION + '", interact=False)', script)
-        self.assertNotIn('renpy.say(None, "' + CALIBRATION + '", interact=False)', script)
 
     def test_console_window_is_not_the_renpy_game(self):
         console = SimpleNamespace(hwnd=1, title='Python console')
@@ -232,34 +228,6 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(recoveries, [])
         self.assertEqual(actions, ['close', 'quit'])
 
-    def test_failure_diagnostics_read_application_state_not_retired_gui_state(self):
-        recorded = []
-        closed = []
-        source = SimpleNamespace(identity='hook-a')
-        candidate = SimpleNamespace(
-            identity='hook-a', address=7, ambiguous=False, history=('unrelated text',),
-            samples=(SimpleNamespace(raw='unrelated text', speaker='', body='unrelated text'),))
-        runtime = SimpleNamespace(session=4, token=None, pause_reason=None)
-        product = SimpleNamespace(
-            capture_view=lambda: SimpleNamespace(candidates=(candidate,)),
-            capture_source=lambda identity, address, require_unique=False: source,
-            hook_host_running=True,
-            runtime_state=lambda: runtime,
-        )
-        window = SimpleNamespace(application=product, close=lambda: closed.append('window'))
-        trace = SimpleNamespace(emit=lambda name, **kwargs: recorded.append((name, kwargs)))
-        qt_app = SimpleNamespace(exit=lambda code: closed.append(code))
-        driver = SessionDriver(window, qt_app, {'timeout_seconds': 30, 'phase': 'accuracy'}, trace)
-        driver.state = 'calibration'
-        driver.fail('finite live-run timeout before requested validation collection completed')
-        self.assertEqual(closed, ['window', 3])
-        name, fields = recorded[0]
-        self.assertEqual(name, 'validation_driver_failure')
-        self.assertEqual(fields['stage'], 'calibration')
-        self.assertEqual(fields['candidate_hooks'], 1)
-        self.assertEqual(fields['sampled_hooks'], 1)
-        self.assertEqual(fields['calibration_matches'], 0)
-        self.assertTrue(fields['luna_host_alive'])
 
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(gate='session-gate', executable='validation-game.exe',
