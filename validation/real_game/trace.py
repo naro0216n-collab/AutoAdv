@@ -6,12 +6,10 @@ import json
 from pathlib import Path
 from threading import Lock
 import time
-import unicodedata
 
 
 def text_digest(value: str) -> str:
-    normalized = unicodedata.normalize('NFKC', value).strip()
-    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
 class ValidationTrace:

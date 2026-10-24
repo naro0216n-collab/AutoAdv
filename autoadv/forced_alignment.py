@@ -358,8 +358,9 @@ class TargetConditionedAligner:
         self._candidates: tuple[PronunciationCandidate, ...] = ()
         self._encoded: tuple[tuple[PronunciationCandidate, tuple[int, ...]], ...] = ()
 
-    def set_target(self, text: str) -> None:
-        candidates = self.g2p.candidates(text, max_candidates=self.max_readings)
+    def set_target(self, text: str, *, candidates: tuple[PronunciationCandidate, ...] | None = None) -> None:
+        if candidates is None:
+            candidates = self.g2p.candidates(text, max_candidates=self.max_readings)
         encoded = []
         vocab = self.model.vocab
         for candidate in candidates:

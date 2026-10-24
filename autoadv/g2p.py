@@ -12,10 +12,19 @@ import unicodedata
 class PronunciationCandidate:
     phonemes: tuple[str, ...]
     rank: int = 0
+    reading_units: int | None = None
+
+
+@dataclass(frozen=True)
+class WordSpan:
+    start: int
+    end: int
+    surface: str
 
 
 class G2PBackend(Protocol):
     def candidates(self, text: str, *, max_candidates: int = 4) -> tuple[PronunciationCandidate, ...]: ...
+    def word_spans(self, text: str) -> tuple[WordSpan, ...]: ...
 
 
 _READING_NUCLEI = frozenset({"a", "i", "u", "e", "o", "I", "U"})
@@ -41,20 +50,13 @@ def count_reading_units(phonemes: tuple[str, ...]) -> int:
     return total
 
 
-def primary_reading_units(text: str, backend: G2PBackend) -> tuple[tuple[str, ...], int]:
-    """Return the context-selected primary phone sequence and timing units.
-
-    Punctuation-only text legitimately has no pronunciation. Readable text must
-    not silently collapse to the minimum wait if the configured G2P backend
-    fails to return a primary pronunciation.
-    """
-    candidates = backend.candidates(text, max_candidates=1)
+def reading_units_from_candidates(text: str, candidates: tuple[PronunciationCandidate, ...]) -> int:
     if not candidates:
         if any(unicodedata.category(ch)[0] in "LN" for ch in text):
             raise ValueError("G2P returned no primary pronunciation for readable text")
-        return (), 0
-    phones = candidates[0].phonemes
-    return phones, count_reading_units(phones)
+        return 0
+    primary = candidates[0]
+    return primary.reading_units if primary.reading_units is not None else count_reading_units(primary.phonemes)
 
 
 class HaqumeiG2P:
@@ -77,6 +79,43 @@ class HaqumeiG2P:
         self._lock = RLock()
 
     @staticmethod
+    def _span_bounds(span) -> tuple[int, int]:
+        if hasattr(span, 'start') and hasattr(span, 'end'):
+            return int(span.start), int(span.end)
+        if isinstance(span, (tuple, list)) and len(span) == 2:
+            return int(span[0]), int(span[1])
+        raise ValueError('Haqumei mapping returned an unsupported char_span')
+
+    def word_spans(self, text: str) -> tuple[WordSpan, ...]:
+        """Return verified primary word spans in the G2P canonical coordinate space.
+
+        Haqumei documents ``char_span`` against its normalized/text2mecab view,
+        not necessarily the caller's source string. AutoAdv therefore exposes
+        those spans only after verifying that each mapped surface still denotes
+        the corresponding NFKC input slice. Source-coordinate projection stays
+        with the caller that owns the source text.
+        """
+        normalized = unicodedata.normalize('NFKC', text)
+        if not normalized:
+            return ()
+        with self._lock:
+            words = tuple(self.engine.g2p_mapping_detailed(normalized))
+        spans: list[WordSpan] = []
+        previous_end = 0
+        for word in words:
+            start, end = self._span_bounds(word.char_span)
+            if not 0 <= start < end <= len(normalized) or start < previous_end:
+                raise ValueError('Haqumei mapping returned an invalid char_span')
+            surface = str(getattr(word, 'word', ''))
+            mapped = unicodedata.normalize('NFKC', surface)
+            source_slice = normalized[start:end]
+            if mapped != source_slice:
+                raise ValueError('Haqumei word boundary cannot be projected to canonical input')
+            spans.append(WordSpan(start, end, surface))
+            previous_end = end
+        return tuple(spans)
+
+    @staticmethod
     def _clean_word(word) -> tuple[str, ...]:
         # Punctuation/space pauses are not target phones. Unknown words may
         # still carry a usable Haqumei pronunciation; only a literal ``unk``
@@ -93,15 +132,26 @@ class HaqumeiG2P:
         if not normalized or max_candidates <= 0:
             return ()
         with self._lock:
-            got = self.engine.g2p_candidates(normalized)
+            got = self.engine.g2p_candidates_detailed(normalized)
             raw = tuple(got.candidates)[:max_candidates]
-        sequences: list[tuple[str, ...]] = []
+        sequences: list[PronunciationCandidate] = []
         for candidate in raw:
             phones = tuple(p for word in candidate.words for p in self._clean_word(word))
-            if phones and phones not in sequences:
-                sequences.append(phones)
-        return tuple(PronunciationCandidate(phones, rank=i)
-                     for i, phones in enumerate(sequences))
+            if phones and all(item.phonemes != phones for item in sequences):
+                units = 0
+                for word in candidate.words:
+                    cleaned = self._clean_word(word)
+                    if not cleaned:
+                        continue
+                    if cleaned[0].startswith('unk:'):
+                        units += count_reading_units(cleaned)
+                    elif getattr(word, 'is_unknown', False) and not word.mora_count:
+                        units += max(1, sum(unicodedata.category(ch)[0] in 'LN'
+                                            for ch in str(word.word)))
+                    else:
+                        units += int(word.mora_count)
+                sequences.append(PronunciationCandidate(phones, rank=len(sequences), reading_units=units))
+        return tuple(sequences)
 
 
 @lru_cache(maxsize=1)

@@ -41,11 +41,11 @@ class ReadingTiming(unittest.TestCase):
         p = make_profile(tts=True)
         p.replacements = [ReplacementRule('こんにちは', 'はろー', target='tts')]
         u = interpret('京「こんにちは！」', p, session=1, line=1, source='x', sequence=1, g2p=TEST_G2P)
-        self.assertEqual(u.pronunciation, 'こんにちは!')
+        self.assertEqual(u.speech.resolved_text, 'こんにちは！')
         self.assertEqual(u.reading_unit_count, 5)
         self.assertEqual(u.text_wait_ms, 900)
         self.assertEqual(u.speaker, '京')
-        self.assertEqual(u.reading, 'はろー!')
+        self.assertEqual(u.speech.tts_text, 'はろー！')
         self.assertTrue(u.use_tts)
 
     def test_prose_colon_and_url_are_not_speaker_delimiters(self):
@@ -58,7 +58,7 @@ class ReadingTiming(unittest.TestCase):
             with self.subTest(raw=raw):
                 utterance = interpret(raw, profile, session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P)
                 self.assertEqual(utterance.speaker, '')
-                self.assertEqual(utterance.text, __import__('unicodedata').normalize('NFKC', raw))
+                self.assertEqual(utterance.text, raw)
         explicit = interpret('京：おはようございます。', profile,
                              session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P)
         self.assertEqual((explicit.speaker, explicit.text), ('京', 'おはようございます。'))
@@ -69,7 +69,7 @@ class ReadingTiming(unittest.TestCase):
                                   StructureRule(r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」$')]
         p.name_readings['京'] = 'みやこ'
         p.replacements = [ReplacementRule('みやこ', 'ミヤコ', target='tts'),
-                          ReplacementRule('京', '京都', target='match')]
+                          ReplacementRule('みやこ', 'ミヤコ原音', target='match')]
         p.speaker_tts['大和'] = False
         p.speaker_voices['大和'] = 'v2'
         raw = '大和「京さん」'
@@ -77,20 +77,88 @@ class ReadingTiming(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(index, 1)
         trace = []
-        u = interpret(raw, p, session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P, trace=trace)
-        without_trace = interpret(raw, p, session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P)
+        g2p = FakeG2P(word_spans={'京さん': ((0, 1), (1, 3))})
+        u = interpret(raw, p, session=1, line=1, source='hook', sequence=1, g2p=g2p, trace=trace)
+        without_trace = interpret(raw, p, session=1, line=1, source='hook', sequence=1, g2p=g2p)
         self.assertEqual(u, without_trace)
-        self.assertEqual((u.speaker, u.text, u.pronunciation, u.reading, u.match_text, u.use_tts, u.voice),
-                         ('大和', '京さん', 'みやこさん', 'ミヤコさん', '京都さん', False, 'v2'))
+        self.assertEqual((u.speaker, u.text, u.speech.resolved_text, u.speech.tts_text,
+                          u.speech.alignment_text, u.use_tts, u.voice),
+                         ('大和', '京さん', 'みやこさん', 'ミヤコさん', 'ミヤコ原音さん', False, 'v2'))
         self.assertEqual(trace, ['抽出: 優先順位 2', '読み: 京 → みやこ',
                                  '置換 1: TTS文を変更', '置換 2: 原音照合文を変更'])
+
+    def test_explicit_ruby_is_not_rewritten_by_a_registered_reading_of_its_output(self):
+        p = make_profile()
+        p.name_readings['みやこ'] = '別読み'
+        g2p = FakeG2P(word_spans={'みやこ': ((0, 3),)})
+        u = interpret('「京(みやこ)」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        self.assertEqual(u.speech.resolved_text, 'みやこ')
+
+    def test_registered_reading_cannot_span_across_explicit_ruby(self):
+        p = make_profile()
+        p.name_readings['みやこ様'] = '別読み'
+        g2p = FakeG2P(word_spans={'みやこ様': ((0, 3), (3, 4))})
+        u = interpret('「京(みやこ)様」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        self.assertEqual(u.speech.resolved_text, 'みやこ様')
+
+    def test_name_reading_requires_primary_word_boundaries(self):
+        p = make_profile()
+        p.name_readings['京'] = 'みやこ'
+        g2p = FakeG2P(
+            word_spans={
+                '東京の京': ((0, 2), (2, 3), (3, 4)),
+            },
+        )
+        u = interpret('「東京の京」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        self.assertEqual(u.speech.resolved_text, '東京のみやこ')
+
+    def test_registered_reading_may_span_complete_adjacent_words(self):
+        p = make_profile()
+        p.name_readings['大和京'] = 'やまとみやこ'
+        g2p = FakeG2P(word_spans={'大和京': ((0, 2), (2, 3))})
+        u = interpret('「大和京」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        self.assertEqual(u.speech.resolved_text, 'やまとみやこ')
+
+    def test_name_reading_boundary_rule_is_not_character_specific(self):
+        cases = (
+            ('東京の京', '京', 'みやこ', ((0, 2), (2, 3), (3, 4)), '東京のみやこ'),
+            ('山田の田', '田', 'た', ((0, 2), (2, 3), (3, 4)), '山田のた'),
+            ('世界と世', '世', 'せ', ((0, 2), (2, 3), (3, 4)), '世界とせ'),
+        )
+        for text, surface, reading, spans, expected in cases:
+            with self.subTest(text=text, surface=surface):
+                p = make_profile()
+                p.name_readings[surface] = reading
+                g2p = FakeG2P(word_spans={text: spans})
+                u = interpret(f'「{text}」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+                self.assertEqual(u.speech.resolved_text, expected)
+
+    def test_name_reading_projects_source_boundaries_through_nfkc(self):
+        cases = (
+            ('ﾊﾟ京', ((0, 1), (1, 2)), 'ﾊﾟみやこ'),
+            ('㍑京', ((0, 4), (4, 5)), '㍑みやこ'),
+        )
+        for text, spans, expected in cases:
+            with self.subTest(text=text):
+                p = make_profile()
+                p.name_readings['京'] = 'みやこ'
+                g2p = FakeG2P(word_spans={text: spans})
+                u = interpret(f'「{text}」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+                self.assertEqual(u.speech.resolved_text, expected)
+
+    def test_name_reading_requires_contiguous_complete_words(self):
+        p = make_profile()
+        p.name_readings['甲乙'] = 'こうおつ'
+        g2p = FakeG2P(word_spans={'甲乙': ((0, 1),)})
+        u = interpret('「甲乙」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        self.assertEqual(u.speech.resolved_text, '甲乙')
 
     def test_both_replacement_updates_shared_pronunciation_base(self):
         p = make_profile()
         p.replacements = [ReplacementRule('東京', 'とうきょう', target='both')]
         g2p = FakeG2P({'とうきょう': ('t', 'o', 'o', 'ky', 'o', 'o')})
         u = interpret('「東京」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-        self.assertEqual((u.pronunciation, u.reading, u.match_text),
+        self.assertEqual((u.speech.resolved_text, u.speech.tts_text, u.speech.alignment_text),
                          ('とうきょう', 'とうきょう', 'とうきょう'))
         self.assertEqual(u.reading_unit_count, 4)
 
@@ -428,3 +496,23 @@ class StorageModes(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SharedPronunciationContract(unittest.TestCase):
+    def test_explicit_ruby_is_shared_by_wait_and_audio_target(self):
+        p = make_profile(AdvanceMode.AUDIO)
+        seen = []
+        class Backend:
+            def candidates(self, text, *, max_candidates=4):
+                seen.append((text, max_candidates))
+                return (__import__('autoadv.g2p', fromlist=['PronunciationCandidate'])
+                        .PronunciationCandidate(('m', 'i', 'y', 'a', 'k', 'o'), 0, 3),)
+        utterance = interpret('「京(みやこ)」', p, session=1, line=1,
+                              source='hook', sequence=1, g2p=Backend())
+        self.assertEqual(utterance.text, '京(みやこ)')
+        self.assertEqual(utterance.speech.resolved_text, 'みやこ')
+        self.assertEqual(utterance.speech.alignment_text, 'みやこ')
+        self.assertEqual(utterance.reading_unit_count, 3)
+        self.assertEqual(utterance.speech.alignment_candidates[0].phonemes,
+                         ('m', 'i', 'y', 'a', 'k', 'o'))
+        self.assertEqual(seen, [('みやこ', 4)])

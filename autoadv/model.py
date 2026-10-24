@@ -6,7 +6,7 @@ from collections.abc import Sequence
 import re
 import unicodedata
 
-from .g2p import G2PBackend, primary_reading_units
+from .g2p import G2PBackend, PronunciationCandidate, WordSpan, reading_units_from_candidates
 
 
 class AdvanceMode(str, Enum):
@@ -283,6 +283,20 @@ class Game:
 
 
 @dataclass(frozen=True)
+class SpeechPlan:
+    """Resolved speech inputs for one immutable utterance.
+
+    ``resolved_text`` is the common explicit-reading result used for timing.
+    Output-specific corrections may derive different TTS and alignment inputs
+    without rewriting the displayed dialogue.
+    """
+    resolved_text: str
+    tts_text: str
+    alignment_text: str
+    alignment_candidates: tuple[PronunciationCandidate, ...] = ()
+
+
+@dataclass(frozen=True)
 class Utterance:
     session: int
     line: int
@@ -291,9 +305,7 @@ class Utterance:
     raw: str
     speaker: str
     text: str
-    pronunciation: str
-    reading: str
-    match_text: str
+    speech: SpeechPlan
     use_tts: bool
     voice: str
     advance_mode: AdvanceMode
@@ -303,9 +315,6 @@ class Utterance:
 
 
 _RUBY = re.compile(r'([\u3400-\u9fff]+)\(([\u3040-\u30ffー]{1,30})\)')
-_KANJI = r'[\u3400-\u9fff]'
-
-
 
 def extraction_rules_for(profile: Profile, source_identity: str) -> tuple[StructureRule, ...]:
     configured = profile.source_rules.get(source_identity)
@@ -313,31 +322,169 @@ def extraction_rules_for(profile: Profile, source_identity: str) -> tuple[Struct
 
 
 def matching_structure_rule(raw: str, rules: Sequence[StructureRule]) -> tuple[re.Match | None, int | None, str]:
-    """Apply one source's structural rules to an NFKC-normalized sample."""
+    """Prefer source coordinates; normalize only where a structural rule needs it."""
     normalized = unicodedata.normalize('NFKC', raw)
     for index, rule in enumerate(rules):
-        if not rule.enabled or (rule.condition and not re.search(rule.condition, normalized, re.S)):
+        if not rule.enabled:
             continue
-        match = re.fullmatch(rule.pattern, normalized, re.S)
-        if match:
-            return match, index, normalized
-    return None, None, normalized
+        for view in (normalized,) if raw != normalized else (raw,):
+            if rule.condition and not re.search(rule.condition, view, re.S):
+                continue
+            match = re.fullmatch(rule.pattern, view, re.S)
+            if match:
+                return match, index, view
+    return None, None, raw
+
+
+def _original_span(raw: str, normalized: str, start: int, end: int) -> str | None:
+    """Project one NFKC-view span back to an unmodified source substring.
+
+    Prefix normalization handles both expansion and cross-character composition
+    such as half-width kana plus a voiced mark. A projection is accepted only
+    when exactly one source substring normalizes to the matched view; ambiguous
+    boundaries are never guessed.
+    """
+    if normalized == raw:
+        return raw[start:end]
+    if not 0 <= start <= end <= len(normalized):
+        return None
+    prefix_offsets = [len(unicodedata.normalize('NFKC', raw[:index]))
+                      for index in range(len(raw) + 1)]
+    source_starts = [index for index, offset in enumerate(prefix_offsets) if offset == start]
+    source_ends = [index for index, offset in enumerate(prefix_offsets) if offset == end]
+    expected = normalized[start:end]
+    matches = [raw[source_start:source_end]
+               for source_start in source_starts
+               for source_end in source_ends
+               if source_start <= source_end and
+               unicodedata.normalize('NFKC', raw[source_start:source_end]) == expected]
+    return matches[0] if len(matches) == 1 else None
 
 
 def extract_fields(raw: str, rules: Sequence[StructureRule]) -> ExtractedFields:
-    matched, matched_index, normalized = matching_structure_rule(raw, rules)
+    matched, matched_index, view = matching_structure_rule(raw, rules)
     if matched is None:
-        # Unknown structures stay usable as body text; the workspace can then
-        # define a source-specific extractor without losing the sample.
-        return ExtractedFields(body=normalized.strip())
-    groups = matched.groupdict()
-    speaker = (groups.get('speaker') or '').strip()
-    body = (groups.get('body') or '').strip()
-    return ExtractedFields(speaker=speaker, body=body, matched_rule=matched_index)
+        return ExtractedFields(body=raw)
+    result = {}
+    for key in ('speaker', 'body'):
+        if key not in matched.re.groupindex:
+            continue
+        start, end = matched.span(key)
+        if start < 0:
+            continue
+        value = _original_span(raw, view, start, end)
+        if value is None:
+            return ExtractedFields(body=raw)
+        result[key] = value.strip() if key == 'speaker' else value
+    return ExtractedFields(speaker=result.get('speaker', ''), body=result.get('body', ''),
+                           matched_rule=matched_index)
 
 
 def extract_source_fields(raw: str, profile: Profile, source_identity: str) -> ExtractedFields:
     return extract_fields(raw, extraction_rules_for(profile, source_identity))
+
+
+def _covered_by_words(start: int, end: int, spans: Sequence[WordSpan]) -> bool:
+    """True when [start, end) is exactly a contiguous sequence of whole words."""
+    cursor = start
+    for span in spans:
+        if span.end <= cursor:
+            continue
+        if span.start != cursor or span.end > end:
+            return False
+        cursor = span.end
+        if cursor == end:
+            return True
+    return False
+
+
+def _canonical_offset(text: str, source_offset: int) -> int:
+    """Project one source boundary into the NFKC view without rewriting source."""
+    return len(unicodedata.normalize('NFKC', text[:source_offset]))
+
+
+def _overlaps_any(start: int, end: int, ranges: Sequence[tuple[int, int]]) -> bool:
+    return any(start < protected_end and protected_start < end
+               for protected_start, protected_end in ranges)
+
+
+def _expand_ruby(text: str) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Expand explicit ruby and return output ranges protected from later readings.
+
+    Registered readings are lower priority than ruby. Keeping the expanded
+    ranges explicit prevents a configured surface that happens to equal ruby's
+    kana from rewriting the user's inline pronunciation.
+    """
+    out: list[str] = []
+    protected: list[tuple[int, int]] = []
+    source_index = 0
+    output_length = 0
+    for match in _RUBY.finditer(text):
+        literal = text[source_index:match.start()]
+        out.append(literal)
+        output_length += len(literal)
+        reading = match.group(2)
+        start = output_length
+        out.append(reading)
+        output_length += len(reading)
+        protected.append((start, output_length))
+        source_index = match.end()
+    tail = text[source_index:]
+    out.append(tail)
+    return ''.join(out), tuple(protected)
+
+
+def _apply_name_readings(text: str, readings: dict[str, str], g2p: G2PBackend,
+                         trace: list[str] | None = None, *,
+                         protected_ranges: Sequence[tuple[int, int]] = ()) -> str:
+    """Apply registered readings only to complete primary Haqumei word ranges.
+
+    Matching always starts from the literal source spelling configured by the
+    user. Its source boundaries are projected into Haqumei's canonical
+    coordinate space and must cover one or more adjacent primary words exactly.
+    Explicit-ruby output ranges are excluded because ruby has higher priority.
+    No character class, particular kanji, or title-specific exception decides
+    whether a reading applies.
+    """
+    if not readings or not text:
+        return text
+    canonical = unicodedata.normalize('NFKC', text)
+    spans = g2p.word_spans(text)
+    choices = sorted(readings.items(), key=lambda item: (-len(item[0]), item[0]))
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        chosen = None
+        for surface, reading in choices:
+            end = index + len(surface)
+            if end > len(text) or not text.startswith(surface, index):
+                continue
+            if _overlaps_any(index, end, protected_ranges):
+                continue
+            canonical_start = _canonical_offset(text, index)
+            canonical_end = _canonical_offset(text, end)
+            if canonical_start >= canonical_end:
+                continue
+            if unicodedata.normalize('NFKC', text[index:end]) != canonical[canonical_start:canonical_end]:
+                continue
+            if _covered_by_words(canonical_start, canonical_end, spans):
+                chosen = (surface, reading, end)
+                break
+        if chosen is None:
+            out.append(text[index])
+            index += 1
+            continue
+        surface, reading, end = chosen
+        out.append(reading)
+        if trace is not None:
+            trace.append(f'読み: {surface} → {reading}')
+        index = end
+    return ''.join(out)
+
+
+def _replace(text: str, rule: ReplacementRule) -> str:
+    return (re.sub(rule.pattern, rule.replacement, text) if rule.regex else
+            text.replace(rule.pattern, rule.replacement))
 
 
 def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,
@@ -351,43 +498,58 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
             trace.append(f'抽出: 優先順位 {fields.matched_rule + 1}' if fields.matched_rule is not None
                          else '抽出: 規則なし（原文を本文として使用）')
     else:
-        body = unicodedata.normalize('NFKC', body_override).strip()
+        body = body_override
         speaker = (speaker_override or '').strip()
         if trace is not None:
             trace.append('抽出: 会話取得レシピで確定済み')
-    pronunciation = _RUBY.sub(lambda m: m.group(2), body)
-    for word, replacement in sorted(profile.name_readings.items(), key=lambda item: -len(item[0])):
-        prior = pronunciation
-        pronunciation = re.sub(r'(?<!' + _KANJI + ')' + re.escape(word) + r'(?!' + _KANJI + ')',
-                                 lambda _: replacement, pronunciation)
-        if trace is not None and pronunciation != prior:
-            trace.append(f'読み: {word} → {replacement}')
-    reading = pronunciation
-    match_text = _RUBY.sub(lambda m: m.group(1), body)
+
+    # Explicit ruby wins before configured readings. Ruby output remains marked
+    # so a configured surface cannot accidentally rewrite the inline reading.
+    resolved, ruby_ranges = _expand_ruby(body)
+    resolved = _apply_name_readings(
+        resolved, profile.name_readings, g2p, trace, protected_ranges=ruby_ranges)
+
+    # Shared corrections alter the common speech target. Output-specific rules
+    # derive their own inputs from that target and never mutate display text.
     for index, rule in enumerate(profile.replacements, 1):
-        if not rule.enabled:
+        if not rule.enabled or rule.target != 'both':
             continue
-        def replace(text):
-            return (re.sub(rule.pattern, rule.replacement, text) if rule.regex else
-                    text.replace(rule.pattern, rule.replacement))
-        if rule.target in ('tts', 'both'):
-            updated = replace(reading)
-            if trace is not None and updated != reading:
+        updated = _replace(resolved, rule)
+        if trace is not None and updated != resolved:
+            trace.append(f'置換 {index}: 共通発音を変更')
+        resolved = updated
+
+    tts_text = resolved
+    alignment_text = resolved
+    for index, rule in enumerate(profile.replacements, 1):
+        if not rule.enabled or rule.target == 'both':
+            continue
+        if rule.target == 'tts':
+            updated = _replace(tts_text, rule)
+            if trace is not None and updated != tts_text:
                 trace.append(f'置換 {index}: TTS文を変更')
-            reading = updated
-        if rule.target in ('match', 'both'):
-            updated = replace(match_text)
-            if trace is not None and updated != match_text:
+            tts_text = updated
+        elif rule.target == 'match':
+            updated = _replace(alignment_text, rule)
+            if trace is not None and updated != alignment_text:
                 trace.append(f'置換 {index}: 原音照合文を変更')
-            match_text = updated
-        if rule.target == 'both':
-            pronunciation = replace(pronunciation)
+            alignment_text = updated
+
     use_tts = profile.speaker_tts.get(speaker, profile.default_tts)
     voice = profile.speaker_voices.get(speaker, profile.default_voice)
-    _, reading_units = primary_reading_units(pronunciation, g2p)
-    return Utterance(session, line, source, sequence, raw, speaker, body,
-                     pronunciation, reading, match_text, use_tts, voice,
-                     AdvanceMode(profile.advance_mode), profile.uncertain_text_fallback,
-                     reading_units,
-                     max(profile.reading_ms,
-                         reading_units * profile.per_reading_unit_wait_ms))
+    advance_mode = AdvanceMode(profile.advance_mode)
+    use_alignment = advance_mode == AdvanceMode.AUDIO and not use_tts
+    primary_candidates = g2p.candidates(resolved, max_candidates=4 if use_alignment else 1)
+    reading_units = reading_units_from_candidates(resolved, primary_candidates)
+    alignment_candidates = (
+        primary_candidates if alignment_text == resolved else
+        g2p.candidates(alignment_text, max_candidates=4)
+    ) if use_alignment else ()
+    speech = SpeechPlan(resolved, tts_text, alignment_text, alignment_candidates)
+    return Utterance(
+        session=session, line=line, source=source, sequence=sequence, raw=raw,
+        speaker=speaker, text=body, speech=speech, use_tts=use_tts, voice=voice,
+        advance_mode=advance_mode, uncertain_text_fallback=profile.uncertain_text_fallback,
+        reading_unit_count=reading_units,
+        text_wait_ms=max(profile.reading_ms, reading_units * profile.per_reading_unit_wait_ms),
+    )

@@ -1472,3 +1472,14 @@ def test_capture_source_rule_commands_remain_inside_capture_transaction():
     app.commit_capture()
     assert app.current_profile().source_rules[candidate.identity][0] == rule
     assert calls == ['save']
+
+
+def test_capture_history_preserves_original_spaces_and_width():
+    app, _ = app_with_game()
+    hook = source('RAW', 9)
+    raw = '  ＡＢＣ１２３　ﾊﾟﾋﾟﾌﾟ  '
+    app.capture.observe(hook, raw, sequence=1)
+    sample = app.capture_view().candidates[0]
+    assert sample.history == (raw,)
+    assert sample.samples[0].raw == raw
+    assert sample.samples[0].body == raw

@@ -1008,21 +1008,70 @@ def cmd_connector_segments(_: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_refresh_base(args: argparse.Namespace) -> int:
-    """Advance recorded publish bases after another develop publish won the race.
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
 
-    This recovery is intentionally limited to a prepared transaction that never
-    reached connector-plan, so no GitHub write can have originated from it.
-    The caller must first integrate the observed develop HEAD into the current
-    local history.
+
+def _verify_stale_connector_recovery(
+    repo: Path, *, prepared: dict[str, object], state: dict[str, str],
+    develop_head: str, publish_head: str,
+) -> None:
+    """Prove that a planned request cannot still publish its target.
+
+    Connector execution may have created unreachable Git tree/commit objects, or
+    may even have advanced the transport branch.  Those writes are not product
+    publication.  Once ``develop`` has fast-forwarded from the request base to a
+    history that does not contain this request's exact publish commit, the fixed
+    Gateway can no longer publish that request: its bundle parent is stale, and
+    every later standard develop update is fast-forward only.
+    """
+    connector = _read_connector_state(repo)
+    if connector.get("stage") != "execution-plan-ready":
+        raise PublishStateError(
+            f"refresh-base cannot recover connector stage {connector.get('stage')}"
+        )
+    if _manifest_sha256(_manifest_path(repo)) != connector.get("manifest_sha256"):
+        raise PublishStateError("prepared publish manifest changed after connector-plan")
+    expected = {
+        "request_id": prepared["request_id"],
+        "develop_head": prepared["base_sha"],
+        "publish_base_head": state["publish_commit"],
+        "prepared_publish_commit": prepared["publish_commit"],
+        "prepared_target_tree": prepared["target_tree"],
+        "local_target_commit": prepared["local_target_commit"],
+        "payload_sha256": prepared["payload_sha256"],
+    }
+    for key, value in expected.items():
+        if connector.get(key) != value:
+            raise PublishStateError(f"connector plan no longer matches prepared publish identity: {key}")
+    if develop_head == state["remote_commit"]:
+        raise PublishStateError(
+            "connector-plan recovery requires develop to have moved; continue or diagnose the active transaction"
+        )
+    if _is_ancestor(repo, str(prepared["publish_commit"]), develop_head):
+        raise PublishStateError(
+            "prepared publish commit is already in observed develop history; record or diagnose the completed transaction"
+        )
+    if not _is_ancestor(repo, state["publish_commit"], publish_head):
+        raise PublishStateError("observed publish HEAD does not fast-forward the recorded publish base")
+
+
+def cmd_refresh_base(args: argparse.Namespace) -> int:
+    """Advance recorded bases after another standard publish won the race.
+
+    Before connector-plan, the stale request can be discarded directly after the
+    caller integrates the observed develop HEAD.  After connector-plan, recovery
+    is also allowed when the observed develop history proves that the request's
+    exact publish commit was never published and can no longer succeed through
+    the fixed Gateway.
     """
     repo = _repo_from_cwd()
     manifest = _manifest_path(repo)
     if not manifest.exists():
         raise PublishStateError("refresh-base requires an active prepared transaction")
-    connector_dir = _connector_dir(repo)
-    if connector_dir.exists() and any(connector_dir.iterdir()):
-        raise PublishStateError("refresh-base is only valid before connector-plan/GitHub writes")
     if not _working_tree_clean(repo):
         raise PublishStateError("refresh-base requires a clean working tree")
 
@@ -1037,17 +1086,21 @@ def cmd_refresh_base(args: argparse.Namespace) -> int:
         raise PublishStateError("prepared transaction does not match recorded develop base")
     if develop_head == state["remote_commit"] and publish_head == state["publish_commit"]:
         raise PublishStateError("publish bases have not advanced; continue the active transaction")
-    if subprocess.run(
-        ["git", "merge-base", "--is-ancestor", state["remote_commit"], develop_head],
-        cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode != 0:
+    if not _is_ancestor(repo, state["remote_commit"], develop_head):
         raise PublishStateError("observed develop HEAD does not advance the recorded develop base")
     local_head = _git("rev-parse", "HEAD^{commit}", cwd=repo)
-    if subprocess.run(
-        ["git", "merge-base", "--is-ancestor", develop_head, local_head],
-        cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode != 0:
+    if not _is_ancestor(repo, develop_head, local_head):
         raise PublishStateError("integrate the observed develop HEAD into local history before refresh-base")
+
+    connector_dir = _connector_dir(repo)
+    planned = connector_dir.exists() and any(connector_dir.iterdir())
+    if planned:
+        _verify_stale_connector_recovery(
+            repo, prepared=prepared, state=state,
+            develop_head=develop_head, publish_head=publish_head,
+        )
+    elif not _is_ancestor(repo, state["publish_commit"], publish_head):
+        raise PublishStateError("observed publish HEAD does not fast-forward the recorded publish base")
 
     develop_tree = _git("rev-parse", f"{develop_head}^{{tree}}", cwd=repo)
     publish_tree = _git("rev-parse", f"{publish_head}^{{tree}}", cwd=repo)
@@ -1058,6 +1111,7 @@ def cmd_refresh_base(args: argparse.Namespace) -> int:
     shutil.rmtree(_transaction_dir(repo))
     print(json.dumps({
         "refreshed": True,
+        "recovered_stage": "connector-plan" if planned else "prepared",
         "discarded_request_id": prepared["request_id"],
         "remote_commit": develop_head,
         "remote_tree": develop_tree,
@@ -1179,7 +1233,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     refresh = sub.add_parser(
         "refresh-base",
-        help="replace a pre-connector stale transaction after integrating a newer develop HEAD",
+        help="replace a stale transaction after integrating a newer develop HEAD",
     )
     refresh.add_argument("--develop-head", required=True)
     refresh.add_argument("--publish-head", required=True)

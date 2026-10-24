@@ -143,7 +143,7 @@ class DialogueContractTests(unittest.TestCase):
         p.replacements = [ReplacementRule('東京', 'とうきょう')]
         p.speaker_tts = {'京': False}
         result = interpret('京「東京へ行く(いく)」', p, session=2, line=3, source='x', sequence=6, g2p=TEST_G2P)
-        self.assertEqual(result.reading, 'とうきょうへ行く(いく)')
+        self.assertEqual(result.speech.tts_text, 'とうきょうへ行く(いく)')
         self.assertEqual(result.use_tts, False)
         self.assertEqual(result.speaker, '京')
 

@@ -290,8 +290,8 @@ class CaptureWorkspace:
         else:
             record.source = source
         self._refresh_ambiguity(source.identity)
-        value = text.strip()
-        if value and (not record.history or record.history[-1][1] != value):
+        value = text
+        if value.strip() and (not record.history or record.history[-1][1] != value):
             record.history.append((sequence, value))
 
     def observe_group(self, events: Sequence[HookEvent]) -> None:
@@ -806,13 +806,13 @@ class AutoAdvApplication:
                 if external_ns and state.profile is not None:
                     lookback_ms = self._native_replay_lookback_ms(state.profile)
                     replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
-                self._begin_native_audio(token, utterance.match_text, replay_from_ms=replay_from_ms)
+                self._begin_native_audio(token, utterance.speech.alignment_text, utterance.speech.alignment_candidates, replay_from_ms=replay_from_ms)
             self._schedule(utterance.text_wait_ms, lambda t=token: self._audio_deadline_due(t))
         if utterance.use_tts:
             if not utterance.voice:
                 self._runtime_presentation_event(token, 'tts_finished', success=False)
             else:
-                self._start_voice(token, utterance.reading, utterance.voice)
+                self._start_voice(token, utterance.speech.tts_text, utterance.voice)
         self._notify_runtime()
         return external_ns
 
@@ -1243,7 +1243,7 @@ class AutoAdvApplication:
             if (now.token is not None and now.utterance is not None and not now.sent and
                     not now.completed and now.utterance.advance_mode.value == 'audio' and
                     not now.utterance.use_tts):
-                self._begin_native_audio(now.token, now.utterance.match_text)
+                self._begin_native_audio(now.token, now.utterance.speech.alignment_text, now.utterance.speech.alignment_candidates)
             self._emit_runtime_event('native_ready', None, session=session, ready=True,
                                      reason='', audio_pid=pid)
 
@@ -1287,11 +1287,11 @@ class AutoAdvApplication:
         if self._native_audio is not None:
             self._native_audio.cancel()
 
-    def _begin_native_audio(self, token: Token, match_text: str, *, replay_from_ms: int | None = None) -> bool:
+    def _begin_native_audio(self, token: Token, alignment_text: str, candidates, *, replay_from_ms: int | None = None) -> bool:
         if self._native_audio is None:
             return False
         try:
-            self._native_audio.begin(token, match_text, replay_from_ms=replay_from_ms)
+            self._native_audio.begin(token, alignment_text, candidates=candidates, replay_from_ms=replay_from_ms)
         except Exception as exc:
             detail = 'alignment target failure: ' + str(exc)
             self._emit_runtime_event('native_audio_error', token, reason=detail)

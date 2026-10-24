@@ -19,6 +19,7 @@ from .audio_buffer import AudioHistory, PCMChunk
 from .audio_knowledge import NativeAudioObservation
 from .conversation import Token
 from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
+from .g2p import PronunciationCandidate
 from .process_audio import ProcessCapture, CaptureHealth
 
 
@@ -111,10 +112,10 @@ class NativeAudio:
         self._last_pcm_end_ms = -1
         self._capture_stereo_peak = 0.0
 
-    def begin(self, token: Token, match_text: str, *, replay_from_ms: int | None = None) -> None:
+    def begin(self, token: Token, alignment_text: str, *, candidates: tuple[PronunciationCandidate, ...] | None = None, replay_from_ms: int | None = None) -> None:
         """Bind one known target text to retained PCM for this Utterance."""
         aligner = TargetConditionedAligner(self.model, g2p=self.g2p)
-        aligner.set_target(match_text)
+        aligner.set_target(alignment_text, candidates=candidates)
         with self._lock:
             self._generation += 1
             generation = self._generation

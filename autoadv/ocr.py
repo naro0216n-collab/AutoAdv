@@ -30,7 +30,7 @@ class TesseractOCR:
             raise RuntimeError('configured Tesseract failed to execute') from exc
         if result.returncode:
             raise RuntimeError('Tesseract failure: ' + result.stderr.decode('utf-8', 'replace')[:200])
-        return result.stdout.decode('utf-8', 'replace').strip()
+        return result.stdout.decode('utf-8', 'replace').removesuffix('\r\n').removesuffix('\n')
 
 
 class OCRWorker:

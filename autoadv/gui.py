@@ -1291,9 +1291,9 @@ def run_gui() -> int:
                 tts_result = (f'TTS: Voice {u.voice or "未設定"}' if u.use_tts else 'TTS: 使用しない')
                 self.editor_preview.setPlainText(
                     f'{tts_result}\n'
-                    f'発音基準: {u.pronunciation}\n'
-                    f'TTS読み上げ: {u.reading}\n'
-                    f'原音照合: {u.match_text}')
+                    f'共通読み: {u.speech.resolved_text}\n'
+                    f'TTS読み上げ: {u.speech.tts_text}\n'
+                    f'原音照合: {u.speech.alignment_text}')
                 self._preview_utterance = u
             except (ValueError, re.error, IndexError) as exc:
                 self._preview_utterance = None
