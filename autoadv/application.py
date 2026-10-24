@@ -18,6 +18,7 @@ from typing import Callable
 from collections.abc import Sequence
 
 from .conversation import Controller, Target, Token
+from .g2p import G2PBackend, default_g2p
 from .audio_knowledge import (
     NativeAudioObservation, NativeVoiceKnowledge, reduce_native_voice_knowledge,
 )
@@ -528,7 +529,8 @@ class AutoAdvApplication:
     """
 
     def __init__(self, catalog: Catalog, persist: Callable[[], None], *,
-                 input_send: Callable | None = None, target_ready: Callable | None = None):
+                 input_send: Callable | None = None, target_ready: Callable | None = None,
+                 g2p: G2PBackend | None = None):
         self.catalog = catalog
         self._persist = persist
         self.game_id = ''
@@ -536,7 +538,8 @@ class AutoAdvApplication:
         self.capture: CaptureWorkspace | None = None
         self._runtime_capture_problem: CaptureProblemView | None = None
         self._raw_input_send = input_send or self._windows_input_send
-        self.controller = Controller(self._send_runtime_input, target_ready or self._windows_target_ready)
+        self.g2p = g2p if g2p is not None else default_g2p()
+        self.controller = Controller(self._send_runtime_input, target_ready or self._windows_target_ready, self.g2p)
         self.hook_host: HookHost | None = None
         self._host_epoch = 0
         self._irodori_server: IrodoriServer | None = None

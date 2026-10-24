@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
+from .g2p import G2PBackend
 from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
                     extract_source_fields, interpret)
 
@@ -29,9 +30,10 @@ class Token:
 class Controller:
     """Callbacks from devices never send input; only try_advance may do that."""
     def __init__(self, input_send: Callable[[Target, int], None],
-                 target_ready: Callable[[Target], bool]):
+                 target_ready: Callable[[Target], bool], g2p: G2PBackend):
         self.input_send = input_send
         self.target_ready = target_ready
+        self.g2p = g2p
         self.session = 0
         self.target: Target | None = None
         self.profile: Profile | None = None
@@ -234,7 +236,7 @@ class Controller:
         self.line_no += 1
         self.utterance = interpret(
             raw, self.profile, session=self.session, line=self.line_no, source=origin,
-            sequence=sequence, speaker_override=speaker, body_override=body)
+            sequence=sequence, g2p=self.g2p, speaker_override=speaker, body_override=body)
         self.completed = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False

@@ -6,6 +6,8 @@ from collections.abc import Sequence
 import re
 import unicodedata
 
+from .g2p import G2PBackend, primary_reading_units
+
 
 class AdvanceMode(str, Enum):
     TEXT = 'text'
@@ -182,7 +184,7 @@ class OCRSettings:
 
 
 COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
-                 'default_voice', 'reading_ms', 'per_character_wait_ms',
+                 'default_voice', 'reading_ms', 'per_reading_unit_wait_ms',
                  'native_helper', 'alignment_model', 'alignment_vocab', 'input_key',
                  'next_line_timeout_ms')
 
@@ -210,7 +212,7 @@ class Profile:
     replacements: list[ReplacementRule] = field(default_factory=list)
     name_readings: dict[str, str] = field(default_factory=dict)
     reading_ms: int = 700
-    per_character_wait_ms: int = 200
+    per_reading_unit_wait_ms: int = 200
     hook_flush_ms: int = 500
     hook_codepage: int = 932
     hook_max_buffer: int = 3000
@@ -226,7 +228,7 @@ class Profile:
     inherit_common: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
-        if not self.id or not self.name or type(self.reading_ms) is not int or self.reading_ms <= 0 or type(self.per_character_wait_ms) is not int or self.per_character_wait_ms <= 0:
+        if not self.id or not self.name or type(self.reading_ms) is not int or self.reading_ms <= 0 or type(self.per_reading_unit_wait_ms) is not int or self.per_reading_unit_wait_ms <= 0:
             raise ValueError('invalid profile')
         if (not 0 <= self.hook_flush_ms <= 10000 or not 0 <= self.hook_codepage <= 65535
                 or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
@@ -289,30 +291,20 @@ class Utterance:
     raw: str
     speaker: str
     text: str
+    pronunciation: str
     reading: str
     match_text: str
     use_tts: bool
     voice: str
     advance_mode: AdvanceMode
     uncertain_text_fallback: bool
-    character_count: int
+    reading_unit_count: int
     text_wait_ms: int
 
 
 _RUBY = re.compile(r'([\u3400-\u9fff]+)\(([\u3040-\u30ffー]{1,30})\)')
 _KANJI = r'[\u3400-\u9fff]'
 
-
-def count_reading_characters(body: str) -> int:
-    """Count display glyphs only, never expanded reading or duplicate ruby."""
-    without_ruby = _RUBY.sub(lambda m: m.group(1), body)
-    def countable(index: int, character: str) -> bool:
-        if character == 'ー':
-            return index > 0 and ('\u3040' <= without_ruby[index-1] <= '\u30ff'
-                                  or without_ruby[index-1] == 'ー')
-        return unicodedata.category(character)[0] in 'LN'
-
-    return sum(countable(i, c) for i, c in enumerate(without_ruby))
 
 
 def extraction_rules_for(profile: Profile, source_identity: str) -> tuple[StructureRule, ...]:
@@ -349,7 +341,7 @@ def extract_source_fields(raw: str, profile: Profile, source_identity: str) -> E
 
 
 def interpret(raw: str, profile: Profile, *, session: int, line: int, source: str,
-              sequence: int, speaker_override: str | None = None,
+              sequence: int, g2p: G2PBackend, speaker_override: str | None = None,
               body_override: str | None = None, trace: list[str] | None = None) -> Utterance:
     if body_override is None:
         fields = extract_source_fields(raw, profile, source)
@@ -363,13 +355,14 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
         speaker = (speaker_override or '').strip()
         if trace is not None:
             trace.append('抽出: 会話取得レシピで確定済み')
-    reading = _RUBY.sub(lambda m: m.group(2), body)
+    pronunciation = _RUBY.sub(lambda m: m.group(2), body)
     for word, replacement in sorted(profile.name_readings.items(), key=lambda item: -len(item[0])):
-        prior = reading
-        reading = re.sub(r'(?<!' + _KANJI + ')' + re.escape(word) + r'(?!' + _KANJI + ')',
-                         lambda _: replacement, reading)
-        if trace is not None and reading != prior:
+        prior = pronunciation
+        pronunciation = re.sub(r'(?<!' + _KANJI + ')' + re.escape(word) + r'(?!' + _KANJI + ')',
+                                 lambda _: replacement, pronunciation)
+        if trace is not None and pronunciation != prior:
             trace.append(f'読み: {word} → {replacement}')
+    reading = pronunciation
     match_text = _RUBY.sub(lambda m: m.group(1), body)
     for index, rule in enumerate(profile.replacements, 1):
         if not rule.enabled:
@@ -387,10 +380,14 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
             if trace is not None and updated != match_text:
                 trace.append(f'置換 {index}: 原音照合文を変更')
             match_text = updated
+        if rule.target == 'both':
+            pronunciation = replace(pronunciation)
     use_tts = profile.speaker_tts.get(speaker, profile.default_tts)
     voice = profile.speaker_voices.get(speaker, profile.default_voice)
-    count = count_reading_characters(body)
+    _, reading_units = primary_reading_units(pronunciation, g2p)
     return Utterance(session, line, source, sequence, raw, speaker, body,
-                     reading, match_text, use_tts, voice,
+                     pronunciation, reading, match_text, use_tts, voice,
                      AdvanceMode(profile.advance_mode), profile.uncertain_text_fallback,
-                     count, max(profile.reading_ms, count * profile.per_character_wait_ms))
+                     reading_units,
+                     max(profile.reading_ms,
+                         reading_units * profile.per_reading_unit_wait_ms))

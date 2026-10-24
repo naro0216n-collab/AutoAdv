@@ -18,7 +18,7 @@ class CommonSettings:
     default_tts: bool = False
     default_voice: str = ''
     reading_ms: int = 700
-    per_character_wait_ms: int = 200
+    per_reading_unit_wait_ms: int = 200
     native_helper: str = ''
     alignment_model: str = ''
     alignment_vocab: str = ''
@@ -109,7 +109,7 @@ def _profile_payload(p: Profile) -> dict:
         source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
         alignment_model=p.alignment_model, alignment_vocab=p.alignment_vocab,
         next_line_timeout_ms=p.next_line_timeout_ms, inherit_common=p.inherit_common,
-        reading_ms=p.reading_ms, per_character_wait_ms=p.per_character_wait_ms,
+        reading_ms=p.reading_ms, per_reading_unit_wait_ms=p.per_reading_unit_wait_ms,
         hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
         hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
         repeat_rule=p.repeat_rule, input_key=p.input_key)
@@ -185,10 +185,11 @@ def _read_profile(raw: dict) -> Profile:
         alignment_model=raw.get('alignment_model', ''),
         alignment_vocab=raw.get('alignment_vocab', ''),
         next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
-        inherit_common=[k for k in raw.get('inherit_common', [])
+        inherit_common=[('per_reading_unit_wait_ms' if k == 'per_character_wait_ms' else k)
+                        for k in raw.get('inherit_common', [])
                         if k not in ('asr_model', 'asr_tokens')],
         reading_ms=raw.get('reading_ms', 700),
-        per_character_wait_ms=raw.get('per_character_wait_ms', 200),
+        per_reading_unit_wait_ms=raw.get('per_reading_unit_wait_ms', raw.get('per_character_wait_ms', 200)),
         hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
         hook_max_buffer=int(raw.get('hook_max_buffer', 3000)),
         hook_max_history=int(raw.get('hook_max_history', 1000000)),
@@ -236,7 +237,7 @@ def load(path: Path | None = None) -> Catalog:
     if raw['schema_version'] == 3:
         # No inference from old audio-routing policy to the new advance mode.
         # Explicit old TTS use can be preserved, but uncertain fields need review.
-        review.append('旧4区分の進行モードには等価な移行先がありません。新規設定は文字のみ判断、文字数フォールバックOFFです。')
+        review.append('旧4区分の進行モードには等価な移行先がありません。新規設定は文字のみ判断、本文時間フォールバックOFFです。')
         common = raw.get('common', {})
         common['default_tts'] = common.get('default_mode') == 'tts'
         common.pop('default_mode', None)
@@ -266,6 +267,10 @@ def load(path: Path | None = None) -> Catalog:
     # unless an actual alignment override is already present.
     base_common.pop('asr_model', None)
     base_common.pop('asr_tokens', None)
+    if 'per_reading_unit_wait_ms' not in base_common and 'per_character_wait_ms' in base_common:
+        base_common['per_reading_unit_wait_ms'] = base_common.pop('per_character_wait_ms')
+    else:
+        base_common.pop('per_character_wait_ms', None)
     catalog = Catalog(raw.get('irodori_root', ''), raw.get('irodori_url', 'http://127.0.0.1:8088'),
                       raw.get('host_dll', ''), luna_imports=raw.get('luna_imports', {}),
                       common=CommonSettings(**{**base_common,

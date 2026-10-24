@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target
 from autoadv.model import (AdvanceMode, Profile, HookSelection, OCRSettings, ReplacementRule,
-                           count_reading_characters, interpret, matching_structure_rule, StructureRule)
+                           interpret, matching_structure_rule, StructureRule)
 from autoadv.storage import Catalog, CommonSettings, load, save
 
 
@@ -18,28 +20,33 @@ SOURCE = SimpleNamespace(hook_code='H', context=1, context2=2)
 def make_profile(mode=AdvanceMode.TEXT, tts=False, fallback=False):
     return Profile('p', 'game', hooks=[HookSelection('H', 1, 2)], body_source='H|1|2', advance_mode=mode,
                    default_tts=tts, default_voice='v0', uncertain_text_fallback=fallback,
-                   reading_ms=350, per_character_wait_ms=180)
+                   reading_ms=350, per_reading_unit_wait_ms=180)
 
 
-class ReadingCharacters(unittest.TestCase):
-    def test_unicode_and_ruby_contract(self):
-        for raw, count in (('「おはよう！」', 4), ('「……」', 0),
-                           ('　（！？）🎉\n', 0), ('花(はな)は赤い', 4),
-                           ('かなー', 3), ('ー', 0), ('AB 12.', 4),
-                           ('か\u3099', 1), ('東京(とうきょう)です', 4)):
-            with self.subTest(raw=raw):
-                self.assertEqual(count_reading_characters(raw), count)
+class ReadingTiming(unittest.TestCase):
+    def test_primary_pronunciation_uses_mora_like_units_not_display_characters(self):
+        g2p = FakeG2P({
+            '学校': ('g', 'a', 'cl', 'k', 'o', 'o'),
+            '愛': ('a', 'i'),
+        })
+        p = make_profile()
+        school = interpret('「学校」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        love = interpret('「愛」', p, session=1, line=2, source='x', sequence=2, g2p=g2p)
+        punctuation = interpret('「……」', p, session=1, line=3, source='x', sequence=3, g2p=g2p)
+        self.assertEqual((school.reading_unit_count, school.text_wait_ms), (4, 720))
+        self.assertEqual((love.reading_unit_count, love.text_wait_ms), (2, 360))
+        self.assertEqual((punctuation.reading_unit_count, punctuation.text_wait_ms), (0, 350))
 
-    def test_effective_body_ignores_speaker_and_tts_changes(self):
+    def test_tts_only_changes_do_not_rewrite_pronunciation_timing(self):
         p = make_profile(tts=True)
         p.replacements = [ReplacementRule('こんにちは', 'はろー', target='tts')]
-        u = interpret('京「こんにちは！」', p, session=1, line=1, source='x', sequence=1)
-        self.assertEqual(u.character_count, 5)
+        u = interpret('京「こんにちは！」', p, session=1, line=1, source='x', sequence=1, g2p=TEST_G2P)
+        self.assertEqual(u.pronunciation, 'こんにちは!')
+        self.assertEqual(u.reading_unit_count, 5)
         self.assertEqual(u.text_wait_ms, 900)
         self.assertEqual(u.speaker, '京')
         self.assertEqual(u.reading, 'はろー!')
         self.assertTrue(u.use_tts)
-        self.assertEqual(interpret('「……」', p, session=1, line=2, source='x', sequence=2).text_wait_ms, 350)
 
     def test_prose_colon_and_url_are_not_speaker_delimiters(self):
         profile = make_profile()
@@ -49,11 +56,11 @@ class ReadingCharacters(unittest.TestCase):
             '彼は「京：おはよう」と書いた。',
         ):
             with self.subTest(raw=raw):
-                utterance = interpret(raw, profile, session=1, line=1, source='hook', sequence=1)
+                utterance = interpret(raw, profile, session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P)
                 self.assertEqual(utterance.speaker, '')
                 self.assertEqual(utterance.text, __import__('unicodedata').normalize('NFKC', raw))
         explicit = interpret('京：おはようございます。', profile,
-                             session=1, line=1, source='hook', sequence=1)
+                             session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P)
         self.assertEqual((explicit.speaker, explicit.text), ('京', 'おはようございます。'))
 
     def test_rule_preview_trace_is_the_actual_interpretation_path(self):
@@ -70,19 +77,28 @@ class ReadingCharacters(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(index, 1)
         trace = []
-        u = interpret(raw, p, session=1, line=1, source='hook', sequence=1, trace=trace)
-        without_trace = interpret(raw, p, session=1, line=1, source='hook', sequence=1)
+        u = interpret(raw, p, session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P, trace=trace)
+        without_trace = interpret(raw, p, session=1, line=1, source='hook', sequence=1, g2p=TEST_G2P)
         self.assertEqual(u, without_trace)
-        self.assertEqual((u.speaker, u.text, u.reading, u.match_text, u.use_tts, u.voice),
-                         ('大和', '京さん', 'ミヤコさん', '京都さん', False, 'v2'))
+        self.assertEqual((u.speaker, u.text, u.pronunciation, u.reading, u.match_text, u.use_tts, u.voice),
+                         ('大和', '京さん', 'みやこさん', 'ミヤコさん', '京都さん', False, 'v2'))
         self.assertEqual(trace, ['抽出: 優先順位 2', '読み: 京 → みやこ',
                                  '置換 1: TTS文を変更', '置換 2: 原音照合文を変更'])
+
+    def test_both_replacement_updates_shared_pronunciation_base(self):
+        p = make_profile()
+        p.replacements = [ReplacementRule('東京', 'とうきょう', target='both')]
+        g2p = FakeG2P({'とうきょう': ('t', 'o', 'o', 'ky', 'o', 'o')})
+        u = interpret('「東京」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
+        self.assertEqual((u.pronunciation, u.reading, u.match_text),
+                         ('とうきょう', 'とうきょう', 'とうきょう'))
+        self.assertEqual(u.reading_unit_count, 4)
 
     def test_speaker_tts_independent_of_advance_mode(self):
         p = make_profile(AdvanceMode.AUDIO, True, True)
         p.speaker_tts = {'京': False}
         p.speaker_voices = {'京': 'v1'}
-        u = interpret('京「はい」', p, session=1, line=1, source='x', sequence=1)
+        u = interpret('京「はい」', p, session=1, line=1, source='x', sequence=1, g2p=TEST_G2P)
         self.assertFalse(u.use_tts)
         self.assertEqual(u.voice, 'v1')
         self.assertEqual(u.advance_mode, AdvanceMode.AUDIO)
@@ -92,7 +108,7 @@ class ReadingCharacters(unittest.TestCase):
 class ControllerModes(unittest.TestCase):
     def begin(self, mode, tts, fallback=False):
         self.sent = []
-        self.ctrl = Controller(lambda target, key: self.sent.append(key), lambda target: True)
+        self.ctrl = Controller(lambda target, key: self.sent.append(key), lambda target: True, TEST_G2P)
         self.ctrl.begin(make_profile(mode, tts, fallback), Target(10, 20), 'generation', 1)
         self.ctrl.permit(True)
         self.token = self.ctrl.observe(generation='generation', connection=1, sequence=1,
@@ -108,7 +124,7 @@ class ControllerModes(unittest.TestCase):
         profile = make_profile(AdvanceMode.TEXT, True)
         profile.speaker_tts['京'] = True
         profile.speaker_voices['京'] = 'voice-1'
-        ctrl = Controller(lambda *_: None, lambda _: True)
+        ctrl = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         ctrl.begin(profile, Target(10, 20), 'generation', 1)
         first = ctrl.observe(generation='generation', connection=1, sequence=1,
                              source=SOURCE, text='京「一つ目」', pid=10)
@@ -264,7 +280,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_settings_mutation_does_not_rewrite_active_utterance(self):
         p = make_profile(AdvanceMode.TEXT, tts=True)
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         self.ctrl.observe(generation='generation', connection=1, sequence=1,
                           source=SOURCE, text='「こんにちは」', pid=10)
@@ -272,7 +288,7 @@ class ControllerModes(unittest.TestCase):
         p.advance_mode = AdvanceMode.AUDIO
         p.default_tts = False
         p.reading_ms = 3000
-        p.per_character_wait_ms = 500
+        p.per_reading_unit_wait_ms = 500
         self.assertEqual(self.ctrl.utterance, original)
         self.assertEqual(original.advance_mode, AdvanceMode.TEXT)
         self.assertEqual(original.text_wait_ms, 900)
@@ -280,7 +296,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_staged_profile_applies_only_at_next_utterance_boundary(self):
         p = make_profile(AdvanceMode.TEXT, tts=False)
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
                                   source=SOURCE, text='「一行目」', pid=10)
@@ -305,7 +321,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_staged_profile_rejects_capture_ownership_changes(self):
         p = make_profile()
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         changed = make_profile()
         changed.id = p.id
@@ -315,7 +331,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_staged_profile_waits_through_same_utterance_duplicate(self):
         p = make_profile()
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         self.ctrl.observe(generation='generation', connection=1, sequence=1,
                           source=SOURCE, text='「同じ台詞」', pid=10)
@@ -330,7 +346,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_staged_repeat_policy_decides_next_identical_line(self):
         p = make_profile()
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
                                   source=SOURCE, text='「繰り返し」', pid=10)
@@ -349,7 +365,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_unsent_new_hook_is_external_transition_without_disabling_auto(self):
         p = make_profile(AdvanceMode.AUDIO, tts=False)
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
                                   source=SOURCE, text='「一行目」', pid=10, received_ns=1_000)
@@ -365,7 +381,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_unsent_identical_hook_is_not_guessed_as_external_transition(self):
         p = make_profile(AdvanceMode.TEXT, tts=False)
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'generation', 1)
         first = self.ctrl.observe(generation='generation', connection=1, sequence=1,
                                   source=SOURCE, text='「同じ台詞」', pid=10, received_ns=1_000)
@@ -379,7 +395,7 @@ class ControllerModes(unittest.TestCase):
         p = make_profile()
         p.source = 'ocr'
         p.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 640, 180), stable_samples=2)
-        self.ctrl = Controller(lambda *_: None, lambda *_: True)
+        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
         self.ctrl.begin(p, Target(10, 20), 'ocr', 1)
         changed = make_profile()
         changed.id = p.id
@@ -394,10 +410,10 @@ class StorageModes(unittest.TestCase):
     def test_common_and_game_overrides_roundtrip(self):
         catalog = Catalog(common=CommonSettings(advance_mode=AdvanceMode.AUDIO,
                 uncertain_text_fallback=True, default_tts=True, reading_ms=880,
-                per_character_wait_ms=210))
+                per_reading_unit_wait_ms=210))
         game = catalog.create_game('Example')
         stored = game.profiles[game.default_profile]
-        stored.inherit_common = ['advance_mode', 'uncertain_text_fallback', 'per_character_wait_ms']
+        stored.inherit_common = ['advance_mode', 'uncertain_text_fallback', 'per_reading_unit_wait_ms']
         stored.default_tts = False
         stored.reading_ms = 550
         with tempfile.TemporaryDirectory() as tmp:
@@ -407,9 +423,35 @@ class StorageModes(unittest.TestCase):
         p = restored.effective_profile(restored.games[game.id].profiles[stored.id])
         self.assertEqual(p.advance_mode, AdvanceMode.AUDIO)
         self.assertTrue(p.uncertain_text_fallback)
-        self.assertEqual(p.per_character_wait_ms, 210)
+        self.assertEqual(p.per_reading_unit_wait_ms, 210)
         self.assertEqual(p.reading_ms, 550)
         self.assertFalse(p.default_tts)
+
+    def test_saved_v4_character_rate_migrates_once_to_reading_unit_rate(self):
+        catalog = Catalog(common=CommonSettings(per_reading_unit_wait_ms=230))
+        game = catalog.create_game('Legacy rate')
+        profile = game.profiles[game.default_profile]
+        profile.per_reading_unit_wait_ms = 310
+        profile.inherit_common = ['per_reading_unit_wait_ms']
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings-v4.json'
+            save(catalog, path)
+            raw = json.loads(path.read_text('utf-8'))
+            raw['common']['per_character_wait_ms'] = raw['common'].pop('per_reading_unit_wait_ms')
+            stored = next(iter(raw['games'].values()))['profiles'][profile.id]
+            stored['per_character_wait_ms'] = stored.pop('per_reading_unit_wait_ms')
+            stored['inherit_common'] = ['per_character_wait_ms']
+            path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), 'utf-8')
+
+            restored = load(path)
+            restored_profile = next(iter(next(iter(restored.games.values())).profiles.values()))
+            self.assertEqual(restored.common.per_reading_unit_wait_ms, 230)
+            self.assertEqual(restored_profile.per_reading_unit_wait_ms, 310)
+            self.assertEqual(restored_profile.inherit_common, ['per_reading_unit_wait_ms'])
+            save(restored, path)
+            rewritten = path.read_text('utf-8')
+            self.assertNotIn('per_character_wait_ms', rewritten)
+            self.assertIn('per_reading_unit_wait_ms', rewritten)
 
     def test_v3_remains_unmodified_and_ambiguous_modes_need_confirmation(self):
         previous = Catalog()
@@ -423,7 +465,7 @@ class StorageModes(unittest.TestCase):
             raw['common'].pop('advance_mode')
             raw['common'].pop('uncertain_text_fallback')
             raw['common'].pop('default_tts')
-            raw['common'].pop('per_character_wait_ms')
+            raw['common'].pop('per_reading_unit_wait_ms')
             raw['common']['default_mode'] = 'auto'
             raw['common']['reading_ms'] = 0
             for item in raw['games'].values():
@@ -432,7 +474,7 @@ class StorageModes(unittest.TestCase):
                     p.pop('uncertain_text_fallback')
                     p.pop('default_tts')
                     p.pop('speaker_tts')
-                    p.pop('per_character_wait_ms', None)
+                    p.pop('per_reading_unit_wait_ms', None)
                     p['default_mode'] = 'auto'
                     p['speaker_modes'] = {'主人公': 'tts'}
             original = json.dumps(raw, ensure_ascii=False, indent=2)

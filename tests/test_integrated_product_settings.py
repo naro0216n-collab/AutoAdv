@@ -3,6 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target, Token
 from autoadv.hook_protocol import ThreadSource, HookEvent
 from autoadv.import_legacy import inspect_legacy, add_legacy_games
@@ -17,7 +19,7 @@ class SessionOwnership(unittest.TestCase):
         p = Profile('p', 'test', hooks=[HookSelection('H', 2, 3)], body_source='H|2|3')
         sent = []
         controller = Controller(lambda target, key: sent.append((target.pid, target.audio_pid, key)),
-                                lambda target: target.hwnd == 800 and target.pid == 22)
+                                lambda target: target.hwnd == 800 and target.pid == 22, TEST_G2P)
         target = Target(22, 800, hook_pid=11, audio_pid=33)
         controller.begin(p, target, 'native-host', 3)
         hook = ThreadSource(11, 100, 2, 3, 'H', 'hook')
@@ -34,7 +36,7 @@ class SessionOwnership(unittest.TestCase):
 
     def test_runtime_hold_does_not_disable_auto_and_new_line_clears_hold(self):
         p = Profile('p', 'P', hooks=[HookSelection('H', 2, 3)], body_source='H|2|3')
-        c = Controller(lambda *_: None, lambda _: True)
+        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         c.begin(p, Target(10, 20), 'host', 1)
         source = ThreadSource(10, 100, 2, 3, 'H', 'hook')
         token = c.observe(generation='host', connection=1, sequence=1,
@@ -53,7 +55,7 @@ class SessionOwnership(unittest.TestCase):
 
     def test_explicit_text_source_ignores_unselected_hook_and_rejects_ambiguous_same_source(self):
         p = Profile('p', 'many', hooks=[HookSelection('H', 2, 3), HookSelection('ALT', 4, 5)], body_source='H|2|3')
-        c = Controller(lambda *_: None, lambda _: True)
+        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         c.begin(p, Target(10, 20), 'host', 1)
         primary = ThreadSource(10, 100, 2, 3, 'H', 'primary')
         aux = ThreadSource(10, 200, 4, 5, 'ALT', 'aux')
@@ -185,7 +187,7 @@ class OcrEvidence(unittest.TestCase):
         worker.stopping.wait = lambda _: None
         worker._run()
         self.assertEqual(outputs, [(1, '台詞A'), (2, '台詞B'), (3, '')])
-        c = Controller(lambda *_: None, lambda _: True)
+        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         p = Profile('p', 'OCR', source='ocr')
         session = c.begin(p, Target(11, 22), 'ocr', 1)
         first = c.observe_ocr(sequence=1, text='台詞A', pid=11, session=session)

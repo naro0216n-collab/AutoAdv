@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, Mock
 
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import HookSelection, Profile, SPEAKER_ONLY_RULE
@@ -32,7 +34,7 @@ class SelectedHookContracts(unittest.TestCase):
                          body_source=self.a.identity,
                          source_rules={self.s.identity: [SPEAKER_ONLY_RULE]})
         self.sent = []
-        self.c = Controller(lambda *_: self.sent.append('advance'), lambda _: True)
+        self.c = Controller(lambda *_: self.sent.append('advance'), lambda _: True, TEST_G2P)
 
     def begin(self):
         self.c.begin(self.p, Target(101, 400), 'host', 7)
@@ -83,7 +85,7 @@ class SelectedHookContracts(unittest.TestCase):
             self.assertEqual(restored.body_source, self.b.identity)
             self.assertEqual(restored.speaker_source, self.s.identity)
             self.assertNotIn('address', path.read_text(encoding='utf-8'))
-            c = Controller(lambda *_: None, lambda _: True)
+            c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
             c.begin(restored, Target(101, 401), 'new-host', 1)
             self.assertTrue(next(h for h in restored.hooks if h.identity == self.b.identity)
                             .matches(source('B', 3, address=0xBEEF)))

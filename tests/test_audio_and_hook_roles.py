@@ -3,6 +3,8 @@ import unittest
 import wave
 from unittest.mock import patch
 from types import SimpleNamespace
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import HookSelection, Profile, SPEAKER_ONLY_RULE
@@ -15,7 +17,7 @@ class NativeAndAudioContract(unittest.TestCase):
                                          HookSelection('S', 4, 5)],
                     body_source='D|1|2', speaker_source='S|4|5',
                     source_rules={'S|4|5': [SPEAKER_ONLY_RULE]})
-        c = Controller(lambda *_: None, lambda _: True)
+        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         c.begin(p, Target(11, 22), 'host', 1)
         body = ThreadSource(11, 10, 1, 2, 'D', 'body')
         speaker = ThreadSource(11, 20, 4, 5, 'S', 'speaker')

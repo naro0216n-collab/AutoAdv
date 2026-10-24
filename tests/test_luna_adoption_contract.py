@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import json
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target, Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import Profile, HookSelection, AdvanceMode, SPEAKER_ONLY_RULE
@@ -26,7 +28,7 @@ class MultiHookProductContract(unittest.TestCase):
                          source_rules={'HS|3|4': [SPEAKER_ONLY_RULE]},
                          default_tts=True, default_voice='default',
                          speaker_tts={'京': False})
-        self.c = Controller(lambda *_: self.sent.append(1), lambda _: True)
+        self.c = Controller(lambda *_: self.sent.append(1), lambda _: True, TEST_G2P)
         self.c.begin(self.p, Target(31, 90), 'host', 2)
 
     def test_speaker_after_body_still_assembles_one_utterance(self):

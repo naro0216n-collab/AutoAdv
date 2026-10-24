@@ -37,7 +37,7 @@ def checker_only_records():
             source='H0', address=143, hook_sequence=i, raw_hash=raw_hash)
         add('utterance', **key, source='H0', hook_sequence=i, raw_hash=raw_hash,
             body_hash=raw_hash, advance_mode=case['advance_mode'],
-            use_tts=case['use_tts'], text_wait_ms=500, characters=5,
+            use_tts=case['use_tts'], text_wait_ms=500, reading_units=5,
             uncertain_text_fallback=False)
         if case['advance_mode'] == 'audio':
             add('native_pcm', **key, audio_pid=41, frames=960)

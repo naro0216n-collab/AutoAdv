@@ -22,7 +22,7 @@ fixture manifest、ゲームoracle、trace verifier、live-session adapter等は
 
 ### 3. Hosted WindowsのHOOK・文字送り経路
 
-AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phaseだけを実行する。ゲームPID/HWND検出、実LunaHost接続、実Hook候補からの校正、Controllerの文字時間判断、実Windows入力、次Hookを確認する。Process Loopback、target-conditioned alignment、NativeAudioはこのHosted経路の合否条件に含めない。
+AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phaseだけを実行する。ゲームPID/HWND検出、実LunaHost接続、実Hook候補からの校正、Controllerの本文時間判断、実Windows入力、次Hookを確認する。Process Loopback、target-conditioned alignment、NativeAudioはこのHosted経路の合否条件に含めない。
 
 ```powershell
 .\validation\real_game\run_live_check.ps1 -Phase reading `
@@ -40,7 +40,7 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
 
 標準ケースは**24台詞を一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで連続実行**する。7つの通常ゲーム場面を、静かな室内→BGM付き会話→BGMを維持した入店と群衆音→BGM切替と日本語背景発話→事件演出→旧BGMと機械環境音が重なる場面転換→静かな復帰、の順で一続きに通過する。場面境界でゲーム再起動、HOOK再選択、NativeAudio/alignment再初期化、profile再設定、検証用状態clearは行わない。
 
-24件中18件は原音あり、6件は原音なし。原音ありには通常短文・長文、JVS複数話者、囁き、泣き声・悲鳴、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音を含む。原音なしはclean、BGMのみ、BGM+群衆、BGM+日本語背景発話、BGM+SE残響、機械環境音のみへ分散し、明示フォールバックON時に文字数時間で進むことと、背景音を対象原音へ誤帰属して`native`完了しないことを測る。台詞境界をまたぐBGM・環境音・SEは意図的に保持する。独立game oracleはvoiceの開始・終了だけでなくmusic/ambient/background/SFXの実再生も記録し、`ADVANCEMENT_ACCURACY_SCENARIO.json`の想定mixが実際に成立しなかったrunは完全な計測として扱わない。
+24件中18件は原音あり、6件は原音なし。原音ありには通常短文・長文、JVS複数話者、囁き、泣き声・悲鳴、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音を含む。原音なしはclean、BGMのみ、BGM+群衆、BGM+日本語背景発話、BGM+SE残響、機械環境音のみへ分散し、明示フォールバックON時にG2P由来の本文時間で進むことと、背景音を対象原音へ誤帰属して`native`完了しないことを測る。台詞境界をまたぐBGM・環境音・SEは意図的に保持する。独立game oracleはvoiceの開始・終了だけでなくmusic/ambient/background/SFXの実再生も記録し、`ADVANCEMENT_ACCURACY_SCENARIO.json`の想定mixが実際に成立しなかったrunは完全な計測として扱わない。
 
 途中で保留、早送り、誤帰属、入力失敗、次Hook未取得等になっても品質値として記録し、後続ケースの実測を失わないためだけに`validation_recovery_input`を送って収集を継続できる。回復入力はAutoAdvの成功へ算入しない。固定合格点は置かず、trace/oracle破損、fixture・実音声経路の未成立、要求ケースの収集未完了等だけを計測不能としてrunner異常にする。
 

@@ -1,5 +1,7 @@
 import unittest
 from types import SimpleNamespace
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target, Token
 from autoadv.model import Profile, HookSelection, AdvanceMode, interpret, ReplacementRule
 
@@ -17,7 +19,7 @@ class DialogueContractTests(unittest.TestCase):
         self.sent = []
         self.target_ready = True
         self.controller = Controller(lambda t, k: self.sent.append((t, k)),
-                                     lambda t: self.target_ready)
+                                     lambda t: self.target_ready, TEST_G2P)
         self.controller.begin(profile(), Target(101, 202), 'host-a', 1)
 
     def output(self, text, seq, *, source=SOURCE, gen='host-a', pid=101, conn=1):
@@ -156,14 +158,14 @@ class DialogueContractTests(unittest.TestCase):
         p.default_voice = 'narrator'
         p.replacements = [ReplacementRule('東京', 'とうきょう')]
         p.speaker_tts = {'京': False}
-        result = interpret('京「東京へ行く(いく)」', p, session=2, line=3, source='x', sequence=6)
+        result = interpret('京「東京へ行く(いく)」', p, session=2, line=3, source='x', sequence=6, g2p=TEST_G2P)
         self.assertEqual(result.reading, 'とうきょうへ行く(いく)')
         self.assertEqual(result.use_tts, False)
         self.assertEqual(result.speaker, '京')
 
 
     def test_auto_can_be_enabled_before_monitoring_and_survives_begin_close(self):
-        c = Controller(lambda *_: None, lambda _: True)
+        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         self.assertFalse(c.authorized)
         c.permit(True)
         self.assertTrue(c.authorized)
@@ -193,7 +195,7 @@ class HookBoundaryContractTests(unittest.TestCase):
 
     def setUp(self):
         self.sent = []
-        self.controller = Controller(lambda *_: self.sent.append(1), lambda _: True)
+        self.controller = Controller(lambda *_: self.sent.append(1), lambda _: True, TEST_G2P)
         self.controller.begin(profile(), Target(101, 202), 'host-a', 1)
         self.controller.permit(True)
 

@@ -6,6 +6,8 @@ import json
 import copy
 import unittest
 
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.model import (Profile, AdvanceMode, StructureRule, ReplacementRule,
                            OCRSettings, interpret, DEFAULT_STRUCTURE_RULES)
 from autoadv.storage import Catalog, save, load
@@ -17,9 +19,9 @@ class SalvagedTextTests(unittest.TestCase):
     def test_quoted_newline_and_custom_priority(self):
         p = Profile('p', 'P')
         p.source_rules['src'] = [StructureRule(r'^#(?P<speaker>[^:]+):(?P<body>.*)$'), *DEFAULT_STRUCTURE_RULES]
-        a = interpret('#春:おはよう', p, session=1, line=1, source='src', sequence=1)
+        a = interpret('#春:おはよう', p, session=1, line=1, source='src', sequence=1, g2p=TEST_G2P)
         self.assertEqual((a.speaker, a.text), ('春', 'おはよう'))
-        b = interpret('冬\nおやすみ', p, session=1, line=2, source='src', sequence=2)
+        b = interpret('冬\nおやすみ', p, session=1, line=2, source='src', sequence=2, g2p=TEST_G2P)
         self.assertEqual((b.speaker, b.text), ('冬', 'おやすみ'))
         self.assertEqual(a.source, 'src')
 
@@ -29,7 +31,7 @@ class SalvagedTextTests(unittest.TestCase):
         p.replacements = [ReplacementRule('A', 'えー', target='tts'),
                           ReplacementRule('B', 'びー', target='match'),
                           ReplacementRule('C+', 'しー', regex=True, target='both')]
-        u = interpret('京「京(みやこ)と東京とABCCC」', p, session=1, line=1, source='s', sequence=1)
+        u = interpret('京「京(みやこ)と東京とABCCC」', p, session=1, line=1, source='s', sequence=1, g2p=TEST_G2P)
         self.assertEqual(u.reading, 'みやこと東京とえーBしー')
         self.assertEqual(u.match_text, '京と東京とAびーしー')
 
@@ -37,7 +39,7 @@ class SalvagedTextTests(unittest.TestCase):
         p = Profile('p', 'P', default_tts=False)
         p.speaker_tts['大和'] = True
         p.speaker_voices['大和'] = 'voice-01'
-        u = interpret('大和「こんにちは」', p, session=2, line=5, source='X', sequence=6)
+        u = interpret('大和「こんにちは」', p, session=2, line=5, source='X', sequence=6, g2p=TEST_G2P)
         self.assertEqual((u.use_tts, u.voice), (True, 'voice-01'))
 
     def test_invalid_regexes_fail_before_persisting(self):
@@ -112,7 +114,7 @@ class AcquisitionAndInputTests(unittest.TestCase):
     def test_ocr_session_rejects_stale_and_duplicate_messages(self):
         p = Profile('p', 'OCR', source='ocr', reading_ms=10)
         sent = []
-        c = Controller(lambda target, key: sent.append(key), lambda target: True)
+        c = Controller(lambda target, key: sent.append(key), lambda target: True, TEST_G2P)
         session = c.begin(p, Target(11, 22), 'ocr', 1)
         a = c.observe_ocr(sequence=1, text='同じ台詞', pid=11, session=session)
         self.assertIsNotNone(a)
@@ -130,7 +132,7 @@ class AcquisitionAndInputTests(unittest.TestCase):
         p = Profile('p', 'Edit first')
         p.validate()
         with self.assertRaisesRegex(ValueError, 'body source'):
-            Controller(lambda *_: None, lambda _: True).begin(p, Target(11, 22), 'h', 1)
+            Controller(lambda *_: None, lambda _: True, TEST_G2P).begin(p, Target(11, 22), 'h', 1)
 
 
 

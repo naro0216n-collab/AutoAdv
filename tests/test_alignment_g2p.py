@@ -2,7 +2,8 @@ import importlib.util
 import unittest
 from types import SimpleNamespace
 
-from autoadv.g2p import HaqumeiG2P, PronunciationCandidate
+from autoadv.g2p import (HaqumeiG2P, PronunciationCandidate, count_reading_units,
+                         primary_reading_units)
 
 
 class HaqumeiAdapterTests(unittest.TestCase):
@@ -46,6 +47,38 @@ class HaqumeiAdapterTests(unittest.TestCase):
         engine = SimpleNamespace(
             g2p_candidates=lambda _: SimpleNamespace(candidates=[candidate]))
         self.assertEqual(HaqumeiG2P(engine).candidates('え。')[0].phonemes, ('e',))
+
+
+    def test_mora_like_timing_units_count_nuclei_nasal_and_geminate(self):
+        self.assertEqual(
+            count_reading_units(('g', 'a', 'cl', 'k', 'o', 'o', 'N')),
+            5,
+        )
+        self.assertEqual(count_reading_units(('ky', 'o', 'o')), 2)
+        self.assertEqual(count_reading_units(('pau', 'sil', 'k')), 0)
+
+    def test_unknown_surface_remains_a_timing_quantity(self):
+        self.assertEqual(count_reading_units(('unk:固有名詞',)), 4)
+        self.assertEqual(count_reading_units(('unk:abc12',)), 5)
+
+    def test_readable_text_without_primary_pronunciation_fails_closed(self):
+        class EmptyBackend:
+            def candidates(self, text, *, max_candidates=4):
+                return ()
+        with self.assertRaisesRegex(ValueError, 'no primary pronunciation'):
+            primary_reading_units('東京', EmptyBackend())
+        self.assertEqual(primary_reading_units('……!?', EmptyBackend()), ((), 0))
+
+    def test_primary_timing_ignores_bounded_alternatives(self):
+        class Backend:
+            def candidates(self, text, *, max_candidates=4):
+                self.max_candidates = max_candidates
+                return (PronunciationCandidate(('ky', 'o', 'o'), 0),
+                        PronunciationCandidate(('a', 'i', 'u', 'e', 'o'), 1))
+        backend = Backend()
+        phones, units = primary_reading_units('今日', backend)
+        self.assertEqual((phones, units), (('ky', 'o', 'o'), 2))
+        self.assertEqual(backend.max_candidates, 1)
 
     @unittest.skipUnless(importlib.util.find_spec('haqumei'), 'haqumei native extra not installed')
     def test_installed_haqumei_matches_kanji_and_hiragana_pronunciation(self):

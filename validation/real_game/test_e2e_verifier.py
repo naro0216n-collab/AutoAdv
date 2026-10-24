@@ -50,7 +50,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
             source='HOOK|1|2', address=902, hook_sequence=i+1, context=1, context2=2, raw_hash=raw)
         add('utterance', **key, source='HOOK|1|2', hook_sequence=i+1,
             raw_hash=raw, body_hash=text_digest(line['text']), advance_mode='text' if chosen=='reading' else 'audio',
-            use_tts=chosen=='tts', text_wait_ms=500, characters=5, uncertain_text_fallback=False, speaker='明日香')
+            use_tts=chosen=='tts', text_wait_ms=500, reading_units=5, uncertain_text_fallback=False, speaker='明日香')
         if chosen == 'native':
             add('native_pcm', **key, frames=960, audio_pid=50)
             add('native_audio_observation', **key, kind='alignment', target_units=5, aligned_target_units=5,
@@ -363,7 +363,7 @@ class RealGameVerifierContract(unittest.TestCase):
             {'event': 'utterance', 'session': 1, 'line': 4, 'source': 'HOOK|1|2',
              'hook_sequence': 99, 'raw_hash': text_digest('Cleaning stores took 0 ms'),
              'body_hash': text_digest('Cleaning stores took 0 ms'), 'advance_mode': 'audio',
-             'use_tts': False, 'text_wait_ms': 500, 'characters': 20,
+             'use_tts': False, 'text_wait_ms': 500, 'reading_units': 20,
              'uncertain_text_fallback': False, 'speaker': 'Cleaning stores took 0 ms'},
             final_completion,
         ])

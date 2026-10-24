@@ -5,6 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from tests.g2p_support import TEST_G2P, FakeG2P
+
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import HookSelection, Profile, SPEAKER_ONLY_RULE, BODY_ONLY_RULE
@@ -20,7 +22,7 @@ class HookPairingTests(unittest.TestCase):
         p.speaker_source = p.hooks[2].identity
         p.source_rules[p.hooks[0].identity] = [BODY_ONLY_RULE]
         p.source_rules[p.hooks[2].identity] = [SPEAKER_ONLY_RULE]
-        c = Controller(lambda *_: None, lambda _: True)
+        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
         c.begin(p, Target(123, 456), 'generation', 1)
 
         def e(s, seq, value):

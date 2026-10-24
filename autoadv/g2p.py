@@ -1,4 +1,4 @@
-"""Swappable Japanese grapheme-to-phoneme adapters for target audio alignment."""
+"""Japanese grapheme-to-phoneme contracts shared by timing and alignment."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,6 +16,45 @@ class PronunciationCandidate:
 
 class G2PBackend(Protocol):
     def candidates(self, text: str, *, max_candidates: int = 4) -> tuple[PronunciationCandidate, ...]: ...
+
+
+_READING_NUCLEI = frozenset({"a", "i", "u", "e", "o", "I", "U"})
+_READING_SPECIAL = frozenset({"N", "cl"})
+
+
+def count_reading_units(phonemes: tuple[str, ...]) -> int:
+    """Count mora-like timing units from one primary pronunciation.
+
+    Vowel nuclei, moraic nasal and geminate closure each consume one timing
+    unit. Consonants only qualify the following nucleus. An unresolved Haqumei
+    surface remains explicit as ``unk:<surface>`` and contributes its visible
+    Letter/Number length rather than disappearing from the timing estimate.
+    """
+    total = 0
+    for phone in phonemes:
+        if phone in _READING_NUCLEI or phone in _READING_SPECIAL:
+            total += 1
+        elif phone.startswith("unk:"):
+            surface = phone[4:]
+            visible = sum(unicodedata.category(ch)[0] in "LN" for ch in surface)
+            total += max(1, visible) if surface else 0
+    return total
+
+
+def primary_reading_units(text: str, backend: G2PBackend) -> tuple[tuple[str, ...], int]:
+    """Return the context-selected primary phone sequence and timing units.
+
+    Punctuation-only text legitimately has no pronunciation. Readable text must
+    not silently collapse to the minimum wait if the configured G2P backend
+    fails to return a primary pronunciation.
+    """
+    candidates = backend.candidates(text, max_candidates=1)
+    if not candidates:
+        if any(unicodedata.category(ch)[0] in "LN" for ch in text):
+            raise ValueError("G2P returned no primary pronunciation for readable text")
+        return (), 0
+    phones = candidates[0].phonemes
+    return phones, count_reading_units(phones)
 
 
 class HaqumeiG2P:
