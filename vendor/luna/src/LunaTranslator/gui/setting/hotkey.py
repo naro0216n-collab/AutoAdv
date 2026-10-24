@@ -1,0 +1,548 @@
+from qtsymbols import *
+import functools, gobject, NativeUtils, uuid, windows, shutil, time, math
+from myutils.config import globalconfig, _TR, saveallconfig
+from myutils.hwnd import grabwindow
+from traceback import print_exc
+from myutils.wrapper import threader, tryprint
+from myutils.utils import (
+    parsekeystringtomodvkcode,
+    unsupportkey,
+    selectdebugfile,
+    checkmd5reloadmodule,
+)
+from gui.specialwidget import KeyPressDetector
+from gui.usefulwidget import (
+    D_getsimpleswitch,
+    D_getsimplekeyseq,
+    D_getdoclink,
+    D_getIconButton,
+    getspinbox,
+    request_delete_ok,
+    MyInputDialog,
+    IconButton,
+    SClickableLabel,
+    makesubtab_lazy,
+    maketabholder,
+)
+from gui.dynalang import LLabel, LAction, LDialog, LFormLayout
+from gui.fluent.settingtree import FluentSettingTree, wrap_setting_tree
+from gui.fluent.card import make_card
+
+
+def delaycreatereferlabels(self, name):
+    referlabel = LLabel()
+    self.referlabels[name] = referlabel
+    try:
+        referlabel.setText(self.referlabels_data[name])
+    except:
+        pass
+    return referlabel
+
+
+def maybesetreferlabels(self, name, text):
+    try:
+        self.referlabels[name].setText(text)
+    except:
+        self.referlabels_data[name] = text
+
+
+def autoreadswitch(self):
+    try:
+        self.autoread.clicksignal.emit()
+    except:
+        globalconfig["autoread"] = not globalconfig.get("autoread", False)
+
+
+def safeGet():
+
+    t = NativeUtils.GetSelectedText()
+    if (t is None) and (globalconfig.get("getWordFallbackClipboard", True)):
+        t = NativeUtils.ClipBoard.text
+    if 0:
+        QToolTip.showText(QCursor.pos(), _TR("取词失败"), gobject.base.commonstylebase)
+        t = ""
+    return t
+
+
+def createreloadablewrapper(self, name):
+    module = checkmd5reloadmodule(
+        gobject.getconfig("myhotkeys/{}.py").format(name), "myhotkeys." + name
+    )
+    try:
+        gobject.base.safeinvokefunction.emit(module.OnHotKeyClicked)
+    except:
+        print_exc()
+
+
+liandianqi_stoped = True
+
+
+def invoke_liandianqi_or_stop():
+    global liandianqi_stoped
+    key = globalconfig.get("liandianqi_key")
+    if not key:
+        return
+    key = parsekeystringtomodvkcode(key)[1]
+    interval = globalconfig.get("liandianqi_interval", 1)
+    if liandianqi_stoped:
+        liandianqi_stoped = False
+
+        @threader
+        def __():
+            d = globalconfig["quick_setting"]["all"]["53"]
+            while d["use"] and not liandianqi_stoped:
+                if key in (1, 2, 4):
+                    flags = {
+                        1: (windows.MOUSEEVENTF_LEFTDOWN, windows.MOUSEEVENTF_LEFTUP),
+                        2: (windows.MOUSEEVENTF_RIGHTDOWN, windows.MOUSEEVENTF_RIGHTUP),
+                        4: (
+                            windows.MOUSEEVENTF_MIDDLEDOWN,
+                            windows.MOUSEEVENTF_MIDDLEUP,
+                        ),
+                    }
+                    windows.mouse_event(flags[key][0], 0, 0, 0)
+                    time.sleep(0.1)
+                    windows.mouse_event(flags[key][1], 0, 0, 0)
+                else:
+                    windows.keybd_event(key, 0, 0, 0)
+                    time.sleep(0.1)
+                    windows.keybd_event(key, 0, windows.KEYEVENTF_KEYUP, 0)
+                time.sleep(interval)
+
+        __()
+    else:
+        liandianqi_stoped = True
+
+
+@tryprint
+def _ocr_focus_switch(to):
+    curr = 0
+    for i, r in enumerate(gobject.base.textsource.ranges):
+        if r.range_ui.isfocus:
+            curr = i
+            break
+    __l = len(gobject.base.textsource.ranges)
+    for i in range(__l):
+        curri = (__l + curr + i + to) % __l
+        r = gobject.base.textsource.ranges[curri]
+        if r.range_ui.getrect().isValid():
+            r.range_ui.isfocus = True
+            gobject.base.translation_ui.startTranslater()
+            break
+
+
+def _calc_dis_and_centerdis(rect: QRect, point):
+    px, py = point.x, point.y
+
+    x1, x2 = rect.left(), rect.right()
+    y1, y2 = rect.top(), rect.bottom()
+
+    if rect.contains(QPoint(px, py)):
+        edge_dist = 0
+    else:
+        dx = max(x1 - px, 0, px - x2)
+        dy = max(y1 - py, 0, py - y2)
+        edge_dist = math.hypot(dx, dy)
+
+    cx, cy = rect.center().x(), rect.center().y()
+    center_dist = math.hypot(px - cx, py - cy)
+
+    return edge_dist, center_dist
+
+
+@tryprint
+def _ocr_focus_No():
+    for r in gobject.base.textsource.ranges:
+        if r.range_ui.isfocus:
+            r.range_ui.isfocus = False
+
+
+@tryprint
+def _ocr_focus_switch_near():
+    nearestr = None
+    dist = math.inf, math.inf
+    curr = windows.GetCursorPos()
+    for rr in gobject.base.textsource.ranges:
+        r = rr.range_ui.getrect()
+        if not r.isValid():
+            continue
+        d, cd = _calc_dis_and_centerdis(r, curr)
+        if d < dist[0]:
+            nearestr = rr
+            dist = d, cd
+        elif d == dist[0] and cd < dist[1]:
+            nearestr = rr
+            dist = d, cd
+    if not nearestr:
+        return
+    nearestr.range_ui.isfocus = True
+    gobject.base.translation_ui.startTranslater()
+
+
+def safesaveall():
+    _ = NativeUtils.SimpleCreateMutex("LUNASAVECONFIGUPDATE")
+    if windows.GetLastError() != windows.ERROR_ALREADY_EXISTS:
+        print(saveallconfig())
+
+
+def registrhotkeys(self):
+    self.referlabels = {}
+    self.referlabels_data = {}
+    self.registok = {}
+    self.bindfunctions = {
+        "croprecord": lambda: gobject.base.searchwordW.ankiwindow.recordvediohotkeycallback(True),
+        "recordwindow": lambda: gobject.base.searchwordW.ankiwindow.recordvediohotkeycallback(False),
+        "playlastrecord": lambda: gobject.base.audioplayer.play(
+            gobject.base.searchwordW.autorecorder.get(), force=True
+        ),
+        "_1": gobject.base.translation_ui.startTranslater,
+        "_2": gobject.base.translation_ui.changeTranslateMode,
+        "_3": gobject.base.settin_ui_showsignal.emit,
+        "_4": lambda: NativeUtils.ClipBoard.setText(gobject.base.currenttext),
+        "_5": gobject.base.translation_ui.changeshowhiderawsig.emit,
+        "_51": gobject.base.translation_ui.changeshowhidetranssig.emit,
+        "_6": lambda: gobject.base.transhis.showsignal.emit(),
+        "_7": lambda: gobject.base.readcurrent(force=True),
+        "_7_1": lambda: gobject.base.audioplayer.stop(),
+        "_8": lambda: gobject.base.translation_ui.changemousetransparentstate(0),
+        "_9": lambda: (
+            gobject.base.translation_ui.changetoolslockstate(),
+            gobject.base.translation_ui.enterfunction(),
+        ),
+        "52": lambda: (
+            globalconfig.__setitem__(
+                "hidetools", not globalconfig.get("hidetools", False)
+            ),
+            gobject.base.translation_ui.enterfunction(),
+        ),
+        "_10": gobject.base.translation_ui.showsavegame_signal.emit,
+        "_11": gobject.base.translation_ui.hotkeyuse_selectprocsignal.emit,
+        "_12": lambda: gobject.base.hookselectdialog.showsignal.emit(),
+        "_13": lambda: gobject.base.translation_ui.clickRange_signal.emit(),
+        "_14": gobject.base.translation_ui.showhide_signal.emit,
+        "_14_1": gobject.base.translation_ui.clear_signal_1.emit,
+        "_15": gobject.base.translation_ui.bindcropwindow_signal.emit,
+        "_16": gobject.base.translation_ui.showhideuisignal.emit,
+        "_17": gobject.base.translation_ui.quitf_signal.emit,
+        "_21": grabwindow,
+        "_22": gobject.base.translation_ui.muteprocessignal.emit,
+        "41": lambda: gobject.base.translation_ui.fullsgame_signal.emit(False),
+        "42": lambda: gobject.base.translation_ui.fullsgame_signal.emit(True),
+        "_26": gobject.base.translation_ui.ocr_once_signal.emit,
+        "_26_1": lambda: gobject.base.translation_ui.ocr_do_function(
+            gobject.base.translation_ui.ocr_once_follow_rect
+        ),
+        "_28": lambda: NativeUtils.ClipBoard.setText(gobject.base.currenttranslate),
+        "_29": lambda: gobject.base.searchwordW.ankiwindow.recordbtn1.click(),
+        "_30": lambda: gobject.base.searchwordW.ankiwindow.recordbtn2.click(),
+        "_32": functools.partial(autoreadswitch, self),
+        "_33": lambda: gobject.base.searchwordW.soundbutton.click(),
+        "_35": lambda: gobject.base.searchwordW.ankiconnect.customContextMenuRequested.emit(
+            QPoint()
+        ),
+        "36": lambda: gobject.base.textgetmethod(NativeUtils.ClipBoard.text, False),
+        "37": lambda: gobject.base.searchwordW.search_word.emit(safeGet()),
+        "39": lambda: gobject.base.searchwordW.ocr_once_signal.emit(),
+        "38": lambda: gobject.base.textgetmethod(safeGet(), False),
+        "40": lambda: gobject.base.searchwordW.search_word_in_new_window.emit(
+            safeGet()
+        ),
+        "43": lambda: NativeUtils.SuspendResumeProcess(
+            windows.GetWindowThreadProcessId(gobject.base.hwnd)
+        ),
+        "53": invoke_liandianqi_or_stop,
+        "45": gobject.base.prepare,
+        "46": lambda: _ocr_focus_switch(-1),
+        "47": lambda: _ocr_focus_switch(1),
+        "48": lambda: _ocr_focus_switch_near(),
+        "49": lambda: _ocr_focus_No(),
+        "50": safesaveall,
+        "51": lambda: gobject.base.translation_ui.changemousetransparentstate(1),
+        "disableothers": functools.partial(__enable, self, exception="disableothers"),
+        "giveupfocus": gobject.base.giveupfocus,
+    }
+
+    for name in globalconfig["myquickkeys"]:
+        self.bindfunctions[name] = functools.partial(
+            createreloadablewrapper, self, name
+        )
+    for name in self.bindfunctions:
+        regist_or_not_key(self, name)
+
+
+hotkeys = [
+    [
+        "通用",
+        [
+            "disableothers",
+            "_1",
+            "_2",
+            "_3",
+            "_5",
+            "_51",
+            "_6",
+            "_8",
+            "51",
+            "_9",
+            "52",
+            "38",
+            "_16",
+            "_17",
+            "53",
+            "45",
+            "50",
+            "giveupfocus",
+        ],
+    ],
+    ["HOOK", ["_11", "_12"]],
+    ["OCR", ["_13", "_14", "_14_1", "_26", "_26_1", "46", "47", "48", "49"]],
+    ["剪贴板", ["36", "_4", "_28"]],
+    ["TTS", ["_32", "_7", "_7_1"]],
+    ["游戏", ["_10", "_15", "_21", "_22", "43", "41", "42"]],
+    ["查词", ["37", "40", "39"]],
+]
+
+
+class liandianqi(LDialog):
+    def __init__(self, parent):
+        super().__init__(parent, Qt.WindowType.WindowCloseButtonHint)
+        self.setWindowTitle("设置")
+        formLayout = LFormLayout(self)
+        formLayout.addRow(
+            "点击间隔_(s)",
+            getspinbox(
+                0.1, 10000, globalconfig, "liandianqi_interval", True, 0.1, default=1
+            ),
+        )
+        combo = KeyPressDetector(globalconfig.get("liandianqi_key", ""))
+        combo.callback.connect(
+            lambda ks: globalconfig.__setitem__("liandianqi_key", ks)
+        )
+        formLayout.addRow("按键", combo)
+        self.exec()
+
+
+hotkeysettings = {"53": liandianqi}
+
+
+def _setupkeycolumns(tree):
+    """快捷键树的五列：使用/设置（无标题）/名称/快捷键/说明。"""
+    tree.setColumnCount(5)
+    tree.setExpandsOnDoubleClick(False)
+    hdr = tree.header()
+    for c in (0, 1, 3, 4):
+        hdr.setSectionResizeMode(
+            c, QHeaderView.ResizeMode.ResizeToContents)
+    hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+
+
+def _customnamelabel(tree, item, name):
+    """自定义键的名称标签：点击菜单重命名/删除。"""
+    bl = SClickableLabel(globalconfig["quick_setting"]["all"][name]["name"])
+
+    def clickmenu(*_):
+        menu = QMenu(tree._host)
+        editname = LAction("重命名", menu)
+        delete = LAction("删除", menu)
+        menu.addAction(editname)
+        menu.addAction(delete)
+        action = menu.exec(QCursor.pos())
+        if action == delete:
+            if not request_delete_ok(
+                    tree._host, "1ac8bc89-7049-4e1c-9d36-b30698ad104a"):
+                return
+            globalconfig["myquickkeys"].remove(name)
+            globalconfig["quick_setting"]["all"][name]["use"] = False
+            regist_or_not_key(tree._host, name)
+            if item.parent() is not None:
+                item.parent().removeChild(item)
+            else:
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+        elif action == editname:
+            before = globalconfig["quick_setting"]["all"][name]["name"]
+            title = MyInputDialog(tree._host, "重命名", "名称", before)
+            if not title or title == before:
+                return
+            globalconfig["quick_setting"]["all"][name]["name"] = title
+            bl.setText(title)
+            tree._a11yname(item, 2, title)  # 无障碍文本同步
+
+    bl.clicked.connect(clickmenu)
+    return bl
+
+
+def _fillkeyrow(tree, host, item, name, doc=True, custom=False):
+    """快捷键行（五列：使用/设置/名称/快捷键/说明）。设置列为特设按钮
+    （如 连点器）或自定义行的编辑脚本按钮（均独占一列，无标题）。
+    custom 行的名称可点菜单重命名/删除。"""
+    item.setData(0, Qt.ItemDataRole.UserRole, name)
+    d = globalconfig["quick_setting"]["all"][name]
+    tree._a11yname(item, 2, d["name"])  # 重命名经 _customnamelabel 同步
+    if custom:
+        namew = _customnamelabel(tree, item, name)
+        docw = None
+        # 自定义行：编辑脚本按钮
+        setbtn = D_getIconButton(
+            callback=lambda: selectdebugfile(
+                "myhotkeys/{}.py".format(name), ishotkey=True),
+            icon="fa.edit")()
+    else:
+        namew = LLabel(d["name"])
+        docw = (D_getdoclink("fastkeys.html#anchor-" + name)()
+                if doc else None)
+        setbtn = (D_getIconButton(
+            callback=functools.partial(hotkeysettings[name], host))()
+            if name in hotkeysettings else None)
+    tree.setItemWidget(item, 0, tree._cell(
+        D_getsimpleswitch(
+            d, "use",
+            callback=functools.partial(regist_or_not_key, host, name))(),
+        center=True))
+    if setbtn is not None:
+        tree.setItemWidget(item, 1, tree._cell(setbtn, center=True))
+    tree.setItemWidget(item, 2, tree._cell(docw, namew))
+    tree.setItemWidget(item, 3, tree._cell(
+        D_getsimplekeyseq(
+            d, "keystring",
+            functools.partial(regist_or_not_key, host, name))(),
+        center=True))
+    tree.setItemWidget(item, 4, tree._cell(delaycreatereferlabels(host, name)))
+
+
+class HotkeyListTree(FluentSettingTree):
+    """快捷键行列表（无分组、无标题四列）：查词窗口的快捷键页复用。"""
+
+    def __init__(self, host, names, doc=True, parent=None):
+        super().__init__(parent, titles=None, draggable=False)
+        self._host = host
+        self._customroot = None
+        _setupkeycolumns(self)
+        for name in names:
+            item = QTreeWidgetItem()
+            self.addTopLevelItem(item)
+            _fillkeyrow(self, host, item, name, doc=doc)
+
+
+class _CustomKeyTree(HotkeyListTree):
+    """自定义快捷键列表（快捷键页 自定义 tab）：键行（名称菜单重命名/
+    删除）+ 末尾 + 行点击追加。"""
+
+    def __init__(self, host, parent=None):
+        super().__init__(host, globalconfig["myquickkeys"], doc=False,
+                         parent=parent)
+        self._addplusrow()
+
+    # ---- + 行追加 ----
+    def _addplusrow(self):
+        item = QTreeWidgetItem()
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.addTopLevelItem(item)
+        plus = IconButton(icon="fa.plus")
+        plus.clicked.connect(self._plusclicked)
+        self.setItemWidget(item, 0, self._cell(plus, center=True))
+
+    def _plusclicked(self):
+        name = str(uuid.uuid4())
+        self._host.bindfunctions[name] = functools.partial(
+            createreloadablewrapper, self._host, name)
+        globalconfig["myquickkeys"].append(name)
+        globalconfig["quick_setting"]["all"][name] = {
+            "use": False,
+            "name": name,
+            "keystring": "",
+        }
+        shutil.copy(
+            "LunaTranslator/myutils/template/hotkey.py",
+            gobject.getconfig("myhotkeys/{}.py".format(name)),
+        )
+        # 插到 + 行之前
+        item = QTreeWidgetItem()
+        self.insertTopLevelItem(self.topLevelItemCount() - 1, item)
+        _fillkeyrow(self, self._host, item, name, custom=True)
+
+
+def setTab_quick(self, l: QVBoxLayout):
+
+    # ---- “使用快捷键”卡片 ----
+    card_holder = QWidget()
+    card_lay = QVBoxLayout(card_holder)
+    card_lay.setContentsMargins(16, 16, 16, 0)
+    card_lay.setSpacing(0)
+    card_lay.addWidget(
+        make_card(
+            "",
+            "使用快捷键",
+            "",
+            D_getsimpleswitch(
+                globalconfig["quick_setting"],
+                "use",
+                callback=functools.partial(__enable, self),
+            ),
+        )
+    )
+    l.addWidget(card_holder)
+
+    # ---- 分组页签（原 tab 结构保留），每个 tab 页 = 快捷键树 ----
+    def ___group(names, lay):
+        lay.addWidget(
+            wrap_setting_tree(HotkeyListTree(self, names)), 1)
+
+    def ___custom(lay):
+        lay.addWidget(wrap_setting_tree(_CustomKeyTree(self)), 1)
+
+    __vis, __ = [], []
+    for _title, _names in hotkeys:
+        __vis.append(_title)
+        __.append(functools.partial(___group, _names))
+    __vis.append("自定义")
+    __.append(___custom)
+    tab, do = makesubtab_lazy(
+        __vis, __, delay=True, type=3,
+    )
+    l.addWidget(maketabholder(tab))
+    l.setSpacing(0)
+    do()
+
+
+def __enable(self, exception=None, *_):
+    if exception == "disableothers":
+        gobject.tempconfig["disableothers"] = not gobject.tempconfig.get(
+            "disableothers", False
+        )
+    for quick in globalconfig["quick_setting"]["all"]:
+        if quick not in self.bindfunctions:
+            continue
+        if quick == exception:
+            continue
+        regist_or_not_key(self, quick)
+
+
+def regist_or_not_key(self, name, _=None):
+    maybesetreferlabels(self, name, "")
+
+    if name in self.registok:
+        NativeUtils.UnRegisterHotKey(self.registok[name])
+    __: dict = globalconfig["quick_setting"]["all"].get(name)
+    if not __:
+        return
+    keystring = __.get("keystring")
+    if (not keystring) or (
+        not (
+            __.get("use")
+            and globalconfig["quick_setting"]["use"]
+            and not gobject.tempconfig.get("disableothers", False)
+        )
+    ):
+        return
+
+    try:
+        mode, vkcode = parsekeystringtomodvkcode(keystring)
+    except unsupportkey as e:
+        maybesetreferlabels(self, name, ("不支持的键位_") + ",".join(e.args[0]))
+        return
+    uid = NativeUtils.RegisterHotKey((mode, vkcode), self.bindfunctions[name])
+
+    if not uid:
+        maybesetreferlabels(self, name, ("快捷键冲突"))
+    else:
+        self.registok[name] = uid

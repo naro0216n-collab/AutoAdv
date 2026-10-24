@@ -1,0 +1,30 @@
+name: Luna Release Asset Adoption
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - '.github/workflows/luna-release-adoption.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  stage-official-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Adopt pinned official release to temporary artifact
+        run: python scripts/adopt_luna_release.py --download --destination "${RUNNER_TEMP}/adopted"
+      - name: Upload checked upstream binary assets for review and local source commit
+        uses: actions/upload-artifact@v4
+        with:
+          name: luna-official-v12.1.2.12
+          path: ${{ runner.temp }}/adopted
+          if-no-files-found: error
+          retention-days: 14

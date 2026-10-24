@@ -1,0 +1,2381 @@
+from qtsymbols import *
+from gui.fluent.messagebox import ExMessageBox
+import functools, os, re, shutil, zipfile
+import gobject, math, NativeUtils, hashlib, uuid
+from myutils.config import (
+    globalconfig,
+    savehook_new_data,
+    translatorsetting,
+    _TR,
+    tryreadconfig2,
+    getcopyfrom,
+    copyllmapi,
+    dynamicapiname,
+    dynamiclink,
+)
+from datetime import datetime
+import requests
+from myutils.utils import (
+    useExCheck,
+    selectdebugfile,
+    splittranslatortypes,
+    get_free_port,
+    translate_exits,
+    getannotatedapiname,
+    format_bytes,
+)
+from myutils.proxy import getproxy
+from myutils.utils import subprochiderun
+import json, sqlite3
+from traceback import print_exc
+from collections import Counter
+from language import Languages
+from myutils.wrapper import tryprint, threader
+from gui.inputdialog import autoinitdialog, autoinitdialog_items
+from gui.usefulwidget import (
+    SuperCombo,
+    AutoScaleImageButton,
+    getboxlayout,
+    VisLFormLayout,
+    getIconButton,
+    ColorButton,
+    check_grid_append,
+    getsimpleswitch,
+    D_getIconButton,
+    MyInputDialog,
+    D_getsimpleswitch,
+    request_delete_ok,
+    createfoldgrid,
+    getspinbox,
+    ClickableLabel,
+    automakegrid,
+    FocusFontCombo,
+    getsmalllabel,
+    clearlayout,
+    makescrollgrid,
+    IconButton,
+    PopupWidget,
+    getsimplecombobox,
+    GroupCardWidget,
+    FocusSpin,
+)
+from gui.setting.display_text import GetFormForLineHeight
+from gui.dynalang import (
+    LPushButton,
+    LAction,
+    LFormLayout,
+    LDialog,
+    LStandardItemModel,
+    LStandardItem,
+    LTableView,
+)
+
+
+def getallllms(l):
+    _ = []
+    for fanyi in l:
+        is_gpt_like = globalconfig["fanyi"][fanyi].get("is_gpt_like", False)
+        if is_gpt_like:
+            _.append(fanyi)
+    return _
+
+
+def splitapillm(l):
+    not_is_gpt_like = []
+    is_gpt_likes = []
+    for fanyi in l:
+        is_gpt_like = globalconfig["fanyi"][fanyi].get("is_gpt_like", False)
+        if is_gpt_like:
+            is_gpt_likes.append(fanyi)
+        else:
+            not_is_gpt_like.append(fanyi)
+    return is_gpt_likes, not_is_gpt_like
+
+
+def loadvisinternal(copy):
+    __vis = []
+    __uid = []
+    for _ in getallllms(globalconfig["fanyi"]):
+        if copy:
+            which = translate_exits(_, only_copy=True)
+            if not which:
+                continue
+        else:
+            if not translate_exits(_):
+                continue
+        __vis.append(dynamicapiname(_))
+        __uid.append(_)
+    return __vis, __uid
+
+
+class SpecialFont(PopupWidget):
+    def __init__(self, apiuid, p):
+        super().__init__(p)
+        self.apiuid = apiuid
+        box = QGridLayout(self)
+        grid = []
+        grid.append(
+            [
+                "",
+                "跟随默认",
+            ]
+        )
+        if "privatefont" not in globalconfig["fanyi"][apiuid]:
+            globalconfig["fanyi"][apiuid]["privatefont"] = {}
+        dd = globalconfig["fanyi"][apiuid]["privatefont"]
+        for i in range(5):
+            if i == 0:
+                t = "字体"
+                k = "fontfamily"
+                w = QPushButton()
+
+                def _f(dd, key, x):
+                    dd[key] = x
+                    self.resetfont()
+
+                w = FocusFontCombo()
+                w.setCurrentFont(
+                    QFont(
+                        dd.get(
+                            k,
+                            globalconfig.get(
+                                "fonttype2", gobject.tempconfig.get("fonttype2", "")
+                            ),
+                        )
+                    )
+                )
+                w.currentTextChanged.connect(functools.partial(_f, dd, k))
+            elif i == 1:
+                t = "大小"
+                k = "fontsize"
+                w = getspinbox(
+                    1,
+                    100,
+                    dd,
+                    k,
+                    double=True,
+                    default=globalconfig.get(k, 16),
+                    callback=self.resetfont,
+                )
+            elif i == 2:
+                t = "加粗"
+                k = "showbold"
+                w = getsimpleswitch(
+                    dd, k, default=globalconfig.get(k, False), callback=self.resetfont
+                )
+            elif i == 3:
+                t = "倾斜"
+                k = "showitalic"
+                w = getsimpleswitch(
+                    dd, k, default=globalconfig.get(k, False), callback=self.resetfont
+                )
+            elif i == 4:
+                t = "间距"
+                k = "lineheight"
+                w = QWidget()
+                GetFormForLineHeight(w, dd, self.resetfont)
+
+            w.setEnabled(not dd.get(k + "_df", True))
+            switch = D_getsimpleswitch(
+                dd,
+                k + "_df",
+                callback=functools.partial(self.disableclear, w),
+                default=True,
+            )
+            grid.append([getsmalllabel(t), switch, w])
+        automakegrid(box, grid)
+
+    def disableclear(self, w: QWidget, _):
+        w.setEnabled(not _)
+        self.resetfont()
+
+    def resetfont(self, _=None):
+        gobject.base.translation_ui.translate_text.setfontextra(self.apiuid)
+
+
+def renameapi(qlabel: QLabel, apiuid, self, countnum, _=None):
+    menu = QMenu(qlabel)
+    editname = LAction("重命名", menu)
+    specialfont = LAction("字体设置", menu)
+    delete = LAction("删除", menu)
+    copy = LAction("复制", menu)
+    astoppest = LAction("设为首选", menu)
+    astoppest.setCheckable(True)
+    usecache = LAction("使用翻译缓存", menu)
+    usecache.setCheckable(True)
+    useproxy = LAction("使用代理", menu)
+    useproxy.setCheckable(True)
+    astoppest.setChecked(globalconfig.get("toppest_translator") == apiuid)
+    menu.addAction(editname)
+    menu.addAction(specialfont)
+    menu.addAction(astoppest)
+    which = translate_exits(apiuid, only_copy=True)
+    is_gpt_like = globalconfig["fanyi"][apiuid].get("is_gpt_like", False)
+    if is_gpt_like:
+        menu.addSeparator()
+        menu.addAction(usecache)
+        usecache.setChecked(globalconfig["fanyi"][apiuid].get("use_trans_cache", True))
+        menu.addAction(copy)
+
+    if which or "chatgpt-offline" == apiuid:
+        menu.addAction(delete)
+    if globalconfig.get("useproxy", True) and globalconfig["fanyi"][apiuid].get(
+        "type"
+    ) not in (
+        "offline",
+        "other",
+        "pre",
+    ):
+        menu.addSeparator()
+        menu.addAction(useproxy)
+        useproxy.setChecked(globalconfig["fanyi"][apiuid].get("useproxy", True))
+    pos = QCursor.pos()
+    action = menu.exec(pos)
+    if action == delete:
+        selectllmcallback_2(self, countnum, apiuid, None)
+    elif action == useproxy:
+        globalconfig["fanyi"][apiuid]["useproxy"] = useproxy.isChecked()
+    elif action == astoppest:
+        globalconfig["toppest_translator"] = apiuid if action.isChecked() else None
+        if action.isChecked():
+            try:
+                # 若已开启，则立即置顶
+                globalconfig["fix_translate_rank_rank"].remove(apiuid)
+                globalconfig["fix_translate_rank_rank"].insert(0, apiuid)
+            except:
+                pass
+
+    elif action == usecache:
+        globalconfig["fanyi"][apiuid]["use_trans_cache"] = usecache.isChecked()
+    elif action == editname:
+        before = dynamicapiname(apiuid)
+        newname = MyInputDialog(self, "重命名", "名称", before)
+        if not newname:
+            return
+        if newname == before:
+            return
+        globalconfig["fanyi"][apiuid]["name_self_set"] = newname
+        qlabel.setText(newname)
+
+    elif action == specialfont:
+        SpecialFont(apiuid, self).display(pos)
+    elif action == copy:
+        selectllmcallback(self, countnum, apiuid)
+
+
+class RippleWidget(QWidget):
+    """简洁明亮的电磁波圆环聚集动画组件"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        # 动画参数
+        self.ripple_count = 3  # 同时显示的波纹数量
+        self.max_radius = 80  # 最大半径
+        self.min_radius = 3  # 最小半径
+
+        # 颜色配置 - 更亮的蓝色
+        self.ring_color = QColor(0, 150, 255)  # 圆环主色
+
+        # 初始化波纹
+        self.ripples = []
+        for i in range(self.ripple_count):
+            self.ripples.append(
+                {
+                    "radius": self.max_radius
+                    - i * (self.max_radius / self.ripple_count),
+                    "opacity": 0.0,
+                }
+            )
+
+        # 动画定时器
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_animation)
+        self.timer.start(30)
+
+        # 固定大小
+        self.setFixedSize(self.max_radius * 2 + 20, self.max_radius * 2 + 20)
+
+    def set_center(self, center_pos):
+        """设置中心位置"""
+        if center_pos:
+            self.move(
+                int(center_pos.x() - self.width() // 2),
+                int(center_pos.y() - self.height() // 2),
+            )
+
+    def update_animation(self):
+        """更新动画状态"""
+        for ripple in self.ripples:
+            # 缩小半径
+            ripple["radius"] -= 2.0
+
+            # 当波纹到达最小半径时重置
+            if ripple["radius"] < self.min_radius:
+                ripple["radius"] = self.max_radius
+                ripple["opacity"] = 0.0
+
+            # 平滑淡入淡出
+            if ripple["radius"] > self.max_radius * 0.7:
+                target_opacity = 1.0 - (ripple["radius"] - self.max_radius * 0.7) / (
+                    self.max_radius * 0.3
+                )
+                ripple["opacity"] += (target_opacity - ripple["opacity"]) * 0.3
+            elif ripple["radius"] < self.max_radius * 0.3:
+                target_opacity = ripple["radius"] / (self.max_radius * 0.3)
+                ripple["opacity"] += (target_opacity - ripple["opacity"]) * 0.3
+            else:
+                ripple["opacity"] += (1.0 - ripple["opacity"]) * 0.3
+
+        self.update()
+
+    def paintEvent(self, event):
+        """绘制明亮的电磁波圆环"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        center = QPoint(self.width() // 2, self.height() // 2)
+
+        for ripple in self.ripples:
+            if ripple["opacity"] <= 0.01:
+                continue
+
+            radius = ripple["radius"]
+            opacity = ripple["opacity"]
+
+            base_color = QColor(self.ring_color)
+
+            # 1. 外层光晕（让圆环看起来发光）
+            outer_glow = QRadialGradient(center, radius + 6)
+            outer_glow.setColorAt(
+                0.0,
+                QColor(
+                    base_color.red(),
+                    base_color.green(),
+                    base_color.blue(),
+                    int(100 * opacity),
+                ),
+            )
+            outer_glow.setColorAt(
+                1.0, QColor(base_color.red(), base_color.green(), base_color.blue(), 0)
+            )
+
+            pen = QPen(QBrush(outer_glow), 12)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(center, int(radius), int(radius))
+
+            # 2. 主圆环（明亮的线条）
+            main_gradient = QRadialGradient(center, radius)
+            main_gradient.setColorAt(
+                0.0, QColor(base_color.red(), base_color.green(), base_color.blue(), 0)
+            )
+            main_gradient.setColorAt(
+                0.75,
+                QColor(
+                    base_color.red(),
+                    base_color.green(),
+                    base_color.blue(),
+                    int(230 * opacity),
+                ),
+            )
+            main_gradient.setColorAt(0.85, QColor(255, 255, 255, int(255 * opacity)))
+            main_gradient.setColorAt(
+                0.88,
+                QColor(
+                    base_color.red(),
+                    base_color.green(),
+                    base_color.blue(),
+                    int(240 * opacity),
+                ),
+            )
+            main_gradient.setColorAt(
+                1.0, QColor(base_color.red(), base_color.green(), base_color.blue(), 0)
+            )
+
+            pen = QPen(QBrush(main_gradient), 3.5)
+            painter.setPen(pen)
+            painter.drawEllipse(center, int(radius), int(radius))
+
+            # 3. 内层高光线（让圆环更有层次）
+            inner_highlight = QRadialGradient(center, radius)
+            inner_highlight.setColorAt(0.0, QColor(255, 255, 255, 0))
+            inner_highlight.setColorAt(0.85, QColor(255, 255, 255, int(180 * opacity)))
+            inner_highlight.setColorAt(1.0, QColor(255, 255, 255, 0))
+
+            pen = QPen(QBrush(inner_highlight), 1)
+            painter.setPen(pen)
+            painter.drawEllipse(center, int(radius), int(radius))
+
+        painter.end()
+
+    def reset_animation(self):
+        """重置动画状态"""
+        for i, ripple in enumerate(self.ripples):
+            ripple["radius"] = self.max_radius - i * (
+                self.max_radius / self.ripple_count
+            )
+            ripple["opacity"] = 0.0
+
+
+class GuideOverlay(QWidget):
+    """引导遮罩层"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self.ripple = RippleWidget(self)
+        self.target_pos = None
+        self._updating_geometry = False
+
+    def show_at(self, target_widget):
+        """在指定控件位置显示引导"""
+        if self.parent() and target_widget:
+            target_pos = target_widget.mapTo(
+                self.parent(), target_widget.rect().center()
+            )
+            self.target_pos = target_pos
+
+            parent_rect = self.parent().rect()
+            self.setGeometry(parent_rect)
+
+            self.ripple.reset_animation()
+            self.ripple.set_center(target_pos)
+
+            self.show()
+            self.raise_()
+
+    def update_position(self):
+        """更新位置"""
+        if self.target_pos and not self._updating_geometry:
+            self._updating_geometry = True
+            parent_rect = self.parent().rect()
+            self.setGeometry(parent_rect)
+            self.ripple.set_center(self.target_pos)
+            self._updating_geometry = False
+
+
+tscolor_setting_collector: "list[IconButtonWithOverlay]" = []
+
+
+def show_tscolor_setting_guide():
+    # 页签懒加载重建后，旧收集项的 C++ 对象可能已被删除——
+    # 挨个尝试并清掉死引用（自愈，不再对已删除控件抛 RuntimeError）
+    dead = []
+    for _ in tscolor_setting_collector:
+        try:
+            _.guide.show_at(_)
+        except RuntimeError:
+            dead.append(_)
+    for _ in dead:
+        tscolor_setting_collector.remove(_)
+
+
+class IconButtonWithOverlay(ColorButton):
+    def __init__(self, *argc, **kw):
+        super().__init__(*argc, **kw)
+        self.guide = GuideOverlay(self)
+        self.guide.hide()
+        self.clicked.connect(
+            lambda: [_.guide.hide() for _ in tscolor_setting_collector]
+        )
+        tscolor_setting_collector.append(self)
+
+    def resizeEvent(self, a0):
+        super().resizeEvent(a0)
+        if hasattr(self, "guide") and self.guide.isVisible():
+            self.guide.update_position()
+
+
+def D_IconButtonWithOverlay(*argc, **kw):
+    return lambda: IconButtonWithOverlay(*argc, **kw)
+
+
+def getrenameablellabel(uid, self, countnum):
+    name = ClickableLabel(dynamicapiname(uid))
+    fn = functools.partial(renameapi, name, uid, self, countnum)
+    name.clicked.connect(fn)
+    return name
+
+
+def loadbutton(self, fanyi):
+    which = translate_exits(fanyi)
+    copyfrom = getcopyfrom(fanyi)
+    if (copyfrom != fanyi) and (copyfrom in translatorsetting):
+        if "args" in translatorsetting[copyfrom]:
+            for k in translatorsetting[copyfrom]["args"]:
+                if k not in translatorsetting[fanyi]["args"]:
+                    translatorsetting[fanyi]["args"][k] = translatorsetting[copyfrom][
+                        "args"
+                    ][k]
+
+            for k in list(translatorsetting[fanyi]["args"].keys()):
+                if k not in translatorsetting[copyfrom]["args"]:
+                    translatorsetting[fanyi]["args"].pop(k)
+        if "argstype" in translatorsetting[copyfrom]:
+            translatorsetting[fanyi]["argstype"] = translatorsetting[copyfrom][
+                "argstype"
+            ]
+    items = autoinitdialog_items(translatorsetting[fanyi])
+    if not which:
+        return
+    return autoinitdialog(
+        self,
+        translatorsetting[fanyi]["args"],
+        dynamicapiname(fanyi),
+        800,
+        items,
+        which,
+        fanyi,
+    )
+
+
+def selectllmcallback(self, countnum: list, fanyi, newname=None):
+    uid = copyllmapi(fanyi, newname=newname)
+
+    layout: QGridLayout = getattr(self, "damoxinggridinternal")
+
+    last = getIconButton(callback=functools.partial(loadbutton, self, uid))
+
+    name = getrenameablellabel(uid, self, countnum)
+    swc = getsimpleswitch(
+        globalconfig["fanyi"][uid],
+        "use",
+        callback=functools.partial(gobject.base.prepare, uid),
+    )
+    color = IconButtonWithOverlay(
+        self,
+        globalconfig["fanyi"][uid],
+        "color",
+        callback=gobject.base.translation_ui.translate_text.setcolorstyle,
+        width=44,
+    )
+
+    offset = 5 * (len(countnum) % 3)
+    layout.addWidget(name, layout.rowCount() - 1 + (len(countnum) % 3 == 0), offset + 0)
+    layout.addWidget(swc, layout.rowCount() - 1, offset + 1)
+    layout.addWidget(color, layout.rowCount() - 1, offset + 2)
+    layout.addWidget(last, layout.rowCount() - 1, offset + 3)
+    if len(countnum) % 3 != 2:
+        layout.addWidget(QLabel(), layout.rowCount() - 1, offset + 4)
+    countnum.append(uid)
+    self.__del_btn.show()
+
+
+def selectllmcallback_2(self, countnum: list, fanyi, _=None):
+    if not request_delete_ok(self, "99e3f96f-8659-457f-9e0b-52643f552889"):
+        return
+    _f2 = gobject.getconfig("copyed/{}.py".format(fanyi))
+    try:
+        os.remove(_f2)
+    except:
+        pass
+    globalconfig["fanyi"][fanyi]["use"] = False
+    try:
+        gobject.base.translators.pop(fanyi)
+    except:
+        pass
+    layout: QGridLayout = getattr(self, "damoxinggridinternal", None)
+    if layout is not None:
+        clearlayout(layout)
+        automakegrid(
+            layout, initsome11(self, getallllms(globalconfig["fanyi"]), save=True)
+        )
+
+    if not loadvisinternal(True)[0]:
+        self.__del_btn.hide()
+
+
+def addordelete(delete, self, countnum):
+    menu = QMenu(self)
+
+    __vis, __uid = loadvisinternal(delete)
+    if not __vis:
+        return
+    actions = {}
+    for i in range(len(__vis)):
+        if (not delete) and (not useExCheck(__uid[i])):
+            continue
+        _ = QAction(__vis[i], menu)
+        actions[_] = __uid[i]
+        menu.addAction(_)
+    action = menu.exec(QCursor.pos())
+    if action in actions:
+        name = None
+        if not delete:
+            name = MyInputDialog(self, "复制接口", "命名为", action.text() + "_copy")
+            if not name:
+                return
+        (selectllmcallback_2 if delete else selectllmcallback)(
+            self, countnum, actions[action], name
+        )
+
+
+def btndeccallback(self, countnum):
+    addordelete(True, self, countnum)
+
+
+def btnpluscallback(self, countnum):
+    addordelete(False, self, countnum)
+
+
+def initsome11(self, l, save=False):
+    grids: "list[list]" = []
+    i = 0
+    line = []
+    if save:
+        # 复用已存在的 countnum 列表对象（+/- 按钮、标签右键菜单都捕获了它），
+        # 原地清空再重建，避免重建后这些回调持有的列表与实际网格脱节。
+        countnum = getattr(self, "__countnum", None)
+        if countnum is None:
+            countnum = []
+            self.__countnum = countnum
+        else:
+            countnum.clear()
+    else:
+        countnum = []
+    for fanyi in l:
+        which = translate_exits(fanyi)
+        if not which:
+            continue
+        if not useExCheck(fanyi, which):
+            continue
+        i += 1
+        countnum.append(fanyi)
+        if translatorsetting.get(fanyi):
+            last = D_getIconButton(callback=functools.partial(loadbutton, self, fanyi))
+        elif fanyi == "selfbuild":
+            last = D_getIconButton(
+                callback=lambda: selectdebugfile("selfbuild.py"),
+                icon="fa.edit",
+            )
+        else:
+            last = ""
+        line += [
+            functools.partial(getrenameablellabel, fanyi, self, countnum),
+            D_getsimpleswitch(
+                globalconfig["fanyi"][fanyi],
+                "use",
+                callback=functools.partial(gobject.base.prepare, fanyi),
+            ),
+            D_IconButtonWithOverlay(
+                self,
+                globalconfig["fanyi"][fanyi],
+                "color",
+                callback=gobject.base.translation_ui.translate_text.setcolorstyle,
+                width=44,
+            ),
+            last,
+        ]
+
+        if i % 3 == 0:
+            grids.append(line)
+            line = []
+        else:
+            line += [""]
+    if len(line):
+        grids.append(line)
+    check_grid_append(grids)
+    if len(grids) == 1:
+        if i % 3 != 0:
+            grids[-1].append(("", 5 * (3 - i % 3)))
+    return grids
+
+
+def initsome21(self, not_is_gpt_like):
+    not_is_gpt_like = initsome11(self, not_is_gpt_like)
+    grids = [
+        [
+            functools.partial(
+                createfoldgrid,
+                not_is_gpt_like,
+                "过时的",
+                globalconfig["foldstatus"]["ts"],
+                "outdate",
+            )
+        ],
+    ]
+    return grids
+
+
+def __create(download, keydir, key, check, curropen):
+    combollama = SuperCombo()
+    combollama.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    def refresh_llama(combo: SuperCombo):
+        llamacppdir = globalconfig["llama.cpp"].get(keydir, ".")
+        if not llamacppdir:
+            return
+        with QSignalBlocker(combo) as _:
+            combo.clear()
+            for _dir, _, _fs in os.walk(llamacppdir):
+                for _f in _fs:
+                    if not check(_f):
+                        continue
+                    _ = os.path.relpath(os.path.join(_dir, _f), llamacppdir)
+                    combo.addItem(_, internal=_)
+            combo.setCurrentData(globalconfig["llama.cpp"].get(key))
+        combo.currentIndexChanged.emit(combo.currentIndex())
+
+    def getdir(combo):
+        llamacppdir = globalconfig["llama.cpp"].get(keydir, ".")
+        f = QFileDialog.getExistingDirectory(combo, directory=llamacppdir)
+        if not f:
+            return
+        globalconfig["llama.cpp"].__setitem__(keydir, f)
+        refresh_llama(combo)
+
+    refresh_llama(combollama)
+    combollama.currentIndexChanged.connect(
+        lambda idx: globalconfig["llama.cpp"].__setitem__(
+            key, combollama.getIndexData(idx)
+        )
+    )
+
+    def __(curropen):
+        _ = curropen()
+        if not _:
+            return
+        os.startfile(os.path.dirname(_))
+
+    return (
+        (
+            getIconButton(
+                callback=functools.partial(download, combollama),
+                icon="fa.download",
+            )
+            if download
+            else None
+        ),
+        combollama,
+        getIconButton(
+            callback=functools.partial(getdir, combollama),
+            icon="fa.folder-open",
+        ),
+        getIconButton(
+            callback=functools.partial(refresh_llama, combollama),
+            icon="fa.refresh",
+            tips="刷新",
+        ),
+        getIconButton(
+            callback=functools.partial(__, curropen),
+            icon="fa.hdd-o",
+            tips="打开目录",
+        ),
+    )
+
+
+def context_to_slider(context):
+    min_value = math.log(256)
+    max_value = math.log(131072)
+    return int(10000 * (math.log(context) - min_value) / (max_value - min_value))
+
+
+def slider_to_context(value):
+    min_value = math.log(256)
+    max_value = math.log(131072)
+    return int(math.exp(min_value + (value / 10000) * (max_value - min_value)))
+
+
+def update_context_from_slider(value):
+    context_length = slider_to_context(value)
+    context_length = max(256, min(131072, context_length))
+    context_length = round(context_length / 256) * 256
+    return context_length
+
+
+def update_slider_from_input(value):
+    value = round(value / 256) * 256
+    slider_value = context_to_slider(value)
+    slider_value = max(0, min(10000, slider_value))
+    return slider_value
+
+
+def _c_slice_spin(
+    keydefault,
+    keyvalue,
+    range0,
+    range1,
+    range20,
+    range21,
+    step,
+    step2,
+    default,
+    defaulttext,
+    f1=lambda x: x,
+    f2=lambda x: x,
+):
+    w = QWidget()
+    text = QLabel(defaulttext)
+    stack = QStackedWidget()
+    stack.setContentsMargins(0, 0, 0, 0)
+    stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    stack.addWidget(w)
+    stack.addWidget(text)
+
+    def __(_=None):
+        _df = globalconfig["llama.cpp"].get(keydefault, False)
+        stack.setCurrentIndex(1 - _df)
+
+    switch = getsimpleswitch(
+        globalconfig["llama.cpp"], keydefault, callback=__, default=False
+    )
+    __()
+    l2 = QHBoxLayout(w)
+    context_length = QSlider()
+    context_length.setOrientation(Qt.Orientation.Horizontal)
+    context_length.setRange(range0, range1)
+    context_length.setPageStep(step)
+    context_length.setValue(f1(globalconfig["llama.cpp"].get(keyvalue, default)))
+    context_length_input = FocusSpin()
+    context_length_input.setRange(range20, range21)
+    context_length_input.setSingleStep(step2)
+    context_length_input.setValue(globalconfig["llama.cpp"].get(keyvalue, default))
+    l2.setContentsMargins(0, 0, 0, 0)
+    l2.addWidget(context_length)
+    l2.addWidget(context_length_input)
+
+    def __(v):
+        with QSignalBlocker(context_length_input) as _:
+            context_length_input.setValue(f2(v))
+            globalconfig["llama.cpp"][keyvalue] = f2(v)
+
+    def __2(v):
+        with QSignalBlocker(context_length) as _:
+            context_length.setValue(f1(v))
+            globalconfig["llama.cpp"][keyvalue] = v
+
+    context_length.valueChanged.connect(__)
+    context_length_input.valueChanged.connect(__2)
+
+    l = QHBoxLayout()
+    l.setContentsMargins(0, 0, 0, 0)
+    l.addWidget(switch)
+    l.addWidget(stack)
+    return l
+
+
+def loadmodewidget():
+    w = QWidget()
+    text = QLabel("(default: mmap)")
+    stack = QStackedWidget()
+    stack.setContentsMargins(0, 0, 0, 0)
+    stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    stack.addWidget(w)
+    stack.addWidget(text)
+
+    def __(_=None):
+        _df = globalconfig["llama.cpp"].get("load-mode-use", False)
+        stack.setCurrentIndex(1 - _df)
+
+    switch = getsimpleswitch(
+        globalconfig["llama.cpp"], "load-mode-use", callback=__, default=False
+    )
+    __()
+    l2 = QHBoxLayout(w)
+
+    l2.setContentsMargins(0, 0, 0, 0)
+    l2.addWidget(
+        getsimplecombobox(
+            ["none", "mmap", "mlock", "mmap+mlock", "dio"],
+            globalconfig["llama.cpp"],
+            k="load-mode",
+            internal=[
+                "none",
+                "mmap",
+                "mlock",
+                "mmap+mlock",
+                "dio",
+            ],
+            default="mmap",
+        ),
+    )
+
+    l = QHBoxLayout()
+    l.setContentsMargins(0, 0, 0, 0)
+    l.addWidget(switch)
+    l.addWidget(stack)
+    return l
+
+
+def nglnum():
+    l = QHBoxLayout()
+    combo = getsimplecombobox(
+        ["auto", "all", "number"],
+        d=globalconfig["llama.cpp"],
+        k="gpu-layers-which",
+        internal=["auto", "all", "number"],
+        default="auto",
+    )
+    l.addWidget(combo)
+    stack = QStackedWidget()
+    stack.setContentsMargins(0, 0, 0, 0)
+    stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    stack.addWidget(QLabel())
+    stack.addWidget(
+        getspinbox(0, 200, globalconfig["llama.cpp"], "gpu-layers", default=200)
+    )
+
+    def cb(_):
+        stack.setCurrentIndex(combo.getIndexData(_) == "number")
+
+    combo.currentIndexChanged.connect(cb)
+    stack.setCurrentIndex(combo.getCurrentData() == "number")
+    l.addWidget(stack)
+    return l
+
+
+def portnum():
+    l = QHBoxLayout()
+    l.setContentsMargins(0, 0, 0, 0)
+    spin = getspinbox(0, 65536, globalconfig["llama.cpp"], "port", default=8080)
+    switch = getsimpleswitch(
+        globalconfig["llama.cpp"],
+        "port-fixed",
+        default=False,
+        callback=lambda _: spin.setVisible(_),
+    )
+    if not globalconfig["llama.cpp"].get("port-fixed", False):
+        spin.setVisible(False)
+    l.addWidget(switch)
+    l.addWidget(spin)
+    return l
+
+
+llamacppautoHandle = None
+
+
+def __getfirstllamacpp(llamacppdir: str):
+    if llamacppdir and os.path.isdir(llamacppdir):
+        for _dir, _, _fs in os.walk(llamacppdir):
+            for _f in _fs:
+                if _f.lower() == "llama-server.exe":
+                    return os.path.abspath(os.path.join(_dir, _f))
+
+
+def __getfirstgguf(ggufdir: str):
+    if ggufdir and os.path.isdir(ggufdir):
+        for _dir, _, _fs in os.walk(ggufdir):
+            for _f in _fs:
+                if _f.lower().endswith(".gguf"):
+                    return os.path.abspath(os.path.join(_dir, _f))
+
+
+def __getllamacppversion(llamaserver, std=False):
+    if not llamaserver:
+        return None
+    cmd = '"{}" --version'.format(llamaserver)
+    llamaserverdir = os.path.dirname(llamaserver)
+    proc = subprochiderun(cmd, cwd=llamaserverdir)
+    version: "re.Match" = re.search(
+        r"version: .*? \(build (\d+), commit .*?\)", proc.stderr
+    )
+    if not version:
+        version: "re.Match" = re.search(r"version: (\d+) \(.*?\)", proc.stderr)
+    if not version:
+        return (None, proc.stderr) if std else None
+    version = int(version.groups()[0])
+    return (version, proc.stderr) if std else version
+
+
+def __getllamacppdevices(llamaserver):
+    cmd = '"{}" --list-devices'.format(llamaserver)
+    llamaserverdir = os.path.dirname(llamaserver)
+    proc = subprochiderun(cmd, cwd=llamaserverdir)
+    _: "list[str]" = proc.stdout.split("Available devices:")
+    if len(_) != 2:
+        return None
+    result = ["auto", "cpu"]
+    for __ in _[1].splitlines():
+        __ = __.strip()
+        if not __:
+            continue
+        if __ == "(none)":
+            continue
+        result.append(__)
+    return result
+
+
+class interruptexc(Exception):
+    pass
+
+
+def _download_file(
+    key,
+    url,
+    savep,
+    *,
+    digest=None,
+    check_interrupt=None,
+    octet_stream_only=False,
+    verify_size=True
+):
+    """llama.cpp 下载流（downloadgguf / downloadone 共用）：分块写入 +
+    中断 + 进度 + 可选 SHA256 校验。异常统一转进度码（-3 取消 / -1
+    失败），返回是否成功。"""
+    try:
+        gobject.base.llamacppdownloadprogress.emit(key, url, 0, 0)
+        with open(savep + ".tmp", "wb") as file:
+            r = requests.get(url, stream=True, proxies=getproxy())
+            if octet_stream_only and r.headers.get("Content-Type") not in (
+                None,
+                "application/octet-stream",
+            ):
+                raise Exception()
+            size = int(r.headers["Content-Length"])
+            file_size = 0
+            hash_obj = hashlib.sha256()
+            for i in r.iter_content(chunk_size=1024 * 32):
+                if (check_interrupt and check_interrupt()) or (
+                    interrupt.get(key, False)
+                ):
+                    raise interruptexc()
+                if not i:
+                    continue
+                file.write(i)
+                file_size += len(i)
+                gobject.base.llamacppdownloadprogress.emit(key, url, file_size, size)
+                if digest:
+                    hash_obj.update(i)
+            if digest and (hash_obj.hexdigest().upper() != digest):
+                raise Exception()
+            if verify_size and (file_size != size):
+                raise Exception()
+        if os.path.isfile(savep):
+            os.remove(savep)
+        os.rename(savep + ".tmp", savep)
+        return True
+    except interruptexc:
+        gobject.base.llamacppdownloadprogress.emit(key, url, -3, 0)
+    except:
+        print_exc()
+        gobject.base.llamacppdownloadprogress.emit(key, url, -1, 0)
+    return False
+
+
+def downloadgguf(key, url: str):
+    savep = gobject.gettempdir("llamacpp-models/" + str(uuid.uuid4()))
+    if not _download_file(key, url, savep, octet_stream_only=True):
+        return False
+    gobject.base.llamacppdownloadprogress.emit(key, url, -2, 0)
+
+    shutil.move(savep, gobject.getcachedir("llamacpp-models/" + key))
+    globalconfig["llama.cpp"]["models"] = gobject.getcachedir("llamacpp-models")
+    globalconfig["llama.cpp"]["model"] = key
+    if GGUF_REFRESH_BTN:
+        gobject.base.safeinvokefunction.emit(GGUF_REFRESH_BTN.click)
+    return True
+
+
+def downloadone(key, url: str, digest: str, check_interrupt, tag: str):
+    try:
+        digmethod, digest = digest.upper().split(":")
+        if digmethod != "SHA256":
+            raise Exception()
+    except:
+        digest = None
+    savep = gobject.gettempdir("llamacpp/" + str(uuid.uuid4()) + ".zip")
+    if not _download_file(
+        key,
+        url,
+        savep,
+        digest=digest,
+        check_interrupt=check_interrupt,
+        verify_size=False,
+    ):
+        return False
+    try:
+        with zipfile.ZipFile(savep) as zipf:
+            zipf.extractall(gobject.gettempdir("llamacpp/" + tag))
+        gobject.base.llamacppdownloadprogress.emit(key, url, -2, 0)
+        return True
+    except:
+        gobject.base.llamacppdownloadprogress.emit(key, url, -1, 0)
+        return False
+
+
+def copy_move_not_exists(src: str, dst: str, lost_copy: bool = False):
+    # 尽量减少磁盘读写
+    os.makedirs(dst, exist_ok=True)
+    for root, dirs, files in os.walk(src):
+        rel_path = os.path.relpath(root, src)
+        target_dir = os.path.join(dst, rel_path)
+        if rel_path != ".":
+            os.makedirs(target_dir, exist_ok=True)
+        for file in files:
+            src_file = os.path.normpath(os.path.join(root, file))
+            dst_file = os.path.normpath(os.path.join(target_dir, file))
+            if dst_file == src_file:
+                continue
+            if (
+                src_file != dst_file
+                and os.path.exists(dst_file)
+                and not dst_file.lower().endswith(".exe")
+            ):
+                continue
+            if lost_copy:
+                shutil.copy2(src_file, dst_file)
+            else:
+                shutil.move(src_file, dst_file)
+
+
+def merge_copy_llamacpps(llamaserver, tag):
+    downloaddir = gobject.gettempdir("llamacpp/" + tag)
+
+    d = gobject.getcachedir("llamacpp")
+    dirname = "-".join(["llama", tag])
+    tgt = os.path.join(d, dirname)
+    # 相同版本的目录，不存在时移动，存在时跳过
+    copy_move_not_exists(downloaddir, tgt, lost_copy=False)
+
+    llamaserver = getllamaserverpath()
+    if llamaserver:
+        # 如果有旧的，那么对于其中我没有的dll，予以拷贝。不存在时拷贝，存在时跳过
+        copy_move_not_exists(os.path.dirname(llamaserver), tgt, lost_copy=True)
+
+    if os.path.isdir(d):
+        for _ in os.listdir(d):
+            if _.lower() == dirname.lower():
+                continue
+            try:
+                _ = os.path.join(d, _)
+                if os.path.isfile(_) and (_.endswith(".dll") or _.endswith(".exe")):
+                    os.remove(_)
+                else:
+                    shutil.rmtree(_)
+            except:
+                pass
+
+    globalconfig["llama.cpp"]["llama-server.exe.dir"] = tgt
+    globalconfig["llama.cpp"]["llama-server.exe"] = "llama-server.exe"
+
+    if LLAMA_CPP_REFRESH_BTN:
+        gobject.base.safeinvokefunction.emit(LLAMA_CPP_REFRESH_BTN.click)
+
+
+def getllamaserverpath(search=True):
+    llamacppdir = globalconfig["llama.cpp"].get("llama-server.exe.dir", ".")
+    llamaserver = globalconfig["llama.cpp"].get("llama-server.exe", "")
+    if llamaserver and llamacppdir:
+        llamaserver = os.path.abspath(os.path.join(llamacppdir, llamaserver))
+    else:
+        llamaserver = None
+    if (not llamaserver) or (not os.path.isfile(llamaserver)):
+        if not search:
+            return None
+        llamaserver = __getfirstllamacpp(llamacppdir)
+        if not llamaserver:
+            return
+    return llamaserver
+
+
+def getllamaservercmd(llamaserver, gguf, version):
+    devices = __getllamacppdevices(llamaserver)
+    device = globalconfig["llama.cpp"].get("device", "auto")
+    if not devices:
+        device = "auto"
+    elif device not in devices:
+        device = devices[0]
+
+    ctx = ""
+    if globalconfig["llama.cpp"].get("ctx-size-use", False):
+        ctx = "--ctx-size {}".format(globalconfig["llama.cpp"].get("ctx-size", 2048))
+    parallel = ""
+    if globalconfig["llama.cpp"].get("parallel-use", False):
+        parallel = "--parallel {}".format(globalconfig["llama.cpp"].get("parallel", 1))
+    fa = ""
+    if version >= 6325:
+        fa = globalconfig["llama.cpp"].get("flash-attn", "auto")
+        if globalconfig["llama.cpp"].get("flash-attn", "auto") != "auto":
+            fa = "--flash-attn {fa}".format(fa=fa)
+    else:
+        if globalconfig["llama.cpp"].get("flash-attn", "auto") == "on":
+            fa = "-fa"
+    ngl = globalconfig["llama.cpp"].get("gpu-layers-which", "auto")
+    if ngl == "number":
+        ngl = globalconfig["llama.cpp"].get("gpu-layers", 200)
+
+    load_mode = ""
+    if globalconfig["llama.cpp"].get("load-mode-use", False):
+        _load_mode = globalconfig["llama.cpp"].get("load-mode", "mmap")
+        if version >= 10105:
+            load_mode = "--load-mode {}".format(_load_mode)
+        else:
+            if _load_mode == "none":
+                load_mode = "--no-mmap"
+            elif _load_mode == "mmap":
+                load_mode = "--mmap"
+            elif _load_mode == "mlock":
+                load_mode = "--mlock"
+            elif _load_mode == "mmap+mlock":
+                load_mode = "--mmap --mlock"
+    if device == "auto":
+        device = ""
+    elif device == "cpu":
+        device = "--device none"
+    else:
+        device = "--device {}".format(device.split(":")[0])
+    host = globalconfig["llama.cpp"].get("host", "127.0.0.1")
+    port = (
+        get_free_port(host)
+        if not globalconfig["llama.cpp"].get("port-fixed", False)
+        else globalconfig["llama.cpp"].get("port", 8080)
+    )
+    cmd = '"{llamaserver}" -m "{gguf}" --host {host} --port {port} {ctx} {parallel} --gpu-layers {ngl} {load_mode} --metrics {device}'.format(
+        load_mode=load_mode,
+        ngl=ngl,
+        ctx=ctx,
+        parallel=parallel,
+        llamaserver=llamaserver,
+        gguf=gguf,
+        host=host,
+        port=port,
+        device=device,
+    )
+    return cmd
+
+
+def getggufpath():
+    ggufdir = globalconfig["llama.cpp"].get("models", ".")
+    gguf = globalconfig["llama.cpp"].get("model", "")
+    if gguf and ggufdir:
+        gguf = os.path.abspath(os.path.join(ggufdir, gguf))
+    else:
+        gguf = None
+    if (not gguf) or (not os.path.isfile(gguf)):
+        gguf = __getfirstgguf(ggufdir)
+        if not gguf:
+            return
+    return gguf
+
+
+@threader
+def autostartllamacpp(force=False):
+    if (not force) and (not globalconfig["llama.cpp"].get("autolaunch", False)):
+        return
+
+    llamaserver = getllamaserverpath()
+    if not llamaserver:
+        return
+    gguf = getggufpath()
+    if not gguf:
+        return
+
+    gobject.base.translation_ui.displayglobaltooltip.emit("loading llama.cpp")
+
+    version, std = __getllamacppversion(llamaserver, std=True)
+    if not version:
+        return
+    gobject.base.llamacppstdout.emit(std)
+    cmd = getllamaservercmd(llamaserver, gguf, version)
+    global llamacppautoHandle
+    loghandle = open(gobject.getcachedir("llama-server.log"), "a", encoding="utf8")
+
+    class _scopeexits:
+        def __del__(self):
+            gobject.base.llamacppstatus.emit(0)
+            loghandle.close()
+
+    __scopeexits = _scopeexits()  # 保留引用：__del__ 时关日志/复位状态
+    gobject.base.llamacppstatus.emit(1)
+    gobject.base.llamacppstdout.emit(cmd)
+    print(cmd, file=loghandle, flush=True)
+    env = None
+    _env: str = globalconfig["llama.cpp"].get("environment")
+    if _env:
+        env = os.environ.copy()
+        for _ in _env.split(";"):
+            _s = _.split("=")
+            if len(_s) != 2:
+                continue
+            if (not _s[0]) or (not _s[1]):
+                continue
+            env[_s[0]] = _s[1]
+    proc = subprochiderun(cmd, cwd=os.path.dirname(llamaserver), run=False, env=env)
+    llamacppautoHandle = NativeUtils.AutoKillProcess(proc.pid)
+
+    @threader
+    def _():
+        cnt = 0
+        while True:
+            l: str = proc.stderr.readline()
+            if not l:
+                break
+            if "all slots are idle" in l or "listening on http://" in l:
+                cnt += 1
+            if cnt == 1:
+                cnt += 1
+                gobject.base.translation_ui.displayglobaltooltip.emit(
+                    "llama.cpp loaded"
+                )
+                gobject.base.llamacppstatus.emit(2)
+            gobject.base.llamacppstdout.emit(l[:-1])
+            print(l, file=loghandle, flush=True, end="")
+
+    _()
+
+    proc.wait()
+    gobject.base.translation_ui.displayglobaltooltip.emit("llama.cpp exit")
+
+
+class AdvancedTreeTable(QTreeWidget):
+    def updatelangtext(self):
+        self.setHeaderLabels(_TR(self.headers))
+        for i, item in enumerate(self.langitem):
+            item.setText(self.vislang(self.langitemlang[i]))
+
+    def __init__(self):
+        super().__init__()
+        self.langitem: "list[QLabel]" = []
+        self.langitemlang: "list[str]" = []
+        self.setup_ui()
+        self.setMinimumHeight(300)
+
+    def setup_ui(self):
+        self.headers = [("模型"), ("大小"), ("更新时间"), ("下载")]
+        self.setHeaderLabels(_TR(self.headers))
+        header = self.header()
+        header.setSectionsClickable(True)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for i in range(1, self.columnCount()):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_header_menu)
+        self.itemDoubleClicked.connect(functools.partial(self._itemDoubleClicked, True))
+        self.populate_data()
+        self.setSortingEnabled(False)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.sortIndicatorChanged.connect(self.changed)
+
+    def changed(self, index, order: Qt.SortOrder):
+        self.sortItems(index, order)
+
+    def astimestm(self, input_value):
+        if isinstance(input_value, str):
+            try:
+                dt = datetime.fromisoformat(input_value.replace("Z", "+00:00"))
+            except ValueError:
+                dt = datetime.strptime(input_value.split("T")[0], "%Y-%m-%d")
+        elif isinstance(input_value, (int, float)):
+            if input_value > 1e10:
+                dt = datetime.fromtimestamp(input_value / 1000)
+            else:
+                dt = datetime.fromtimestamp(input_value)
+        return dt
+
+    def alightoday(self, input_value):
+        return self.astimestm(input_value).strftime("%Y-%m-%d")
+
+    def vislang(self, l):
+        def replace_match(_: "re.Match"):
+            return _TR(Languages.fromcode(_.group(0)).zhsname)
+
+        return re.sub("[a-z]+", replace_match, l)
+
+    def vissize(self, z):
+        if isinstance(z, str):
+            return z
+        return format_bytes(z)
+
+    def populate_data(self):
+        llm_model_list: "list[dict[str, list[dict[str, list]]]]" = tryreadconfig2(
+            "llm_model_list.json"
+        )
+        for line in llm_model_list:
+            series = QTreeWidgetItem(self, [line["series"]])
+            if "lang" in line:
+                _ = QWidget()
+                _l = QHBoxLayout(_)
+                _l.setContentsMargins(0, 0, 0, 0)
+                _l.setAlignment(Qt.AlignmentFlag.AlignRight)
+                label = QLabel(self.vislang(line["lang"]))
+                _l.addWidget(label)
+                self.setItemWidget(series, 0, _)
+                self.langitemlang.append(line["lang"])
+                self.langitem.append(label)
+            series.setExpanded(True)
+            account = line.get("account", line["series"])
+            series.setData(0, Qt.ItemDataRole.UserRole + 21, account)
+            for repo in line["repos"]:
+                repoaccount = repo.get("account", account)
+                r = QTreeWidgetItem(series, [repo["repo"]])
+                r.setData(0, Qt.ItemDataRole.UserRole + 22, (repoaccount, repo["repo"]))
+                repo["models"].sort(
+                    key=lambda _: -self.astimestm(_["timestamp"]).timestamp()
+                )
+                for m in repo["models"]:
+                    itm = QTreeWidgetItem(
+                        r,
+                        [
+                            m["file"],
+                            self.vissize(m["size"]),
+                            self.alightoday(m["timestamp"]),
+                            "",
+                        ],
+                    )
+                    btn = LPushButton("下载")
+                    btn.clicked.connect(
+                        functools.partial(self._itemDoubleClicked, False, itm)
+                    )
+                    self.setItemWidget(itm, 3, btn)
+                    itm.setData(
+                        0,
+                        Qt.ItemDataRole.UserRole + 20,
+                        (repoaccount, repo["repo"], m["file"]),
+                    )
+
+    def _itemDoubleClicked(self, doubleclick, item: QTreeWidgetItem):
+        series_account = item.data(0, Qt.ItemDataRole.UserRole + 21)
+        repo = item.data(0, Qt.ItemDataRole.UserRole + 22)
+        model = item.data(0, Qt.ItemDataRole.UserRole + 20)
+        if ((not doubleclick) and (not (series_account or model or repo))) or (
+            doubleclick and (not model)
+        ):
+            return
+        menu = QMenu(self)
+        if model:
+            action = LAction("下载_huggingface", menu)
+            action2 = LAction("下载_hf-mirror", menu)
+        else:
+            action = LAction("huggingface", menu)
+            action2 = LAction("hf-mirror", menu)
+        menu.addAction(action)
+        menu.addAction(action2)
+        a = menu.exec(QCursor.pos())
+        if a:
+            if model:
+
+                def down(m, url):
+                    gobject.base.llamacppposttask.emit(
+                        m,
+                        functools.partial(downloadgguf, m, url),
+                    )
+
+                u, r, m = model
+                if a == action:
+                    down(
+                        m,
+                        "https://huggingface.co/{}/{}/resolve/main/{}".format(u, r, m),
+                    )
+                elif a == action2:
+                    down(
+                        m, "https://hf-mirror.com/{}/{}/resolve/main/{}".format(u, r, m)
+                    )
+            elif repo:
+                u, r = repo
+                if a == action:
+                    os.startfile("https://huggingface.co/{}/{}".format(u, r))
+                elif a == action2:
+                    os.startfile("https://hf-mirror.com/{}/{}".format(u, r))
+            elif series_account:
+                u = series_account
+                if a == action:
+                    os.startfile("https://huggingface.co/{}".format(u))
+                elif a == action2:
+                    os.startfile("https://hf-mirror.com/{}".format(u))
+
+    def show_header_menu(self, position):
+        item = self.itemAt(position)
+        if not item:
+            return
+        self._itemDoubleClicked(False, item)
+
+
+class llamalisttable(LTableView):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(250)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.Model = LStandardItemModel()
+        self.setModel(self.Model)
+        self.Model.setHorizontalHeaderLabels(["架构", "大小", "下载"])
+        for _ in (0, 1, 2):
+            self.horizontalHeader().setSectionResizeMode(
+                _,
+                (
+                    QHeaderView.ResizeMode.Stretch
+                    if _ != 0
+                    else QHeaderView.ResizeMode.ResizeToContents
+                ),
+            )
+        self.initialize_(tryreadconfig2("llama.cpp.version.json"))
+
+    def initialize_(self, res: "dict"):
+        cudas = {}
+        cudasdigest = {}
+        for _ in res["assets"]:
+            name: str = _["name"]
+            maich = re.match(r"cudart-llama-bin-win-(.*?)-x64\.zip", name)
+            if not maich:
+                continue
+            cudasdigest[maich.groups()[0]] = _["digest"]
+            cudas[maich.groups()[0]] = _["browser_download_url"]
+        xpus = NativeUtils.ListXpuVendors().union(NativeUtils.ListXpuVendors(False))
+        for _ in res["assets"]:
+            name: str = _["name"]
+            maich = re.match(r"llama-.*?-bin-win-(.*?)-x64\.zip", name)
+            if not maich:
+                continue
+            arch = maich.groups()[0]
+            size = format_bytes(_["size"])
+            _arch = arch
+            enable = True
+            if arch == "sycl":
+                arch += " (Intel)"
+                enable = "8086" in xpus
+            elif arch.startswith("openvino"):
+                arch += " (Intel)"
+                enable = "8086" in xpus
+            elif arch.startswith("cuda"):
+                arch += " (Nvidia)"
+                enable = "10DE" in xpus
+            elif arch.startswith("rocm"):
+                arch += " (AMD)"
+                enable = "1022" in xpus or "1002" in xpus
+            elif arch == "vulkan":
+                arch += "_(通用)"
+            item = LStandardItem(arch)
+            item.setData(_["browser_download_url"], Qt.ItemDataRole.UserRole + 2)
+            item.setData(res["tag_name"], Qt.ItemDataRole.UserRole + 10)
+            item.setData(_["digest"], Qt.ItemDataRole.UserRole + 4)
+            item.setData(_arch, Qt.ItemDataRole.UserRole + 6)
+            item.setData(cudas.get(_arch, ""), Qt.ItemDataRole.UserRole + 3)
+            item.setData(cudasdigest.get(_arch, ""), Qt.ItemDataRole.UserRole + 30)
+            item3 = LStandardItem()
+            item2 = QStandardItem(size)
+            item2.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item3.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            items = [item, item2, item3]
+            self.Model.appendRow(items)
+            [_.setEnabled(enable) for _ in items]
+        gobject.base.connectsignal(gobject.base.llamacpparchcheck, self.__archcheck)
+
+    def __archcheck(self, llamaserver: "None|str"):
+        insarchs = detect_llama_installed_archs(llamaserver)
+        for i in range(self.Model.rowCount()):
+            arch: str = self.Model.item(i, 0).data(Qt.ItemDataRole.UserRole + 6)
+            item: LStandardItem = self.Model.item(i, 2)
+            item.setText("")
+            item.setToolTip("")
+            index = self.Model.indexFromItem(item)
+            _arch = arch.split(".")[0] if arch.startswith("cuda-") else arch
+            _arch = "openvino" if _arch.startswith("openvino") else _arch
+            t = "下载"
+            cudaonly = False
+            if _arch in insarchs:
+                if arch.startswith("cuda-") and len(
+                    set(insarchs[_arch]) - set(["nvcuda.dll"])
+                ):
+                    cudaonly = True
+                else:
+                    t = "重新下载"
+            btn = LPushButton(t)
+            btn.setEnabled(item.isEnabled())
+            btn.clicked.connect(
+                functools.partial(self.__click_download, i, arch, cudaonly)
+            )
+            self.setIndexWidget(index, btn)
+
+    def __click_download(self, i, arch, cudaonly):
+        url = self.Model.item(i, 0).data(Qt.ItemDataRole.UserRole + 2)
+        digest = self.Model.item(i, 0).data(Qt.ItemDataRole.UserRole + 4)
+        tag = self.Model.item(i, 0).data(Qt.ItemDataRole.UserRole + 10)
+        cudalink = self.Model.item(i, 0).data(Qt.ItemDataRole.UserRole + 3)
+        cudadig = self.Model.item(i, 0).data(Qt.ItemDataRole.UserRole + 30)
+
+        def ___(key, url, digest, tag):
+            if not downloadone(key, url, digest, None, tag):
+                return
+            llamaserver = getllamaserverpath()
+            merge_copy_llamacpps(llamaserver, tag)
+
+        if not cudaonly:
+            gobject.base.llamacppposttask.emit(
+                "llama.cpp " + arch,
+                functools.partial(___, "llama.cpp " + arch, url, digest, tag),
+            )
+        if cudalink:
+            gobject.base.llamacppposttask.emit(
+                "cudart-" + arch,
+                functools.partial(___, "cudart-" + arch, cudalink, cudadig, tag),
+            )
+
+
+def _detect_runtime_lost(d, ff):
+    f = os.path.join(d, ff)
+    imports: "list[str]" = NativeUtils.AnalysisDllImports(f)
+    losts = []
+    for imp in imports:
+        if imp.lower().startswith("api-ms-win"):
+            continue
+        if not (os.path.isfile(os.path.join(d, imp)) or NativeUtils.SearchDllPath(imp)):
+            losts.append(imp)
+    return losts
+
+
+def __maybelostdllimport(llamaserver: str):
+    llamaserverdir = os.path.dirname(llamaserver)
+    lostss = {}
+    for ff in os.listdir(llamaserverdir):
+        if ff.lower().endswith(".dll") and ff.lower().startswith("ggml-"):
+            losts = _detect_runtime_lost(llamaserverdir, ff)
+            if losts:
+                lostss[ff] = losts
+    if lostss:
+        gobject.base.llamacppstdoutstatus.emit(lostss)
+
+
+BTNPlayEnable1 = True
+BTNPlayEnable2 = True
+
+
+def __testgguf(index: int):
+    global BTNPlayEnable2
+    BTNPlayEnable2 = index != -1
+    gobject.base.llamacppstatus.emit(-3)
+
+
+def __checkcudaimports(f):
+    imports: "list[str]" = NativeUtils.AnalysisDllImports(f)
+    imports = [_.lower() for _ in imports]
+    for _ in (12, 13):
+        for __ in ("cublas64_{}", "cublasLt64_{}", "cudart64_{}"):
+            if __.format(_) + ".dll" in imports:
+                return "cuda-{}".format(_)
+    return None
+
+
+def detect_llama_installed_archs(llamaserver: str):
+    if not llamaserver:
+        return {}
+    llamaserverdir = os.path.dirname(llamaserver)
+    archs: "dict[str, list[str]]" = {}
+    for ff in os.listdir(llamaserverdir):
+        ff = ff.lower()
+        if ff.endswith(".dll") and ff.startswith("ggml-"):
+            if ff.startswith("ggml-cpu"):
+                archs["cpu"] = _detect_runtime_lost(llamaserverdir, ff)
+            elif ff == "ggml-sycl.dll":
+                archs["sycl"] = _detect_runtime_lost(llamaserverdir, ff)
+            elif ff == "ggml-hip.dll":
+                archs["hip-radeon"] = _detect_runtime_lost(llamaserverdir, ff)
+            elif ff == "ggml-vulkan.dll":
+                archs["vulkan"] = _detect_runtime_lost(llamaserverdir, ff)
+            elif ff == "ggml-openvino.dll":
+                archs["openvino"] = _detect_runtime_lost(llamaserverdir, ff)
+            elif ff == "ggml-cuda.dll":
+                f = os.path.join(llamaserverdir, ff)
+                cudaver = __checkcudaimports(f)
+                if cudaver:
+                    archs[cudaver] = _detect_runtime_lost(llamaserverdir, ff)
+    return archs
+
+
+def __testexe_1(obj, combollama: SuperCombo, devicelist: SuperCombo, index: int):
+    __testexe(obj, devicelist, combollama.getIndexData(index))
+
+
+def __testexe(obj, devicelist: SuperCombo, data):
+    global BTNPlayEnable1
+    if not data:
+        gobject.base.llamacpparchcheck.emit(None)
+        gobject.base.llamacppcurrversion.emit(0)
+        BTNPlayEnable1 = False
+        gobject.base.llamacppstatus.emit(-1)
+        obj["pathlayout"].layout().setRowVisible(2, False)
+        return
+    llamacppdir = globalconfig["llama.cpp"].get("llama-server.exe.dir", ".")
+    llamaserver = os.path.abspath(os.path.join(llamacppdir, data))
+    version = __getllamacppversion(llamaserver)
+    gobject.base.llamacpparchcheck.emit(llamaserver)
+
+    def __failed():
+        global BTNPlayEnable1
+        BTNPlayEnable1 = False
+        gobject.base.llamacppstatus.emit(-2)
+        __maybelostdllimport(llamaserver)
+        obj["pathlayout"].layout().setRowVisible(2, False)
+
+    gobject.base.llamacppcurrversion.emit(version)
+    if not version:
+        return __failed()
+    devices = __getllamacppdevices(llamaserver)
+    if devices is None:
+        return __failed()
+    else:
+        BTNPlayEnable1 = True
+        gobject.base.llamacppstatus.emit(-4)
+        __maybelostdllimport(llamaserver)
+        vis = len(devices) > 2
+        obj["pathlayout"].layout().setRowVisible(2, vis)
+        if vis:
+            with QSignalBlocker(devicelist) as _:
+                devicelist.clear()
+                devicelist.addItems(devices, internals=devices)
+                devicelist.setCurrentData(
+                    globalconfig["llama.cpp"].get("device", "auto")
+                )
+            devicelist.currentIndexChanged.emit(devicelist.currentIndex())
+
+
+class tipslabel(QLabel):
+    def __init__(self):
+        self.__t = ""
+        self.lostss = ""
+        super().__init__()
+
+    def test(self, lostss: dict):
+        self.__t = ""
+        self.lostss = lostss
+        _tips = "\n".join(
+            _TR("{} 缺少依赖: {}").format(_, ", ".join(lostss[_])) for _ in lostss
+        )
+        super().setText(_tips)
+
+    def setText(self, t):
+        self.__t = t
+        self.lostss = {}
+        super().setText(_TR(t))
+
+    def updatelangtext(self):
+        if self.__t:
+            self.setText(self.__t)
+        elif self.lostss:
+            self.test(self.lostss)
+
+
+def _findkey(downloadtasks: QFormLayout, name) -> QHBoxLayout:
+    for i in range(downloadtasks.rowCount()):
+        label: QLabel = downloadtasks.itemAt(i, QFormLayout.ItemRole.LabelRole).widget()
+        if label.text() == name:
+            return downloadtasks.itemAt(i, QFormLayout.ItemRole.FieldRole).layout()
+
+
+interrupt = {}
+
+
+def _updateprogress(
+    downloadtasks: QFormLayout, form: VisLFormLayout, name, link, curr, size
+):
+    lay = _findkey(downloadtasks, name)
+    progbar: QProgressBar = lay.itemAt(0).widget() if lay else None
+
+    if curr == -1:
+        if progbar:
+            progbar.setValue(0)
+            progbar.setFormat(_TR("失败"))
+            progbar.fuck = True
+    elif curr == -3:
+        if progbar:
+            progbar.setValue(0)
+            progbar.setFormat(_TR("已取消"))
+            progbar.fuck = True
+    elif curr == -2:
+        if progbar:
+            progbar.setValue(10000)
+            progbar.setFormat(_TR("成功"))
+            progbar.fuck = True
+    else:
+        if not progbar:
+            progbar = QProgressBar()
+            progbar.setRange(0, 10000)
+            hb = QHBoxLayout()
+            hb.setContentsMargins(0, 0, 0, 0)
+            hb.addWidget(progbar)
+            hb.addWidget(
+                getIconButton(
+                    lambda: os.startfile(link),
+                    icon="fa.link",
+                )
+            )
+            hb.addWidget(
+                getIconButton(
+                    lambda: (
+                        interrupt.__setitem__(name, True),
+                        downloadtasks.removeRow(lay if lay else hb),
+                        form.setRowVisible(2, downloadtasks.count()),
+                    ),
+                    icon="fa.times",
+                )
+            )
+            downloadtasks.addRow(name, hb)
+        elif progbar.fuck:
+            progbar.setValue(0)
+            progbar.setFormat("")
+        progbar.fuck = False
+        interrupt[name] = False
+        if size:
+            progbar.setValue(int(curr / size * 10000))
+            progbar.setFormat(
+                _TR("{}/{}_进度_{:0.2f}%").format(
+                    format_bytes(curr), format_bytes(size), curr / size * 100
+                )
+            )
+    if progbar:
+        form.setRowVisible(2, True)
+
+
+def __download(downloadtasks: QFormLayout, form: VisLFormLayout, name, downloader):
+    lay = _findkey(downloadtasks, name)
+    progbar: QProgressBar = lay.itemAt(0).widget() if lay else None
+    if (not progbar) or (progbar.fuck):
+        threader(downloader)()
+
+
+LLAMA_CPP_REFRESH_BTN = None
+GGUF_REFRESH_BTN = None
+
+
+def llamacppgrid():
+    _, combollama, _2, _3, _4 = __create(
+        None,
+        "llama-server.exe.dir",
+        "llama-server.exe",
+        lambda f: f.lower() == "llama-server.exe",
+        getllamaserverpath,
+    )
+    global LLAMA_CPP_REFRESH_BTN, GGUF_REFRESH_BTN
+    LLAMA_CPP_REFRESH_BTN = _3
+    obj = dict()
+    devicelist = SuperCombo(static=True)
+    devicelist.currentIndexChanged.connect(
+        lambda i: globalconfig["llama.cpp"].__setitem__(
+            "device", devicelist.getIndexData(i)
+        )
+    )
+    combollama.currentIndexChanged.connect(
+        functools.partial(__testexe_1, obj, combollama, devicelist)
+    )
+    _, _12, _22, _32, _42 = __create(
+        None, "models", "model", lambda f: f.lower().endswith(".gguf"), getggufpath
+    )
+    GGUF_REFRESH_BTN = _32
+    _12.currentIndexChanged.connect(functools.partial(__testgguf))
+    _02 = IconButton(
+        icon="fa.download", checkable=True, checkablechangecolor=False, tips="下载"
+    )
+    _02.clicked.connect(
+        lambda checked: obj["pathlayout"].layout().setRowVisible(4, checked)
+    )
+    _0 = IconButton(
+        icon="fa.download", checkable=True, checkablechangecolor=False, tips="下载"
+    )
+    _0.clicked.connect(
+        lambda checked: obj["pathlayout"].layout().setRowVisible(1, checked)
+    )
+
+    def _edit(k, df):
+        edit = QLineEdit(globalconfig["llama.cpp"].get(k, df))
+        edit.textChanged.connect(
+            functools.partial(globalconfig["llama.cpp"].__setitem__, k)
+        )
+        return edit
+
+    statusbtn = IconButton("fa.play", tips="启动")
+
+    def _cb():
+        if statusbtn.iconStr() == "fa.play":
+            autostartllamacpp(force=True)
+        else:
+            global llamacppautoHandle
+            llamacppautoHandle = None
+            update_text(label2)
+
+    statusbtn.clicked.connect(_cb)
+
+    label2 = QLabel()
+    label2.hide()
+    label = tipslabel()
+    label.setWordWrap(True)
+    gobject.base.connectsignal(gobject.base.llamacppstdoutstatus, label.test)
+
+    def __status(status: int):
+        if status == -3:
+            pass
+        elif status < 0:
+            if status == -2:
+                label.setText("当前选择的 llama-server 无法运行")
+            else:
+                label.setText("")
+        else:
+            statusbtn.setIconStr(("fa.play", "fa.spinner", "fa.stop")[status])
+            statusbtn.setToolTip(("启动", "启动中", "停止")[status])
+            statusbtn.setAccessibleName(("启动", "启动中", "停止")[status])
+        statusbtn.setEnabled(
+            ((statusbtn.iconStr() == "fa.play") and BTNPlayEnable1 and BTNPlayEnable2)
+            or (statusbtn.iconStr() != "fa.play")
+        )
+
+    gobject.base.connectsignal(gobject.base.llamacppstatus, __status)
+    _loglable = QPlainTextEdit()
+    _loglable.setReadOnly(True)
+    gobject.base.connectsignal(
+        gobject.base.llamacppstdout, lambda s: _loglable.appendPlainText(s)
+    )
+    logopenbtn = IconButton(
+        "fa.terminal", tips="log", checkable=True, checkablechangecolor=False
+    )
+    timer = QTimer(logopenbtn)
+    timer.timeout.connect(functools.partial(update_text, label2))
+    timer.start(1000)
+    form = VisLFormLayout()
+    form.addRow(
+        "伴随启动",
+        getboxlayout(
+            [
+                getsimpleswitch(
+                    globalconfig["llama.cpp"], key="autolaunch", default=False
+                ),
+                getsmalllabel(""),
+                statusbtn,
+                getsmalllabel(""),
+                logopenbtn,
+                label2,
+                label,
+            ]
+        ),
+    )
+    form.addRow(_loglable)
+    form.setRowVisible(1, False)
+    group = GroupCardWidget("下载")
+    downloadtasks = QFormLayout(group.contentWidget())
+    group.setContentLayout(downloadtasks)
+    form.addRow(group)
+    form.setRowVisible(2, False)
+    logopenbtn.clicked.connect(lambda c: form.setRowVisible(1, c))
+
+    def afterfunctions():
+        __testexe(obj, devicelist, combollama.getCurrentData())
+        gobject.base.connectsignal(
+            gobject.base.llamacppposttask,
+            functools.partial(
+                __download,
+                downloadtasks,
+                form,
+            ),
+        )
+        gobject.base.connectsignal(
+            gobject.base.llamacppdownloadprogress,
+            functools.partial(
+                _updateprogress,
+                downloadtasks,
+                form,
+            ),
+        )
+        __testgguf(_12.currentIndex())
+
+    return afterfunctions, [
+        [(form, -1)],
+        [
+            dict(
+                name="pathlayout",
+                title="核心",
+                parent=obj,
+                hiderows=[1, 2, 4],
+                grid=[
+                    ["llama-server", _0, combollama, _2, _3, _4],
+                    [llamalisttable],
+                    ["Device", devicelist],
+                    ["Model", _02, _12, _22, _32, _42],
+                    [AdvancedTreeTable],
+                ],
+            ),
+        ],
+        [
+            dict(
+                title="网络",
+                type="grid",
+                grid=[
+                    [
+                        "--host",
+                        functools.partial(_edit, "host", "127.0.0.1"),
+                        "",
+                        "--port",
+                        portnum,
+                    ],
+                ],
+            ),
+        ],
+        [
+            dict(
+                title="参数",
+                type="grid",
+                grid=[
+                    [
+                        getsmalllabel(
+                            "size of the prompt context (-c)",
+                            "-c, --ctx-size N   size of the prompt context (default: 0, 0 = loaded from model)",
+                        ),
+                        _c_slice_spin(
+                            "ctx-size-use",
+                            "ctx-size",
+                            0,
+                            10000,
+                            256,
+                            131072,
+                            1,
+                            128,
+                            2048,
+                            "default: 0, 0 = loaded from model",
+                            f1=update_slider_from_input,
+                            f2=update_context_from_slider,
+                        ),
+                    ],
+                    [
+                        getsmalllabel(
+                            "number of server slots (-np)",
+                            "-np, --parallel N  number of server slots (default: -1, -1 = auto)",
+                        ),
+                        _c_slice_spin(
+                            "parallel-use",
+                            "parallel",
+                            1,
+                            32,
+                            1,
+                            32,
+                            1,
+                            1,
+                            1,
+                            "default: -1, -1 = auto",
+                        ),
+                    ],
+                    [
+                        getsmalllabel(
+                            "set Flash Attention use (-fa)",
+                            "-fa, --flash-attn [on|off|auto]    set Flash Attention use ('on', 'off', or 'auto', default: 'auto')",
+                        ),
+                        getsimplecombobox(
+                            ["auto", "on", "off"],
+                            globalconfig["llama.cpp"],
+                            k="flash-attn",
+                            internal=["auto", "on", "off"],
+                            default="auto",
+                        ),
+                    ],
+                    [
+                        getsmalllabel(
+                            "model loading mode (--load-mode)",
+                            "-lm,   --load-mode MODE                 model loading mode (default: mmap)",
+                        ),
+                        loadmodewidget,
+                    ],
+                    [
+                        getsmalllabel(
+                            "max. number of layers to store in VRAM (-ngl)",
+                            "-ngl, --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto)",
+                        ),
+                        nglnum,
+                    ],
+                ],
+            )
+        ],
+    ]
+
+
+def update_text(label: QLabel):
+    if not llamacppautoHandle:
+        gobject.base.safeinvokefunction.emit(lambda: (label.hide(), label.setText("")))
+        return
+    mem = NativeUtils.GetProcessMemory(llamacppautoHandle.pid)
+    vmem = NativeUtils.GetProcessVRAM(llamacppautoHandle.pid, True)
+    text = ""
+    if mem > 1024 * 1024 * 64:
+        mem = format_bytes(mem)
+        text += _TR("内存占用: {}").format(mem)
+    if vmem > 1024 * 1024 * 64:
+        vmem = format_bytes(vmem)
+        if text:
+            text += " "
+        text += _TR("显存占用: {}").format(vmem)
+    gobject.base.safeinvokefunction.emit(lambda: (label.show(), label.setText(text)))
+
+
+def __showllamacpp(ref: "list[CollapsibleBoxWithButton]", checked):
+    isclosenotinit = ref[0].internalLayout.itemAt(0) is None
+    if isclosenotinit or ref[0].internalLayout.count() == 1:
+        if isclosenotinit:
+            ref[0].toggle_button.click()
+        w = QWidget()
+        ref[0].internalLayout.setSpacing(0)
+        ref[0].internalLayout.addWidget(w)
+        l = QHBoxLayout(w)
+        box = GroupCardWidget("llama.cpp Launcher")
+        l.addWidget(box)
+        grid = QGridLayout(box.contentWidget())
+        box.setContentLayout(grid)
+        do, grids = llamacppgrid()
+        automakegrid(grid, grids)
+        do()
+    else:
+        if checked and not ref[0].toggle_button.isChecked():
+            ref[0].toggle_button.click()
+        ref[0].internalLayout.itemAt(1).widget().setVisible(checked)
+
+
+def leftwidget(self, ref: "list[CollapsibleBoxWithButton]"):
+    btn = IconButton("fa.plus", fix=False, tips="复制")
+    btn.clicked.connect(functools.partial(btnpluscallback, self, self.__countnum))
+
+    btn2 = IconButton("fa.minus", fix=False, tips="删除")
+    btn2.clicked.connect(functools.partial(btndeccallback, self, self.__countnum))
+    self.__del_btn = btn2
+    if not loadvisinternal(True)[0]:
+        btn2.hide()
+
+    btn3 = IconButton(
+        "fa.question",
+        fix=False,
+        tips="使用说明",
+    )
+    btn3.clicked.connect(
+        lambda: os.startfile(dynamiclink("guochandamoxing.html", docs=True))
+    )
+
+    btn4 = AutoScaleImageButton(
+        r"files\static\llama.cpp.light.png", r"files\static\llama.cpp.dark.png"
+    )
+    btn4.setAccessibleName("llama.cpp Launcher")
+    btn4.setToolTip("llama.cpp Launcher")
+    btn4.clicked.connect(functools.partial(__showllamacpp, ref))
+    lb = QLabel()
+    lb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+    return [btn3, btn, btn2, lb, btn4]
+
+
+def __llmfold(self):
+
+    is_gpt_likes = initsome11(self, getallllms(globalconfig["fanyi"]), save=True)
+    ref = []
+    fold = createfoldgrid(
+        is_gpt_likes,
+        "大模型",
+        globalconfig["foldstatus"]["ts"],
+        "gpt",
+        "damoxinggridinternal",
+        self,
+        leftwidget=functools.partial(leftwidget, self, ref),
+    )
+    ref.append(fold)
+    return fold
+
+
+def initsome2(self, mianfei, api):
+
+    onlinegrid = initsome11(self, mianfei)
+    api = initsome11(self, api)
+    grids = [
+        [
+            functools.partial(
+                __llmfold,
+                self,
+            )
+        ],
+        [
+            functools.partial(
+                createfoldgrid,
+                onlinegrid,
+                "传统",
+                globalconfig["foldstatus"]["ts"],
+                "free",
+            )
+        ],
+        [
+            functools.partial(
+                createfoldgrid,
+                api,
+                "传统_API",
+                globalconfig["foldstatus"]["ts"],
+                "api",
+                leftwidget=D_getIconButton(
+                    fix=False,
+                    icon="fa.question",
+                    callback=lambda: os.startfile(
+                        dynamiclink("useapis/tsapi.html", docs=True)
+                    ),
+                    tips="使用说明",
+                ),
+            )
+        ],
+    ]
+    return grids
+
+
+@tryprint
+def sqlite2json2(self, sqlitefile, targetjson=None, existsmerge=False):
+    try:
+        with sqlite3.connect(sqlitefile, check_same_thread=False) as sql:
+            ret = sql.execute("SELECT * FROM artificialtrans  ").fetchall()
+            js_format2: "dict[str, dict|str]" = {}
+            collect = []
+            for _aret in ret:
+                if len(_aret) == 4:
+                    _id, source, mt, source_origin = _aret
+                    if targetjson:
+                        source = source_origin
+                    js_format2[source] = mt
+                elif len(_aret) == 3:
+                    _id, source, mt = _aret
+                    js_format2[source] = mt
+                try:
+                    mtjs = json.loads(mt)
+                except:
+                    mtjs = mt
+                js_format2[source] = mtjs
+                if isinstance(mtjs, dict):
+                    collect.extend(list(mtjs.keys()))
+    except:
+        print_exc()
+        ExMessageBox.critical(self, _TR("错误"), _TR("所选文件格式错误！"))
+        return
+    _collect = []
+    for _, __ in Counter(collect).most_common():
+        if _ in globalconfig["fanyi"]:
+            _collect.append(_)
+    dialog = LDialog(self, Qt.WindowType.WindowCloseButtonHint)  # 自定义一个dialog
+    dialog.setWindowTitle("导出翻译记录为json文件")
+    dialog.resize(QSize(800, 10))
+    formLayout = LFormLayout(dialog)  # 配置layout
+
+    combo = SuperCombo()
+    combo.addItems([getannotatedapiname(_) for _ in _collect], _collect)
+
+    formLayout.addRow("首选翻译", combo)
+    e = QLineEdit(sqlitefile[: -(len(".sqlite"))])
+
+    bu = LPushButton("选择路径")
+
+    def __selectsavepath():
+        ff = QFileDialog.getSaveFileName(
+            dialog, directory=sqlitefile[: -(len(".sqlite"))]
+        )
+        if ff[0] == "":
+            return
+        e.setText(ff[0])
+
+    bu.clicked.connect(__selectsavepath)
+    hori = QHBoxLayout()
+    hori.addWidget(e)
+    hori.addWidget(bu)
+
+    if targetjson is None:
+        formLayout.addRow("保存路径", hori)
+
+    button = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )
+    formLayout.addRow(button)
+    button.rejected.connect(dialog.close)
+
+    def __savefunction(target, existsmerge):
+        transkirokuuse = combo.getIndexData(combo.currentIndex())
+        for k in js_format2:
+            if isinstance(js_format2[k], dict):
+                js_format2[k] = js_format2[k].get(transkirokuuse, "")
+
+        if target is None:
+            target = e.text() + ".json"
+        if existsmerge and os.path.exists(target):
+            try:
+                with open(target, "r", encoding="utf8") as ff:
+                    existsjs = json.load(ff)
+            except:
+                existsjs = {}
+            for k in existsjs:
+                if k not in js_format2 or js_format2[k] == "":
+                    js_format2[k] = existsjs[k]
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf8") as ff:
+            ff.write(
+                json.dumps(js_format2, ensure_ascii=False, sort_keys=False, indent=4)
+            )
+        try:
+            gameuid = gobject.base.gameuid
+            _path = savehook_new_data[gameuid].get("gamejsonfile", [])
+        except:
+            _path: list = translatorsetting["rengong"]["args"]["jsonfile"]
+        ready = set()
+        for _ in _path:
+            if not os.path.isfile(_):
+                continue
+            try:
+                with open(_, "r", encoding="utf8") as ff:
+                    _js: dict = json.load(ff)
+            except:
+                continue
+            if not isinstance(_js, dict):
+                continue
+            ready = ready.union(_js.keys())
+        changed = False
+        for _ in ready:
+            if _ in js_format2:
+                js_format2.pop(_)
+                changed = True
+        if changed:
+            with open(target[:-5] + ".partial.json", "w", encoding="utf8") as ff:
+                ff.write(
+                    json.dumps(
+                        js_format2, ensure_ascii=False, sort_keys=False, indent=4
+                    )
+                )
+        dialog.close()
+
+    button.accepted.connect(functools.partial(__savefunction, targetjson, existsmerge))
+    button.button(QDialogButtonBox.StandardButton.Ok).setText(_TR("确定"))
+    button.button(QDialogButtonBox.StandardButton.Cancel).setText(_TR("取消"))
+    dialog.show()
+
+
+def sqlite2json(self):
+    f = QFileDialog.getOpenFileName(
+        directory=gobject.getcachedir("translation_record"), filter="*.sqlite"
+    )
+    if f[0] == "":
+        return
+
+    sqlite2json2(self, f[0])
+
+
+def createbtnexport(self):
+
+    bt = LPushButton("导出翻译记录为json文件")
+    bt.clicked.connect(lambda x: sqlite2json(self))
+    return bt
+
+
+def setTabTwo_lazy(self, basel: QVBoxLayout):
+
+    res = splittranslatortypes()
+
+    _, not_is_gpt_like = splitapillm(res.offline)
+    offlinegrid = initsome21(self, not_is_gpt_like)
+    _, not_is_gpt_like = splitapillm(res.api)
+    online_reg_grid = initsome2(self, res.free, not_is_gpt_like)
+    prets = initsome11(self, res.pre)
+    prets += [[(functools.partial(createbtnexport, self), 0)]]
+    pretransgrid = [
+        [dict(type="grid", title="预翻译", grid=prets)],
+        [dict(type="grid", title="其他", grid=initsome11(self, res.other))],
+    ]
+    pretransgrid += offlinegrid
+    pretransgrid = [
+        [
+            functools.partial(
+                createfoldgrid,
+                pretransgrid,
+                "其他",
+                globalconfig["foldstatus"]["ts"],
+                "special",
+            )
+        ],
+    ]
+    online_reg_grid += pretransgrid
+    savelay = []
+    makescrollgrid(online_reg_grid, basel, savelay=savelay)

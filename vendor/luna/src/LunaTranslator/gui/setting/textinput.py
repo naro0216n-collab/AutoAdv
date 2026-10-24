@@ -1,0 +1,972 @@
+from qtsymbols import *
+import functools, NativeUtils
+import gobject, os, re, functools
+from myutils.config import globalconfig, static_data
+from myutils.utils import all_langs
+from traceback import print_exc
+from language import Languages
+from gui.setting.textinput_ocr import getocrgrid_table
+from gui.dynalang import LLabel, LStandardItemModel, LDialog
+from myutils.wrapper import Singleton
+from textio.textsource.mssr import MSSR, LiveCaptions
+from gui.fluent.expander import ExExpander
+from gui.fluent.tabwidget import make_content_card
+from gui.usefulwidget import (
+    D_getsimplecombobox,
+    D_getspinbox,
+    D_getIconButton,
+    D_getdoclink,
+    SuperCombo,
+    VisLFormLayout,
+    LDialog,
+    TableViewW,
+    createfoldgrid,
+    getIconButton,
+    manybuttonlayout,
+    makegrid,
+    makegroupcard,
+    maketabholder,
+    getsimplecombobox,
+    getsimpleswitch,
+    yuitsu_switch,
+    D_getsimpleswitch,
+    getboxwidget,
+    GroupCardWidget,
+    makesubtab_lazy,
+    makescrollgrid,
+    FocusFontCombo,
+    getsmalllabel,
+)
+
+
+def __create():
+    selectbutton = getIconButton(
+        gobject.base.createattachprocess,
+        icon=globalconfig["toolbutton"]["buttons"]["selectgame"]["icon"],
+        enable=globalconfig["sourcestatus2"]["texthook"]["use"],
+        fix=False,
+    )
+    selectbutton.setText("选择游戏")
+    # IconButton 自带的 transparent 边框样式会盖掉插件的按钮渲染
+    selectbutton.setStyleSheet("")
+    selectbutton.setFixedHeight(32)
+    gobject.base.selecthookbuttonstatus.connect(selectbutton.setEnabled)
+    return selectbutton
+
+
+def __create2():
+    selecthookbutton = getIconButton(
+        lambda: gobject.base.hookselectdialog.showsignal.emit(),
+        icon=globalconfig["toolbutton"]["buttons"]["selecttext"]["icon"],
+        enable=globalconfig["sourcestatus2"]["texthook"]["use"],
+        fix=False,
+    )
+    selecthookbutton.setText("选择文本")
+    selecthookbutton.setStyleSheet("")
+    selecthookbutton.setFixedHeight(32)
+    gobject.base.selecthookbuttonstatus.connect(selecthookbutton.setEnabled)
+    return selecthookbutton
+
+
+def __create3():
+    gamebutton = getIconButton(
+        lambda: gobject.base.translation_ui.showsavegame_signal.emit(),
+        icon=globalconfig["toolbutton"]["buttons"]["gamepad_new"]["icon"],
+        fix=False,
+    )
+    gamebutton.setText("游戏管理")
+    gamebutton.setStyleSheet("")
+    gamebutton.setFixedHeight(32)
+    return gamebutton
+
+
+def gethookgrid_em(dic=None):
+    isglobal = dic is None
+    if dic is None:
+        dic = globalconfig["embedded"]
+    grids = [
+        [D_getdoclink("embedtranslate.html")] if isglobal else None,
+        [
+            "清除游戏内显示的文字",
+            D_getsimpleswitch(
+                dic,
+                "clearText",
+                default=False,
+                callback=lambda _: gobject.base.textsource.set_settings_ex(),
+            ),
+            "",
+            "",
+            "",
+        ],
+        [
+            "显示模式",
+            "",
+            D_getsimplecombobox(
+                ["翻译", "原文_翻译", "翻译_原文"],
+                dic,
+                "displaymode",
+                default=0,
+                callback=lambda _: gobject.base.textsource.set_settings_ex(),
+            ),
+        ],
+        [
+            "翻译等待时间_(s)",
+            "",
+            D_getspinbox(
+                0,
+                30,
+                dic,
+                "timeout_translate",
+                double=True,
+                default=2,
+                callback=lambda x: gobject.base.textsource.set_settings_ex(),
+            ),
+        ],
+        [
+            "将汉字转换成繁体/日式汉字",
+            D_getsimpleswitch(dic, "trans_kanji", default=False),
+        ],
+        [
+            "限制每行字数",
+            D_getsimpleswitch(dic, "limittextlength_use", default=False),
+            D_getspinbox(
+                0,
+                1000,
+                dic,
+                "limittextlength_length",
+                default=40,
+            ),
+        ],
+        [
+            "修改游戏字体",
+            D_getsimpleswitch(
+                dic,
+                "changefont",
+                default=False,
+                callback=lambda v: gobject.base.hookselectdialog.on_check_unity_font(),
+            ),
+            functools.partial(creategamefont_comboBox, dic),
+        ],
+        [
+            "修改游戏字体相对大小",
+            D_getsimpleswitch(
+                dic,
+                "changefontsize_use",
+                default=False,
+                callback=lambda _: gobject.base.textsource.set_settings_ex(),
+            ),
+            D_getspinbox(
+                0.5,
+                2,
+                dic,
+                "changefontsize",
+                step=0.01,
+                double=True,
+                default=1,
+                callback=lambda _: gobject.base.textsource.set_settings_ex(),
+            ),
+        ],
+    ]
+    return grids
+
+
+def gethookgrid(dic=None):
+    isglobal = dic is None
+    if dic is None:
+        dic = globalconfig
+    grids = [
+        [D_getdoclink("hooksettings.html")] if isglobal else None,
+        [
+            "代码页",
+            (
+                D_getsimplecombobox(
+                    ["自动"] + static_data["codepage_display"],
+                    dic,
+                    "codepage_value",
+                    lambda x: gobject.base.textsource.setsettings(),
+                    internal=[0] + static_data["codepage_real"],
+                    default=0,
+                    sizeX=True,
+                ),
+                2,
+            ),
+            "",
+            "",
+        ],
+        [
+            "刷新延迟_(ms)",
+            (
+                D_getspinbox(
+                    0,
+                    10000,
+                    dic,
+                    "textthreaddelay",
+                    callback=lambda x: gobject.base.textsource.setsettings(),
+                    default=500,
+                ),
+                2,
+            ),
+        ],
+        [
+            "最大缓冲区长度",
+            (
+                D_getspinbox(
+                    0,
+                    1000000,
+                    dic,
+                    "maxBufferSize",
+                    callback=lambda x: gobject.base.textsource.setsettings(),
+                    default=3000,
+                ),
+                2,
+            ),
+        ],
+        [
+            "最大缓存文本长度",
+            (
+                D_getspinbox(
+                    0,
+                    1000000000,
+                    dic,
+                    "maxHistorySize",
+                    callback=lambda x: gobject.base.textsource.setsettings(),
+                    default=1000000,
+                ),
+                2,
+            ),
+        ],
+        (
+            [
+                "最大允许输出文本长度",
+                (
+                    D_getspinbox(
+                        0,
+                        1000000000,
+                        dic,
+                        "maxOutputSize",
+                        default=10000,
+                    ),
+                    2,
+                ),
+            ]
+            if isglobal
+            else None
+        ),
+    ]
+
+    return grids
+
+
+def creategamefont_comboBox(dic: dict):
+
+    gamefont_comboBox = FocusFontCombo()
+
+    def callback(x):
+        dic.__setitem__("changefont_font", x)
+        try:
+            gobject.base.textsource.set_settings_ex()
+        except:
+            pass
+
+    gamefont_comboBox.currentTextChanged.connect(callback)
+    gamefont_comboBox.setCurrentFont(QFont(dic.get("changefont_font", "")))
+    return gamefont_comboBox
+
+
+def clipusage(self):
+    """剪贴板折叠卡（同 Gallery ExExpander「高级设置」的多行子设置）：
+    折叠条 = 标题 + 自动输出文本开关；内容 = 原文 / 翻译 两行面板。"""
+    exp = ExExpander(content_pad=True)
+
+    # 同「应用主题」卡片的形式：标题在左、控件在右端
+    originrow = getboxwidget(
+        [
+            "原文",
+            1,
+            D_getsimpleswitch(
+                globalconfig["textoutputer"]["clipboard"], "origin"
+            ),
+        ]
+    )
+    transrow = getboxwidget(
+        [
+            "翻译",
+            1,
+            D_getsimpleswitch(
+                globalconfig["textoutputer"]["clipboard"], "trans"
+            ),
+        ]
+    )
+    rows = [originrow, transrow]
+
+    def __use(x):
+        for r in rows:
+            r.setEnabled(x)
+
+    __use(globalconfig["textoutputer"]["clipboard"].get("use", False))
+
+    header = QWidget()
+    hlay = QHBoxLayout(header)
+    hlay.setContentsMargins(0, 12, 0, 12)
+    hlay.setSpacing(8)
+    titlelabel = LLabel("剪贴板")
+    titlefont = titlelabel.font()
+    titlefont.setPixelSize(15)
+    titlelabel.setFont(titlefont)
+    hlay.addWidget(titlelabel)
+    hlay.addStretch(1)
+    hlay.addWidget(getsmalllabel("自动输出文本")())
+    hlay.addWidget(
+        getsimpleswitch(
+            globalconfig["textoutputer"]["clipboard"],
+            "use",
+            callback=__use,
+        )
+    )
+    exp.setHeaderWidget(header)
+
+    exp.addContentWidget(originrow)
+    exp.addContentWidget(transrow)
+    return exp
+
+
+def selectfile(self):
+    f = QFileDialog.getOpenFileNames(
+        options=QFileDialog.Option.DontResolveSymlinks,
+        filter="text file (*.json *.txt *.lrc *.srt *.vtt)",
+    )
+
+    res = f[0]
+    if not res:
+        return
+    callback = functools.partial(
+        yuitsu_switch,
+        self,
+        globalconfig["sourcestatus2"],
+        "sourceswitchs",
+        "filetrans",
+        gobject.base.starttextsource,
+    )
+
+    try:
+        callback(True)
+        gobject.base.starttranslatefiles.emit(res)
+    except:
+        print_exc()
+
+
+def createdownloadprogress(self):
+
+    downloadprogress = QProgressBar()
+
+    downloadprogress.setRange(0, 10000)
+
+    downloadprogress.setAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    )
+
+    def __set(_d: QProgressBar, text, i):
+        _d.setValue(i)
+        _d.setFormat(text)
+
+    gobject.base.connectsignal(
+        gobject.base.progresssignal2, functools.partial(__set, downloadprogress)
+    )
+    gobject.base.connectsignal(
+        gobject.base.progresssignal3, lambda x: downloadprogress.setRange(0, x)
+    )
+    return downloadprogress
+
+
+def sources(_):
+    sources = ["loopback"]
+    vis = ["环回录制"]
+    if 1:
+        sources.append("i")
+        vis.append("麦克风")
+    else:
+        sources.append("i")
+        vis.append("DefaultMicrophoneInput")
+        for _, _id in NativeUtils.ListEndpoints(True):
+            sources.append(_id)
+            vis.append("[[" + _ + "]]")
+        sources.append("o")
+        vis.append("DefaultSpeakerOutput")
+        for _, _id in NativeUtils.ListEndpoints(False):
+            sources.append(_id)
+            vis.append("[[" + _ + "]]")
+
+    mssrsource = getsimplecombobox(
+        vis,
+        globalconfig["sourcestatus2"]["mssr"],
+        "source",
+        internal=sources,
+        callback=lambda _: (gobject.base.textsource.init(),),
+    )
+    return mssrsource
+
+
+def hhfordirect(self, __vis, paths):
+
+    return getboxwidget(
+        [
+            getsmalllabel("语言"),
+            D_getsimplecombobox(
+                __vis,
+                globalconfig["sourcestatus2"]["mssr"],
+                "path",
+                internal=paths,
+                callback=lambda _: gobject.base.textsource.init(),
+            ),
+            "",
+            getsmalllabel("刷新间隔"),
+            D_getspinbox(
+                0,
+                10,
+                globalconfig["sourcestatus2"]["mssr"],
+                "refreshinterval",
+                True,
+                0.1,
+            ),
+            "",
+            getsmalllabel("音源"),
+            functools.partial(sources, self),
+        ]
+    )
+
+
+def hhforindirect():
+
+    return getboxwidget(
+        [
+            getsmalllabel("刷新间隔"),
+            D_getspinbox(
+                0.1,
+                10,
+                globalconfig["sourcestatus2"]["mssr"],
+                "refreshinterval2",
+                True,
+                0.1,
+            ),
+            "",
+            getsmalllabel("隐藏窗口"),
+            D_getsimpleswitch(
+                globalconfig["sourcestatus2"]["mssr"],
+                "hidewindow",
+                callback=functools.partial(
+                    lambda _: (gobject.base.textsource.engine.engine.show(not _)),
+                ),
+            ),
+            "",
+            getsmalllabel("自动结束进程"),
+            D_getsimpleswitch(
+                globalconfig["sourcestatus2"]["mssr"],
+                "autokill",
+                callback=functools.partial(
+                    lambda _: (gobject.base.textsource.engine.engine.setkill(_)),
+                ),
+            ),
+        ]
+    )
+
+
+def modesW(self, __vis, paths):
+    w = QWidget()
+    layout = VisLFormLayout(w)
+    layout.setContentsMargins(0, 0, 0, 0)
+    # 模式下面的各种设置放进卡片
+    card = GroupCardWidget()
+    cardlay = VisLFormLayout(card.contentWidget())
+    setvisrow = lambda _: (
+        cardlay.setRowVisible(0, _ == "direct"),
+        cardlay.setRowVisible(1, _ == "indirect"),
+    )
+    layout.addRow(
+        "模式",
+        getsimplecombobox(
+            ["直接调用", "间接读取"],
+            globalconfig["sourcestatus2"]["mssr"],
+            "mode",
+            internal=["direct", "indirect"],
+            callback=lambda _: (gobject.base.textsource.init(), setvisrow(_)),
+        ),
+    )
+    layout.addRow(card)
+    cardlay.addRow(hhfordirect(self, __vis, paths))
+    cardlay.addRow(hhforindirect())
+    setvisrow(globalconfig["sourcestatus2"]["mssr"]["mode"])
+    return w
+
+
+def _setlazywidgetenabled(self, attr, en):
+    """懒构建的设置控件可能尚未创建（折叠区未展开过）。"""
+    w = getattr(self, attr, None)
+    if w is not None:
+        w.setEnabled(en)
+
+
+def getsrgrid(self):
+    __vis, paths = MSSR.findallmodel()
+    if not paths and not gobject.sys_ge_win_10:
+        return [["系统不支持"]]
+
+    if os.path.exists(LiveCaptions.lcexe):
+        __w = modesW(self, __vis, paths)
+    else:
+        __w = hhfordirect(self, __vis, paths)
+    __w.setEnabled(globalconfig["sourcestatus2"]["mssr"]["use"])
+    self._srsettingswidget = __w
+
+    return [
+        [__w],
+    ]
+
+
+def getftsgrid(self):
+    gobject.base.starttranslatefiles.connect(
+        lambda res: gobject.base.textsource.starttranslatefiles(res)
+    )
+    return [
+        [
+            "文件",
+            D_getIconButton(
+                functools.partial(selectfile, self),
+                icon="fa.folder-open",
+            ),
+            "",
+            functools.partial(createdownloadprogress, self),
+        ],
+    ]
+
+
+def netusage(self):
+    """网络服务折叠卡（同 Gallery ExExpander「高级设置」的多行子设置）：
+    折叠条 = 标题 + doclink + 开启开关；内容 = 打开 / 端口号 两行面板。"""
+    exp = ExExpander(content_pad=True)
+
+    # 同「应用主题」卡片的形式：标题在左、控件在右端
+    openrow = getboxwidget(
+        [
+            getsmalllabel("打开"),
+            1,
+            D_getIconButton(
+                icon="fa.chrome",
+                callback=lambda: os.startfile(
+                    "http://127.0.0.1:{}".format(
+                        globalconfig.get("networktcpport", 2333)
+                    )
+                ),
+                tips="打开",
+            ),
+        ]
+    )
+    # 冲突提示在控件左侧，保证控件右缘与其他行对齐
+    portrow = getboxwidget(
+        [
+            getsmalllabel("端口号"),
+            1,
+            __portconflict,
+            D_getspinbox(
+                0,
+                65535,
+                globalconfig,
+                "networktcpport",
+                callback=lambda _: gobject.base.serviceinit(),
+                default=2333,
+            ),
+        ]
+    )
+    rows = [openrow, portrow]
+
+    def __setrows(x):
+        for r in rows:
+            r.setEnabled(x)
+
+    __setrows(globalconfig.get("networktcpenable", False))
+
+    header = QWidget()
+    hlay = QHBoxLayout(header)
+    hlay.setContentsMargins(0, 12, 0, 12)
+    hlay.setSpacing(8)
+    titlelabel = LLabel("网络服务")
+    titlefont = titlelabel.font()
+    titlefont.setPixelSize(15)
+    titlelabel.setFont(titlefont)
+    hlay.addWidget(titlelabel)
+    hlay.addWidget(D_getdoclink("apiservice.html")())
+    hlay.addStretch(1)
+    hlay.addWidget(getsmalllabel("开启")())
+    hlay.addWidget(
+        getsimpleswitch(
+            globalconfig,
+            "networktcpenable",
+            callback=lambda x: (__setrows(x), gobject.base.serviceinit()),
+            default=False,
+        )
+    )
+    exp.setHeaderWidget(header)
+
+    exp.addContentWidget(openrow)
+    exp.addContentWidget(portrow)
+    return exp
+
+
+def validator(createproxyedit_check: QLabel, text):
+    regExp = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$")
+    mch = regExp.match(text)
+    for _ in (1,):
+
+        if not mch:
+            break
+        _1, _2, _3, _4, _p = [int(_) for _ in mch.groups()]
+        if _p > 65535:
+            break
+        if any([_ > 255 for _ in [_1, _2, _3, _4]]):
+            break
+        globalconfig["proxy"] = text
+        createproxyedit_check.hide()
+        return
+    if not createproxyedit_check.isVisible():
+        createproxyedit_check.show()
+    createproxyedit_check.setText("Invalid")
+
+
+def proxyusage(self):
+    """代理设置折叠卡（同 Gallery ExExpander「高级设置」的多行子设置）：
+    折叠条 = 标题 + 使用开关；内容 = 使用系统代理 / 手动设置代理 两行面板。"""
+    exp = ExExpander(content_pad=True)
+
+    # 子设置 2：手动设置代理
+    check = QLabel()
+    proxy = QLineEdit(globalconfig.get("proxy", "127.0.0.1:7890"))
+    # 校验标签在控件左侧，保证控件右缘与其他行对齐
+    manualrow = getboxwidget(["手动设置代理", 1, check, proxy])
+
+    def __sys(x):
+        manualrow.setEnabled(not x)
+
+    # 子设置 1：使用系统代理
+    # 同「应用主题」卡片的形式：标题在左、控件在右端
+    sysrow = getboxwidget(
+        [
+            "使用系统代理",
+            1,
+            D_getsimpleswitch(
+                globalconfig, "usesysproxy", callback=__sys, default=True
+            ),
+        ]
+    )
+    __sys(globalconfig.get("usesysproxy", True))
+    validator(check, globalconfig.get("proxy", "127.0.0.1:7890"))
+    proxy.textChanged.connect(functools.partial(validator, check))
+
+    rows = [sysrow, manualrow]
+
+    def __use(x):
+        for r in rows:
+            r.setEnabled(x)
+        if x:
+            __sys(globalconfig.get("usesysproxy", True))
+
+    __use(globalconfig.get("useproxy", True))
+
+    # 折叠条：标题 + 使用开关
+    header = QWidget()
+    hlay = QHBoxLayout(header)
+    hlay.setContentsMargins(0, 12, 0, 12)
+    hlay.setSpacing(8)
+    titlelabel = LLabel("代理设置")
+    titlefont = titlelabel.font()
+    titlefont.setPixelSize(15)
+    titlelabel.setFont(titlefont)
+    hlay.addWidget(titlelabel)
+    hlay.addStretch(1)
+    hlay.addWidget(getsmalllabel("使用")())
+    hlay.addWidget(
+        getsimpleswitch(globalconfig, "useproxy", callback=__use, default=True)
+    )
+    exp.setHeaderWidget(header)
+
+    # 多行子设置：每行独立 ContentPanel（同 C++ 多次 addContentWidget）
+    exp.addContentWidget(sysrow)
+    exp.addContentWidget(manualrow)
+    return exp
+
+
+def filetranslate(self):
+    grids = [
+        [
+            functools.partial(clipusage, self),
+        ],
+        [
+            functools.partial(
+                createfoldgrid,
+                functools.partial(getsrgrid, self),
+                "语音识别",
+                globalconfig["foldstatus"]["others"],
+                "sr",
+                leftwidget=D_getdoclink("sr.html"),
+                switch=getboxwidget(
+                    [
+                        getsmalllabel("使用"),
+                        D_getsimpleswitch(
+                            globalconfig["sourcestatus2"]["mssr"],
+                            "use",
+                            name="mssr",
+                            parent=self,
+                            callback=functools.partial(
+                                yuitsu_switch,
+                                self,
+                                globalconfig["sourcestatus2"],
+                                "sourceswitchs",
+                                "mssr",
+                                lambda _, _2: (
+                                    gobject.base.starttextsource(_, _2),
+                                    _setlazywidgetenabled(
+                                        self, "_srsettingswidget", _2
+                                    ),
+                                ),
+                            ),
+                            pair="sourceswitchs",
+                        ),
+                    ]
+                ),
+            )
+        ],
+        [
+            functools.partial(
+                createfoldgrid,
+                functools.partial(getftsgrid, self),
+                "文件翻译",
+                globalconfig["foldstatus"]["others"],
+                "fts",
+            )
+        ],
+        [
+            functools.partial(proxyusage, self),
+        ],
+        [
+            functools.partial(netusage, self),
+        ],
+    ]
+    return grids
+
+
+def __portconflict():
+    _ = LLabel()
+    gobject.base.connectsignal(gobject.base.portconflict, _.setText)
+    return _
+
+
+@Singleton
+class extralangs(LDialog):
+    def __init__(self, parent) -> None:
+        super().__init__(parent, Qt.WindowType.WindowCloseButtonHint)
+        self.setWindowTitle("其他语言")
+        self.model = LStandardItemModel()
+        self.model.setHorizontalHeaderLabels(["语言名称", "语言代码"])
+        table = TableViewW(self)
+        table.setModel(self.model)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table = table
+
+        table.insertplainrow = lambda row: self.newline(row, {"name": "", "code": ""})
+        self.table = table
+        for row, item in enumerate(globalconfig["extraLangs"]):
+            self.newline(row, item)
+        table.startObserveInserted()
+        button = manybuttonlayout(
+            [
+                ("添加行", functools.partial(table.insertplainrow, 0)),
+                ("删除行", self.table.removeselectedrows),
+            ]
+        )
+
+        formLayout = QVBoxLayout(self)
+        formLayout.addWidget(table)
+        formLayout.addLayout(button)
+
+        self.resize(QSize(600, 400))
+        self.exec()
+
+    def newline(self, row, item: dict):
+        self.model.insertRow(
+            row,
+            [
+                QStandardItem(item["name"]),
+                QStandardItem(item["code"]),
+            ],
+        )
+
+    def apply(self):
+        self.table.dedumpmodel(0, removeblank=True)
+        self.table.dedumpmodel(1, removeblank=True)
+        globalconfig["extraLangs"].clear()
+        for row in range(self.model.rowCount()):
+            switch = self.table.getdata(row, 0)
+            es = self.table.getdata(row, 1)
+            if Languages.fromcode(es):
+                continue
+            globalconfig["extraLangs"].append(
+                {
+                    "name": switch,
+                    "code": es,
+                }
+            )
+
+    def closeEvent(self, a0: QCloseEvent) -> None:
+        self.setFocus()
+        self.apply()
+        srclangw: SuperCombo = self.parent().srclangw
+        tgtlangw: SuperCombo = self.parent().tgtlangw
+        srclangw.blockSignals(True)
+        tgtlangw.blockSignals(True)
+        srclangw.clear()
+        tgtlangw.clear()
+        srclangw.addItems(all_langs()[0], internals=all_langs()[1])
+        tgtlangw.addItems(all_langs(False)[0], internals=all_langs(False)[1])
+        srclangw.blockSignals(False)
+        tgtlangw.blockSignals(False)
+        srclangw.setCurrentData(globalconfig.get("srclang4", "auto"))
+        tgtlangw.setCurrentData(globalconfig.get("tgtlang4", "zh"))
+
+
+def __srclangw(self):
+    self.srclangw = getsimplecombobox(
+        all_langs()[0],
+        globalconfig,
+        "srclang4",
+        internal=all_langs()[1],
+        default="auto",
+    )
+    return self.srclangw
+
+
+def __tgtlangw(self):
+    self.tgtlangw = getsimplecombobox(
+        all_langs(False)[0],
+        globalconfig,
+        "tgtlang4",
+        internal=all_langs(False)[1],
+        default="zh",
+    )
+    return self.tgtlangw
+
+
+def setTablanglz(self):
+    return [
+        [
+            "源语言",
+            (functools.partial(__srclangw, self), 5),
+            "",
+            "目标语言",
+            (functools.partial(__tgtlangw, self), 5),
+            D_getIconButton(
+                lambda: extralangs(self),
+            ),
+        ]
+    ]
+
+
+def __hooksubtabs():
+    tab, do = makesubtab_lazy(
+        ["默认设置", "内嵌翻译"],
+        [
+            lambda l: makescrollgrid(gethookgrid(), l),
+            lambda l: makescrollgrid(gethookgrid_em(), l),
+        ],
+        delay=True,
+    )
+    return tab, do
+
+
+def __otherspage(self, l):
+    # 无底页内的网格：标记为卡内网格，顶边距与左右统一 16
+    # （makescrollgrid 在无属性页默认顶边距 8）
+    l.setProperty("_fluent_card_grid", True)
+    makescrollgrid(filetranslate(self), l)
+
+
+def setTabOne_lazy_h(self, basel: QVBoxLayout):
+    grids = [
+        [
+            __create,
+            "",
+            __create2,
+            "",
+            __create3,
+            "",
+        ],
+        [
+            (__hooksubtabs, 0)
+        ],
+    ]
+    gridlayoutwidget, do = makegrid(grids, delay=True, topmargin=16)
+    basel.addWidget(gridlayoutwidget)
+    do()
+
+
+def setTabOne_lazy(self, basel: QVBoxLayout):
+    _rank = [
+        ("texthook", "HOOK"),
+        ("ocr", "OCR"),
+        ("copy", "剪贴板"),
+    ]
+    __ = []
+    for key, name in _rank:
+        __.append(getsmalllabel(name))
+        __.append(
+            D_getsimpleswitch(
+                globalconfig["sourcestatus2"][key],
+                "use",
+                name=key,
+                parent=self,
+                callback=functools.partial(
+                    yuitsu_switch,
+                    self,
+                    globalconfig["sourcestatus2"],
+                    "sourceswitchs",
+                    key,
+                    gobject.base.starttextsource,
+                ),
+                pair="sourceswitchs",
+            )
+        )
+        __.append("")
+    # 语言设置/文本输入：标题分组卡片（内部内容不变）
+    content = QWidget()
+    vlay = QVBoxLayout(content)
+    vlay.setContentsMargins(0, 0, 0, 0)
+    vlay.setSpacing(8)
+    vlay.setAlignment(Qt.AlignmentFlag.AlignTop)
+    vlay.addWidget(makegroupcard("语言设置", setTablanglz(self)))
+    vlay.addWidget(makegroupcard("文本输入", [__]))
+    basel.addWidget(content)
+    titles = ["HOOK设置", "OCR设置", "其他"]
+    funcs = [
+        lambda l: setTabOne_lazy_h(self, l),
+        lambda l: getocrgrid_table(self, l),
+        lambda l: __otherspage(self, l),
+    ]
+
+    # Gallery pageaudiolevelmeter 配方：内容卡包裹 [Pivot 页签组]
+    # （FluentPaneTabWidget 默认 Pivot_Grow，各页直角面板紧贴 bar）
+    tab, dotab = makesubtab_lazy(
+        titles,
+        funcs,
+        delay=True,
+        type=1,
+    )
+    basel.addWidget(tab)
+    basel.setContentsMargins(16, 16, 16, 12)
+    basel.setSpacing(0)
+    dotab()
+
+    def ___(k, x):
+        btn: QPushButton = self.sourceswitchs.get(k)
+        if not btn:
+            return
+        btn.setChecked(x)
+
+    gobject.base.sourceswitchs.connect(___)

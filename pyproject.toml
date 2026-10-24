@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoadv"
+version = "0.1.0.dev0"
+description = "LunaHook dialogue acquisition, Irodori voice routing, and authorized conversation advancement"
+requires-python = ">=3.11"
+dependencies = ["haqumei>=0.12,<0.13"]
+
+[project.scripts]
+autoadv = "autoadv.__main__:main"
+
+[project.gui-scripts]
+autoadv-gui = "autoadv.gui:run_gui"
+
+[project.optional-dependencies]
+audio = ["sounddevice>=0.5,<1"]
+ocr = ["opencv-python>=4.8,<5", "mss>=9,<11", "numpy>=1.26,<3"]
+native = ["numpy>=1.26,<3", "onnxruntime>=1.20,<2"]
+dev = ["pytest>=8,<10"]
+gui = ["PySide6-Essentials>=6.8,<7"]
+
+[tool.setuptools.packages.find]
+include = ["autoadv*"]
+[tool.setuptools.package-data]
+autoadv = ["luna_assets/*", "alignment_assets/*"]

@@ -1,0 +1,1075 @@
+"""Independent diagnostic audit of product GUI observations from a *real* game.
+
+No runner, injection, simulated HOOK, audio source or input exists here. A
+trace is evidence from one opt-in production run, never proof of execution when
+manufactured for unit tests. Scenario expectations are not read by AutoAdv.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from pathlib import Path
+from typing import Sequence
+from validation.real_game.trace import text_digest
+
+HERE = Path(__file__).resolve().parent
+PHASES = ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')
+# The independent clean-source oracle is needed to judge *native* early
+# advances; voice-channel lifecycle remains diagnostic only.
+VOICE_ORACLE_PHASES = frozenset(('accuracy', 'mixed', 'stress'))
+
+
+def _summary(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return {
+        'count': len(ordered),
+        'p50': round(ordered[(len(ordered) - 1) // 2], 3),
+        'p95': round(ordered[math.ceil(len(ordered) * .95) - 1], 3),
+        'max': round(ordered[-1], 3),
+    }
+
+
+def _elapsed_ms(first: int | None, last: int | None) -> float | None:
+    if first is None or last is None or first > last:
+        return None
+    return (last - first) / 1_000_000
+
+
+def _signed_elapsed_ms(first: int | None, last: int | None) -> float | None:
+    if first is None or last is None:
+        return None
+    return (last - first) / 1_000_000
+
+
+def _key(record: dict) -> tuple[object, object]:
+    return record.get('session'), record.get('line')
+
+
+def _oracle_collection_prefix(oracle_records: Sequence[dict] | None,
+                              utterance_order: Sequence[tuple],
+                              utterances: dict) -> Sequence[dict] | None:
+    """Exclude fixture activity after the requested dialogue collection.
+
+    Native validation can return/restart the Ren'Py fixture immediately after
+    the final requested input. The oracle may then legitimately reuse line
+    numbers and Luna may observe engine text. Once every collected Utterance
+    body has been seen in order by the independent game observer, the next game
+    line belongs to a later fixture run and is outside this validation scope.
+    """
+    if not oracle_records or not utterance_order:
+        return oracle_records
+    expected = [utterances[key].get('body_hash') for key in utterance_order]
+    if any(not isinstance(value, str) or not value for value in expected):
+        return oracle_records
+    matched = 0
+    limited = []
+    for record in oracle_records:
+        if record.get('event') == 'line_started':
+            if matched >= len(expected):
+                break
+            if record.get('body_hash') == expected[matched]:
+                matched += 1
+        limited.append(record)
+    return limited if matched == len(expected) else oracle_records
+
+
+def audit_game_oracle(oracle_records: Sequence[dict] | None,
+                      utterance_order: Sequence[tuple], utterances: dict,
+                      attempts: dict, sent: dict, reasons: dict,
+                      reference_start: int | None, scenario: Sequence[dict], *,
+                      game_pid_by_session: dict, presentation_at: dict,
+                      native_acoustic_completion_estimates: dict, source_outputs: dict,
+                      recovery_inputs: dict,
+                      max_voice_hold_ms: int | None = None,
+                      measurement_only: bool = False) -> dict:
+    """Compare independent game playback with actual AutoAdv inputs.
+
+    The Ren'Py observer is independent of the product. It records channel
+    lifecycle only as diagnostics and derives a clean-source acoustic endpoint
+    from the isolated foreground WAV. That source endpoint remains evaluable
+    even when AutoAdv input itself stops the voice channel. It is a test oracle,
+    never product audio evidence or physical-speaker audibility ground truth.
+    """
+    errors: list[str] = []
+    diagnostics: list[str] = []
+    quality_issues: list[str] = []
+    result = {'errors': errors, 'quality_issues': quality_issues,
+              'diagnostics': diagnostics, 'latencies': {}, 'lines': [], 'early_inputs': 0,
+              'unverified_source_acoustic_ends': 0, 'indeterminate_source_acoustic_end': 0,
+              'overholds': 0, 'misattributions': 0,
+              'confirmed_source_acoustic_safe_inputs': 0, 'unaligned_lines': 0}
+    if not oracle_records:
+        diagnostics.append('independent game playback evidence unavailable; voice safety unverified')
+        return result
+    if (oracle_records[0].get('event') != 'oracle_started' or
+            oracle_records[0].get('version') != 2 or
+            oracle_records[0].get('endpoint_contract') != 'clean_source_pcm_rms_v1'):
+        errors.append('invalid independent game playback observation header')
+        return result
+    pid = oracle_records[0].get('pid')
+    if type(pid) is not int or pid <= 0 or any(
+            game_pid_by_session.get(key[0]) != pid for key in utterance_order):
+        errors.append('game oracle PID does not match the selected input/window process')
+        return result
+    last_at = -1
+    lines: dict[int, dict] = {}
+    ordered = []
+    for record in oracle_records:
+        at = record.get('at_ns')
+        if (type(at) is not int or at < last_at or record.get('pid') != pid):
+            errors.append('inconsistent independent game clock or process')
+            return result
+        last_at = at
+        event, number = record.get('event'), record.get('line')
+        if event == 'line_started':
+            if type(number) is not int or number <= 0 or number in lines:
+                errors.append('invalid independent game line sequence')
+                return result
+            lines[number] = {'start': record, 'voice_onsets': [], 'channel_inactive': [],
+                             'interruptions': [], 'mix_channels': set()}
+            ordered.append(number)
+        elif event == 'mix_snapshot':
+            if number not in lines:
+                errors.append(f'game mix snapshot without a line: {number}')
+                return result
+            channels = record.get('channels')
+            if not isinstance(channels, dict) or any(
+                    not isinstance(channel, str) or not isinstance(filename, str) or not filename
+                    for channel, filename in channels.items()):
+                errors.append(f'invalid game mix snapshot: {number}')
+                return result
+            lines[number]['mix_channels'].update(channels)
+        elif event == 'mix_started':
+            # Mix changes during a dialogue (notably a delayed SFX) belong to
+            # that line. Changes during ordinary scene transitions have no
+            # current dialogue and are captured by the next mix_snapshot.
+            if number in lines:
+                channel = record.get('channel')
+                if not isinstance(channel, str) or not channel:
+                    errors.append(f'invalid game mix channel: {number}')
+                    return result
+                lines[number]['mix_channels'].add(channel)
+        elif event == 'mix_stopped':
+            pass
+        elif event in ('voice_started', 'voice_channel_inactive', 'voice_interrupted'):
+            if number not in lines:
+                errors.append(f'game event without a line: {number}')
+                return result
+            line = lines[number]
+            if at < line['start']['at_ns']:
+                errors.append(f'game event predates line: {number}')
+            if event == 'voice_started':
+                endpoint = record.get('source_acoustic_end_at_ns')
+                uncertainty = record.get('source_acoustic_uncertainty_ms')
+                file_end = record.get('source_file_end_at_ns')
+                if endpoint is not None and (type(endpoint) is not int or endpoint <= 0):
+                    errors.append(f'invalid source acoustic endpoint: {number}')
+                if uncertainty is not None and (type(uncertainty) not in (int, float) or uncertainty < 0):
+                    errors.append(f'invalid source endpoint uncertainty: {number}')
+                if file_end is not None and (type(file_end) is not int or file_end <= 0):
+                    errors.append(f'invalid source file endpoint: {number}')
+                if type(endpoint) is int and type(file_end) is int and endpoint > file_end:
+                    errors.append(f'source acoustic endpoint exceeds file endpoint: {number}')
+                line['voice_onsets'].append(record)
+            elif event == 'voice_channel_inactive':
+                last_active = record.get('last_channel_active_at_ns')
+                if type(last_active) is not int or last_active > at:
+                    errors.append(f'bad game voice-channel inactivity interval: {number}')
+                line['channel_inactive'].append(record)
+            elif event == 'voice_interrupted':
+                line['interruptions'].append(record)
+    # Align *each* game dialogue using only independently observed source text
+    # and monotonic timing. A lost/changed HOOK or one faulty parsing rule must
+    # not discard observations of every other utterance in the session.
+    for offset, key in enumerate(utterance_order):
+        utterance = utterances[key]
+        stamp = utterance['at_ns']
+        matching = [number for position, number in enumerate(ordered)
+                    if lines[number]['start'].get('body_hash') == utterance.get('body_hash')
+                    and lines[number]['start']['at_ns'] <= stamp
+                    and (position + 1 == len(ordered) or
+                         stamp < lines[ordered[position + 1]]['start']['at_ns'])]
+        if len(matching) != 1:
+            result['unaligned_lines'] += 1
+            result['lines'].append({
+                'scenario': None, 'game_line': None, 'sent': key in sent,
+                'voice_observed': None, 'outcome': 'game_playback_unaligned',
+            })
+            diagnostics.append(f'no unique playback observation for HOOK line {key}; voice safety unverified')
+            continue
+        game_number = matching[0]
+        line = lines[game_number]
+        # Scenario metadata is optional diagnostic context. Its authored voice
+        # classification is never a prerequisite for collecting game playback.
+        pos = (reference_start + offset if reference_start is not None else None)
+        contract = scenario[pos] if pos is not None and 0 <= pos < len(scenario) else {}
+        want_voice = contract.get('foreground_voice')
+        if type(want_voice) is not bool:
+            want_voice = None
+        attempt = attempts.get(key)
+        actual_input = sent.get(key)
+        strict_native = (utterances[key].get('advance_mode') == 'audio' and
+                         not utterances[key].get('use_tts'))
+        voice_onsets = line['voice_onsets']
+        channel_inactive = line['channel_inactive']
+        interruptions = line['interruptions']
+        # Source acoustic timing is fixed when one foreground WAV begins and
+        # therefore survives channel interruption/inactivity caused by the very
+        # AutoAdv input being evaluated. Multiple foreground starts on one game
+        # line remain ambiguous; do not select a convenient source.
+        source_onset = voice_onsets[0] if len(voice_onsets) == 1 else None
+        source_ambiguous = len(voice_onsets) > 1
+        if source_onset is not None and actual_input is not None:
+            # A replacement strictly before AutoAdv input means the game/source
+            # lifecycle changed independently, so the planned source endpoint is
+            # no longer a valid safety oracle for that input. Replacements at or
+            # after the input do not erase the counterfactual natural endpoint.
+            if any(item['at_ns'] < actual_input for item in interruptions):
+                source_ambiguous = True
+        source_end_at = (source_onset.get('source_acoustic_end_at_ns')
+                         if source_onset is not None else None)
+        source_uncertainty_ms = (source_onset.get('source_acoustic_uncertainty_ms')
+                                 if source_onset is not None else None)
+        origin = (key[0], utterances[key].get('source'),
+                  utterances[key].get('hook_sequence'), utterances[key].get('raw_hash'))
+        if len(voice_onsets) == 1:
+            if (ms := _signed_elapsed_ms(voice_onsets[0]['at_ns'],
+                                         source_outputs.get(origin))) is not None:
+                result['latencies'].setdefault('game_voice_onset_to_hook_ms', []).append(ms)
+        observed_mix = set(line.get('mix_channels', ()))
+        expected_mix = contract.get('expected_mix_channels')
+        forbidden_mix = contract.get('forbidden_mix_channels', ())
+        if not isinstance(expected_mix, list):
+            expected_mix = None
+        if not isinstance(forbidden_mix, list):
+            forbidden_mix = []
+        missing_mix = (set(expected_mix) - observed_mix) if expected_mix is not None else set()
+        forbidden_observed = set(forbidden_mix) & observed_mix
+        mix_verified = (expected_mix is not None and not missing_mix and not forbidden_observed)
+        detail = {'scenario': contract.get('id'), 'game_line': game_number,
+                  'completion_reason': reasons.get(key), 'sent': key in sent,
+                  'voice_expected': want_voice, 'voice_observed': bool(voice_onsets),
+                  'mix_channels_observed': sorted(observed_mix),
+                  'mix_environment_verified': mix_verified if expected_mix is not None else None,
+                  'validation_recovery_input': key in recovery_inputs,
+                  'outcome': 'unadvanced'}
+        if missing_mix:
+            issue = (f'expected game mix not observed for {contract.get("id") or key}: ' +
+                     ','.join(sorted(missing_mix)))
+            errors.append(issue)
+            quality_issues.append(issue)
+        if forbidden_observed:
+            issue = (f'forbidden game mix remained active for {contract.get("id") or key}: ' +
+                     ','.join(sorted(forbidden_observed)))
+            errors.append(issue)
+            quality_issues.append(issue)
+        if attempt is not None and key not in sent:
+            diagnostics.append(f'input attempt has no confirmed advance input: {key}')
+        # The product's targeted input and following LunaHook verify the
+        # advance. The fixture observer is retained solely to compare native
+        # input timing with independently observed voice playback.
+        if want_voice is False and not voice_onsets and actual_input is not None:
+            if reasons.get(key) == 'native':
+                result['misattributions'] += 1
+                detail['outcome'] = 'no_foreground_voice_misattributed'
+                diagnostics.append(f'native completion with no foreground voice in independent scenario: {key}')
+            elif reasons.get(key) == 'uncertain_text_fallback':
+                detail['outcome'] = 'no_foreground_voice_fallback'
+            else:
+                detail['outcome'] = 'input_without_foreground_voice'
+                diagnostics.append(f'unexpected completion reason for no-foreground-voice line: {key}')
+        elif actual_input is None:
+            # Advancement without AutoAdv input is already represented by the
+            # product trace (including explicit validation recovery). The game
+            # observer does not reconstruct a second progression contract.
+            detail['outcome'] = ('validation_recovery_input'
+                                 if key in recovery_inputs else 'no_autoadv_input')
+        elif strict_native:
+            # Safety is judged against the isolated foreground source's acoustic
+            # endpoint, not against Ren'Py channel inactivity. The latter can be
+            # caused by this same input and is retained only as a diagnostic.
+            if len(channel_inactive) == 1:
+                channel_ms = _signed_elapsed_ms(channel_inactive[0]['at_ns'], actual_input)
+                result['latencies'].setdefault('game_voice_channel_inactive_to_input_ms', []).append(channel_ms)
+                detail['game_voice_channel_inactive_to_input_ms'] = channel_ms
+            if source_ambiguous:
+                result['unverified_source_acoustic_ends'] += 1
+                detail['outcome'] = 'source_acoustic_end_unverified'
+                diagnostics.append(f'ambiguous independent foreground source for input: {key}')
+            elif (source_onset is None or type(source_end_at) is not int or
+                  type(source_uncertainty_ms) not in (int, float)):
+                result['unverified_source_acoustic_ends'] += 1
+                detail['outcome'] = 'source_acoustic_end_unverified'
+                diagnostics.append(f'clean-source acoustic endpoint unavailable for input: {key}')
+            else:
+                uncertainty_ns = int(source_uncertainty_ms * 1_000_000)
+                lower = source_end_at - uncertainty_ns
+                upper = source_end_at + uncertainty_ns
+                ms = _signed_elapsed_ms(source_end_at, actual_input)
+                result['latencies'].setdefault('source_acoustic_end_to_input_ms', []).append(ms)
+                detail['source_acoustic_end_to_input_ms'] = ms
+                detail['source_acoustic_uncertainty_ms'] = source_uncertainty_ms
+                if (decision := presentation_at.get(key)) is not None:
+                    result['latencies'].setdefault('source_acoustic_end_to_decision_ms', []).append(
+                        _signed_elapsed_ms(source_end_at, decision))
+                if (estimated := native_acoustic_completion_estimates.get(key)) is not None:
+                    result['latencies'].setdefault('source_acoustic_end_to_product_completion_ms', []).append(
+                        _signed_elapsed_ms(source_end_at, estimated))
+                if actual_input < lower:
+                    result['early_inputs'] += 1
+                    detail['outcome'] = 'early_input'
+                    issue = f'input before independent source acoustic endpoint: {key}'
+                    quality_issues.append(issue)
+                    if not measurement_only:
+                        errors.append(issue)
+                elif actual_input <= upper:
+                    result['indeterminate_source_acoustic_end'] += 1
+                    detail['outcome'] = 'source_acoustic_end_indeterminate'
+                    diagnostics.append(f'input within source acoustic endpoint uncertainty: {key}')
+                else:
+                    if (ms is not None and max_voice_hold_ms is not None and ms > max_voice_hold_ms):
+                        result['overholds'] += 1
+                        detail['outcome'] = 'overheld'
+                        diagnostics.append(
+                            f'source-acoustic-end-to-input latency {ms:.0f}ms exceeds diagnostic reference: {key}')
+                    else:
+                        detail['outcome'] = 'source_acoustic_end_then_input'
+                        result['confirmed_source_acoustic_safe_inputs'] += 1
+        else:
+            detail['outcome'] = ('native_voice_not_required_by_text_or_tts_policy'
+                                 if want_voice else 'input_without_foreground_voice')
+        result['lines'].append(detail)
+    return result
+
+
+def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json') -> list[dict]:
+    # These are test-side expectations, never a source of AutoAdv decisions.
+    if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
+        scenario_path = HERE / 'ALIGNMENT_STRESS_SCENARIO.json'
+    elif phase == 'accuracy' and scenario_path == HERE / 'SCENARIO.json':
+        # Dedicated Windows auto-advance accuracy expectations deliberately differ
+        # from the redistributable fixture's ordinary mixed scene. Runtime media
+        # is hydrated outside Git before launch and remains test-side evidence only.
+        scenario_path = HERE / 'ADVANCEMENT_ACCURACY_SCENARIO.json'
+    scenario = json.loads(scenario_path.read_text(encoding='utf-8'))['lines']
+    if phase == 'mixed' and scenario_path == HERE / 'SCENARIO.json':
+        # The same Ren'Py game terminates before its interactive menu when
+        # launched with AUTOADV_VALIDATION_SCENARIO=mixed.
+        handoff = next((i for i, line in enumerate(scenario) if line.get('manual_handoff')), None)
+        if handoff is None:
+            raise ValueError('mixed game has no menu boundary')
+        scenario = scenario[:handoff] + [{
+            'id': 'auto-test-end', 'text': '通常会話の検証を終了します。',
+            'ending': True, 'advance_mode': 'text', 'use_tts': False,
+            'foreground_voice': False,
+        }]
+    return scenario
+
+
+def validate(records: Sequence[dict], *, phase: str = 'mixed',
+             scenario_path: Path = HERE / 'SCENARIO.json',
+             start_line: int | None = None,
+             oracle_records: Sequence[dict] | None = None,
+             max_voice_hold_ms: int | None = None,
+             measurement_only: bool = False) -> dict:
+    if phase not in PHASES:
+        raise ValueError(f'unknown validation phase: {phase}')
+    scenario = scenario_for_phase(phase, scenario_path)
+    expected_hashes = [text_digest(x['text']) for x in scenario]
+    errors: list[str] = []
+    diagnostics: list[str] = []
+    quality_issues: list[str] = []
+
+    def product_issue(message: str) -> None:
+        quality_issues.append(message)
+        if not measurement_only:
+            errors.append(message)
+    if (not records or records[0].get('event') != 'trace_started'
+            or records[0].get('version') != 2):
+        errors.append('missing version 2 real-session trace header')
+    for index, (previous, current) in enumerate(zip(records, records[1:]), 1):
+        if (type(current.get('seq')) is not int or current['seq'] != index or
+                type(current.get('at_ns')) is not int or
+                current['at_ns'] < previous.get('at_ns', 0)):
+            errors.append(f'invalid event sequence or timestamp at record {index}')
+            break
+
+    # The active-session and provenance checks reject old-session, OCR and
+    # unmatched candidate-HOOK events as evidence of a live Luna dialogue.
+    connections: set[tuple] = set()
+    # Active lifetime and immutable session provenance are different facts.
+    # The active map answers "was this event emitted while monitoring?" while
+    # the historical map remains available after monitor_ended for deferred
+    # cross-event validation such as PCM -> Utterance association.
+    active_monitoring: dict[object, dict] = {}
+    monitor_sessions: dict[object, dict] = {}
+    game_pid_by_session: dict[object, int] = {}
+    source_outputs: dict[tuple, int] = {}
+    utterances: dict[tuple, dict] = {}
+    utterance_order: list[tuple] = []
+    complete: set[tuple] = set()
+    pcm: set[tuple] = set()
+    pcm_records: list[tuple[dict, dict | None]] = []
+    native: set[tuple] = set()
+    tts: set[tuple] = set()
+    attempts: dict[tuple, int] = {}
+    sent: dict[tuple, int] = {}
+    input_completion_reasons: dict[tuple, str] = {}
+    timestamps: dict[tuple, int] = {}
+    readiness: set[object] = set()
+    audio_methods: dict[object, str] = {}
+    audio_targets: dict[object, int] = {}
+    timeouts: set[tuple] = set()
+    handoffs: dict[tuple, str] = {}
+    recovery_inputs: dict[tuple, int] = {}
+    collection_target: int | None = None
+    capture_summaries: dict[tuple, dict] = {}
+    methods: dict[tuple, str] = {}
+    reasons: dict[tuple, str] = {}
+    presentation_at: dict[tuple, int] = {}
+    audio_started_at: dict[tuple, int] = {}
+    audio_completed_at: dict[tuple, int] = {}
+    native_acoustic_completion_estimates: dict[tuple, int] = {}
+    native_acoustic_onset_estimates: dict[tuple, int] = {}
+    native_acoustic_completion_sources: dict[tuple, str] = {}
+    native_acoustic_completion_estimate_sources: dict[tuple, str] = {}
+    alignment_counts: dict[tuple, int] = {}
+    out_of_scope_utterances: set[tuple] = set()
+    post_collection_utterance: dict | None = None
+    post_collection_timestamp: int | None = None
+    measured: dict[str, list[float]] = {
+        name: [] for name in (
+            'alignment_ms', 'alignment_queue_ms', 'alignment_rtf',
+            'tts_synthesis_ms', 'tts_synthesis_rtf', 'tts_playback_ms',
+        )
+    }
+
+    for record in records[1:]:
+        event, session = record.get('event'), record.get('session')
+        key = _key(record)
+        at = record.get('at_ns', -1)
+        # ``validation_collection_target`` defines the requested acceptance
+        # scope. A fixture restart or engine string after that many real
+        # Utterances must not become an extra dialogue in this run. Keep
+        # scanning, though, because Qt-queued diagnostics for the final in-scope
+        # Utterance may be appended after the restarted fixture already emitted
+        # unrelated text.
+        if (event == 'utterance' and collection_target is not None
+                and len(utterance_order) >= collection_target):
+            if post_collection_utterance is None:
+                post_collection_utterance = record
+                post_collection_timestamp = at
+            out_of_scope_utterances.add(key)
+            continue
+        if key in out_of_scope_utterances:
+            continue
+        if event == 'hook_connected':
+            connections.add((record.get('pid'), record.get('generation'), record.get('connection')))
+        elif event == 'monitor_started':
+            if record.get('source') != 'hook':
+                errors.append('real LunaHook acceptance cannot use OCR or other sources')
+            connection = (record.get('hook_pid'), record.get('generation'), record.get('connection'))
+            if connection not in connections:
+                errors.append(f'monitor {session} lacks actual Host connected notification')
+            if session in monitor_sessions:
+                errors.append(f'duplicate monitor session {session}')
+            active_monitoring[session] = record
+            monitor_sessions[session] = record
+            # Hook, audio and UI PIDs may legitimately differ for a game.
+            # The independent game observer identifies the input/window PID;
+            # capture evidence is checked against its separately selected PID.
+            game_pid_by_session[session] = record.get('input_pid')
+        elif event == 'monitor_ended':
+            active_monitoring.pop(session, None)
+        elif event == 'hook_output':
+            monitor = active_monitoring.get(session)
+            if (not monitor or record.get('pid') != monitor.get('hook_pid') or
+                    record.get('generation') != monitor.get('generation') or
+                    record.get('connection') != monitor.get('connection') or
+                    not isinstance(record.get('source'), str) or
+                    not isinstance(record.get('address'), int) or
+                    record['address'] <= 0 or
+                    not isinstance(record.get('hook_sequence'), int) or
+                    not isinstance(record.get('received_ns'), int) or
+                    record['received_ns'] <= 0 or record['received_ns'] > at):
+                errors.append(f'invalid live Luna output source for session {session}')
+            provenance = (session, record.get('source'), record.get('hook_sequence'), record.get('raw_hash'))
+            if provenance in source_outputs:
+                errors.append(f'duplicate HOOK output provenance: {provenance}')
+            source_outputs[provenance] = record.get('received_ns', 0)
+        elif event == 'utterance':
+            if key in utterances:
+                errors.append(f'duplicate utterance identity {key}')
+            utterances[key] = record
+            utterance_order.append(key)
+            timestamps[key] = at
+            if session not in active_monitoring:
+                errors.append(f'utterance outside HOOK monitoring: {key}')
+            source = (session, record.get('source'), record.get('hook_sequence'), record.get('raw_hash'))
+            if source not in source_outputs:
+                errors.append(f'utterance without actual selected Luna output: {key}')
+        elif event == 'native_ready':
+            if (session in active_monitoring and
+                    record.get('audio_pid') == active_monitoring[session].get('audio_pid')):
+                readiness.add(session)
+                audio_methods[session] = 'target_conditioned_forced_alignment'
+                audio_targets[session] = record.get('audio_pid')
+        elif event == 'native_pcm':
+            # PCM callbacks can precede the corresponding queued Utterance.
+            pcm_records.append((record, active_monitoring.get(session)))
+        elif event == 'alignment_inference':
+            if key in utterances:
+                alignment_counts[key] = alignment_counts.get(key, 0) + 1
+            if key in utterances and record.get('audio_ms', 0) > 0:
+                duration = record.get('align_ms')
+                queue = record.get('queue_ms')
+                if type(duration) in (int, float) and duration >= 0:
+                    measured['alignment_ms'].append(duration)
+                    measured['alignment_rtf'].append(duration / record['audio_ms'])
+                if type(queue) in (int, float) and queue >= 0:
+                    measured['alignment_queue_ms'].append(queue)
+        elif event == 'tts_timing':
+            if key in utterances and type(record.get('duration_ms')) in (int, float):
+                duration = record['duration_ms']
+                if duration >= 0:
+                    if record.get('stage') == 'synthesis':
+                        measured['tts_synthesis_ms'].append(duration)
+                        if record.get('audio_ms', 0) > 0:
+                            measured['tts_synthesis_rtf'].append(duration / record['audio_ms'])
+                    elif record.get('stage') == 'playback':
+                        measured['tts_playback_ms'].append(duration)
+        elif event == 'native_voice_knowledge':
+            associated = record.get('target_associated')
+            ended = record.get('target_acoustic_completed')
+            source = record.get('completion_source', '')
+            if type(associated) is not bool or type(ended) is not bool:
+                product_issue(f'invalid native voice knowledge: {key}')
+            elif ended and not associated:
+                product_issue(f'native acoustic completion knowledge without target association: {key}')
+            else:
+                if associated:
+                    audio_started_at.setdefault(key, at)
+                if ended:
+                    if not isinstance(source, str) or not source:
+                        product_issue(f'native acoustic completion knowledge lacks provenance: {key}')
+                    audio_completed_at[key] = at
+                    methods[key] = audio_methods.get(session, '')
+                    native_acoustic_completion_sources[key] = source
+                    native.add(key)
+        elif event == 'native_target_acoustic_completion_estimate':
+            estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
+            evidence = record.get('evidence')
+            # This is the product-side endpoint estimated by the same
+            # target-conditioned alignment provenance that established target
+            # association. It is still not the independent game oracle.
+            if (key not in utterances or type(estimate) is not int or
+                    estimate > at or estimate < 0 or
+                    (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
+                    evidence != 'target_conditioned_alignment'):
+                product_issue(f'invalid native acoustic completion evidence: {key}')
+            elif key in native_acoustic_completion_estimates:
+                product_issue(f'duplicate native acoustic completion estimate: {key}')
+            else:
+                native_acoustic_completion_estimates[key] = estimate
+                native_acoustic_completion_estimate_sources[key] = evidence
+                if onset is not None:
+                    native_acoustic_onset_estimates[key] = onset
+        elif event == 'tts_result':
+            if record.get('success') is True:
+                tts.add(key)
+                audio_completed_at[key] = at
+        elif event == 'presentation_complete':
+            if record.get('success') is True:
+                complete.add(key)
+                presentation_at[key] = at
+                reasons[key] = record.get('reason', '')
+        elif event in ('permit_requested', 'pause_requested'):
+            errors.append(f'unsupported trace event: {event}')
+        elif event == 'advance_attempt':
+            if key in attempts:
+                product_issue(f'duplicate advance input attempt: {key}')
+            attempts[key] = at
+        elif event == 'advance_input':
+            if key not in attempts or attempts[key] > at:
+                product_issue(f'advance input lacks a preceding real attempt: {key}')
+            if key in sent:
+                product_issue(f'double advance input for one line: {key}')
+            sent[key] = at
+            causal_reason = record.get('presentation_reason')
+            if causal_reason is not None:
+                if not isinstance(causal_reason, str) or not causal_reason:
+                    product_issue(f'invalid input completion reason: {key}')
+                else:
+                    input_completion_reasons[key] = causal_reason
+            if key not in utterances:
+                errors.append(f'input without observed utterance: {key}')
+            if session not in active_monitoring:
+                errors.append(f'input outside active monitored game session: {key}')
+        elif event == 'validation_recovery_input':
+            if key not in utterances:
+                errors.append(f'validation recovery without observed utterance: {key}')
+            elif key in recovery_inputs:
+                errors.append(f'duplicate validation recovery input: {key}')
+            elif not isinstance(record.get('reason'), str) or not record['reason']:
+                errors.append(f'validation recovery lacks product failure reason: {key}')
+            else:
+                recovery_inputs[key] = at
+        elif event == 'validation_collection_target':
+            dialogues = record.get('dialogues')
+            if (record.get('phase') != phase or type(dialogues) is not int or dialogues <= 0 or
+                    (collection_target is not None and collection_target != dialogues)):
+                errors.append('invalid validation collection target')
+            else:
+                collection_target = dialogues
+        elif event == 'next_line_timeout':
+            timeouts.add(key)
+        elif event == 'controller_handoff':
+            if key not in utterances or not isinstance(record.get('reason'), str) or not record['reason']:
+                errors.append(f'invalid Controller handoff: {key}')
+            else:
+                handoffs[key] = record['reason']
+        elif event == 'native_capture_summary':
+            # Capture transport health is independent from target-conditioned alignment.
+            # No count or PCM threshold is a test pass condition.
+            if key in utterances:
+                capture_summaries[key] = {
+                    name: record.get(name) for name in
+                    ('scope', 'pcm_packets', 'pcm_frames', 'heartbeats',
+                     'capture_stereo_peak', 'failure')
+                }
+        elif event == 'validation_driver_failure':
+            reason = record.get('reason')
+            errors.append('validation driver failed: ' + (reason if isinstance(reason, str) else 'unknown'))
+
+    # Validate captured PCM after all queued Utterances have been collected.
+    # Post-collection PCM may precede the out-of-scope Utterance record.
+    for record, active_monitor in pcm_records:
+        key = _key(record)
+        if key not in utterances and key in out_of_scope_utterances:
+            continue
+        session = record.get('session')
+        monitor = monitor_sessions.get(session)
+        if (key not in utterances or type(record.get('frames')) is not int
+                or record['frames'] <= 0
+                or active_monitor is None
+                or monitor is None
+                or record.get('audio_pid') != audio_targets.get(session)
+                or record.get('audio_pid') != monitor.get('audio_pid')
+                or active_monitor.get('audio_pid') != monitor.get('audio_pid')):
+            product_issue(f'PCM is not valid captured frames for {key}')
+        else:
+            pcm.add(key)
+
+    # GUI diagnostic signals are delivered through different threads/Qt queues.
+    # Their append order is therefore not a causal contract. Validate the final
+    # per-Utterance event set after collection rather than requiring diagnostic
+    # completion records to have been physically written before ``advance_input``.
+    for key in sent:
+        u = utterances.get(key)
+        if u is None:
+            continue
+        if key not in complete:
+            product_issue(f'input without presentation completion evidence: {key}')
+            continue
+        mode, uses_tts = u.get('advance_mode'), u.get('use_tts')
+        completion_reason = reasons.get(key)
+        completed_at = presentation_at.get(key)
+        causal_reason = input_completion_reasons.get(key)
+        if completed_at is not None and completed_at > sent[key] and causal_reason is None:
+            product_issue(f'input before presentation completion: {key}')
+        if causal_reason is not None and causal_reason != completion_reason:
+            product_issue(f'input completion reason disagrees with presentation evidence: {key}')
+        if mode not in ('text', 'audio') or type(uses_tts) is not bool:
+            product_issue(f'invalid two-mode Utterance policy: {key}')
+        elif mode == 'text':
+            expected_reason = 'tts_and_text' if uses_tts else 'text'
+            if completion_reason != expected_reason:
+                product_issue(f'text-mode completion contract not observed: {key}')
+            if uses_tts and key not in tts:
+                product_issue(f'TTS advance input lacks actual playback completion: {key}')
+            wait = u.get('text_wait_ms')
+            if (type(wait) is not int or wait <= 0 or completed_at is None or
+                    completed_at - timestamps[key] < wait * 1_000_000):
+                product_issue(f'text advance input before computed reading time: {key}')
+        elif uses_tts:
+            if key not in tts or completion_reason != 'tts':
+                product_issue(f'audio-judgment TTS requires playback drain: {key}')
+        elif completion_reason == 'native':
+            if key not in native:
+                product_issue(f'native completion lacks observed target acoustic completion: {key}')
+        elif completion_reason == 'uncertain_text_fallback':
+            wait = u.get('text_wait_ms')
+            if (u.get('uncertain_text_fallback') is not True or
+                    type(wait) is not int or wait <= 0 or completed_at is None or
+                    completed_at - timestamps[key] < wait * 1_000_000):
+                product_issue(f'unpermitted or early uncertain fallback: {key}')
+        else:
+            product_issue(f'unknown native completion reason: {key}')
+
+    for key in native:
+        if (key[0] not in readiness or key not in pcm or alignment_counts.get(key, 0) <= 0 or
+                methods.get(key) != audio_methods.get(key[0])):
+            product_issue(f'native completion lacks matching real PCM and alignment evidence: {key}')
+        if native_acoustic_completion_sources.get(key) != native_acoustic_completion_estimate_sources.get(key):
+            product_issue(f'native acoustic completion provenance disagrees with knowledge: {key}')
+
+    hashes = [utterances[key].get('body_hash') for key in utterance_order]
+    # A run may start from a known line in a larger game. It must not skip
+    # intervening dialogues; no arbitrary subsequence matching is permitted.
+    if start_line is not None:
+        starts = [start_line - 1] if 1 <= start_line <= len(scenario) else []
+    else:
+        starts = [i for i in range(len(scenario)) if
+                  hashes and expected_hashes[i:i + len(hashes)] == hashes]
+    matches = [i for i in starts if expected_hashes[i:i + len(hashes)] == hashes]
+    if len(matches) != 1:
+        # The fixture text can reveal a parsing regression, but the product's
+        # received output is still usable to diagnose the controller/input path.
+        diagnostics.append('HOOK text cannot be uniquely aligned to fixture: '
+                           'report unaligned evidence rather than reject observed product events')
+    start = matches[0] if len(matches) == 1 else None
+    links: set[tuple] = set()
+    # Source provenance, the product's input, and the subsequent Hook event
+    # establish the actual continuation, independent of fixture text identity.
+    for offset, key in enumerate(utterance_order):
+        if key not in sent or key in recovery_inputs or offset + 1 >= len(utterance_order):
+            continue
+        subsequent = utterance_order[offset + 1]
+        next_u = utterances[subsequent]
+        next_origin = (subsequent[0], next_u.get('source'),
+                       next_u.get('hook_sequence'), next_u.get('raw_hash'))
+        if (subsequent[0] != key[0] or timestamps[subsequent] <= sent[key]
+                or source_outputs.get(next_origin, 0) <= attempts.get(key, sent[key])):
+            product_issue(f'next HOOK utterance not after advance input in same session: {key}')
+        else:
+            links.add(key)
+    if utterance_order and post_collection_utterance is not None:
+        key = utterance_order[-1]
+        if key in sent and key not in recovery_inputs and key not in links:
+            next_u = post_collection_utterance
+            next_origin = (next_u.get('session'), next_u.get('source'),
+                           next_u.get('hook_sequence'), next_u.get('raw_hash'))
+            if (next_u.get('session') == key[0]
+                    and post_collection_timestamp is not None
+                    and post_collection_timestamp > sent[key]
+                    and source_outputs.get(next_origin, 0) > attempts.get(key, sent[key])):
+                links.add(key)
+    # These are measurements of the product path, not fixture-authored
+    # instructions to AutoAdv. Unobserved continuation is always reported,
+    # regardless of what line number or expected scene was selected.
+    for offset, key in enumerate(utterance_order):
+        if key in sent and key not in links:
+            if key in recovery_inputs:
+                diagnostics.append(f'AutoAdv input required validation recovery before continuation: {key}')
+            else:
+                diagnostics.append(f'input sent but following HOOK not observed: {key}')
+        elif key in recovery_inputs:
+            diagnostics.append(f'validation forced continuation after product handoff: {key}')
+        if key in timeouts:
+            diagnostics.append(f'controller handed off after next-line timeout: {key}')
+        if offset:
+            previous = utterance_order[offset - 1]
+            if previous in recovery_inputs:
+                diagnostics.append(f'dialogue observed after validation recovery input: {previous}')
+            elif previous not in sent and phase != 'hook':
+                diagnostics.append(f'dialogue observed without preceding AutoAdv advance input: {previous}')
+    confirmed_native = [k for k in links if k in native and k in pcm]
+    confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]
+    if not utterance_order:
+        errors.append('no live dialogue observed')
+    # Measurements are observational, never an additional pass criterion.
+    # The same monotonic clock times delivery, policy and actual advancement.
+    durations = {name: values for name, values in measured.items()}
+    for index, key in enumerate(utterance_order):
+        u = utterances[key]
+        origin = (key[0], u.get('source'), u.get('hook_sequence'), u.get('raw_hash'))
+        if (ms := _elapsed_ms(source_outputs.get(origin), timestamps.get(key))) is not None:
+            durations.setdefault('hook_to_utterance_ms', []).append(ms)
+        if key in native_acoustic_completion_estimates:
+            if (ms := _signed_elapsed_ms(native_acoustic_completion_estimates[key], presentation_at.get(key))) is not None:
+                durations.setdefault('native_acoustic_completion_to_decision_ms', []).append(ms)
+            if (ms := _signed_elapsed_ms(native_acoustic_completion_estimates[key], attempts.get(key))) is not None:
+                durations.setdefault('native_acoustic_completion_to_input_ms', []).append(ms)
+            if (onset := native_acoustic_onset_estimates.get(key)) is not None:
+                # Signed delta: negative means observed voice began before the HOOK.
+                source_time = source_outputs.get(origin)
+                if source_time is not None:
+                    durations.setdefault('hook_to_native_onset_ms', []).append(
+                        round((onset - source_time) / 1_000_000, 3))
+        if (ms := _elapsed_ms(timestamps.get(key), audio_started_at.get(key))) is not None:
+            durations.setdefault('utterance_to_native_onset_ms', []).append(ms)
+        if (ms := _elapsed_ms(timestamps.get(key), audio_completed_at.get(key))) is not None:
+            durations.setdefault('utterance_to_audio_done_ms', []).append(ms)
+        if (ms := _elapsed_ms(timestamps.get(key), presentation_at.get(key))) is not None:
+            durations.setdefault('utterance_to_presentation_ms', []).append(ms)
+        if (ms := _elapsed_ms(presentation_at.get(key), attempts.get(key))) is not None:
+            durations.setdefault('presentation_to_input_ms', []).append(ms)
+        if key in links:
+            if index + 1 < len(utterance_order):
+                next_key = utterance_order[index + 1]
+                next_u = utterances[next_key]
+                next_origin = (next_key[0], next_u.get('source'),
+                               next_u.get('hook_sequence'), next_u.get('raw_hash'))
+            else:
+                next_u = post_collection_utterance
+                next_origin = ((next_u.get('session'), next_u.get('source'),
+                                next_u.get('hook_sequence'), next_u.get('raw_hash'))
+                               if next_u is not None else None)
+            if next_origin is not None:
+                if (ms := _elapsed_ms(attempts.get(key), source_outputs.get(next_origin))) is not None:
+                    durations.setdefault('input_to_next_hook_ms', []).append(ms)
+    # The product trace establishes the Luna->Controller->input->next-HOOK
+    # path. The independent game observer is additionally required wherever
+    # an actual native-voice advance is being credited, even if the caller
+    # labels the run 'reading' or 'tts'. Never silently certify an incidental
+    # native input without the evidence necessary to judge premature sending.
+    needs_oracle = (phase in VOICE_ORACLE_PHASES or any(
+        key in sent and u.get('advance_mode') == 'audio' and not u.get('use_tts')
+        for key, u in utterances.items()))
+    if oracle_records is not None or needs_oracle:
+        scoped_oracle = _oracle_collection_prefix(
+            oracle_records, utterance_order, utterances)
+        game_evidence = audit_game_oracle(
+            scoped_oracle, utterance_order, utterances, attempts, sent, reasons,
+            start, scenario, game_pid_by_session=game_pid_by_session,
+            presentation_at=presentation_at, native_acoustic_completion_estimates=native_acoustic_completion_estimates,
+            source_outputs=source_outputs, recovery_inputs=recovery_inputs,
+            max_voice_hold_ms=max_voice_hold_ms, measurement_only=measurement_only,
+        )
+        errors.extend(game_evidence['errors'])
+        quality_issues.extend(game_evidence.get('quality_issues', ()))
+        diagnostics.extend(game_evidence['diagnostics'])
+        for name, values in game_evidence['latencies'].items():
+            durations.setdefault(name, []).extend(values)
+        game_evidence = {k: v for k, v in game_evidence.items() if k != 'latencies'}
+    else:
+        game_evidence = None
+    performance = {name: stats for name, samples in durations.items()
+                   if (stats := _summary(samples)) is not None}
+    # Preserve each acquired line, including a terminal observation without an
+    # input. A two-line success count must never hide an unadvanced third line.
+    line_results = []
+    for offset, key in enumerate(utterance_order):
+        utterance = utterances[key]
+        if key not in attempts:
+            outcome = 'no_autoadv_input'
+        elif key not in sent:
+            outcome = 'input_attempt_unconfirmed'
+        elif key in links:
+            outcome = 'next_hook_observed'
+        else:
+            outcome = 'next_hook_not_observed'
+        scenario_case = (scenario[start + offset]
+                         if start is not None and start + offset < len(scenario) else None)
+        scenario_id = scenario_case.get('id') if scenario_case is not None else None
+        line_result = {
+            'session': key[0], 'line': key[1], 'scenario': scenario_id,
+            'foreground_voice': (scenario_case.get('foreground_voice')
+                                 if scenario_case is not None else None),
+            'process_audio_expected': (scenario_case.get('process_audio_expected')
+                                       if scenario_case is not None else None),
+            'speaker_family': (scenario_case.get('speaker_family')
+                               if scenario_case is not None else None),
+            'audio_environment': (scenario_case.get('environment')
+                                  if scenario_case is not None else None),
+            'scene': (scenario_case.get('scene') if scenario_case is not None else None),
+            'advance_mode': utterance.get('advance_mode'),
+            'use_tts': utterance.get('use_tts'),
+            'completion_reason': reasons.get(key),
+            'stop_reason': handoffs.get(key),
+            'fallback_enabled': utterance.get('uncertain_text_fallback'),
+            'source': utterance.get('source'),
+            'body_hash': utterance.get('body_hash'),
+            'text_wait_ms': utterance.get('text_wait_ms'),
+            'reading_units': utterance.get('reading_units'),
+            'native_setup_ready': key[0] in readiness,
+            'audio_judgement_method': audio_methods.get(key[0]),
+            'pcm_observed': key in pcm,
+            'alignment_inference_count': alignment_counts.get(key, 0),
+            'capture_transport': capture_summaries.get(key),
+            'native_association_observed': key in audio_started_at,
+            'native_acoustic_complete': key in native,
+            'native_acoustic_completion_estimate_ns': native_acoustic_completion_estimates.get(key),
+            'input_attempted': key in attempts,
+            'input_sent': key in sent,
+            'next_hook_observed': key in links,
+            'next_hook_timeout': key in timeouts,
+            'validation_recovery_input': key in recovery_inputs,
+            'outcome': outcome,
+        }
+        if game_evidence is not None and offset < len(game_evidence['lines']):
+            line_result['game_outcome'] = game_evidence['lines'][offset]['outcome']
+            line_result['mix_channels_observed'] = game_evidence['lines'][offset].get(
+                'mix_channels_observed', [])
+            line_result['mix_environment_verified'] = game_evidence['lines'][offset].get(
+                'mix_environment_verified')
+            if 'source_acoustic_end_to_input_ms' in game_evidence['lines'][offset]:
+                line_result['source_acoustic_end_to_input_ms'] = game_evidence['lines'][offset]['source_acoustic_end_to_input_ms']
+        line_results.append(line_result)
+
+    # Accuracy is a product-path measurement, not merely a progression count.
+    # A safe text fallback can keep the game moving after an audio regression,
+    # so preserve independent coverage of the Process Loopback/target-conditioned alignment path rather
+    # than allowing fallback success to masquerade as audio observation.
+    expected_audio_lines = [line for line in line_results
+                            if line.get('process_audio_expected') is True]
+    for line in expected_audio_lines:
+        label = line.get('scenario') or f"{line.get('session')}:{line.get('line')}"
+        if not line.get('pcm_observed'):
+            quality_issues.append(f'expected process audio PCM not observed: {label}')
+        if not line.get('alignment_inference_count'):
+            quality_issues.append(f'expected target-conditioned alignment inference not observed: {label}')
+
+    collection_valid = not errors
+    advancement_observed = bool(links)
+    voice_safety_verified = (game_evidence is not None and
+        game_evidence['confirmed_source_acoustic_safe_inputs'] > 0 and
+        not game_evidence['early_inputs'] and
+        not game_evidence['unverified_source_acoustic_ends'] and
+        not game_evidence['indeterminate_source_acoustic_end'] and
+        not game_evidence['misattributions'] and
+        not game_evidence['unaligned_lines'] and
+        len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None
+    collection_complete = (
+        len(utterance_order) >= collection_target if collection_target is not None else None)
+    automatic_continuation_verified = (not recovery_inputs and not handoffs)
+    if phase == 'accuracy':
+        automatic_continuation_verified = bool(
+            collection_complete is not False and not recovery_inputs and not handoffs)
+
+    requested_cases = collection_target or len(utterance_order)
+    safe_automatic_advances = 0
+    for line in line_results:
+        if line['outcome'] != 'next_hook_observed':
+            continue
+        if line['advance_mode'] != 'audio' or line['use_tts']:
+            safe_automatic_advances += 1
+            continue
+        if line.get('game_outcome') in ('source_acoustic_end_then_input', 'overheld',
+                                              'no_foreground_voice_fallback'):
+            safe_automatic_advances += 1
+    def fraction(count: int, total: int) -> float | None:
+        return round(count / total, 4) if total else None
+    def rate(count: int) -> float | None:
+        return fraction(count, requested_cases)
+    foreground_lines = [line for line in line_results if line.get('foreground_voice') is True]
+    foreground_native = sum(line.get('completion_reason') == 'native' for line in foreground_lines)
+    foreground_fallback = sum(
+        line.get('completion_reason') == 'uncertain_text_fallback' for line in foreground_lines)
+    unvoiced_lines = [line for line in line_results if line.get('foreground_voice') is False]
+    unvoiced_fallback = sum(
+        line.get('completion_reason') == 'uncertain_text_fallback' for line in unvoiced_lines)
+    pcm_observed = sum(bool(line.get('pcm_observed')) for line in expected_audio_lines)
+    alignment_observed = sum(int(line.get('alignment_inference_count') or 0) > 0 for line in expected_audio_lines)
+    mix_lines = [line for line in line_results if line.get('mix_environment_verified') is not None]
+    mix_verified = sum(line.get('mix_environment_verified') is True for line in mix_lines)
+    quality = {
+        'requested_cases': requested_cases,
+        'observed_cases': len(utterance_order),
+        'automatic_inputs': len(sent),
+        'confirmed_automatic_advances': len(links),
+        'safe_automatic_advances': safe_automatic_advances,
+        'validation_recovery_inputs': len(recovery_inputs),
+        'controller_handoffs': len(handoffs),
+        'automatic_advance_rate': rate(len(links)),
+        'safe_automatic_advance_rate': rate(safe_automatic_advances),
+        'recovery_rate': rate(len(recovery_inputs)),
+        'process_audio_expected_cases': len(expected_audio_lines),
+        'process_audio_observed_cases': pcm_observed,
+        'alignment_observed_cases': alignment_observed,
+        'process_audio_observation_rate': fraction(pcm_observed, len(expected_audio_lines)),
+        'alignment_observation_rate': fraction(alignment_observed, len(expected_audio_lines)),
+        'mix_environment_cases': len(mix_lines),
+        'mix_environment_verified_cases': mix_verified,
+        'mix_environment_observation_rate': fraction(mix_verified, len(mix_lines)),
+        'foreground_voice_cases': len(foreground_lines),
+        'foreground_native_completion_rate': fraction(foreground_native, len(foreground_lines)),
+        'foreground_fallback_rate': fraction(foreground_fallback, len(foreground_lines)),
+        'unvoiced_cases': len(unvoiced_lines),
+        'unvoiced_fallback_rate': fraction(unvoiced_fallback, len(unvoiced_lines)),
+        'early_input_rate': rate(game_evidence['early_inputs']) if game_evidence is not None else None,
+        'overhold_rate': rate(game_evidence['overholds']) if game_evidence is not None else None,
+        'misattribution_rate': rate(game_evidence['misattributions']) if game_evidence is not None else None,
+    }
+
+    if measurement_only:
+        accepted = collection_valid and collection_complete is not False
+    elif phase in ('hook', 'stress'):
+        accepted = collection_valid
+    elif needs_oracle:
+        accepted = (collection_valid and advancement_observed and voice_safety_verified is True
+                    and automatic_continuation_verified)
+    else:
+        accepted = collection_valid and advancement_observed
+    return {
+        'performance': performance,
+        'evaluation_scope': ('stress_observation_not_automatic_success' if phase == 'stress'
+                             else 'native_voice_timing_and_advancement' if needs_oracle
+                             else 'product_hook_source_only' if phase == 'hook'
+                             else 'product_presentation_input_and_next_hook'),
+        'game_observer': ('required' if needs_oracle else 'optional'),
+        'ok': accepted, 'phase': phase,
+        'collection_valid': collection_valid,
+        'collection_complete': collection_complete,
+        'measurement_only': measurement_only,
+        'measurement_valid': collection_valid,
+        'quality': quality,
+        'quality_issues': quality_issues,
+        'advancement_observed': advancement_observed,
+        'automatic_continuation_verified': automatic_continuation_verified,
+        'validation_recovery_inputs': len(recovery_inputs),
+        'voice_safety_verified': voice_safety_verified,
+        'reference_start_line': start + 1 if start is not None else None,
+        'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
+        'confirmed_native_alignment': len(confirmed_native),
+        'confirmed_tts': len(confirmed_tts),
+        'errors': errors, 'diagnostics': diagnostics, 'game_evidence': game_evidence, 'line_results': line_results,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Collect and audit real AutoAdv GUI-to-game HOOK observations')
+    parser.add_argument('--trace', type=Path, required=True, help='fresh AUTOADV_VALIDATION_TRACE JSONL')
+    parser.add_argument('--phase', choices=PHASES, required=True,
+                        help='hook / reading / accuracy / tts / mixed / stress branch')
+    parser.add_argument('--oracle', type=Path,
+                        help='independent RenPy JSONL; required for accuracy, mixed and stress')
+    parser.add_argument('--report', type=Path,
+                        help='write measured per-line outcomes and timing as JSON, including failures')
+    parser.add_argument('--max-voice-hold-ms', type=int,
+                        help='optional diagnostic delay reference; no default acceptance threshold')
+    parser.add_argument('--start-line', type=int,
+                        help='1-based first SCENARIO.json line, to disambiguate repeated text')
+    parser.add_argument('--measurement-only', action='store_true',
+                        help='treat product mistakes as measured outcomes; fail only invalid/incomplete collection')
+    args = parser.parse_args()
+    if not args.trace.is_file():
+        parser.error('real game trace not found')
+    # Missing external playback evidence must not prevent product data capture.
+    # The resulting report explicitly leaves voice safety unverified.
+    if args.report is not None and args.report.exists():
+        parser.error('refusing to overwrite an existing report')
+    if args.max_voice_hold_ms is not None and args.max_voice_hold_ms <= 0:
+        parser.error('--max-voice-hold-ms must be positive')
+    try:
+        records = [json.loads(x) for x in args.trace.read_text(encoding='utf-8').splitlines() if x.strip()]
+        oracle_records = ([json.loads(x) for x in args.oracle.read_text(encoding='utf-8').splitlines() if x.strip()]
+                          if args.oracle is not None and args.oracle.is_file() else None)
+        result = validate(records, phase=args.phase, start_line=args.start_line,
+                          oracle_records=oracle_records, max_voice_hold_ms=args.max_voice_hold_ms,
+                          measurement_only=args.measurement_only)
+        if args.report is not None:
+            with args.report.open('x', encoding='utf-8') as stream:
+                json.dump(result, stream, ensure_ascii=False, indent=2)
+                stream.write('\n')
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        parser.error(f'invalid real-session trace: {exc}')
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result['ok'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

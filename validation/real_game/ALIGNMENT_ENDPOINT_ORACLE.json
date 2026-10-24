@@ -1,0 +1,20 @@
+{
+  "schema": "autoadv-alignment-endpoint-oracle-v1",
+  "basis": "Fixed clean-source speech-tail annotations reviewed from the source waveform envelope only; product alignment output is not used.",
+  "samples": {
+    "normal-001": {"speech_end_ms": 1350, "uncertainty_ms": 50},
+    "normal-017": {"speech_end_ms": 1500, "uncertainty_ms": 50},
+    "normal-022": {"speech_end_ms": 1800, "uncertainty_ms": 50},
+    "normal-026": {"speech_end_ms": 3750, "uncertainty_ms": 50},
+    "normal-028": {"speech_end_ms": 3250, "uncertainty_ms": 50},
+    "normal-010": {"speech_end_ms": 2190, "uncertainty_ms": 50},
+    "normal-012": {"speech_end_ms": 3880, "uncertainty_ms": 50},
+    "normal-020": {"speech_end_ms": 1510, "uncertainty_ms": 50},
+    "normal-021": {"speech_end_ms": 2350, "uncertainty_ms": 50},
+    "normal-030": {"speech_end_ms": 4890, "uncertainty_ms": 50},
+    "normal-035": {"speech_end_ms": 3410, "uncertainty_ms": 50},
+    "whisper-001": {"speech_end_ms": 1110, "uncertainty_ms": 60},
+    "whisper-017": {"speech_end_ms": 1480, "uncertainty_ms": 60},
+    "whisper-022": {"speech_end_ms": 1870, "uncertainty_ms": 60}
+  }
+}

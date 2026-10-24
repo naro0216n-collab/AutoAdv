@@ -1,0 +1,102 @@
+name: Luna Native Source and ABI Validation
+
+on:
+  pull_request:
+    branches: [main]
+    types: [edited]
+
+# Explicit adoption/patch validation only. Add [RUN LUNA NATIVE] to the
+# develop -> main validation PR title to run it. x86 here means a 32-bit game
+# target on 64-bit Windows, not 32-bit Windows OS support. Normal development
+# CI uses the pinned shipped runtime and does not rebuild upstream Luna native code.
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-source:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' && contains(github.event.pull_request.title, '[RUN LUNA NATIVE]') }}
+    name: Pinned Luna source acquisition
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Acquire coherent upstream source for explicit adoption validation
+        run: python scripts/sync_luna_upstream.py --write
+      - name: Verify manifest coverage and revision
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.sync_luna_upstream import PIN
+          root=Path('vendor/luna')
+          m=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+          assert m['revision']==PIN
+          assert m['file_count']>=100, m['file_count']
+          assert (root/'src/NativeImpl/LunaHook/LunaHost/LunaHostDll.cpp').is_file()
+          assert (root/'src/LunaTranslator/textio/textsource/texthook.py').is_file()
+          assert (root/'LICENSE').is_file()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-pinned-sources
+          path: vendor/luna
+          if-no-files-found: error
+          retention-days: 15
+
+  native-build:
+    name: Patched LunaHost build for x86/x64 game targets
+    runs-on: windows-2022
+    timeout-minutes: 30
+    needs: pinned-source
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: luna-pinned-sources
+          path: vendor/luna
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare the exact patched native runtime source
+        shell: pwsh
+        run: python scripts/prepare_luna_native.py --source vendor/luna --target "${{ runner.temp }}/luna-ready"
+      - name: Build patched LunaHost DLL only
+        shell: pwsh
+        run: |
+          cmake -S "${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook" -B "${{ runner.temp }}/luna-build" -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DBUILD_GUI=OFF -DBUILD_HOST=ON -DBUILD_HOOK=OFF -DWIN10ABOVE=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "${{ runner.temp }}/luna-build" --config Release --target LunaHostDll --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify patched Host exports
+        shell: pwsh
+        run: |
+          $suffix = if ('${{ matrix.arch }}' -eq 'x64') { '64' } else { '32' }
+          $hostDlls = @(Get-ChildItem "${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook/builds" -Recurse -Filter "LunaHost$suffix.dll")
+          if ($hostDlls.Count -ne 1) { throw "Expected exactly one LunaHost$suffix.dll from patched build" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC" -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match 'Hostx64[\\/]x64' } | Select-Object -First 1
+          if (-not $dumpbin) { throw 'MSVC dumpbin.exe unavailable' }
+          foreach ($hostDll in $hostDlls) {
+            $exports = (& $dumpbin.FullName /exports $hostDll.FullName) -join "`n"
+            foreach ($symbol in @('Luna_Start', 'Luna_ConnectAndInjectProcess', 'Luna_CheckIfNeedInject', 'Luna_FindHooks')) {
+              if ($exports -notmatch [regex]::Escape($symbol)) { throw "Missing $symbol from $($hostDll.FullName)" }
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-native-host-${{ matrix.arch }}
+          path: ${{ runner.temp }}/luna-ready/src/NativeImpl/LunaHook/builds
+          if-no-files-found: error
+          retention-days: 15
+      - name: Validate ABI declarations and IPC contract
+        run: python -m unittest discover -s tests -p 'test_luna_abi_and_ipc.py' -v

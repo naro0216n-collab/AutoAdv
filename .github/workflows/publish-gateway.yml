@@ -1,0 +1,95 @@
+name: Publish Gateway
+
+on:
+  push:
+    branches: [publish]
+    paths:
+      - '.publish/transport/**'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: publish-gateway
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve fixed transport slot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff-tree --no-commit-id --name-status --no-renames -r "${GITHUB_SHA}")
+          branches=()
+          for entry in "${changed[@]}"; do
+            status="${entry%%$'\t'*}"
+            path="${entry#*$'\t'}"
+            if [[ "${status}" =~ ^[AM]$ && "${path}" =~ ^\.publish/transport/(develop|temp)/[0-9]{4}\.b64$ ]]; then
+              branch="${BASH_REMATCH[1]}"
+              if [[ ! " ${branches[*]} " =~ " ${branch} " ]]; then
+                branches+=("${branch}")
+              fi
+            elif [[ "${status}" == D && "${path}" == .publish/* ]]; then
+              :
+            else
+              echo "Invalid publish transport change: ${status} ${path}" >&2
+              exit 1
+            fi
+          done
+          if [ "${#branches[@]}" -ne 1 ]; then
+            echo "Expected exactly one active transport target, found ${#branches[@]}" >&2
+            exit 1
+          fi
+          target="${branches[0]}"
+          before="$(git rev-parse "refs/remotes/origin/${target}")"
+          echo "TARGET_BRANCH=${target}" >> "$GITHUB_ENV"
+          echo "TARGET_BEFORE=${before}" >> "$GITHUB_ENV"
+          echo "TRANSPORT_DIR=.publish/transport/${target}" >> "$GITHUB_ENV"
+
+      - name: Validate local transport and bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/publish_gateway_validate.py
+
+      - name: Publish exact target commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/publish_gateway_validate.py --verify-trusted-workflow
+          git push origin "${PUBLISH_COMMIT}:refs/heads/${TARGET_BRANCH}"
+
+      - name: Dispatch validation fixture build when its inputs changed
+        if: env.TARGET_BRANCH == 'develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$TARGET_BEFORE" "$PUBLISH_COMMIT" -- \
+            validation/real_game/renpy validation/real_game/fixture_runtime.py; then
+            echo 'Validation fixture inputs unchanged; no fixture build requested.'
+            exit 0
+          fi
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/validation-fixture.yml/dispatches" \
+            -f ref="${TARGET_BRANCH}"
+
+      - name: Dispatch Fast CI for published branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/dispatches" \
+            -f ref="${TARGET_BRANCH}"

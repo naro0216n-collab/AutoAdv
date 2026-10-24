@@ -1,0 +1,60 @@
+name: AutoAdv Live Advancement
+
+on:
+  pull_request:
+    branches: [main]
+    types: [edited]
+
+permissions:
+  contents: read
+
+# Explicit PR title edit requests only the hosted Hook/text-advance path.
+# Auto-advance accuracy measurement is actual-machine-only and is never run here.
+# The game is consumed as a prebuilt fixture; RenPy construction is separate.
+jobs:
+  reading-auto-advance:
+    if: >-
+      ${{ github.event.changes.title != null &&
+          startsWith(github.event.pull_request.title, '[RUN AUTOADV LIVE]') &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.head.ref == 'develop' &&
+          github.event.pull_request.base.ref == 'main' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install production GUI requirements
+        run: python -m pip install '.[gui]'
+      - name: Acquire prebuilt validation game matching this fixture source
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $env:RUNNER_TEMP 'validation-game'
+          $cache = Join-Path $env:RUNNER_TEMP 'fixture-cache'
+          $game = & python -m validation.real_game.fixture_runtime stage `
+            --runtime $runtime --cache $cache --wait-seconds 600
+          if ($LASTEXITCODE -ne 0 -or -not $game) { throw 'Prebuilt validation game staging failed' }
+          "AUTOADV_VALIDATION_GAME=$game" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Check Hook and reading decision through actual Luna and Windows input
+        shell: pwsh
+        run: |
+          & .\validation\real_game\run_live_check.ps1 -Phase reading `
+            -GameExecutable $env:AUTOADV_VALIDATION_GAME -Automated `
+            -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-reading.jsonl') `
+            -Report (Join-Path $env:RUNNER_TEMP 'autoadv-reading.result.json') `
+            -TimeoutSeconds 120
+      - name: Preserve hosted Hook and reading observations including failed runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-reading-advancement
+          path: |
+            ${{ runner.temp }}/autoadv-reading.jsonl
+            ${{ runner.temp }}/autoadv-reading.result.json
+            ${{ runner.temp }}/autoadv-game-*.jsonl
+          if-no-files-found: warn
+          retention-days: 30

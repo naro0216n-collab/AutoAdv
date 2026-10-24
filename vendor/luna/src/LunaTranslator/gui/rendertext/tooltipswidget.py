@@ -1,0 +1,228 @@
+from qtsymbols import *
+from gui.rendertext.texttype import dataget, TextType
+import gobject
+from traceback import print_exc
+from sometypes import WordSegResult
+import windows
+from myutils.config import globalconfig, ui_settings
+from gui.usefulwidget import ColorButton, getspinbox, limitpos
+from myutils.wrapper import Singleton, threader
+from gui.dynalang import LDialog, LFormLayout
+from gui.flowsearchword import createsomecontrols
+import NativeUtils
+
+
+def tooltipssetting(self):
+    def __cb(*_):
+        tooltipswidget.resetstyle()
+        gobject.base.translation_ui.translate_text.settooltipsstyle(
+            ui_settings.get("word_hover_bg_color", "#333"),
+            ui_settings.get("word_hover_text_color", "white"),
+            ui_settings.get("word_hover_border", 8),
+            ui_settings.get("word_hover_border_R", 4),
+        )
+
+    l = []
+    spin = getspinbox(0, 50, ui_settings, "word_hover_border", callback=__cb, default=8)
+    l.append(("边距", spin))
+
+    spin1, lay = createsomecontrols(
+        __cb,
+        tooltipswidget.seteffect,
+        "word_hover_border_R",
+        "word_hover_border_R_SYS",
+        False,
+        "word_hover_DWM",
+        "word_hover_DWM_1",
+        (globalconfig["rendertext_using"] != "webview")
+        or (not globalconfig.get("word_hover_action_usewb2", False)),
+        kRdf=4,
+        dic=ui_settings,
+    )
+    l.append(("圆角", spin1))
+    if lay:
+        l.append(("窗口特效", lay))
+    color = ColorButton(
+        self,
+        ui_settings,
+        "word_hover_bg_color",
+        alpha=True,
+        tips="背景颜色",
+        callback=__cb,
+        default="#333",
+    )
+    l.append(("背景颜色", color))
+    color = ColorButton(
+        self,
+        ui_settings,
+        "word_hover_text_color",
+        tips="文字颜色",
+        callback=__cb,
+        default="white",
+    )
+    l.append(("文字颜色", color))
+    return l
+
+
+class TextEdit(QTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # 使其看起来和感觉像一个普通标签
+        self.setReadOnly(True)
+        self.setFrameStyle(0)  # QFrame.NoFrame
+
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.transparent)
+        self.setPalette(pal)
+
+        # 自动换行，动态调整最小高度
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAnywhere)
+
+        # 连接文档大小变化信号
+        self.document().documentLayout().documentSizeChanged.connect(
+            self.adjustMinimumSize
+        )
+
+    def adjustMinimumSize(self, size: QSizeF):
+        """根据文档大小调整最小高度"""
+        self.setMinimumHeight(int(size.height()) + 2 * self.frameWidth())
+
+
+class tooltipswidget(QMainWindow, dataget):
+    @staticmethod
+    def resetstyle():
+        if tooltipswidget.tooltipwindow:
+            tooltipswidget.tooltipwindow._setstyle()
+
+    @staticmethod
+    def seteffect():
+        if tooltipswidget.tooltipwindow:
+            tooltipswidget.tooltipwindow._seteffect()
+
+    def _seteffect(self):
+        if ui_settings.get("word_hover_DWM", 0) == 0:
+            NativeUtils.clearEffect(int(self.winId()))
+        elif ui_settings.get("word_hover_DWM", 0) == 1:
+            NativeUtils.setAcrylicEffect(
+                int(self.winId()),
+                ui_settings.get("word_hover_DWM_1", True),
+                0x00FFFFFF,
+            )
+        elif ui_settings.get("word_hover_DWM", 0) == 2:
+            NativeUtils.setAeroEffect(
+                int(self.winId()), ui_settings.get("word_hover_DWM_1", True)
+            )
+
+    tooltipwindow: "tooltipswidget" = None
+
+    @staticmethod
+    def createtipstext(word: WordSegResult):
+        tooltipcontent = ""
+        if word.prototype and word.word != word.prototype:
+            tooltipcontent += " / " + word.prototype
+        if word.kana and word.kana != word.word:
+            tooltipcontent += " / " + word.kana
+        if word.info:
+            tooltipcontent += "\n" + ",".join(word.info)
+        if tooltipcontent:
+            return word.word + tooltipcontent
+
+    def _setstyle(self):
+        NativeUtils.SetCornerNotRound(
+            int(self.winId()), False, ui_settings.get("word_hover_border_R_SYS", False)
+        )
+
+        radiu_valid = ui_settings.get("word_hover_DWM", 0) == 0 and not (
+            gobject.sys_ge_win_11 and ui_settings.get("word_hover_border_R_SYS", False)
+        )
+        self.qlabel.setStyleSheet(
+            r""" 
+        background: {};  
+        color: {};    
+        padding: {}px;   
+        border-radius: {}px; 
+ """.format(
+                ui_settings.get("word_hover_bg_color", "#333"),
+                ui_settings.get("word_hover_text_color", "white"),
+                ui_settings.get("word_hover_border", 8),
+                ui_settings.get("word_hover_border_R", 4) * radiu_valid,
+            )
+        )
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | self.windowFlags())
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        windows.MouseTrans.set(self.winId())
+        qlabel = TextEdit(self)
+        self.qlabel = qlabel
+        self._setstyle()
+        self._seteffect()
+        self.setCentralWidget(qlabel)
+
+    def showtext(self, text, pos: QPoint, mw):
+        font = self._createqfont(TextType.Origin)
+        self.qlabel.resize(QSize(mw, 1))
+        self.qlabel.setPlainText(text)
+        self.qlabel.setFont(font)
+
+        self.resize(
+            int(self.qlabel.document().idealWidth() + 2 * self.qlabel.frameWidth()),
+            self.qlabel.minimumHeight(),
+        )
+        pos = limitpos(pos, self, QPoint(0, 10))
+        self.move(pos)
+        self.show()
+
+    @staticmethod
+    def hidetooltipwindow():
+        if tooltipswidget.tooltipwindow:
+            tooltipswidget.tooltipwindow.hide()
+        gobject.base.WordViewTooltip.Leave()
+
+    @staticmethod
+    def tracetooltipwindow(word: WordSegResult, pos):
+        skip = False
+        if globalconfig.get("usesearchword_S", False) and (
+            globalconfig.get("searchword_S_mousetrigger", "left") == "hover"
+        ):
+            result = gobject.base.checkkeypresssatisfy("searchword_S", False)
+            result = result == -1 or result == True
+            skip = result
+            wordwhich = lambda k: (word.word, word.prototype)[
+                globalconfig["usewordoriginfor"].get(k, False)
+            ]
+            threader(gobject.base.hover_search_word.emit)(
+                dict(
+                    word=wordwhich("searchword_S"),
+                    sentence=gobject.base.currenttext,
+                    append=False,
+                    fromhover=True,
+                    show=result,
+                )
+            )
+        if skip:
+            return
+        if gobject.base.WordViewTooltip.isVisible():
+            return
+        if globalconfig.get("word_hover_show_word_info", False):
+
+            try:
+                if not tooltipswidget.tooltipwindow:
+                    tooltipswidget.tooltipwindow = tooltipswidget(
+                        gobject.base.translation_ui.translate_text
+                    )
+                tips = tooltipswidget.createtipstext(word)
+                if tips:
+                    tooltipswidget.tooltipwindow.showtext(
+                        tips,
+                        pos,
+                        gobject.base.translation_ui.translate_text.width(),
+                    )
+                else:
+                    tooltipswidget.tooltipwindow.hide()
+            except:
+                print_exc()
