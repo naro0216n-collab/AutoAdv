@@ -17,7 +17,8 @@ param(
     [int] $TimeoutSeconds = 120,
     [int] $MaxVoiceHoldMs = 0,
     [switch] $UncertainFallback,
-    [switch] $MeasurementOnly
+    [switch] $MeasurementOnly,
+    [string] $PythonExecutable = 'python'
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -76,6 +77,24 @@ $oldAppData = $env:APPDATA
 $gate = Join-Path $scratch ('autoadv-gate-' + [guid]::NewGuid().ToString('N'))
 $settingsDir = Join-Path $scratch ('autoadv-settings-' + [guid]::NewGuid().ToString('N'))
 $gameProcess = $null
+
+function Invoke-ValidationPython([string[]] $CommandArgs) {
+    # Windows PowerShell 5.1 promotes native stderr to an ErrorRecord.  With
+    # ErrorActionPreference=Stop that can terminate validation before the
+    # native process exit code is observed, even for warnings emitted by Qt or
+    # a native library.  Preserve stderr in the transcript and decide success
+    # exclusively from the Python process exit code.
+    $savedErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $PythonExecutable @CommandArgs 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorAction
+    }
+    return [int]$exitCode
+}
+
 try {
     if ($Automated) {
         # Only the normal AutoAdv GUI uses this isolated settings root.
@@ -211,11 +230,10 @@ public static class AudioRenderProbe {
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }
         if ($Automated) {
-            python -m validation.real_game.gui_entry
+            $guiExit = Invoke-ValidationPython @('-m', 'validation.real_game.gui_entry')
         } else {
-            python -m autoadv
+            $guiExit = Invoke-ValidationPython @('-m', 'autoadv')
         }
-        $guiExit = $LASTEXITCODE
         $arguments = @('-m', 'validation.real_game.verify_trace', '--trace', $Trace,
                        '--phase', $Phase, '--report', $Report)
         if ($MaxVoiceHoldMs -gt 0) { $arguments += @('--max-voice-hold-ms', [string]$MaxVoiceHoldMs) }
@@ -223,19 +241,17 @@ public static class AudioRenderProbe {
         if ($Oracle) { $arguments += @('--oracle', $Oracle) }
         if ($StartLine -gt 0) { $arguments += @('--start-line', [string]$StartLine) }
         if (Test-Path -LiteralPath $Trace) {
-            & python @arguments
+            $auditExit = Invoke-ValidationPython $arguments
         } else {
             @{ok = $false; phase = $Phase; errors = @('GUI did not produce a product trace')} |
                 ConvertTo-Json | Set-Content -LiteralPath $Report -Encoding utf8
-            $LASTEXITCODE = 1
+            $auditExit = 1
         }
-        $auditExit = $LASTEXITCODE
         Write-Host "AutoAdv validation report: $Report"
         if ($guiExit -ne 0) {
             throw "AutoAdv GUI returned exit code $guiExit; game not verified"
         }
-        $LASTEXITCODE = $auditExit
-        if ($LASTEXITCODE -ne 0) {
+        if ($auditExit -ne 0) {
             throw "Real game measurement/verification could not complete (phase=$Phase, trace=$Trace)"
         }
         Write-Host "Collected and audited AutoAdv product observations (phase=$Phase). Product quality is reported as measurements, independently from collection validity."

@@ -210,16 +210,22 @@ try {
             $stage = "validate-$currentPhase"
             Push-Location $repo
             try {
-                $arguments = @(
-                    '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',
-                    (Join-Path $repo 'validation\real_game\run_live_check.ps1'),
-                    '-Phase',$currentPhase,
-                    '-GameExecutable',$gameExecutable,
-                    '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
-                    '-TimeoutSeconds','360'
-                )
-                & powershell.exe @arguments
-                if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
+                # Keep the live-check in this PowerShell host so native/Python
+                # diagnostics are part of the persistent transcript.  A nested
+                # powershell.exe previously discarded the actual stderr and left
+                # only an opaque "exited with 1" summary.
+                $liveCheck = Join-Path $repo 'validation\real_game\run_live_check.ps1'
+                $liveArgs = @{
+                    Phase = $currentPhase
+                    GameExecutable = $gameExecutable
+                    Automated = $true
+                    MeasurementOnly = $true
+                    Trace = $trace
+                    Report = $report
+                    TimeoutSeconds = 360
+                    PythonExecutable = $python
+                }
+                & $liveCheck @liveArgs
             } catch {
                 $phaseError = [string]$_.Exception.Message
                 Write-Warning "Phase ${currentPhase}: $phaseError"
