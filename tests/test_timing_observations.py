@@ -21,7 +21,7 @@ class TimingG2P:
 
 
 class TimingPosterior:
-    frame_ms_hint = 20.0
+    frame_stride_ms = 20.0
     vocab = {'PAD': 0, 'UNK': 1, 'SOS': 2, 'EOS': 3, 'a': 4, 'b': 5, 'c': 6}
 
     def infer(self, chunks):

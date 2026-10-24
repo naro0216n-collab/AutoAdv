@@ -294,8 +294,8 @@ class NativeAudio:
             capture_start_ms = int(round(samples[0].at_ms - samples[0].duration_ms)) if samples else None
             capture_end_ms = int(samples[-1].at_ms) if samples else None
             target_end_ms = None
-            if alignment.target_end_frame is not None and alignment.frame_count:
-                end_offset = alignment.target_end_frame * audio_ms / alignment.frame_count
+            if alignment.target_end_frame is not None:
+                end_offset = alignment.target_end_frame * alignment.frame_ms
                 wall = self._audio_offset_to_wall_ms(samples, end_offset)
                 if wall is not None:
                     target_end_ms = int(round(wall))

@@ -101,7 +101,7 @@ class AlignmentPolicy:
 
 
 class PosteriorModel(Protocol):
-    frame_ms_hint: float
+    frame_stride_ms: float
     vocab: dict[str, int]
 
     def infer(self, chunks: tuple[PCMChunk, ...]) -> np.ndarray:
@@ -386,8 +386,9 @@ class TargetConditionedAligner:
         if logits.ndim != 2 or not logits.shape[0]:
             raise ValueError("alignment model returned no frame posterior")
         log_probs = _log_softmax(logits)
-        audio_ms = sum(chunk.duration_ms for chunk in chunks)
-        frame_ms = audio_ms / logits.shape[0] if audio_ms > 0 else self.model.frame_ms_hint
+        frame_ms = float(self.model.frame_stride_ms)
+        if not np.isfinite(frame_ms) or frame_ms <= 0:
+            raise ValueError("alignment model must provide a positive fixed frame stride")
         results = [
             _candidate_alignment(log_probs, candidate.phonemes, ids, candidate.rank,
                                  frame_ms, self.policy)
@@ -438,7 +439,7 @@ def _downsample_48k_to_16k(mono_48k: np.ndarray) -> np.ndarray:
 class OnnxPhoneCTCModel:
     """Small runtime adapter around a fixed phone-CTC ONNX artifact."""
 
-    frame_ms_hint = 20.0
+    frame_stride_ms = 20.0
 
     def __init__(self, model: Path, vocab: Path, *, num_threads: int = 2):
         if not model.is_file() or not vocab.is_file():

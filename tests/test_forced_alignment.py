@@ -18,7 +18,7 @@ class StaticG2P:
 
 
 class Posterior:
-    frame_ms_hint = 20.0
+    frame_stride_ms = 20.0
 
     def __init__(self, logits, vocab):
         self.logits = np.asarray(logits, dtype=np.float32)
@@ -68,6 +68,20 @@ def test_supported_prefix_associates_without_claiming_end():
     assert result.aligned_target_units == 3
     assert not result.complete_alignment
     assert not result.committed_end
+
+
+def test_model_frame_stride_is_fixed_and_not_stretched_to_capture_duration():
+    logits, vocab = logits_with_phones(('a', 'b', 'c'), frames=49, starts=(10, 20, 30))
+    model = Posterior(logits, vocab)
+    aligner = TargetConditionedAligner(model, g2p=StaticG2P(('a', 'b', 'c')))
+    aligner.set_target('target')
+    raw = np.zeros((48000, 2), dtype='<f4').tobytes()
+    one_second = (PCMChunk(at_ms=1000, frames=raw, sample_rate=48000,
+                           channels=2, sample_width_bytes=4),)
+    result = aligner.align(one_second)
+    assert result.frame_ms == 20.0
+    assert result.target_end_frame == 31
+    assert result.target_end_frame * result.frame_ms == 620.0
 
 
 def test_complete_target_at_capture_edge_does_not_commit_end():

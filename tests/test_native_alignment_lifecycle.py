@@ -31,7 +31,7 @@ class StaticG2P:
 
 
 class StaticPosterior:
-    frame_ms_hint = 20.0
+    frame_stride_ms = 20.0
     vocab = VOCAB
 
     def __init__(self, *, terminal=True):
@@ -119,6 +119,33 @@ class NativeAlignmentLifecycleTests(unittest.TestCase):
             self.assertEqual(reports[0][1]['target_units'], 3)
             self.assertIn('align_ms', reports[0][1])
             self.assertNotIn('transcript', reports[0][1])
+        finally:
+            native.close()
+
+    def test_endpoint_wall_time_uses_model_stride_not_capture_frame_ratio(self):
+        class FortyNineFramePosterior(StaticPosterior):
+            def __init__(self):
+                self.logits = np.full((49, len(VOCAB)), -4.0, dtype=np.float32)
+                self.logits[:, 0] = 5.0
+                for phone, frame in zip(('a', 'b', 'c'), (10, 20, 30)):
+                    self.logits[frame, 0] = 0.0
+                    self.logits[frame, VOCAB[phone]] = 7.0
+
+        observations = []
+        native = make_native(FortyNineFramePosterior(), observations)
+        token = Token(2, 1)
+        try:
+            native.history.start(42)
+            native.boundary(1000)
+            native.begin(token, 'target')
+            chunk = stereo_chunk(2000, 1000)
+            native.history.push(chunk, target_pid=42)
+            native.feed(chunk)
+            wait_idle(native)
+            observation = observations[-1][1]
+            self.assertEqual(observation.alignment.frame_ms, 20.0)
+            self.assertEqual(observation.alignment.target_end_frame, 31)
+            self.assertEqual(observation.target_acoustic_end_ms, 1620)
         finally:
             native.close()
 
