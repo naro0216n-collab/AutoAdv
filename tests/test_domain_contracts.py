@@ -296,6 +296,17 @@ def test_alignment_reading_selection_and_utterance_progress_preserve_evidence_me
     assert auto.state == UtteranceProgressState.ENDED
     assert external.state == UtteranceProgressState.FINITE_VOCAL_ENDING
 
+    # The same distinction applies when delayed known text can be aligned
+    # retrospectively.  Under an unknown external boundary, a complete lexical
+    # match may describe old retained audio and therefore cannot manufacture an
+    # audio-derived endpoint.
+    external_lexical = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', lexical=lexical, vocal=quiet, recurrence=VocalRecurrenceEvidence(),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=None,
+        boundary_certainty=PresentationBoundaryCertainty.EXTERNAL_UNKNOWN))
+    assert external_lexical.state == UtteranceProgressState.UNRESOLVED
+    assert external_lexical.lexical_target_ended
+
 
 class _FakeOnnxSession:
     def __init__(self, output):

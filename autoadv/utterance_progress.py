@@ -211,6 +211,14 @@ class UtteranceProgressEstimator:
             elif vocal_after_lexical and not quiet_after_vocal and not persistent_only_tail:
                 state = UtteranceProgressState.FINITE_VOCAL_ACTIVE
                 ended_at = None
+            elif observation.boundary_certainty == PresentationBoundaryCertainty.EXTERNAL_UNKNOWN:
+                # A retroactive lexical match cannot establish which presentation
+                # owned that audio when the external transition time is unknown.
+                # Preserve the observation but require explicit fallback (or a
+                # later strong boundary) instead of manufacturing completion.
+                state = (UtteranceProgressState.PERSISTENT_OR_LOOPING
+                         if persistent_only_tail else UtteranceProgressState.UNRESOLVED)
+                ended_at = None
             elif persistent_only_tail:
                 state = UtteranceProgressState.ENDED
                 ended_at = self._lexical_end_ms
