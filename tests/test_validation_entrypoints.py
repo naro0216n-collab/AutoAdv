@@ -78,7 +78,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn("Join-Path $cache 'media'", orchestrator)
         self.assertIn(r'scripts\prepare_windows_runtime.py', orchestrator)
         self.assertIn('--require-native', orchestrator)
-        self.assertNotIn("'-UncertainFallback'", orchestrator)
+        self.assertIn("'-UncertainFallback'", orchestrator)
         self.assertNotIn("'-ProcessLoopbackHelper'", orchestrator)
         self.assertNotIn("'-AsrModel'", orchestrator)
         self.assertNotIn("'-AsrTokens'", orchestrator)

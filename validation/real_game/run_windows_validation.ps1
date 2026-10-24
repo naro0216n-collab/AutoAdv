@@ -215,7 +215,7 @@ try {
                     (Join-Path $repo 'validation\real_game\run_live_check.ps1'),
                     '-Phase',$currentPhase,
                     '-GameExecutable',$gameExecutable,
-                    '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
+                    '-Automated','-MeasurementOnly','-UncertainFallback','-Trace',$trace,'-Report',$report,
                     '-TimeoutSeconds','360'
                 )
                 & powershell.exe @arguments

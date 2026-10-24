@@ -50,7 +50,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
             source='HOOK|1|2', address=902, hook_sequence=i+1, context=1, context2=2, raw_hash=raw)
         add('utterance', **key, source='HOOK|1|2', hook_sequence=i+1,
             raw_hash=raw, body_hash=text_digest(line['text']), advance_mode='text' if chosen=='reading' else 'audio',
-            use_tts=chosen=='tts', text_wait_ms=500, reading_units=5, uncertain_text_fallback=False, speaker='明日香')
+            use_tts=chosen=='tts', text_wait_ms=500, reading_units=5, uncertain_text_fallback=(lines is ACCURACY_SCENARIO), speaker='明日香')
         if chosen == 'native':
             add('native_pcm', **key, frames=960, audio_pid=50)
             add('native_audio_observation', **key, kind='alignment', target_units=5, aligned_target_units=5,
@@ -198,6 +198,20 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertFalse(clean['line_results'][0]['process_audio_expected'])
         self.assertTrue(interfered['line_results'][0]['process_audio_expected'])
         self.assertGreater(interfered['line_results'][0]['alignment_inference_count'], 0)
+
+
+    def test_accuracy_measurement_rejects_missing_explicit_fallback_policy(self):
+        records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
+        target = next(r for r in records if r.get('event') == 'utterance' and r['line'] == 2)
+        target['uncertain_text_fallback'] = False
+
+        result = validate(records, phase='accuracy', measurement_only=True)
+
+        self.assertFalse(result['measurement_valid'])
+        self.assertFalse(result['quality']['fallback_policy_verified'])
+        self.assertEqual(result['quality']['fallback_enabled_cases'], 2)
+        self.assertTrue(any('accuracy fallback policy not enabled' in error
+                            for error in result['errors']))
 
     def test_unvoiced_accuracy_case_native_completion_is_counted_as_misattribution(self):
         index = accuracy_pos('street-background-unvoiced')
