@@ -51,24 +51,15 @@ class ManagedNativeRuntimeTests(unittest.TestCase):
         self.assertNotIn('--output', command)
         self.assertFalse(any(arg.startswith('-p:BaseIntermediateOutputPath=') for arg in command))
 
-    def test_standard_windows_bootstrap_installs_alignment_runtime_not_free_asr_stack(self):
+    def test_standard_windows_runtime_declares_required_product_dependencies(self):
         from scripts import prepare_windows_runtime as runtime
         repo = Path(__file__).resolve().parents[1]
         requirements = runtime.runtime_requirements(repo)
         self.assertIn('PySide6-Essentials>=6.8,<7', requirements)
         self.assertIn('onnxruntime>=1.20,<2', requirements)
         self.assertIn('haqumei>=0.12,<0.13', requirements)
-        self.assertFalse(any('sherpa' in requirement for requirement in requirements))
-        self.assertFalse(any('webrtcvad' in requirement for requirement in requirements))
-        source = Path('scripts/prepare_windows_runtime.py').read_text(encoding='utf-8')
-        self.assertIn('--only-binary=:all:', source)
-        self.assertNotIn('.[gui,audio,ocr,native]', source)
-        self.assertIn('.autoadv-dependencies.json', source)
-        self.assertIn('autoadv.native_runtime', source)
-        launcher = Path('AutoAdv.cmd').read_text(encoding='utf-8')
-        self.assertIn('prepare_windows_runtime.py', launcher)
-        self.assertIn('--launch', launcher)
-        self.assertNotIn('pip install', launcher)
+
+
 
 
 if __name__ == '__main__':

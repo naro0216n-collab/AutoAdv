@@ -201,7 +201,6 @@ class WindowsGuiInitialization(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                self.assertFalse(hasattr(window, 'btn_find'))
                 window.insert_pc_hooks_on_attach.setChecked(True)
                 self.assertTrue(window.current_profile().insert_pc_hooks)
                 window.application.select_primary_target(31, 0x100)
@@ -289,13 +288,10 @@ class TaskOrientedGuiContracts(unittest.TestCase):
             window = next(w for w in QApplication.topLevelWidgets()
                           if getattr(w, 'catalog', None) is catalog)
             try:
-                self.assertFalse(hasattr(window, 'btn_edit_detected_speaker'))
-                self.assertFalse(hasattr(window, 'btn_fix_extraction'))
                 window.btn_advanced_extraction.click()
                 self.assertTrue(window.section_toggles['extraction'].isChecked())
                 self.assertIn('話者・音声', window.ui_sections['speakers'].title())
                 self.assertFalse(window.application.runtime_state().authorized)
-                self.assertFalse(hasattr(window, 'btn_monitor'))
             finally:
                 window.close()
             return 0

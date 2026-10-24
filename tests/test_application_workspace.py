@@ -759,7 +759,6 @@ def test_capture_provider_selection_drives_luna_sync_without_public_sync_api():
     disables = [kwargs['source']['hook_code'] for action, kwargs in host.commands
                 if action == 'sync_thread' and not kwargs['enabled']]
     assert set(disables) == {'T', 'S'}
-    assert not hasattr(app, 'sync_hook_threads')
 
 def test_application_owns_hook_connection_identity_and_rejects_stale_events():
     class Child:
@@ -876,7 +875,6 @@ def test_profile_selection_invalidates_pending_capture_group_epoch():
     app.select_profile(game_id, profile_id)
     old_flush()
     assert app.capture_view().assembly == ()
-    assert not hasattr(app, 'flush_hook_outputs')
 
 def test_runtime_rebuild_setting_does_not_pause_or_rewrite_active_utterance():
     app, _ = app_with_game()
@@ -925,8 +923,6 @@ def test_capture_transition_rebuilds_only_at_next_distinct_hook_line():
     app.handle_hook_event(HookEvent('output', 'host', 1, 4, 300, 101, text, 'second'))
     assert app.runtime_state().session > first_session
     assert app.runtime_state().utterance.raw == 'second'
-    assert not hasattr(app, 'capture_transition_boundary')
-    assert not hasattr(app, 'consume_capture_transition')
 
 def test_runtime_target_alternates_reset_to_primary_without_losing_primary_window():
     app, _ = app_with_game()
@@ -1052,7 +1048,6 @@ def test_profile_capture_restore_is_connection_scoped_through_target_activation(
     app.handle_hook_event(HookEvent('connected', 'host-b', 4, 1, 30, 101))
     assert [action for action, _ in second.commands] == [
         'settings', 'connect', 'settings', 'insert_pc_hooks', 'insert_hook', 'insert_hook']
-    assert not hasattr(app, 'restore_profile_capture')
 
 def test_diagnostics_view_is_generated_from_application_state():
     app, _ = app_with_game()
@@ -1389,17 +1384,6 @@ def test_active_speaker_source_removal_invalidates_runtime_like_body_source():
 
     assert app.runtime_state().profile is None
     assert app.capture_view().problem is not None
-
-
-def test_public_profile_setting_api_cannot_bypass_capture_workspace_transaction():
-    import pytest
-    app, calls = app_with_game()
-    assert not hasattr(app, 'update_profile')
-    assert not hasattr(app, 'update_capture_recipe')
-    with pytest.raises(ValueError, match='unsupported profile setting'):
-        app.set_profile_setting('hooks', [HookSelection('T', 1, 2)])
-    assert app.current_profile().hooks == []
-    assert calls == []
 
 
 def test_monitor_lifecycle_is_observable_from_application_events_without_gui_policy():

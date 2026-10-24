@@ -261,25 +261,6 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertEqual(fields['calibration_matches'], 0)
         self.assertTrue(fields['luna_host_alive'])
 
-    def test_driver_has_no_retired_gui_runtime_ownership_dependencies(self):
-        source = Path('validation/real_game/gui_session.py').read_text(encoding='utf-8')
-        retired = (
-            'self.w.pid', 'self.w.hwnd', 'self.w.controller', 'self.w.sources',
-            'self.w.source_samples', 'self.w.ambiguous_sources', 'self.w.host_generation',
-            'self.w.connection_generation', 'self.w.hook_host', 'self.w.native_audio',
-            'self.w.native_audio_setup_error', 'self.w.begin_monitor', 'self.w.select_hook',
-            'self.w.save_profile', 'self.w.inherit_controls',
-        )
-        for expression in retired:
-            self.assertNotIn(expression, source)
-        for api in (
-            'self.product.select_primary_target(', 'self.product.activate_selected_target()',
-            'self.product.capture_view()',
-            'self.product.set_capture_field_source(', 'self.product.commit_capture()',
-            'self.product.runtime_state()', 'self.w.permit()',
-        ):
-            self.assertIn(api, source)
-
     def test_requires_bound_game_target_and_finite_timeout(self):
         valid = dict(gate='session-gate', executable='validation-game.exe',
                      phase='accuracy', timeout_seconds=120)

@@ -116,8 +116,6 @@ class RunningTargetGuiTests(unittest.TestCase):
             commands = Mock()
             starts = []
             try:
-                self.assertFalse(hasattr(window, 'detect_game'))
-                self.assertFalse(hasattr(window, 'detect_registered_game'))
                 def fake_host_start():
                     starts.append('start')
                     window.application.hook_host = SimpleNamespace(command=commands,

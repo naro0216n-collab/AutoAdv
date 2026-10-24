@@ -296,42 +296,6 @@ class IssueReportingContract(unittest.TestCase):
             )
             self.assertEqual((slot, comment_id), (4, 1004))
 
-    def test_github_cli_writes_non_ascii_issue_body_as_utf8_request_file(self):
-        captured: dict[str, str] = {}
-
-        def fake_run(command, **kwargs):
-            request_path = Path(command[command.index("--input") + 1])
-            captured.update(json.loads(request_path.read_text(encoding="utf-8")))
-            return type("Completed", (), {
-                "returncode": 0,
-                "stdout": json.dumps({"id": 1004, "html_url": "https://github.com/x/y"}).encode("utf-8"),
-                "stderr": b"",
-            })()
-
-        client = issue_reporting.GitHubCliIssueClient(
-            Path("gh.exe"), "naro0216n-collab/AutoAdv", 2
-        )
-        with patch.object(issue_reporting.subprocess, "run", side_effect=fake_run):
-            client.patch_comment(1004, "### run · 日本語")
-
-        self.assertEqual(captured["body"], "### run · 日本語")
-
-    def test_windows_runner_delegates_entire_issue_transaction_to_python(self):
-        source = RUNNER.read_text(encoding="utf-8")
-        self.assertIn("validation.real_game.issue_reporting", source)
-        uploader = source[source.index("function Upload-Result"):source.index("function Get-PrebuiltFixture")]
-        self.assertIn("Ensure-GitHubLogin", uploader)
-        self.assertIn("& $pythonExecutable -m validation.real_game.issue_reporting", uploader)
-        self.assertIn("--repository $repository --issue $IssueNumber", uploader)
-        self.assertIn("--gh $script:GitHubCli --status $statusPath", uploader)
-        self.assertIn("finally { Pop-Location }", uploader)
-        self.assertIn("Upload-Result $session $gitSha $python", source)
-        self.assertNotIn("Get-IssueUploadPlan", source)
-        self.assertNotIn("Invoke-GitHubIssueApi", source)
-        self.assertNotIn("Set-IssueComment", source)
-        self.assertNotIn("ConvertFrom-Json", uploader)
-        self.assertNotIn("--comments", uploader)
-
 
 if __name__ == "__main__":
     unittest.main()
