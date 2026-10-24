@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from autoadv.audio_buffer import PCMChunk
-from autoadv.acoustic_observers import VocalActivityFrame
+from autoadv.acoustic_observers import AcousticObservationHistory, VocalActivityFrame
 from autoadv.conversation import Token
 from autoadv.g2p import PronunciationCandidate
 from autoadv.native_audio import NativeAudio
@@ -64,6 +64,18 @@ def stereo_chunk(end_ms: int, duration_ms: int = 600, value: float = 0.0) -> PCM
     samples = int(48 * duration_ms)
     pcm = np.full((samples, 2), value, dtype='<f4').tobytes()
     return PCMChunk(end_ms, pcm, 48000, 2, 4)
+
+
+def tonal_chunk(end_ms: int, components: tuple[tuple[float, float], ...],
+                duration_ms: int = 400) -> PCMChunk:
+    samples = int(48 * duration_ms)
+    seconds = np.arange(samples, dtype=np.float64) / 48000.0
+    mono = np.zeros(samples, dtype=np.float64)
+    for frequency, amplitude in components:
+        mono += np.sin(2.0 * np.pi * frequency * seconds) * amplitude
+    mono = np.clip(mono, -1.0, 1.0).astype('<f4')
+    stereo = np.column_stack((mono, mono)).astype('<f4', copy=False)
+    return PCMChunk(end_ms, stereo.tobytes(), 48000, 2, 4)
 
 
 def wait_idle(native: NativeAudio) -> None:
@@ -215,3 +227,21 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         assert 'pcm_frames' in status and status['boundary_certainty'] == 'autoadv'
     finally:
         native.close()
+
+def test_vocal_recurrence_discounts_periodicity_already_explained_by_background_audio():
+    def history_for(current_components):
+        history = AcousticObservationHistory()
+        for at_ms in (600, 1000, 1400):
+            history.add_fingerprint(
+                tonal_chunk(at_ms, ((440.0, 0.25),)), vocal_relevance=0.05)
+        for at_ms in (1800, 2200, 2600, 3000):
+            history.add_fingerprint(
+                tonal_chunk(at_ms, current_components), vocal_relevance=0.9)
+        return history.recurrence(epoch_start_ms=1500, end_ms=3000)
+
+    background_only = history_for(((440.0, 0.25),))
+    vocal_over_background = history_for(((440.0, 0.25), (1000.0, 0.5)))
+
+    assert background_only.strength == 0.0
+    assert vocal_over_background.strength > background_only.strength
+    assert vocal_over_background.period_ms is not None

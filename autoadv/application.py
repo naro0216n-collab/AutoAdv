@@ -670,12 +670,15 @@ class AutoAdvApplication:
     def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
         token = self.controller.token
         self._emit_runtime_event('advance_attempt', token)
+        native = self._native_audio
+        # Capture the causal edge immediately before issuing input, but commit
+        # it only after the input call succeeds. This keeps failed sends inside
+        # the current epoch while retaining PCM that may arrive before the
+        # Windows message API returns.
+        boundary_at_ms = native.clock() if native is not None else None
         self._raw_input_send(target, virtual_key)
-        # Only a successfully issued AutoAdv input is a strong Presentation
-        # Epoch boundary.  A failed input attempt must leave the current epoch
-        # intact rather than inventing a transition the game never received.
-        if self._native_audio is not None:
-            self._native_audio.boundary()
+        if native is not None and native is self._native_audio:
+            native.boundary(at_ms=boundary_at_ms)
             self._emit_runtime_event('audio_observation_boundary', token)
         self._emit_runtime_event(
             'advance_input', token, presentation_reason=self.controller.presentation_reason)

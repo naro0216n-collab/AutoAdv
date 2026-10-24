@@ -247,6 +247,29 @@ def test_alignment_reading_selection_and_utterance_progress_preserve_evidence_me
         boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
     assert changed_tail.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
 
+    # Cross-epoch human-vocal activity alone does not identify one persistent
+    # source, and a target-associated but incomplete lexical path must remain a
+    # finite vocal event even when recurrence also describes a background loop.
+    partial = LexicalProgressEvidence(
+        target_units=4, aligned_target_units=2, target_associated=True,
+        complete_alignment=False, committed_target_end=False, target_end_ms=None,
+        reading_rank=0, path_margin=3.0, boundary_margin=2.0)
+    overlap = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', lexical=partial, vocal=vocal(pre=.9),
+        recurrence=VocalRecurrenceEvidence(
+            strength=.9, period_ms=900, period_stability=.8,
+            cross_epoch_persistence=.9, recent_strength=.8),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=1000,
+        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert overlap.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
+
+    vad_continuity_only = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', vocal=vocal(pre=.9), recurrence=VocalRecurrenceEvidence(),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=1000,
+        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert vad_continuity_only.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
+    assert not vad_continuity_only.persistent_vocal_observed
+
     # Lexical completion without any observed human vocal event does not invent
     # a finite-vocal state.  This keeps an actually unvoiced line eligible for
     # the Controller's explicit uncertainty fallback.

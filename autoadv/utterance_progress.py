@@ -126,12 +126,10 @@ class UtteranceProgressEstimator:
     represented explicitly rather than becoming an infinite hold.
     """
 
-    VOCAL_ACTIVE = 0.45
     FINITE_END_CONTEXT_MS = 160
     LOOP_STRENGTH = 0.70
     LOOP_STABILITY = 0.55
     CROSS_EPOCH_PERSISTENCE = 0.72
-    CROSS_EPOCH_VOCAL_FRACTION = 0.55
     RECENT_PERSISTENCE = 0.60
 
     def __init__(self):
@@ -166,13 +164,15 @@ class UtteranceProgressEstimator:
                                         else max(self._last_active_ms, vocal.last_active_ms))
 
         recurrence = observation.recurrence or VocalRecurrenceEvidence()
+        # Persistent-source identity requires recurrence evidence.  Human-vocal
+        # activity on both sides of an epoch boundary is not enough: it can be
+        # a background voice followed by a new finite target voice.  Treating
+        # VAD continuity as source persistence would make the Controller's
+        # uncertainty fallback eligible while a finite target is still active.
         persistent = bool(
             recurrence.cross_epoch_persistence >= self.CROSS_EPOCH_PERSISTENCE or
             (recurrence.strength >= self.LOOP_STRENGTH and
-             recurrence.period_stability >= self.LOOP_STABILITY) or
-            (vocal is not None and
-             vocal.pre_epoch_active_fraction >= self.CROSS_EPOCH_VOCAL_FRACTION and
-             vocal.active_fraction >= self.CROSS_EPOCH_VOCAL_FRACTION)
+             recurrence.period_stability >= self.LOOP_STABILITY)
         )
         self._persistent = self._persistent or persistent
 
@@ -224,11 +224,19 @@ class UtteranceProgressEstimator:
                 state = UtteranceProgressState.FINITE_VOCAL_ENDING
                 ended_at = None
         elif self._seen_vocal:
+            # If known-text alignment has already associated the current target
+            # with the mix, an incomplete target remains finite-vocal work even
+            # when a persistent background source is also present.  This keeps
+            # the Controller from treating the background loop as permission to
+            # invoke uncertainty fallback while the target is still sounding.
+            if self._target_associated and not quiet_after_vocal:
+                state = UtteranceProgressState.FINITE_VOCAL_ACTIVE
+                ended_at = None
             # Non-lexical finite events can complete only when their onset is
             # causally scoped by AutoAdv's own boundary.  An external transition
             # has unknown start time and therefore remains unresolved/persistent
             # rather than inventing a boundary from HOOK arrival.
-            if persistent or self._persistent:
+            elif persistent or self._persistent:
                 state = UtteranceProgressState.PERSISTENT_OR_LOOPING
                 ended_at = None
             elif (observation.boundary_certainty == PresentationBoundaryCertainty.AUTOADV

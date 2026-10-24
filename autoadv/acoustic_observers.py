@@ -27,11 +27,16 @@ class VocalActivityFrame:
 
 @dataclass(frozen=True)
 class AcousticFingerprint:
-    """Compact spectral representation with an independent vocal relevance weight."""
+    """Compact spectrum with independent vocal and background evidence.
+
+    ``background_relevance`` measures similarity to recent low-vocal process
+    audio.  It is evidence about the mix, not a semantic music classifier.
+    """
 
     at_ms: int
     values: tuple[float, ...]
     vocal_relevance: float
+    background_relevance: float = 0.0
 
 
 class VocalActivityObserver(Protocol):
@@ -96,6 +101,8 @@ class AcousticObservationHistory:
     """Compact continuous feature history independent of HOOK arrival."""
 
     ACTIVE_PROBABILITY = 0.45
+    BACKGROUND_VOCAL_MAX = 0.20
+    BACKGROUND_LOOKBACK_MS = 8_000
     FINGERPRINT_BANDS = 12
 
     def __init__(self, *, horizon_ms: int = 10 * 60 * 1000):
@@ -135,11 +142,22 @@ class AcousticObservationHistory:
         values = self._spectral_fingerprint(chunk)
         if values is None:
             return
+        relevance = max(0.0, min(1.0, float(vocal_relevance)))
+        at_ms = int(chunk.at_ms)
+        background = [
+            item for item in self._fingerprints
+            if item.vocal_relevance <= self.BACKGROUND_VOCAL_MAX
+            and item.at_ms >= at_ms - self.BACKGROUND_LOOKBACK_MS
+        ]
+        background_relevance = max(
+            (self._spectral_similarity(values, item.values) for item in background),
+            default=0.0,
+        )
         self._fingerprints.append(AcousticFingerprint(
-            at_ms=int(chunk.at_ms), values=values,
-            vocal_relevance=max(0.0, min(1.0, float(vocal_relevance))),
+            at_ms=at_ms, values=values, vocal_relevance=relevance,
+            background_relevance=background_relevance,
         ))
-        self._trim(int(chunk.at_ms))
+        self._trim(at_ms)
 
     def _trim(self, now_ms: int) -> None:
         cutoff = int(now_ms) - self.horizon_ms
@@ -203,11 +221,25 @@ class AcousticObservationHistory:
         )
 
     @staticmethod
-    def _similarity(a: AcousticFingerprint, b: AcousticFingerprint) -> float:
-        if not a.values or not b.values or len(a.values) != len(b.values):
+    def _spectral_similarity(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+        if not a or not b or len(a) != len(b):
             return 0.0
-        return max(0.0, min(1.0, float(np.dot(a.values, b.values)))) * min(
-            a.vocal_relevance, b.vocal_relevance)
+        return max(0.0, min(1.0, float(np.dot(a, b))))
+
+    @classmethod
+    def _similarity(cls, a: AcousticFingerprint, b: AcousticFingerprint) -> float:
+        # Recurrence concerns the human-vocal component, not periodicity that
+        # can already be explained by recent low-vocal background audio.  The
+        # factors remain separate evidence: no observer labels a source as a
+        # completed utterance or as semantic music.
+        spectral = cls._spectral_similarity(a.values, b.values)
+        vocal = min(a.vocal_relevance, b.vocal_relevance)
+        background = max(a.background_relevance, b.background_relevance)
+        # A moderate overlap is expected whenever the foreground is mixed over
+        # BGM. Only a spectrum that is strongly explained by low-vocal audio
+        # should collapse recurrence evidence.
+        foreground = 1.0 - background ** 3
+        return spectral * vocal * max(0.0, foreground)
 
     def recurrence(self, *, epoch_start_ms: int | None, end_ms: int) -> VocalRecurrenceEvidence:
         current = [f for f in self._fingerprints
