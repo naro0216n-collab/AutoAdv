@@ -126,7 +126,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         )
         driver = SessionDriver(
             SimpleNamespace(application=product), SimpleNamespace(),
-            {'timeout_seconds': 30, 'phase': 'accuracy', 'fallback': True,
+            {'timeout_seconds': 30, 'phase': 'accuracy',
              'executable': 'validation-game.exe'},
             SimpleNamespace(emit=lambda *args, **kwargs: None),
         )

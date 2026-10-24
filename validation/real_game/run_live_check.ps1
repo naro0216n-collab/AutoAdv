@@ -205,7 +205,7 @@ public static class AudioRenderProbe {
                 });
                 continue_collection = ($Phase -eq 'accuracy');
                 voice = $Voice; irodori_url = $IrodoriUrl;
-                fallback = [bool]$UncertainFallback
+                fallback = [bool](($Phase -eq 'accuracy') -or $UncertainFallback)
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }

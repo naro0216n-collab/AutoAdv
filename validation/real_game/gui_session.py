@@ -178,8 +178,8 @@ class SessionDriver:
             'advance_mode',
             AdvanceMode.TEXT if self.options['phase'] in ('hook', 'reading') else AdvanceMode.AUDIO)
         self.product.set_profile_setting('default_tts', self.options['phase'] == 'tts')
-        self.product.set_profile_setting(
-            'uncertain_text_fallback', bool(self.options.get('fallback', False)))
+        fallback = True if self.options['phase'] == 'accuracy' else bool(self.options.get('fallback', False))
+        self.product.set_profile_setting('uncertain_text_fallback', fallback)
         self.product.set_profile_setting('repeat_rule', 'each_flush')
 
         profile = self.product.current_profile()

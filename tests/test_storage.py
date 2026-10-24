@@ -2,10 +2,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from autoadv.model import AdvanceMode, HookSelection, ReplacementRule
-from autoadv.storage import Catalog, load, save
+from autoadv.storage import Catalog, CommonSettings, load, save
 
 
 class SettingsContract(unittest.TestCase):
+    def test_uncertain_audio_fallback_is_enabled_by_default(self):
+        catalog = Catalog()
+        game = catalog.create_game('game')
+        profile = game.profiles[game.default_profile]
+        self.assertTrue(CommonSettings().uncertain_text_fallback)
+        self.assertTrue(catalog.effective_profile(profile).uncertain_text_fallback)
+
     def test_roundtrip_multiple_games_profiles_and_voice(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'settings.json'

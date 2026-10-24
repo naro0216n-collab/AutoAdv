@@ -39,7 +39,7 @@ def _require_object(value: object, expected: frozenset[str], label: str) -> dict
 @dataclass
 class CommonSettings:
     advance_mode: AdvanceMode = AdvanceMode.TEXT
-    uncertain_text_fallback: bool = False
+    uncertain_text_fallback: bool = True
     default_tts: bool = False
     default_voice: str = ''
     reading_ms: int = 700

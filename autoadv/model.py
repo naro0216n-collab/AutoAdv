@@ -205,7 +205,7 @@ class Profile:
     inserted_hooks: list[str] = field(default_factory=list)
     insert_pc_hooks: bool = False
     advance_mode: AdvanceMode = AdvanceMode.TEXT
-    uncertain_text_fallback: bool = False
+    uncertain_text_fallback: bool = True
     default_tts: bool = False
     default_voice: str = ''
     speaker_tts: dict[str, bool] = field(default_factory=dict)
