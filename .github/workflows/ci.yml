@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  statuses: write
 
 concurrency:
   group: fast-ci-${{ github.ref }}
@@ -78,27 +77,3 @@ jobs:
       - run: |
           cd "${RUNNER_TEMP}"
           python -c "import autoadv; assert autoadv.Controller"
-
-  status-rollup:
-    name: Fast CI status
-    if: ${{ always() }}
-    needs: [source-artifact, unit, package-smoke]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish final status
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_RESULT: ${{ needs.source-artifact.result }}
-          UNIT_RESULT: ${{ needs.unit.result }}
-          PACKAGE_RESULT: ${{ needs.package-smoke.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          conclusion=failure
-          if [[ "$SOURCE_RESULT" == success && "$UNIT_RESULT" == success && "$PACKAGE_RESULT" == success ]]; then
-            conclusion=success
-          fi
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -f state="$conclusion" -f context='Fast CI' \
-            -f description="source=${SOURCE_RESULT},unit=${UNIT_RESULT},package=${PACKAGE_RESULT}"
-          [[ "$conclusion" == success ]]
