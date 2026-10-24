@@ -197,18 +197,6 @@ class SessionDriver:
             hook_max_history=profile.hook_max_history,
         )
 
-        if self.options['phase'] in ('mixed', 'stress'):
-            overrides = {field: self.options.get(field, '') for field in ('helper', 'model', 'vocab')}
-            if any(overrides.values()):
-                if not all(overrides.values()):
-                    raise ValueError('native audio overrides must be supplied as one complete set')
-                for field, path in overrides.items():
-                    if not Path(path).is_file():
-                        raise ValueError('real native audio dependency unavailable: ' + field)
-                self.product.set_profile_setting('native_helper', overrides['helper'])
-                self.product.set_profile_setting('alignment_model', overrides['model'])
-                self.product.set_profile_setting('alignment_vocab', overrides['vocab'])
-
         if self.options['phase'] == 'tts':
             voice = self.options.get('voice', '').strip()
             if not voice:

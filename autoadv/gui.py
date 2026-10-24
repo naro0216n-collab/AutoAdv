@@ -13,7 +13,6 @@ from .hook_protocol import HookEvent, ThreadSource
 from .model import AdvanceMode, Profile, StructureRule, ReplacementRule, COMMON_FIELDS, interpret
 from .storage import load, save
 from .import_luna import inspect_luna, add_luna_games
-from .import_legacy import inspect_legacy, add_legacy_games
 from .game_windows import find_game_windows, find_game_processes, WindowCandidate
 from .running_target_dialog import choose_running_target
 from .application import AutoAdvApplication
@@ -477,8 +476,8 @@ def run_gui() -> int:
             row=QWidget(); lay=QHBoxLayout(row); lay.setContentsMargins(0,0,0,0)
             for b in (self.btn_dup,self.btn_rename,self.btn_delete,self.btn_default): lay.addWidget(b)
             management.addRow(row)
-            self.btn_import=QPushButton('Luna設定を取り込む'); self.btn_import.clicked.connect(self.import_luna); self.btn_import_legacy=QPushButton('旧AutoAdv設定を取り込む'); self.btn_import_legacy.clicked.connect(self.import_legacy)
-            management.addRow(self.btn_import); management.addRow(self.btn_import_legacy)
+            self.btn_import=QPushButton('Luna設定を取り込む'); self.btn_import.clicked.connect(self.import_luna)
+            management.addRow(self.btn_import)
 
             diagnostics = group('診断', page='settings', section='diagnostics', detail=True)
             self.diagnostics_snapshot=QPlainTextEdit(); self.diagnostics_snapshot.setReadOnly(True); self.diagnostics_snapshot.setMaximumHeight(180)
@@ -510,7 +509,6 @@ def run_gui() -> int:
             for w in (self.structure_enabled,self.replace_regex,self.replace_enabled,self.default_tts): w.toggled.connect(lambda _=None,control=w:self.preview_from_control(control))
             for w in (self.replace_target,self.default_voice): w.currentTextChanged.connect(lambda _='',control=w:self.preview_from_control(control))
 
-            self.confirm_migration_if_needed()
             self.fill_games()
             if self.irodori_url.text().strip(): QTimer.singleShot(0,self.start_server)
             for layout in pages.values(): layout.addStretch(1)
@@ -541,29 +539,6 @@ def run_gui() -> int:
             if any(word in message for word in actionable):
                 self.statusBar().showMessage(message, 12000)
             self.refresh_diagnostics()
-
-        def confirm_migration_if_needed(self):
-            review = getattr(self.catalog, 'migration_review', ())
-            if not review:
-                return
-            from .storage import user_settings_path
-            message = ('保存形式v3には旧4区分の音声方針があります。新2モードは自動推定しません。\n'
-                       + '\n'.join(review) + '\n旧設定は別ファイルへ保全します。\n'
-                       'この内容を確認して新設定へ移行しますか？')
-            decision = QMessageBox.question(self, '設定移行の確認', message,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if decision != QMessageBox.StandardButton.Yes:
-                self.note('設定移行を取り消しました。原本を保持してGUIを終了します。')
-                QTimer.singleShot(0, self.close)
-                return
-            source = Path(self.catalog.migration_source)
-            destination = user_settings_path()
-            if destination.exists():
-                raise RuntimeError('移行先の設定ファイルが既に存在します')
-            save(self.catalog, destination)
-            self.catalog.migration_review = []
-            self.note('旧設定原本を変更せず新設定へ移行しました: ' + str(source))
 
         def common_control_value(self, key: str):
             if key == 'advance_mode':
@@ -1414,27 +1389,6 @@ def run_gui() -> int:
                 self.note(f'Imported {len(entries)} games')
             except Exception as exc:
                 self.note(f'Import not applied: {exc}')
-
-        def import_legacy(self):
-            path, _ = QFileDialog.getOpenFileName(self, '旧AutoAdv v2設定を選択', '', 'JSON (*.json)')
-            if not path:
-                return
-            try:
-                entries = inspect_legacy(Path(path))
-                proposed = add_legacy_games(self.catalog, entries)
-                summary = '\n'.join(f'{row.game.name}: {len(row.game.profiles)} profiles' +
-                                    (f'\n  Requires manual review: {"; ".join(row.unmapped)}' if row.unmapped else '')
-                                    for row in entries)
-                if QMessageBox.question(self, '旧AutoAdv設定の取り込み確認',
-                        'Import recognized settings as additional games? Source is read-only; '
-                        'unmapped fields remain in the source.\n' + summary) != QMessageBox.StandardButton.Yes:
-                    return
-                self.stop_session()
-                self.application.install_catalog(proposed)
-                self.fill_games()
-                self.note(f'Imported {len(entries)} previous AutoAdv games; review unmapped fields')
-            except Exception as exc:
-                self.note('Previous AutoAdv import not applied: ' + str(exc))
 
         def start_recovery_hook_search(self):
             try:

@@ -8,7 +8,7 @@ import tempfile
 import uuid
 import copy
 from .model import (AdvanceMode, Game, HookSelection, Profile, StructureRule, ReplacementRule, OCRSettings,
-                    DEFAULT_STRUCTURE_RULES, SPEAKER_ONLY_RULE, COMMON_FIELDS)
+                    COMMON_FIELDS)
 
 
 @dataclass
@@ -114,55 +114,19 @@ def _profile_payload(p: Profile) -> dict:
         hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
         repeat_rule=p.repeat_rule, input_key=p.input_key)
 
-def _read_replacements(raw: list | dict) -> list[ReplacementRule]:
-    # A single one-way data migration from the initial v3 literal dictionary.
-    # After saving, only the ordered rule format is written and evaluated.
-    if isinstance(raw, dict):
-        return [ReplacementRule(str(before), str(after)) for before, after in raw.items()]
+def _read_replacements(raw: list) -> list[ReplacementRule]:
     if not isinstance(raw, list):
         raise ValueError('unsupported replacement data; settings preserved')
-    normalized = []
-    for rule in raw:
-        item = dict(rule)
-        if item.get('target') == 'asr':
-            item['target'] = 'match'
-        normalized.append(ReplacementRule(**item))
-    return normalized
+    return [ReplacementRule(**dict(rule)) for rule in raw]
 
 
 def _read_profile(raw: dict) -> Profile:
     raw_hooks = list(raw.get('hooks', []))
     hooks = [HookSelection(h['code'], int(h['context']), int(h['context2'])) for h in raw_hooks]
-    identities = [hook.identity for hook in hooks]
-
-    # Older settings-v4 revisions stored provider-priority lists.  The product
-    # contract has one explicit source per field, so normalize that historical
-    # representation once at the persistence boundary and never carry fallback
-    # ordering into runtime state.
-    if ('body_source' in raw or 'speaker_source' in raw or 'body_sources' in raw or
-            'speaker_sources' in raw or 'source_rules' in raw):
-        body_source = str(raw.get('body_source', '') or '')
-        speaker_source = str(raw.get('speaker_source', '') or '')
-        if not body_source:
-            body_source = next(iter(raw.get('body_sources', []) or []), '')
-        if not speaker_source:
-            speaker_source = next(iter(raw.get('speaker_sources', []) or []), '')
-        source_rules = {identity: [StructureRule(**rule) for rule in rules]
-                        for identity, rules in raw.get('source_rules', {}).items()}
-    else:
-        legacy_roles = {hook.identity: str(data.get('role', 'text'))
-                        for hook, data in zip(hooks, raw_hooks)}
-        body_source = next((identity for identity in identities
-                            if legacy_roles.get(identity) != 'speaker'), '')
-        speaker_source = next((identity for identity in identities
-                               if legacy_roles.get(identity) == 'speaker'), '')
-        old_rules = ([StructureRule(**rule) for rule in raw['structure_rules']]
-                     if 'structure_rules' in raw else list(DEFAULT_STRUCTURE_RULES))
-        source_rules = {}
-        if body_source:
-            source_rules[body_source] = list(old_rules)
-        if speaker_source:
-            source_rules[speaker_source] = [SPEAKER_ONLY_RULE]
+    body_source = str(raw.get('body_source', '') or '')
+    speaker_source = str(raw.get('speaker_source', '') or '')
+    source_rules = {identity: [StructureRule(**rule) for rule in rules]
+                    for identity, rules in raw.get('source_rules', {}).items()}
     p = Profile(
         id=raw['id'], name=raw['name'], hooks=hooks,
         body_source=body_source, speaker_source=speaker_source, source_rules=source_rules,
@@ -177,23 +141,16 @@ def _read_profile(raw: dict) -> Profile:
         ocr=OCRSettings(**{**raw.get('ocr', {}),
                          'region': tuple(raw.get('ocr', {}).get('region', (0, 0, 640, 180)))}),
         native_helper=raw.get('native_helper', ''),
-        # Free-ASR artifacts are not representation-compatible with the
-        # phoneme-CTC aligner.  A settings-v4 file written by an older AutoAdv
-        # revision may still contain ``asr_model``/``asr_tokens``; deliberately
-        # ignore those paths so the managed alignment runtime becomes the
-        # source of truth instead of attempting a false compatibility mapping.
         alignment_model=raw.get('alignment_model', ''),
         alignment_vocab=raw.get('alignment_vocab', ''),
         next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
-        inherit_common=[('per_reading_unit_wait_ms' if k == 'per_character_wait_ms' else k)
-                        for k in raw.get('inherit_common', [])
-                        if k not in ('asr_model', 'asr_tokens')],
+        inherit_common=list(raw.get('inherit_common', [])),
         reading_ms=raw.get('reading_ms', 700),
-        per_reading_unit_wait_ms=raw.get('per_reading_unit_wait_ms', raw.get('per_character_wait_ms', 200)),
+        per_reading_unit_wait_ms=raw.get('per_reading_unit_wait_ms', 200),
         hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
         hook_max_buffer=int(raw.get('hook_max_buffer', 3000)),
         hook_max_history=int(raw.get('hook_max_history', 1000000)),
-        repeat_rule=('each_flush' if raw.get('repeat_rule') == 'each_after_input' else raw.get('repeat_rule', 'distinct_only')),
+        repeat_rule=raw.get('repeat_rule', 'distinct_only'),
         input_key=int(raw.get('input_key', 13)))
     p.validate()
     return p
@@ -226,52 +183,11 @@ def save(catalog: Catalog, path: Path | None = None) -> None:
 def load(path: Path | None = None) -> Catalog:
     path = path or user_settings_path()
     if not path.exists():
-        previous = path.with_name('settings-v3.json')
-        if path.name == 'settings-v4.json' and previous.exists():
-            path = previous  # read-only migration source until user approval
-        else:
-            return Catalog()
+        return Catalog()
     raw = json.loads(path.read_text(encoding='utf-8'))
-    if raw.get('schema_version') not in (3, 4):
+    if raw.get('schema_version') != 4:
         raise ValueError('unsupported settings schema; original settings preserved')
-    review = []
-    if raw['schema_version'] == 3:
-        # No inference from old audio-routing policy to the new advance mode.
-        # Explicit old TTS use can be preserved, but uncertain fields need review.
-        review.append('旧4区分の進行モードには等価な移行先がありません。新規設定は文字のみ判断、本文時間フォールバックOFFです。')
-        common = raw.get('common', {})
-        common['default_tts'] = common.get('default_mode') == 'tts'
-        common.pop('default_mode', None)
-        common.pop('native_wait_ms', None)
-        if common.get('reading_ms', 700) <= 0:
-            review.append('共通設定のreading_ms=0を正の最低時間に変更しました。')
-            common['reading_ms'] = 700
-        for game in raw.get('games', {}).values():
-            for profile in game.get('profiles', {}).values():
-                former = profile.pop('default_mode', 'reading')
-                profile['default_tts'] = former == 'tts'
-                profile['speaker_tts'] = {k: v == 'tts' for k, v in profile.pop('speaker_modes', {}).items()}
-                profile.pop('native_wait_ms', None)
-                inherits_old_mode = 'default_mode' in profile.get('inherit_common', [])
-                profile['inherit_common'] = [k for k in profile.get('inherit_common', [])
-                                              if k not in ('default_mode', 'native_wait_ms')]
-                if inherits_old_mode:
-                    profile['inherit_common'].append('default_tts')
-                    review.append('旧音声既定値の継承がありました。TTS使用方針を確認してください。')
-                if profile.get('reading_ms', 700) <= 0:
-                    review.append(f"{profile.get('name')}: reading_ms=0を700msへ変更しました。")
-                    profile['reading_ms'] = 700
-        raw['common'] = common
     base_common = dict(raw.get('common', {}))
-    # Old free-ASR paths cannot be promoted to forced-alignment assets.  Drop
-    # them at the persistence boundary and use the managed alignment defaults
-    # unless an actual alignment override is already present.
-    base_common.pop('asr_model', None)
-    base_common.pop('asr_tokens', None)
-    if 'per_reading_unit_wait_ms' not in base_common and 'per_character_wait_ms' in base_common:
-        base_common['per_reading_unit_wait_ms'] = base_common.pop('per_character_wait_ms')
-    else:
-        base_common.pop('per_character_wait_ms', None)
     catalog = Catalog(raw.get('irodori_root', ''), raw.get('irodori_url', 'http://127.0.0.1:8088'),
                       raw.get('host_dll', ''), luna_imports=raw.get('luna_imports', {}),
                       common=CommonSettings(**{**base_common,
@@ -284,7 +200,4 @@ def load(path: Path | None = None) -> Catalog:
         catalog.games[gid] = Game(gid, row['name'], row.get('executable', ''),
                                   profiles, row['default_profile'], row.get('audio_executable', ''),
                                   row.get('input_executable', ''))
-    # Never overwrite the v3 source without an explicit GUI migration decision.
-    catalog.migration_review = review
-    catalog.migration_source = str(path) if review else ''
     return catalog

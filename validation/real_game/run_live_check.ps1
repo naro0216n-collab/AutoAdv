@@ -14,9 +14,6 @@ param(
     [switch] $Automated,
     [string] $Voice = '',
     [string] $IrodoriUrl = 'http://127.0.0.1:8088',
-    [string] $ProcessLoopbackHelper = '',
-    [string] $AlignmentModel = '',
-    [string] $AlignmentVocab = '',
     [int] $TimeoutSeconds = 120,
     [int] $MaxVoiceHoldMs = 0,
     [switch] $UncertainFallback,
@@ -209,30 +206,6 @@ public static class AudioRenderProbe {
                 continue_collection = ($Phase -eq 'accuracy');
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool]$UncertainFallback
-            }
-            # Accuracy deliberately exercises the same managed native runtime
-            # resolution as ordinary product use. Only the legacy/manual mixed
-            # and stress entrypoints accept explicit native-path overrides.
-            if ($Phase -in @('mixed', 'stress')) {
-                $nativeOverrides = @($ProcessLoopbackHelper, $AlignmentModel, $AlignmentVocab) |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-                if ($nativeOverrides.Count -gt 0) {
-                    if ($nativeOverrides.Count -ne 3) {
-                        throw 'Native audio overrides must provide helper, alignment model and alignment vocabulary together'
-                    }
-                    foreach ($dependency in @(
-                        @{ name = 'Process Loopback helper'; path = $ProcessLoopbackHelper },
-                        @{ name = 'alignment model'; path = $AlignmentModel },
-                        @{ name = 'alignment vocabulary'; path = $AlignmentVocab }
-                    )) {
-                        if (-not (Test-Path -LiteralPath $dependency.path -PathType Leaf)) {
-                            throw ("Live audio prerequisite is unavailable: " + $dependency.name)
-                        }
-                    }
-                    $config.helper = (Resolve-Path -LiteralPath $ProcessLoopbackHelper).Path
-                    $config.model = (Resolve-Path -LiteralPath $AlignmentModel).Path
-                    $config.vocab = (Resolve-Path -LiteralPath $AlignmentVocab).Path
-                }
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }
