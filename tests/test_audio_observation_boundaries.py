@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_buffer import AudioHistory
-from autoadv.audio_match import TargetMatcher, VoiceActivity, VADDecision, surface_key
+from autoadv.audio_match import TargetAlignment, TargetMatcher, VoiceActivity, VADDecision, surface_key
 from autoadv.g2p import PronunciationCandidate
 from autoadv.audio_evidence import VoiceEvidence, VoiceState, assess_voice
 from autoadv.conversation import Controller, Target, Token
@@ -392,25 +392,35 @@ class PacketVadBoundaryTests(unittest.TestCase):
             audio.close()
 
 class VoiceEvidenceArchitectureTests(unittest.TestCase):
-    def _evidence(self, alignment, *, target_last=None, boundary=None,
-                  vad_tail=0, vad_end=None, progressed=False):
+    def _evidence(self, alignment, *, kind='asr', previous=None,
+                  capture_end=2000, previous_capture_end=0, target_last=None,
+                  boundary=None, render_end=None, render_quiet_at=None,
+                  vad_tail=0, vad_end=None):
         return VoiceEvidence(
+            observation_kind=kind,
             alignment=alignment,
+            previous_alignment=previous or TargetAlignment(),
+            capture_end_ms=capture_end,
+            previous_capture_end_ms=previous_capture_end,
             target_last_token_ms=target_last, target_boundary_ms=boundary,
-            vad_onset_ms=None,
-            vad_tail_ms=vad_tail, vad_end_ms=vad_end,
-            target_progressed=progressed)
+            render_end_ms=render_end, render_quiet_at_ms=render_quiet_at,
+            vad_onset_ms=None, vad_tail_ms=vad_tail, vad_end_ms=vad_end)
 
-    def test_new_target_progress_is_playing_without_wall_clock_freshness(self):
-        alignment = TargetMatcher('おはようございます', g2p=TEST_G2P).align('おはようござ')
+
+    def test_new_target_support_in_new_pcm_is_playing(self):
+        matcher = TargetMatcher('おはようございます', g2p=TEST_G2P)
+        previous = matcher.align('おはよう')
+        alignment = matcher.align('おはようござ')
         assessed = assess_voice(self._evidence(
-            alignment, target_last=1900, progressed=True))
+            alignment, previous=previous, previous_capture_end=1800, target_last=1900))
         self.assertEqual(assessed.state, VoiceState.PLAYING)
 
-    def test_same_alignment_without_new_progress_is_inconclusive(self):
-        alignment = TargetMatcher('おはようございます', g2p=TEST_G2P).align('おはようござ')
+    def test_redecode_progress_confined_to_old_pcm_is_inconclusive(self):
+        matcher = TargetMatcher('おはようございます', g2p=TEST_G2P)
+        previous = matcher.align('おはよう')
+        alignment = matcher.align('おはようござ')
         assessed = assess_voice(self._evidence(
-            alignment, target_last=1900, progressed=False))
+            alignment, previous=previous, previous_capture_end=1950, target_last=1900))
         self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
 
     def test_following_token_boundary_ends_completed_target_without_vad_silence(self):
@@ -421,10 +431,10 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         self.assertEqual(assessed.estimated_end_ms, 1400)
         self.assertEqual(assessed.endpoint_source, 'asr_timestamp')
 
-    def test_completed_alignment_without_direct_endpoint_is_inconclusive(self):
+    def test_completed_alignment_without_direct_endpoint_remains_playing_when_new_pcm_supports_it(self):
         alignment = TargetMatcher('おはようございます', g2p=TEST_G2P).align('おはようございます')
         assessed = assess_voice(self._evidence(alignment, target_last=1000))
-        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+        self.assertEqual(assessed.state, VoiceState.PLAYING)
 
     def test_process_vad_endpoint_cannot_attribute_unrelated_speech(self):
         alignment = TargetMatcher('おはようございます', g2p=TEST_G2P).align('別の台詞です')
@@ -449,10 +459,12 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         self.assertEqual(last, 950)
         self.assertEqual(boundary, 1550)
 
-    def test_healthy_heartbeat_clears_transient_playing_without_fabricating_endpoint(self):
-        alignment = TargetMatcher('おはようございます', g2p=TEST_G2P).align('おはようござ')
+    def test_heartbeat_is_transport_observation_not_reused_as_playing(self):
+        matcher = TargetMatcher('おはようございます', g2p=TEST_G2P)
+        previous = matcher.align('おはよう')
+        alignment = matcher.align('おはようござ')
         initial = self._evidence(
-            alignment, target_last=950, progressed=True)
+            alignment, previous=previous, previous_capture_end=900, target_last=950)
         self.assertEqual(assess_voice(initial).state, VoiceState.PLAYING)
 
         observed = []
@@ -466,15 +478,26 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
             token = Token(1, 1)
             native.token = token
             native._latest_evidence = initial
+            native._last_pcm_end_ms = 1000
             native.health(CaptureHealth(1100, True, 'helper_alive'))
             self.assertEqual(len(observed), 1)
             refreshed = observed[0][1]
-            self.assertFalse(refreshed.target_progressed)
+            self.assertEqual(refreshed.observation_kind, 'transport')
+            self.assertEqual(refreshed.render_end_ms, 1000)
             self.assertEqual(assess_voice(refreshed).state, VoiceState.INCONCLUSIVE)
         finally:
             native.close()
 
-    def _native_audio_reports_raw_evidence_not_completion_state(self):
+    def test_sustained_render_quiescence_can_end_associated_target(self):
+        alignment = TargetMatcher('おはようございます', g2p=TEST_G2P).align('おはようございます')
+        assessed = assess_voice(self._evidence(
+            alignment, kind='transport', target_last=900,
+            render_end=1000, render_quiet_at=1300))
+        self.assertEqual(assessed.state, VoiceState.ENDED)
+        self.assertEqual(assessed.estimated_end_ms, 1000)
+        self.assertEqual(assessed.endpoint_source, 'render_quiescence')
+
+    def test_native_audio_reports_raw_evidence_not_completion_state(self):
         assessments = []
         metrics = []
         ready = threading.Event()
@@ -502,7 +525,8 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
             self.assertTrue(ready.wait(2))
             self.assertEqual(assessments[-1][1].state, VoiceState.ENDED)
             self.assertFalse(hasattr(native, 'completed'))
-            self.assertIn('target_progressed', metrics[-1])
+            self.assertIn('previous_matched_phonemes', metrics[-1])
+            self.assertNotIn('target_progressed', metrics[-1])
             self.assertNotIn('voice_state', metrics[-1])
             self.assertNotIn('evidence_score', metrics[-1])
         finally:

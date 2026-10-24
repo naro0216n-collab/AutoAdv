@@ -63,6 +63,19 @@ class PhoneticMatcherTests(unittest.TestCase):
         self.assertEqual(progress.phonetic_coverage, 1)
         self.assertEqual(progress.phonetic_edits, 0)
 
+
+    def test_observed_reading_alternative_is_considered_symmetrically(self):
+        correct = ('i', 'ch', 'i', 'b', 'a')
+        wrong = ('sh', 'i', 'j', 'o', 'o')
+        g2p = DictG2P({
+            '市場': [PronunciationCandidate(correct, 0)],
+            'いちば': [PronunciationCandidate(wrong, 0), PronunciationCandidate(correct, 1)],
+        })
+        alignment = TargetMatcher('市場', g2p=g2p).align('いちば')
+        self.assertEqual(alignment.phonetic_coverage, 1)
+        self.assertEqual(alignment.phonetic_edits, 0)
+        self.assertEqual(alignment.observed_reading_rank, 1)
+
     def test_dictionary_alternative_handles_context_reading_mismatch_without_unbounded_onkun(self):
         shijou = ('sh', 'i', 'j', 'o', 'o', 'e', 'i', 'k', 'u')
         ichiba = ('i', 'ch', 'i', 'b', 'a', 'e', 'i', 'k', 'u')

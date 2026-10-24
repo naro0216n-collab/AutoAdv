@@ -2,7 +2,7 @@
 import unittest
 
 from autoadv.audio_evidence import VoiceEvidence, VoiceState, assess_voice
-from autoadv.audio_match import TargetMatcher, surface_key
+from autoadv.audio_match import TargetAlignment, TargetMatcher, surface_key
 from autoadv.g2p import PronunciationCandidate
 from autoadv.conversation import Controller, Target
 from autoadv.model import Profile, AdvanceMode, HookSelection
@@ -17,17 +17,26 @@ class IdentityG2P:
 IDENTITY_G2P = IdentityG2P()
 
 
-def evidence(alignment, *, target_last_token_ms=None, target_boundary_ms=None,
-             vad_tail_ms=0, target_progressed=False):
+def evidence(alignment, *, observation_kind='asr', previous_alignment=None,
+             capture_end_ms=1000, previous_capture_end_ms=0,
+             target_last_token_ms=None, target_boundary_ms=None,
+             render_end_ms=None, render_quiet_at_ms=None,
+             vad_tail_ms=0, vad_end_ms=None):
     return VoiceEvidence(
+        observation_kind=observation_kind,
         alignment=alignment,
+        previous_alignment=previous_alignment or TargetAlignment(),
+        capture_end_ms=capture_end_ms,
+        previous_capture_end_ms=previous_capture_end_ms,
         target_last_token_ms=target_last_token_ms,
         target_boundary_ms=target_boundary_ms,
+        render_end_ms=render_end_ms,
+        render_quiet_at_ms=render_quiet_at_ms,
         vad_onset_ms=None,
         vad_tail_ms=vad_tail_ms,
-        vad_end_ms=(1000 - vad_tail_ms if vad_tail_ms else None),
-        target_progressed=target_progressed,
+        vad_end_ms=vad_end_ms,
     )
+
 
 
 class ASRCues(unittest.TestCase):
@@ -65,11 +74,42 @@ class ASRCues(unittest.TestCase):
         self.assertEqual(assessed.state, VoiceState.ENDED)
         self.assertEqual(assessed.estimated_end_ms, 900)
 
-    def test_target_progress_without_endpoint_is_playing(self):
-        alignment = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('おはようござ')
+    def test_target_support_in_new_pcm_is_playing(self):
+        matcher = TargetMatcher('おはようございます', g2p=IDENTITY_G2P)
+        previous = matcher.align('おはよう')
+        alignment = matcher.align('おはようござ')
         assessed = assess_voice(evidence(
-            alignment, target_last_token_ms=800, target_progressed=True))
+            alignment, previous_alignment=previous, previous_capture_end_ms=700,
+            target_last_token_ms=800))
         self.assertEqual(assessed.state, VoiceState.PLAYING)
+
+    def test_partial_target_can_end_at_acoustic_boundary_without_tail_recognition(self):
+        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
+        self.assertLess(alignment.phonetic_prefix_units, alignment.phonetic_target_units)
+        assessed = assess_voice(evidence(
+            alignment, target_last_token_ms=800, vad_tail_ms=220, vad_end_ms=900))
+        self.assertEqual(assessed.state, VoiceState.ENDED)
+        self.assertEqual(assessed.endpoint_source, 'asr_vad')
+
+    def test_successor_token_can_bound_small_unrecognized_tail(self):
+        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
+        assessed = assess_voice(evidence(
+            alignment, target_last_token_ms=800, target_boundary_ms=900))
+        self.assertEqual(assessed.state, VoiceState.ENDED)
+        self.assertEqual(assessed.endpoint_source, 'asr_timestamp')
+
+    def test_successor_token_does_not_excuse_large_unrecognized_tail(self):
+        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abc')
+        assessed = assess_voice(evidence(
+            alignment, target_last_token_ms=700, target_boundary_ms=900))
+        self.assertNotEqual(assessed.state, VoiceState.ENDED)
+
+    def test_partial_target_boundary_too_early_for_missing_tail_does_not_end(self):
+        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
+        assessed = assess_voice(evidence(
+            alignment, target_last_token_ms=890, vad_tail_ms=220, vad_end_ms=900))
+        self.assertEqual(assessed.state, VoiceState.PLAYING)
+        self.assertNotEqual(assessed.state, VoiceState.ENDED)
 
     def test_unconfigured_reading_does_not_match_by_surface_fallback(self):
         matcher = TargetMatcher('東京へ行く', g2p=IDENTITY_G2P)

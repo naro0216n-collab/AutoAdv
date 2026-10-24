@@ -1,8 +1,9 @@
 """Pure target alignment and acoustic observations for native audio.
 
 TargetMatcher does not decide whether a voice is playing or ended. It only
-normalizes the configured target and an ASR hypothesis, then reports bounded pronunciation alignment measurements. Temporal/acoustic observations
-and progression policy live outside this module.
+normalizes the configured target and an ASR hypothesis, then reports bounded
+pronunciation alignment measurements. Temporal/acoustic observations and
+progression policy live outside this module.
 """
 from __future__ import annotations
 from dataclasses import dataclass, replace
@@ -47,6 +48,7 @@ class TargetAlignment:
     phonetic_prefix_units: int = 0
     phonetic_edits: int = 0
     reading_rank: int = 0
+    observed_reading_rank: int = 0
     observed_token_count: int = 0
 
     @property
@@ -77,34 +79,38 @@ class TargetMatcher:
             alignment.phonetic_matches,
             -alignment.phonetic_edits,
             alignment.phonetic_prefix_units,
+            -(alignment.reading_rank + alignment.observed_reading_rank),
             -alignment.reading_rank,
+            -alignment.observed_reading_rank,
         )
 
     def _evaluate(self, hypothesis: str) -> TargetAlignment:
-        observed_candidates = self._g2p.candidates(hypothesis, max_candidates=1)
+        observed_candidates = self._g2p.candidates(hypothesis, max_candidates=4)
         if not self._target_pronunciations or not observed_candidates:
-            return TargetAlignment()
-        observed_phones = observed_candidates[0].phonemes
-        if not observed_phones or len(observed_phones) > self.MAX_PHONEMES:
             return TargetAlignment()
 
         best = None
-        for candidate in self._target_pronunciations:
-            target_phones = candidate.phonemes
-            if not target_phones or len(target_phones) > self.MAX_PHONEMES:
+        for observed in observed_candidates:
+            observed_phones = observed.phonemes
+            if not observed_phones or len(observed_phones) > self.MAX_PHONEMES:
                 continue
-            matches, prefix_units, edits = _align(target_phones, observed_phones)
-            alignment = TargetAlignment(
-                phonetic_matches=matches,
-                phonetic_target_units=len(target_phones),
-                phonetic_observed_units=len(observed_phones),
-                phonetic_prefix_units=prefix_units,
-                phonetic_edits=edits,
-                reading_rank=candidate.rank,
-            )
-            rank = self._alignment_rank(alignment)
-            if best is None or rank > best[0]:
-                best = (rank, alignment)
+            for candidate in self._target_pronunciations:
+                target_phones = candidate.phonemes
+                if not target_phones or len(target_phones) > self.MAX_PHONEMES:
+                    continue
+                matches, prefix_units, edits = _align(target_phones, observed_phones)
+                alignment = TargetAlignment(
+                    phonetic_matches=matches,
+                    phonetic_target_units=len(target_phones),
+                    phonetic_observed_units=len(observed_phones),
+                    phonetic_prefix_units=prefix_units,
+                    phonetic_edits=edits,
+                    reading_rank=candidate.rank,
+                    observed_reading_rank=observed.rank,
+                )
+                rank = self._alignment_rank(alignment)
+                if best is None or rank > best[0]:
+                    best = (rank, alignment)
         return best[1] if best is not None else TargetAlignment()
 
     def align(self, hypothesis: str, *, tokens=()) -> TargetAlignment:

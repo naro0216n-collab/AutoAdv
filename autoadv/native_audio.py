@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Callable
 import time
 from .audio_buffer import AudioHistory, PCMChunk
-from .audio_match import TargetMatcher, VoiceActivity
+from .audio_match import TargetAlignment, TargetMatcher, VoiceActivity
 from .audio_evidence import VoiceEvidence
 from .conversation import Token
 from .process_audio import ProcessCapture, CaptureHealth
@@ -127,8 +127,9 @@ class NativeAudio:
         self._vad_contains_speech = False
         self._pcm_reported = False
         self._latest_evidence: VoiceEvidence | None = None
-        self._last_target_matches = 0
-        self._last_target_token_ms = -1
+        self._previous_alignment = TargetAlignment()
+        self._previous_capture_end_ms: int | None = None
+        self._last_pcm_end_ms = -1
 
     def start(self):
         # Capture starts before the first HOOK: retain the first voice's PCM.
@@ -171,8 +172,9 @@ class NativeAudio:
         self.vad_end_ms = -1
         self.vad_tail_ms = 0
         self._latest_evidence = None
-        self._last_target_matches = 0
-        self._last_target_token_ms = -1
+        self._previous_alignment = TargetAlignment()
+        self._previous_capture_end_ms = None
+        self._last_pcm_end_ms = -1
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
         self._capture_stereo_peak = 0.0
@@ -209,10 +211,10 @@ class NativeAudio:
             # prefix after the replay horizon expires.
             self.history.retain_from(self.window_start_ms)
             self._reset_observation()
-            # Pre-HOOK replay may help END attribution, but it must not claim
-            # that the target is currently progressing.  Only target tokens
-            # positioned after the accepted HOOK can establish PLAYING.
-            self._last_target_token_ms = self.start_ms
+            # Pre-HOOK replay may help endpoint attribution, but target support
+            # wholly before the accepted HOOK is not current PLAYING evidence.
+            # The first ASR snapshot therefore compares against the HOOK time.
+            self._previous_capture_end_ms = self.start_ms
             # ProcessCapture pushes a packet before calling feed(). Replaying
             # under this lock makes an in-flight packet idempotent.
             buffered = self.history.since(self.window_start_ms)
@@ -268,10 +270,12 @@ class NativeAudio:
             self.history.release_retention()
 
     def health(self, status: CaptureHealth):
-        """Record transport health without turning heartbeat into audio evidence.
+        """Record transport health as transport facts, not voice semantics.
 
-        A healthy heartbeat after PCM stops can clear a transient PLAYING
-        observation, but it never fabricates an endpoint or an absent voice.
+        The helper emits a heartbeat only after process-loopback DataAvailable
+        has stopped.  That is a render-quiescence observation, not proof that a
+        target voice ended or that no voice exists.  The pure assessment layer
+        combines it with target attribution and timing facts.
         """
         refreshed = None
         token = None
@@ -284,8 +288,11 @@ class NativeAudio:
                     self._capture_heartbeats += 1
                     latest = self._latest_evidence
                     if (not self._inflight and self.token is not None and latest is not None
-                            and latest.target_progressed):
-                        refreshed = replace(latest, target_progressed=False)
+                            and self._last_pcm_end_ms >= 0):
+                        refreshed = replace(
+                            latest, observation_kind='transport',
+                            render_end_ms=self._last_pcm_end_ms,
+                            render_quiet_at_ms=status.at_ms)
                         self._latest_evidence = refreshed
                         token = self.token
             else:
@@ -337,6 +344,7 @@ class NativeAudio:
             return None
         self._last_processed_ms = chunk.at_ms
         self._last_processed_chunk = chunk
+        self._last_pcm_end_ms = max(self._last_pcm_end_ms, int(chunk.at_ms))
         samples = None
         pcm_frames = None
         token, generation = self.token, self._generation
@@ -494,24 +502,25 @@ class NativeAudio:
                                              else submitted_vad_tail_ms))
                 vad_end = (self.vad_end_ms if submitted_end_ms is None
                            else submitted_end_ms)
-                target_progressed = bool(
-                    target_last_ms is not None
-                    and target_last_ms > self._last_target_token_ms
-                    and alignment.phonetic_matches > self._last_target_matches)
-                if target_last_ms is not None:
-                    self._last_target_token_ms = max(self._last_target_token_ms, target_last_ms)
-                self._last_target_matches = max(
-                    self._last_target_matches, alignment.phonetic_matches)
                 evidence = VoiceEvidence(
+                    observation_kind='asr',
                     alignment=alignment,
+                    previous_alignment=self._previous_alignment,
+                    capture_end_ms=capture_end_ms,
+                    previous_capture_end_ms=self._previous_capture_end_ms,
                     target_last_token_ms=target_last_ms,
                     target_boundary_ms=target_boundary_ms,
-                    target_progressed=target_progressed,
+                    render_end_ms=None,
+                    render_quiet_at_ms=None,
                     vad_onset_ms=(self.vad_onset_ms if self.vad_onset_ms >= 0 else None),
                     vad_tail_ms=tail_at_decode,
                     vad_end_ms=(int(vad_end) if vad_end is not None and vad_end >= 0 else None),
                 )
                 self._latest_evidence = evidence
+                self._previous_alignment = alignment
+                if capture_end_ms is not None:
+                    self._previous_capture_end_ms = max(
+                        capture_end_ms, self._previous_capture_end_ms or capture_end_ms)
 
             if self.on_inference and evidence is not None:
                 a = evidence.alignment
@@ -523,11 +532,14 @@ class NativeAudio:
                     'matched_phonemes': a.phonetic_matches,
                     'phonetic_edit_count': a.phonetic_edits,
                     'reading_rank': a.reading_rank,
+                    'observed_reading_rank': a.observed_reading_rank,
                     'asr_token_timestamp_count': len(result.timestamps),
                     'target_token_count': a.observed_token_count,
                     'target_last_token_ms': evidence.target_last_token_ms,
                     'target_boundary_ms': evidence.target_boundary_ms,
-                    'target_progressed': evidence.target_progressed,
+                    'capture_end_ms': evidence.capture_end_ms,
+                    'previous_capture_end_ms': evidence.previous_capture_end_ms,
+                    'previous_matched_phonemes': evidence.previous_alignment.phonetic_matches,
                     'vad_active': bool(submitted_vad_active),
                     'vad_contains_speech': bool(submitted_contains_speech),
                     'vad_onset_ms': evidence.vad_onset_ms,
