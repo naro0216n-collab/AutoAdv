@@ -228,6 +228,45 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
     finally:
         native.close()
 
+
+def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
+    history = AcousticObservationHistory()
+    history.add_vocal(tuple(
+        VocalActivityFrame(at_ms=at_ms, probability=probability)
+        for at_ms, probability in (
+            (960, .9), (976, .9), (992, .9),
+            (1008, .9), (1024, .9),
+        )
+    ))
+
+    crossing = history.summarize_vocal(
+        start_ms=1000, end_ms=1024, epoch_start_ms=1000)
+    assert crossing.active_across_epoch_boundary
+    assert crossing.post_boundary_onset_ms is None
+
+    history.add_vocal(tuple(
+        VocalActivityFrame(at_ms=at_ms, probability=probability)
+        for at_ms, probability in (
+            (1040, .1), (1056, .1), (1072, .9), (1088, .9),
+        )
+    ))
+    restarted = history.summarize_vocal(
+        start_ms=1000, end_ms=1088, epoch_start_ms=1000)
+    assert restarted.active_across_epoch_boundary
+    assert restarted.post_boundary_onset_ms == 1072
+
+    separated = AcousticObservationHistory()
+    separated.add_vocal((
+        VocalActivityFrame(at_ms=500, probability=.9),
+        VocalActivityFrame(at_ms=1008, probability=.9),
+        VocalActivityFrame(at_ms=1024, probability=.9),
+    ))
+    after_gap = separated.summarize_vocal(
+        start_ms=1000, end_ms=1024, epoch_start_ms=1000)
+    assert not after_gap.active_across_epoch_boundary
+    assert after_gap.post_boundary_onset_ms == 1008
+
+
 def test_vocal_recurrence_discounts_periodicity_already_explained_by_background_audio():
     def history_for(current_components):
         history = AcousticObservationHistory()

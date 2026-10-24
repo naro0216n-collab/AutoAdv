@@ -212,11 +212,14 @@ def test_alignment_reading_selection_and_utterance_progress_preserve_evidence_me
     assert (chosen.reading_rank, chosen.target_phonemes, chosen.committed_target_end) == (1, ('a', 'd', 'c'), True)
     lexical = LexicalProgressEvidence.from_alignment(chosen, 1320)
 
-    def vocal(*, first=1100, last=1580, end=1600, mean=.8, active=.8, pre=0.0):
+    def vocal(*, first=1100, last=1580, end=1600, mean=.8, active=.8, pre=0.0,
+              crosses_boundary=False, post_boundary_onset_ms=None):
         return HumanVocalEvidence(
             start_ms=1000, end_ms=end, frame_count=20, mean_probability=mean,
             peak_probability=.95, active_fraction=active, first_active_ms=first,
-            last_active_ms=last, pre_epoch_active_fraction=pre)
+            last_active_ms=last, pre_epoch_active_fraction=pre,
+            active_across_epoch_boundary=crosses_boundary,
+            post_boundary_onset_ms=post_boundary_onset_ms)
 
     # Full forced alignment is lexical evidence, not an utterance endpoint.
     estimator = UtteranceProgressEstimator()
@@ -271,12 +274,28 @@ def test_alignment_reading_selection_and_utterance_progress_preserve_evidence_me
         boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
     assert overlap.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
 
-    vad_continuity_only = UtteranceProgressEstimator().observe(NativeAudioObservation(
-        kind='acoustic', vocal=vocal(pre=.9), recurrence=VocalRecurrenceEvidence(),
-        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=1000,
-        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
-    assert vad_continuity_only.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
+    # Vocal activity that is already continuous across AutoAdv's presentation
+    # boundary is not enough to establish a finite event for the new target.
+    # A later measured onset can establish one without requiring lexical speech.
+    continuity = UtteranceProgressEstimator()
+    vad_continuity_only = continuity.observe(NativeAudioObservation(
+        kind='acoustic', vocal=vocal(
+            pre=.9, crosses_boundary=True, first=1010, last=1100,
+            end=1400, mean=.2, active=.2),
+        recurrence=VocalRecurrenceEvidence(), capture_start_ms=1000, capture_end_ms=1400,
+        boundary_at_ms=1000, boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert vad_continuity_only.state == UtteranceProgressState.UNRESOLVED
+    assert not vad_continuity_only.finite_vocal_observed
     assert not vad_continuity_only.persistent_vocal_observed
+
+    new_nonlexical = continuity.observe(NativeAudioObservation(
+        kind='acoustic', vocal=vocal(
+            pre=.9, crosses_boundary=True, post_boundary_onset_ms=1500,
+            first=1010, last=1580, end=1600),
+        recurrence=VocalRecurrenceEvidence(), capture_start_ms=1000, capture_end_ms=1600,
+        boundary_at_ms=1000, boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert new_nonlexical.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
+    assert new_nonlexical.finite_vocal_observed
 
     # Lexical completion without any observed human vocal event does not invent
     # a finite-vocal state.  This keeps an actually unvoiced line eligible for

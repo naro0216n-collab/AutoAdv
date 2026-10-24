@@ -203,11 +203,45 @@ class AcousticObservationHistory:
         probabilities = [f.probability for f in frames]
         active = [f for f in frames if f.probability >= self.ACTIVE_PROBABILITY]
         pre_epoch: list[VocalActivityFrame] = []
+        active_across_boundary = False
+        post_boundary_onset_ms = active[0].at_ms if active else None
         if epoch_start_ms is not None:
             # Look behind a boundary only to describe persistence; the interval
             # is not used as an invented start time for the new utterance.
             pre_start = max(0, epoch_start_ms - 1500)
             pre_epoch = [f for f in self._vocal if pre_start <= f.at_ms < epoch_start_ms]
+
+            # Preserve a factual distinction between vocal activity that already
+            # crossed the presentation boundary and a new threshold crossing
+            # observed afterwards.  This does not identify a speaker or decide
+            # that either activity belongs to the target utterance.
+            before = pre_epoch[-1] if pre_epoch else None
+            after = frames[0] if frames else None
+            if before is not None and after is not None:
+                pre_near = pre_epoch[-8:]
+                post_near = frames[:8]
+                gaps = [
+                    b.at_ms - a.at_ms
+                    for segment in (pre_near, post_near)
+                    for a, b in zip(segment, segment[1:])
+                    if b.at_ms > a.at_ms
+                ]
+                nominal_gap = float(np.median(gaps)) if gaps else 16.0
+                active_across_boundary = bool(
+                    before.probability >= self.ACTIVE_PROBABILITY and
+                    after.probability >= self.ACTIVE_PROBABILITY and
+                    after.at_ms - before.at_ms <= max(32.0, nominal_gap * 2.0)
+                )
+
+            previous_active = active_across_boundary
+            post_boundary_onset_ms = None
+            for frame in frames:
+                current_active = frame.probability >= self.ACTIVE_PROBABILITY
+                if current_active and not previous_active:
+                    post_boundary_onset_ms = frame.at_ms
+                    break
+                previous_active = current_active
+
         return HumanVocalEvidence(
             start_ms=int(start_ms), end_ms=int(end_ms), frame_count=len(frames),
             mean_probability=float(np.mean(probabilities)) if probabilities else 0.0,
@@ -218,6 +252,8 @@ class AcousticObservationHistory:
             pre_epoch_active_fraction=(
                 sum(f.probability >= self.ACTIVE_PROBABILITY for f in pre_epoch) / len(pre_epoch)
                 if pre_epoch else 0.0),
+            active_across_epoch_boundary=active_across_boundary,
+            post_boundary_onset_ms=post_boundary_onset_ms,
         )
 
     @staticmethod

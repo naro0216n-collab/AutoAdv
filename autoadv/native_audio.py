@@ -438,6 +438,10 @@ class NativeAudio:
                     "vocal_mean_probability": round(observation.vocal.mean_probability, 4) if observation.vocal else 0.0,
                     "vocal_active_fraction": round(observation.vocal.active_fraction, 4) if observation.vocal else 0.0,
                     "vocal_last_active_ms": observation.vocal.last_active_ms if observation.vocal else None,
+                    "vocal_active_across_epoch_boundary": (
+                        observation.vocal.active_across_epoch_boundary if observation.vocal else False),
+                    "vocal_post_boundary_onset_ms": (
+                        observation.vocal.post_boundary_onset_ms if observation.vocal else None),
                     "recurrence_strength": round(observation.recurrence.strength, 4) if observation.recurrence else 0.0,
                     "recurrence_period_ms": observation.recurrence.period_ms if observation.recurrence else None,
                     "recurrence_stability": round(observation.recurrence.period_stability, 4) if observation.recurrence else 0.0,

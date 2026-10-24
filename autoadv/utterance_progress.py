@@ -22,6 +22,8 @@ class HumanVocalEvidence:
     first_active_ms: int | None
     last_active_ms: int | None
     pre_epoch_active_fraction: float
+    active_across_epoch_boundary: bool = False
+    post_boundary_onset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -156,12 +158,25 @@ class UtteranceProgressEstimator:
 
         vocal = observation.vocal
         if vocal is not None and vocal.first_active_ms is not None:
-            self._seen_vocal = True
-            self._first_active_ms = (vocal.first_active_ms if self._first_active_ms is None
-                                     else min(self._first_active_ms, vocal.first_active_ms))
-            if vocal.last_active_ms is not None:
-                self._last_active_ms = (vocal.last_active_ms if self._last_active_ms is None
-                                        else max(self._last_active_ms, vocal.last_active_ms))
+            # Human-vocal activity that was already continuous across AutoAdv's
+            # presentation boundary is not, by itself, evidence that the new
+            # target owns a finite vocal event.  It may simply be the previous
+            # line's tail or a background voice.  Establish current finite-vocal
+            # ownership only when the known text is acoustically associated, or
+            # when the observer sees a new vocal onset after the boundary.
+            finite_vocal_established = bool(
+                self._target_associated or
+                not vocal.active_across_epoch_boundary or
+                vocal.post_boundary_onset_ms is not None
+            )
+            if finite_vocal_established:
+                self._seen_vocal = True
+                onset_ms = vocal.post_boundary_onset_ms or vocal.first_active_ms
+                self._first_active_ms = (onset_ms if self._first_active_ms is None
+                                         else min(self._first_active_ms, onset_ms))
+                if vocal.last_active_ms is not None:
+                    self._last_active_ms = (vocal.last_active_ms if self._last_active_ms is None
+                                            else max(self._last_active_ms, vocal.last_active_ms))
 
         recurrence = observation.recurrence or VocalRecurrenceEvidence()
         # Persistent-source identity requires recurrence evidence.  Human-vocal
