@@ -3,7 +3,8 @@ import io
 from pathlib import Path
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
-from autoadv.hook_host_worker import NativeHost, ipc_json
+from autoadv.hook_host_worker import (NativeHost, _full_string_hook_code,
+                                      _luna_output_content, ipc_json)
 from autoadv.luna_abi import load_exports
 from autoadv.hook_host import parse_host_event, HookHost
 from autoadv.luna_abi import validate_abi
@@ -20,6 +21,24 @@ class NativeBoundary(unittest.TestCase):
         packet['process_id'] = 32
         with self.assertRaises(ValueError):
             parse_host_event(packet)
+
+    def test_full_string_transport_separator_is_removed_without_trimming_content(self):
+        # Generated H-code variants cover plain, embedded and custom-filter
+        # FULL_STRING hooks. The boundary removes LunaHost framing rather than
+        # applying a generic strip to dialogue content.
+        for code in ('HQF0@1', 'EXHQXFN0@1', 'ENHQXFN0@1'):
+            with self.subTest(code=code):
+                self.assertTrue(_full_string_hook_code(code))
+                self.assertEqual(_luna_output_content(code, '話者\n本文\n'), '話者\n本文')
+                self.assertEqual(_luna_output_content(code, '本文\n\n'), '本文\n')
+                self.assertEqual(_luna_output_content(code, '  本文  \n'), '  本文  ')
+        self.assertEqual(_luna_output_content('HQF0@1', '\n'), '\n')
+
+    def test_non_full_string_output_preserves_terminal_newline(self):
+        for code in ('HQ0@1', 'EXHQXN0@1', 'RS@1'):
+            with self.subTest(code=code):
+                self.assertFalse(_full_string_hook_code(code))
+                self.assertEqual(_luna_output_content(code, '本文\n'), '本文\n')
 
     def test_worker_json_does_not_fail_cp932_on_upstream_diagnostics(self):
         # The game DLL may emit Simplified Chinese irrespective of the local

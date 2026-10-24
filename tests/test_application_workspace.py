@@ -1557,10 +1557,10 @@ def test_capture_source_rule_commands_remain_inside_capture_transaction():
     assert calls == ['save']
 
 
-def test_capture_history_preserves_original_spaces_and_width():
+def test_capture_history_preserves_original_spaces_width_and_source_newline():
     app, _ = app_with_game()
     hook = source('RAW', 9)
-    raw = '  ＡＢＣ１２３　ﾊﾟﾋﾟﾌﾟ  '
+    raw = '  ＡＢＣ１２３　ﾊﾟﾋﾟﾌﾟ  \n'
     app.capture.observe(hook, raw, sequence=1)
     sample = app.capture_view().candidates[0]
     assert sample.history == (raw,)

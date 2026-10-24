@@ -13,6 +13,53 @@ from .luna_runtime import LunaRuntime, inject, is_process_64bit
 from .luna_abi import (ThreadParam,SearchParam,PROCESS,CREATE,THREAD,OUTPUT,INFO,
                        INSERT,EMBED,I18N,EMU,FIND,load_exports,validate_abi)
 
+
+def _full_string_hook_code(code: str) -> bool:
+    """Return whether a generated Luna H-code carries FULL_STRING.
+
+    This follows the stable prefix grammar in the pinned upstream
+    ``GenerateHCode`` implementation. It is intentionally not a general hook
+    code parser: the worker only needs the one flag that defines LunaHost's
+    synthetic terminal separator contract.
+    """
+    if not isinstance(code, str) or not code:
+        return False
+    index = 0
+    if code[index:index + 1] == 'E':
+        index += 1
+        if code[index:index + 1] == 'X':
+            index += 1
+        else:
+            if code[index:index + 1] == 'D':
+                index += 1
+            if code[index:index + 1] in ('N', 'O'):
+                index += 1
+    if code[index:index + 1] not in ('H', 'B'):
+        return False
+    index += 1
+    if code[index:index + 1] not in ('S', 'M', 'Q', 'U', 'V', 'W', 'C', 'I', 'A', 'B'):
+        return False
+    index += 1
+    if code[index:index + 1] == 'X':
+        index += 1
+    return code[index:index + 1] == 'F'
+
+
+def _luna_output_content(code: str, text: str | None) -> str:
+    """Remove only LunaHost's own terminal FULL_STRING separator.
+
+    Upstream ``TextThread::Push`` appends one ``\n`` after a FULL_STRING
+    fragment (except one-character fragments while delayed flushing is active).
+    Internal separators are meaningful aggregation structure and remain intact.
+    A single newline is therefore preserved: it can only be source content under
+    delayed flushing, while zero-delay FULL_STRING output would contain the
+    source newline plus the synthetic newline.
+    """
+    value = text or ''
+    if _full_string_hook_code(code) and len(value) > 1 and value.endswith('\n'):
+        return value[:-1]
+    return value
+
 class NativeHost:
     def __init__(self,dll_path:Path,send):
         self.send=send
@@ -55,7 +102,8 @@ class NativeHost:
             PROCESS(lambda pid:self._disconnected(pid)),
             CREATE(lambda code,n,tp,emb:self.emit('created',tp=tp,code=code,name=name(n),detail=str(bool(emb)))),
             THREAD(lambda code,n,tp:self.emit('removed',tp=tp,code=code,name=name(n))),
-            OUTPUT(lambda code,n,tp,s:self.emit('output',tp=tp,code=code,name=name(n),text=s)),
+            OUTPUT(lambda code,n,tp,s:self.emit('output',tp=tp,code=code,name=name(n),
+                                                   text=_luna_output_content(code, s))),
             INFO(lambda t,s:self.emit('diagnostic',detail=f'{t}: {s}')),
             INSERT(lambda pid,address,code:self.emit('inserted',pid=pid,code=code,detail=str(address))),
             EMBED(lambda s,tp:self.emit('diagnostic',tp=tp,detail='embed_callback_ignored')),
