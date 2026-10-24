@@ -220,7 +220,7 @@ public static class AudioRenderProbe {
                 phase = $Phase; timeout_seconds = $TimeoutSeconds;
                 dialogues = $(switch ($Phase) {
                     'hook' { 1 }; 'reading' { 3 };
-                    'accuracy' { @((Get-Content (Join-Path $repo 'validation\real_game\ADVANCEMENT_ACCURACY_SCENARIO.json') -Raw | ConvertFrom-Json).lines).Count };
+                    'accuracy' { @((Get-Content -LiteralPath (Join-Path $repo 'validation\real_game\ADVANCEMENT_ACCURACY_SCENARIO.json') -Raw -Encoding UTF8 | ConvertFrom-Json).lines).Count };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
                 continue_collection = ($Phase -eq 'accuracy');
