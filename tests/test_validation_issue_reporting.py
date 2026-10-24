@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
+import re
+import zipfile
 from pathlib import Path
 import tempfile
 import unittest
@@ -63,6 +67,18 @@ def _write_summary(root: Path, *, accuracy: dict | None = None) -> None:
     )
 
 
+def _decode_evidence(body: str) -> dict[str, bytes]:
+    match = re.search(
+        re.escape(issue_reporting.EVIDENCE_MARKER) + r".*?```text\n(?P<data>[A-Za-z0-9+/=]+)\n```",
+        body,
+        re.S,
+    )
+    if not match:
+        raise AssertionError("analysis evidence bundle not found")
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(match.group("data")))) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
 def _comments() -> list[dict]:
     runs = {
         1: "20261023T130049Z-36c5ea8d",
@@ -109,6 +125,41 @@ class _FakeIssueClient:
 
 
 class IssueReportingContract(unittest.TestCase):
+
+    def test_snapshot_embeds_reconstructable_analysis_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "20261023T134156Z-b10d6904"
+            root.mkdir()
+            _write_summary(root, accuracy=_phase("accuracy"))
+            trace = b'{"event":"decision","case":1}\n{"event":"input","case":1}\n'
+            report = {"line_results": [{"scenario": "case-1"}], "performance": {}}
+            oracle = b'{"event":"voice_end","case":1}\n'
+            (root / "autoadv-accuracy.jsonl").write_bytes(trace)
+            (root / "autoadv-accuracy.result.json").write_text(
+                json.dumps(report, ensure_ascii=False), encoding="utf-8"
+            )
+            (root / "autoadv-game-test.jsonl").write_bytes(oracle)
+            (root / "validation.log").write_text(
+                "path C:\\Users\\private\\x token github_pat_1234567890abcdef\n",
+                encoding="utf-8",
+            )
+
+            snapshot = issue_reporting.format_snapshot(root, "a" * 40)
+            evidence = _decode_evidence(snapshot.body)
+
+            self.assertEqual(evidence["autoadv-accuracy.jsonl"], trace)
+            self.assertEqual(evidence["autoadv-game-test.jsonl"], oracle)
+            self.assertEqual(
+                json.loads(evidence["autoadv-accuracy.result.json"].decode("utf-8")), report
+            )
+            manifest = json.loads(evidence["manifest.json"].decode("utf-8"))
+            self.assertEqual(manifest["schema"], "autoadv-analysis-evidence-v1")
+            self.assertEqual(manifest["run"], root.name)
+            log = evidence["validation.log"].decode("utf-8")
+            self.assertIn("<USERPROFILE>\\x", log)
+            self.assertIn("<REDACTED-TOKEN>", log)
+            self.assertNotIn("C:\\Users\\private", log)
+
     def test_snapshot_accepts_missing_optional_accuracy_line_fields(self):
         with tempfile.TemporaryDirectory(prefix="20261023T134156Z-b10d6904-") as directory:
             root = Path(directory) / "20261023T134156Z-b10d6904"

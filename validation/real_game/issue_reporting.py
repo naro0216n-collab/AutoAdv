@@ -8,15 +8,21 @@ Windows console encoding boundary.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import io
 import json
 import re
 import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 HISTORY_SLOT_COUNT = 4
+MAX_ISSUE_BODY_CHARS = 64_000
+EVIDENCE_MARKER = "<!-- autoadv-analysis-evidence:zip+base64 -->"
 BASELINE_MARKER = "<!-- autoadv-validation-baseline -->"
 RUN_MARKER_RE = re.compile(
     r"<!--\s*autoadv-validation-run:(?P<run>\d{8}T\d{6}Z-[A-Za-z0-9_-]+)\s*-->"
@@ -72,6 +78,83 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise ValueError(f"expected JSON object: {path}")
     return value
+
+
+
+
+def _analysis_evidence_archive(root: Path, sha: str) -> tuple[str, str, list[dict[str, Any]]]:
+    """Return a compact, reconstructable bundle of the evidence needed for analysis.
+
+    The bundle intentionally excludes redistributable/non-redistributable media and runtime
+    artifacts.  It contains only structured measurement evidence plus a sanitized transcript.
+    """
+    candidates: list[Path] = [
+        root / "validation-summary.json",
+        root / "autoadv-accuracy.result.json",
+        root / "autoadv-accuracy.jsonl",
+    ]
+    candidates.extend(sorted(root.glob("autoadv-game-*.jsonl")))
+
+    payloads: list[tuple[str, bytes]] = []
+    for path in candidates:
+        if path.is_file():
+            payloads.append((path.name, path.read_bytes()))
+
+    log_path = root / "validation.log"
+    if log_path.is_file():
+        sanitized = sanitize_public_issue(
+            log_path.read_text(encoding="utf-8-sig", errors="replace")
+        ).encode("utf-8")
+        payloads.append(("validation.log", sanitized))
+
+    if not payloads:
+        raise ValueError("No analysis evidence exists to upload")
+
+    manifest_files = [
+        {
+            "name": name,
+            "bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+        for name, content in payloads
+    ]
+    manifest = {
+        "schema": "autoadv-analysis-evidence-v1",
+        "run": root.name,
+        "commit": sha,
+        "files": manifest_files,
+    }
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, separators=(",", ":")))
+        for name, content in payloads:
+            archive.writestr(name, content)
+    archive_bytes = buffer.getvalue()
+    return (
+        base64.b64encode(archive_bytes).decode("ascii"),
+        hashlib.sha256(archive_bytes).hexdigest(),
+        manifest_files,
+    )
+
+
+def _append_analysis_evidence(lines: list[str], root: Path, sha: str) -> None:
+    encoded, digest, manifest_files = _analysis_evidence_archive(root, sha)
+    listed = ", ".join(item["name"] for item in manifest_files)
+    lines.extend((
+        "",
+        "<details><summary>analysis evidence bundle</summary>",
+        "",
+        EVIDENCE_MARKER,
+        f"ZIP SHA-256: `{digest}`",
+        f"Files: `{listed}`",
+        "Decode the following base64 as a ZIP archive; `manifest.json` contains per-file SHA-256 values.",
+        "",
+        "```text",
+        encoded,
+        "```",
+        "</details>",
+    ))
 
 
 def baseline_eligible(summary: dict[str, Any]) -> bool:
@@ -174,6 +257,8 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         _limited_items(lines, "Diagnostics", report.get("diagnostics"), 8)
         lines.extend(("", "</details>"))
 
+    _append_analysis_evidence(lines, root, sha)
+
     accuracy_phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "accuracy"), None)
     if isinstance(accuracy_phase, dict) and not accuracy_phase.get("report_present"):
         log_path = root / "validation.log"
@@ -189,7 +274,12 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
                     sanitize_public_issue("\n".join(diagnostic)), "```", "</details>",
                 ))
 
-    return Snapshot(run=run, body="\n".join(lines), summary=summary)
+    body = "\n".join(lines)
+    if len(body) > MAX_ISSUE_BODY_CHARS:
+        raise ValueError(
+            f"Issue diagnostics exceed bounded comment size: {len(body)} > {MAX_ISSUE_BODY_CHARS}"
+        )
+    return Snapshot(run=run, body=body, summary=summary)
 
 
 def _run_from_body(body: str) -> str | None:

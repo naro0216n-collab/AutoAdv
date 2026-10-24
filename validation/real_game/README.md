@@ -66,7 +66,11 @@ JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifa
 
 ## Issue診断面
 
-Windows実機計測のGitHub Issueは、チャット環境から比較・解析できるリモート診断面として使う。4個の固定履歴slotをリングとして扱い、通常runは同一runのslotまたは最古slotの1件だけをPATCHする。別に直近の完全計測・recoveryなし・voice safety成立runをbaselineとして保持する。完全なJSONLとtranscriptはローカルrun directoryにも残す。Issue更新は計測後の共有処理であり、GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
+Windows実機計測のGitHub Issueは、チャット環境から比較・解析できるリモート診断面として使う。4個の固定履歴slotをリングとして扱い、通常runは同一runのslotまたは最古slotの1件だけをPATCHする。別に直近の完全計測・recoveryなし・voice safety成立runをbaselineとして保持する。
+
+各履歴・baseline commentには、人が読む要約だけでなく、精度解析を再実行できる構造化証拠をZIP圧縮・base64化して同梱する。対象は`validation-summary.json`、`autoadv-accuracy.result.json`、`autoadv-accuracy.jsonl`、game oracle JSONL、sanitized transcriptであり、各fileのSHA-256をmanifestへ記録する。検証用音声・fixture・runtime・再配布不可素材は含めない。これによりローカルrun directoryへアクセスできないチャット環境でも、Issue commentだけからケース単位のtrace・alignment・oracleを復元して解析できることを共有契約とする。
+
+完全な証拠はローカルrun directoryにも残す。Issue更新は計測後の共有処理であり、GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
 
 ## Alignment品質・stress計測
 
