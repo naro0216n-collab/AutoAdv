@@ -13,7 +13,8 @@ from autoadv.utterance_progress import (
 )
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import HaqumeiG2P, PronunciationCandidate, count_reading_units, reading_units_from_candidates
-from autoadv.model import ReplacementRule, StructureRule, interpret, matching_structure_rule, resolve_speaker_enclosed_body
+from autoadv.model import (ReplacementRule, SPEAKER_NEWLINE_BODY_RULE, StructureRule, interpret,
+                          matching_structure_rule, resolve_speaker_enclosed_body)
 from tests.contracts_support import profile
 from tests.g2p_support import FakeG2P, TEST_G2P
 
@@ -82,9 +83,16 @@ def test_text_interpretation_keeps_display_content_separate_from_pronunciation_v
     for raw in (
         'これは説明です：https://example.org/voice',
         '彼は「京：おはよう」と書いた。',
+        'また、東寺のように、\nはあ',
     ):
         prose = interpret(raw, profile(), session=1, line=2, source='hook', sequence=2, g2p=TEST_G2P)
         assert (prose.speaker, prose.text) == ('', raw)
+
+    explicit_newline = profile()
+    explicit_newline.source_rules['hook'] = [SPEAKER_NEWLINE_BODY_RULE]
+    structured = interpret('明日香\n本文', explicit_newline, session=1, line=3,
+                           source='hook', sequence=3, g2p=TEST_G2P)
+    assert (structured.speaker, structured.text) == ('明日香', '本文')
 
 
 def test_registered_readings_apply_only_to_complete_unprotected_word_spans():

@@ -200,7 +200,7 @@ class SessionDriver:
             ocr_region=profile.ocr.region,
             ocr_stable_samples=profile.ocr.stable_samples,
             insert_pc_hooks=profile.insert_pc_hooks,
-            hook_flush_ms=200,
+            hook_flush_ms=profile.hook_flush_ms,
             hook_codepage=profile.hook_codepage,
             hook_max_buffer=profile.hook_max_buffer,
             hook_max_history=profile.hook_max_history,

@@ -137,23 +137,28 @@ class ReplacementRule:
 
 # Extraction works on an NFKC-normalized copy.  These are structural patterns,
 # not title-specific exceptions.  More unusual layouts remain editable per source.
-DEFAULT_STRUCTURE_RULES = (
-    StructureRule(r'^\s*(?P<speaker>[^\s「」『』\n]{1,40})\s*[「『](?P<body>.*)[」』]\s*$'),
-    StructureRule(r'^\s*(?P<speaker>[^\n]{1,40})\n(?P<body>.+)$'),
-    # A colon in dialogue (notably https://) is not a speaker separator.
-    StructureRule(r'^\s*(?P<speaker>[^\s「」『』、。，．！？!?():\n]{1,40})\s*[:]\s*(?!https?://)(?P<body>.+)$'),
-    # Common engine metadata layout: NAME (line/id/voice tag) BODY.
-    StructureRule(r'^\s*(?P<speaker>\S{1,40})\s+\([^\n)]{1,80}\)\s*(?P<body>.+)$'),
-    StructureRule(r'^\s*[「『](?P<body>.*)[」』]\s*$'),
-)
-
 BODY_ONLY_RULE = StructureRule(r'^\s*(?P<body>.*)\s*$')
 SPEAKER_ONLY_RULE = StructureRule(r'^\s*(?P<speaker>.*?)\s*$')
-SPEAKER_QUOTED_BODY_RULE = DEFAULT_STRUCTURE_RULES[0]
-SPEAKER_NEWLINE_BODY_RULE = DEFAULT_STRUCTURE_RULES[1]
-SPEAKER_COLON_BODY_RULE = DEFAULT_STRUCTURE_RULES[2]
-SPEAKER_METADATA_BODY_RULE = DEFAULT_STRUCTURE_RULES[3]
-QUOTED_BODY_RULE = DEFAULT_STRUCTURE_RULES[4]
+SPEAKER_QUOTED_BODY_RULE = StructureRule(
+    r'^\s*(?P<speaker>[^\s「」『』\n]{1,40})\s*[「『](?P<body>.*)[」』]\s*$')
+# A bare newline is inherently ambiguous: it may be an engine/UI aggregation,
+# wrapped dialogue, or a real speaker/body format.  Keep it as an explicit
+# per-source preset, but never infer it automatically.
+SPEAKER_NEWLINE_BODY_RULE = StructureRule(
+    r'^\s*(?P<speaker>[^\n]{1,40})\n(?P<body>.+)$')
+# A colon in dialogue (notably https://) is not a speaker separator.
+SPEAKER_COLON_BODY_RULE = StructureRule(
+    r'^\s*(?P<speaker>[^\s「」『』、。，．！？!?():\n]{1,40})\s*[:]\s*(?!https?://)(?P<body>.+)$')
+SPEAKER_METADATA_BODY_RULE = StructureRule(
+    r'^\s*(?P<speaker>\S{1,40})\s+\([^\n)]{1,80}\)\s*(?P<body>.+)$')
+QUOTED_BODY_RULE = StructureRule(r'^\s*[「『](?P<body>.*)[」』]\s*$')
+
+DEFAULT_STRUCTURE_RULES = (
+    SPEAKER_QUOTED_BODY_RULE,
+    SPEAKER_COLON_BODY_RULE,
+    SPEAKER_METADATA_BODY_RULE,
+    QUOTED_BODY_RULE,
+)
 
 EXTRACTION_PRESETS: dict[str, tuple[StructureRule, ...]] = {
     'auto': DEFAULT_STRUCTURE_RULES,
