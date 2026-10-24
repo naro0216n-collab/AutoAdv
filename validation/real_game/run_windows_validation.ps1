@@ -229,9 +229,9 @@ try {
     catch { throw "Standard AutoAdv runtime result cannot be parsed: $($_.Exception.Message)" }
     $python = [string]$runtimeInfo.python
     $managedHelper = [string]$runtimeInfo.native.paths.helper_dll
-    $managedAsrModel = [string]$runtimeInfo.native.paths.asr_model
-    $managedAsrTokens = [string]$runtimeInfo.native.paths.asr_tokens
-    foreach ($required in @($python, $managedHelper, $managedAsrModel, $managedAsrTokens)) {
+    $managedAlignmentModel = [string]$runtimeInfo.native.paths.alignment_model
+    $managedAlignmentVocab = [string]$runtimeInfo.native.paths.alignment_vocab
+    foreach ($required in @($python, $managedHelper, $managedAlignmentModel, $managedAlignmentVocab)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "Standard AutoAdv runtime asset missing: $required"
         }
@@ -254,7 +254,7 @@ try {
             $stage = 'prepare-accuracy'
             Push-Location $repo
             try {
-                # Only fixture media remains measurement-specific. Product ASR,
+                # Only fixture media remains measurement-specific. Product alignment model,
                 # G2P and Process Loopback come from the standard AutoAdv runtime.
                 $mediaRoot = Join-Path $cache 'media'
                 Invoke-Checked 'python' @('-m','validation.real_game.prepare_accuracy_assets',

@@ -402,7 +402,7 @@ def run_gui() -> int:
 
             replacement = group('読み上げ・原音照合の詳細置換', page='game', section='replacement', detail=True)
             self.replacement_table=QTableWidget(0,5); self.replacement_table.setHorizontalHeaderLabels(['有効','一致対象','置換後','適用先','正規表現']); self.configure_editor_table(self.replacement_table); self.replacement_table.itemSelectionChanged.connect(self.show_replacement_rule); replacement.addRow(self.replacement_table)
-            self.replace_pattern=QLineEdit(); self.replace_value=QLineEdit(); self.replace_target=QComboBox(); self.replace_target.addItem('読み上げ(TTS)','tts'); self.replace_target.addItem('原音照合(ASR)','asr'); self.replace_target.addItem('両方','both'); self.replace_regex=QCheckBox('正規表現'); self.replace_enabled=QCheckBox('有効'); self.replace_enabled.setChecked(True)
+            self.replace_pattern=QLineEdit(); self.replace_value=QLineEdit(); self.replace_target=QComboBox(); self.replace_target.addItem('読み上げ(TTS)','tts'); self.replace_target.addItem('原音照合','match'); self.replace_target.addItem('両方','both'); self.replace_regex=QCheckBox('正規表現'); self.replace_enabled=QCheckBox('有効'); self.replace_enabled.setChecked(True)
             replacement.addRow('対象',self.replace_pattern); replacement.addRow('置換後',self.replace_value); replacement.addRow('適用先',self.replace_target); replacement.addRow(self.replace_regex); replacement.addRow(self.replace_enabled)
             row=QWidget(); lay=QHBoxLayout(row); lay.setContentsMargins(0,0,0,0)
             self.btn_replace=QPushButton('置換を追加・変更'); self.btn_replace.clicked.connect(self.add_replacement); self.btn_replace_new=QPushButton('新規'); self.btn_replace_new.clicked.connect(self.clear_replacement_editor); self.btn_replacement_remove=QPushButton('削除'); self.btn_replacement_remove.clicked.connect(self.remove_replacement); self.btn_replace_up=QPushButton('↑'); self.btn_replace_up.clicked.connect(lambda: self.move_replacement_rule(-1)); self.btn_replace_down=QPushButton('↓'); self.btn_replace_down.clicked.connect(lambda: self.move_replacement_rule(1))
@@ -424,13 +424,13 @@ def run_gui() -> int:
             target_details.addRow('ゲームEXE',self.game_exe); target_details.addRow('音声EXE',self.audio_exe); target_details.addRow('入力EXE',self.input_exe)
 
             audio_details = group('音声判断環境', page='game', section='audio_details', detail=True)
-            self.native_helper=QLineEdit(); self.asr_model=QLineEdit(); self.asr_tokens=QLineEdit()
+            self.native_helper=QLineEdit(); self.alignment_model=QLineEdit(); self.alignment_vocab=QLineEdit()
             from .native_runtime import managed_paths
             managed_native = managed_paths()
             self.native_helper.setPlaceholderText(managed_native.helper_dll)
-            self.asr_model.setPlaceholderText(managed_native.asr_model)
-            self.asr_tokens.setPlaceholderText(managed_native.asr_tokens)
-            audio_details.addRow('Process Loopback helper 上書き',setting_row('native_helper', self.native_helper)); audio_details.addRow('ASRモデル 上書き',setting_row('asr_model', self.asr_model)); audio_details.addRow('ASR語彙 上書き',setting_row('asr_tokens', self.asr_tokens))
+            self.alignment_model.setPlaceholderText(managed_native.alignment_model)
+            self.alignment_vocab.setPlaceholderText(managed_native.alignment_vocab)
+            audio_details.addRow('Process Loopback helper 上書き',setting_row('native_helper', self.native_helper)); audio_details.addRow('音響整列モデル 上書き',setting_row('alignment_model', self.alignment_model)); audio_details.addRow('音響整列語彙 上書き',setting_row('alignment_vocab', self.alignment_vocab))
 
             environment = group('Irodori', page='settings', section='irodori')
             self.irodori_path=QLineEdit(self.catalog.irodori_root); self.irodori_url=QLineEdit(self.catalog.irodori_url)
@@ -440,7 +440,7 @@ def run_gui() -> int:
 
             common = group('共通の既定値', page='settings', section='common_advance')
             self.common_controls={}
-            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき文字数時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'文字待機の最低時間 (ms)','per_character_wait_ms':'1文字あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','asr_model':'日本語ASRモデル','asr_tokens':'ASR語彙ファイル','input_key':'送りキーコード','next_line_timeout_ms':'次台詞待ち (ms)'}
+            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき文字数時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'文字待機の最低時間 (ms)','per_character_wait_ms':'1文字あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード','next_line_timeout_ms':'次台詞待ち (ms)'}
             for key in COMMON_FIELDS:
                 value=getattr(self.catalog.common,key)
                 if key=='advance_mode':
@@ -488,7 +488,7 @@ def run_gui() -> int:
             diagnostics.addRow(self.btn_host)
             self.section_toggles['diagnostics'].toggled.connect(lambda checked: checked and self.refresh_diagnostics())
 
-            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_character_wait_ms':self.per_character_wait_ms,'native_helper':self.native_helper,'asr_model':self.asr_model,'asr_tokens':self.asr_tokens,'input_key':self.input_key,'next_line_timeout_ms':self.next_line_timeout}
+            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_character_wait_ms':self.per_character_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key,'next_line_timeout_ms':self.next_line_timeout}
 
             for button in (self.advance_text_button,self.advance_audio_button): button.toggled.connect(lambda checked,key='advance_mode': checked and self.profile_setting_changed(key))
             for button in (self.source_hook_button,self.source_ocr_button): button.toggled.connect(lambda checked: checked and self.profile_setting_changed('source'))
@@ -844,8 +844,8 @@ def run_gui() -> int:
             self.ocr_region.setText(','.join(map(str, profile.ocr.region)))
             self.ocr_stability.setValue(profile.ocr.stable_samples)
             self.native_helper.setText(effective.native_helper)
-            self.asr_model.setText(effective.asr_model)
-            self.asr_tokens.setText(effective.asr_tokens)
+            self.alignment_model.setText(effective.alignment_model)
+            self.alignment_vocab.setText(effective.alignment_vocab)
             self.next_line_timeout.setValue(effective.next_line_timeout_ms)
             for field in COMMON_FIELDS:
                 self.refresh_inherited_control(field)
@@ -1061,7 +1061,7 @@ def run_gui() -> int:
             self.btn_structure.setEnabled(source_key is not None)
             self.fill_editor_table(self.replacement_table, [
                 ('有効' if rule.enabled else '無効', rule.pattern, rule.replacement,
-                 {'tts': 'TTS', 'asr': 'ASR', 'both': '両方'}[rule.target],
+                 {'tts': 'TTS', 'match': '原音照合', 'both': '両方'}[rule.target],
                  '正規表現' if rule.regex else '通常文字列')
                 for rule in p.replacements], row if focus == 'replacement' else -1)
             self.refresh_reading_table()

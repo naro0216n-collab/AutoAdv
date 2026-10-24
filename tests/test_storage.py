@@ -87,6 +87,32 @@ class SettingsContract(unittest.TestCase):
                 load(path)
             self.assertEqual(json.loads(path.read_text())['original'], 42)
 
+    def test_old_free_asr_asset_paths_are_not_reused_as_alignment_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.json'
+            c = Catalog()
+            game = c.create_game('Legacy runtime paths')
+            profile = game.profiles[game.default_profile]
+            save(c, path)
+
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            raw['common']['asr_model'] = 'C:/old/sensevoice.onnx'
+            raw['common']['asr_tokens'] = 'C:/old/tokens.txt'
+            payload = raw['games'][game.id]['profiles'][profile.id]
+            payload['asr_model'] = 'C:/profile/sensevoice.onnx'
+            payload['asr_tokens'] = 'C:/profile/tokens.txt'
+            payload['inherit_common'].extend(['asr_model', 'asr_tokens'])
+            path.write_text(json.dumps(raw, ensure_ascii=False), encoding='utf-8')
+
+            restored = load(path)
+            loaded = restored.games[game.id].profiles[profile.id]
+            self.assertEqual(restored.common.alignment_model, '')
+            self.assertEqual(restored.common.alignment_vocab, '')
+            self.assertEqual(loaded.alignment_model, '')
+            self.assertEqual(loaded.alignment_vocab, '')
+            self.assertNotIn('asr_model', loaded.inherit_common)
+            self.assertNotIn('asr_tokens', loaded.inherit_common)
+
 
 if __name__ == '__main__':
     unittest.main()

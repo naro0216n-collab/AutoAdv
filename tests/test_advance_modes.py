@@ -62,7 +62,7 @@ class ReadingCharacters(unittest.TestCase):
                                   StructureRule(r'^\s*(?P<speaker>[^「」]+)「(?P<body>.*?)」$')]
         p.name_readings['京'] = 'みやこ'
         p.replacements = [ReplacementRule('みやこ', 'ミヤコ', target='tts'),
-                          ReplacementRule('京', '京都', target='asr')]
+                          ReplacementRule('京', '京都', target='match')]
         p.speaker_tts['大和'] = False
         p.speaker_voices['大和'] = 'v2'
         raw = '大和「京さん」'
@@ -76,7 +76,7 @@ class ReadingCharacters(unittest.TestCase):
         self.assertEqual((u.speaker, u.text, u.reading, u.match_text, u.use_tts, u.voice),
                          ('大和', '京さん', 'ミヤコさん', '京都さん', False, 'v2'))
         self.assertEqual(trace, ['抽出: 優先順位 2', '読み: 京 → みやこ',
-                                 '置換 1: TTS文を変更', '置換 2: ASR文を変更'])
+                                 '置換 1: TTS文を変更', '置換 2: 原音照合文を変更'])
 
     def test_speaker_tts_independent_of_advance_mode(self):
         p = make_profile(AdvanceMode.AUDIO, True, True)
@@ -138,7 +138,7 @@ class ControllerModes(unittest.TestCase):
                 self.assertFalse(self.ctrl.try_advance())
                 self.assertEqual(len(self.sent), 1)
 
-    def test_text_non_tts_does_not_accept_asr_as_completion(self):
+    def test_text_non_tts_does_not_accept_native_alignment_as_completion(self):
         self.begin(AdvanceMode.TEXT, False)
         self.assertFalse(self.native_end())
         self.assertFalse(self.done('tts_finished'))

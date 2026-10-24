@@ -142,7 +142,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         self.assertIn(('uncertain_text_fallback', True), settings)
         self.assertEqual(next(value for name, value in settings if name == 'advance_mode').value,
                          'audio')
-        self.assertFalse(any(name in {'native_helper', 'asr_model', 'asr_tokens'}
+        self.assertFalse(any(name in {'native_helper', 'alignment_model', 'alignment_vocab'}
                              for name, _ in settings),
                          'accuracy must exercise Application managed-runtime resolution')
 

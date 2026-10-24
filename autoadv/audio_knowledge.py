@@ -1,90 +1,46 @@
 """Native-audio observations and monotonic utterance knowledge.
 
-Acquisition reports what was measured.  This module is the single place where
-those measurements are reduced into facts about the active target utterance.
-It never decides whether the game should advance; Controller owns that policy.
+Acquisition preserves what the aligner or transport actually measured.  This
+module is the single reducer that turns target-conditioned alignment facts into
+knowledge about the active Utterance.  Controller alone owns advancement.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .audio_match import TargetAlignment, alignment_support_rank
-
-
-MIN_ASSOCIATED_PHONEMES = 3
-ALIGNMENT_ERROR_DIVISOR = 4
-
-
-def _allowed_edits(units: int) -> int:
-    return max(0, int(units) // ALIGNMENT_ERROR_DIVISOR)
-
-
-def alignment_associates_target(alignment: TargetAlignment) -> bool:
-    """Whether one alignment is strong enough to associate audio with target.
-
-    This establishes identity only.  It says nothing about whether the target
-    is still playing or has ended.
-    """
-    target = alignment.phonetic_target_units
-    prefix = alignment.phonetic_prefix_units
-    if target <= 0 or prefix <= 0:
-        return False
-    minimum_matches = min(MIN_ASSOCIATED_PHONEMES, target)
-    return bool(
-        alignment.phonetic_matches >= minimum_matches
-        and alignment.phonetic_edits <= _allowed_edits(prefix)
-    )
-
-
-def alignment_reaches_target_tail(alignment: TargetAlignment) -> bool:
-    """Whether the measured alignment reaches the configured target tail.
-
-    Reaching the tail is still only an alignment fact.  An acoustic end time is
-    required separately before end knowledge can be formed.
-    """
-    return bool(
-        alignment_associates_target(alignment)
-        and alignment.phonetic_prefix_units == alignment.phonetic_target_units
-        and alignment.phonetic_edits <= _allowed_edits(alignment.phonetic_target_units)
-    )
+from .forced_alignment import TargetTimeAlignment
 
 
 @dataclass(frozen=True)
 class NativeAudioObservation:
-    """One immutable observation for the active Utterance generation.
+    """One immutable observation for one Utterance generation."""
 
-    Fields retain source semantics.  In particular, ASR token starts, VAD
-    boundaries and process PCM gaps are not target-voice endpoints.
-    ``target_acoustic_end_ms`` is reserved for a backend observation whose
-    contract directly locates the acoustic end of the target-aligned tail.
-    """
     kind: str
-    alignment: TargetAlignment = TargetAlignment()
+    alignment: TargetTimeAlignment | None = None
+    capture_start_ms: int | None = None
     capture_end_ms: int | None = None
-    target_last_token_start_ms: int | None = None
-    target_successor_token_start_ms: int | None = None
     target_acoustic_end_ms: int | None = None
-    target_acoustic_end_source: str = ''
     pcm_last_frame_ms: int | None = None
     heartbeat_at_ms: int | None = None
-    vad_onset_ms: int | None = None
-    vad_end_ms: int | None = None
-    vad_tail_ms: int = 0
 
 
 @dataclass(frozen=True)
 class TargetAssociation:
-    """Provenance for the strongest target association observed so far."""
+    """Provenance for the strongest positive target association observed."""
+
     observation: NativeAudioObservation
 
     @property
-    def alignment(self) -> TargetAlignment:
+    def alignment(self) -> TargetTimeAlignment:
+        if self.observation.alignment is None:
+            raise RuntimeError("association without alignment provenance")
         return self.observation.alignment
 
 
 @dataclass(frozen=True)
 class TargetEndConfirmation:
-    """A directly constrained target acoustic endpoint with provenance."""
+    """A committed target acoustic endpoint with its exact alignment provenance."""
+
     estimated_end_ms: int
     source: str
     observation: NativeAudioObservation
@@ -93,6 +49,7 @@ class TargetEndConfirmation:
 @dataclass(frozen=True)
 class NativeVoiceKnowledge:
     """Monotonic knowledge about one target utterance."""
+
     association: TargetAssociation | None = None
     end: TargetEndConfirmation | None = None
 
@@ -105,14 +62,22 @@ class NativeVoiceKnowledge:
         return self.end is not None
 
 
+def _association_rank(alignment: TargetTimeAlignment) -> tuple[int, int, float, float]:
+    return (
+        int(alignment.complete_alignment),
+        alignment.aligned_target_units,
+        alignment.fit.mean_unit_peak_margin,
+        alignment.fit.path_margin,
+    )
+
+
 def _prefer_association(current: TargetAssociation | None,
                         observation: NativeAudioObservation) -> TargetAssociation | None:
-    if not alignment_associates_target(observation.alignment):
+    alignment = observation.alignment
+    if alignment is None or not alignment.target_associated:
         return current
     candidate = TargetAssociation(observation)
-    if current is None:
-        return candidate
-    if alignment_support_rank(candidate.alignment) > alignment_support_rank(current.alignment):
+    if current is None or _association_rank(candidate.alignment) > _association_rank(current.alignment):
         return candidate
     return current
 
@@ -120,23 +85,23 @@ def _prefer_association(current: TargetAssociation | None,
 def reduce_native_voice_knowledge(previous: NativeVoiceKnowledge,
                                   observation: NativeAudioObservation
                                   ) -> NativeVoiceKnowledge:
-    """Accumulate target identity and endpoint knowledge without reclassification.
+    """Grow identity/end knowledge without inventing facts from missing evidence.
 
-    Knowledge only grows inside one Utterance generation.  ASR regression does
-    not erase earlier association.  Generic transport/VAD/successor-token facts
-    remain observations and cannot manufacture target-end knowledge.
+    A committed end is accepted only when the same target-conditioned alignment
+    both associated the target and closed its complete tail with right context.
+    Transport heartbeats and PCM availability can never manufacture an end.
     """
     association = _prefer_association(previous.association, observation)
     end = previous.end
-
-    if (end is None
-            and observation.target_acoustic_end_ms is not None
-            and observation.target_acoustic_end_source
-            and alignment_reaches_target_tail(observation.alignment)):
+    alignment = observation.alignment
+    if (end is None and alignment is not None
+            and alignment.target_associated
+            and alignment.complete_alignment
+            and alignment.committed_end
+            and observation.target_acoustic_end_ms is not None):
         end = TargetEndConfirmation(
             estimated_end_ms=int(observation.target_acoustic_end_ms),
-            source=observation.target_acoustic_end_source,
+            source="target_conditioned_alignment",
             observation=observation,
         )
-
     return NativeVoiceKnowledge(association=association, end=end)

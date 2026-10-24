@@ -1,0 +1,13 @@
+AutoAdv target-conditioned alignment model
+
+Managed model artifact:
+  mnaoizyyy/charsiu-js-models
+  japanese-hubert-base-phoneme-ctc/model_quantized.onnx
+  revision 8d38ee8ae5a0f4d7c0e6834ceb2c0c9237d6bc5c
+
+Source acoustic model:
+  prj-beatrice/japanese-hubert-base-phoneme-ctc
+
+License: Apache License 2.0. A copy is included as APACHE-2.0.txt.
+The model is downloaded into the user's managed AutoAdv runtime and is not
+stored in this source repository.

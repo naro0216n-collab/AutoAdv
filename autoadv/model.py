@@ -120,11 +120,11 @@ class ReplacementRule:
     pattern: str
     replacement: str
     regex: bool = False
-    target: str = 'tts'  # tts, asr or both
+    target: str = 'tts'  # tts, match or both
     enabled: bool = True
 
     def __post_init__(self):
-        if not self.pattern or self.target not in ('tts', 'asr', 'both'):
+        if not self.pattern or self.target not in ('tts', 'match', 'both'):
             raise ValueError('invalid text replacement')
         if self.regex:
             try:
@@ -183,7 +183,7 @@ class OCRSettings:
 
 COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
                  'default_voice', 'reading_ms', 'per_character_wait_ms',
-                 'native_helper', 'asr_model', 'asr_tokens', 'input_key',
+                 'native_helper', 'alignment_model', 'alignment_vocab', 'input_key',
                  'next_line_timeout_ms')
 
 
@@ -221,8 +221,8 @@ class Profile:
     source: str = 'hook'
     ocr: OCRSettings = field(default_factory=OCRSettings)
     native_helper: str = ''
-    asr_model: str = ''
-    asr_tokens: str = ''
+    alignment_model: str = ''
+    alignment_vocab: str = ''
     inherit_common: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
@@ -382,10 +382,10 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
             if trace is not None and updated != reading:
                 trace.append(f'置換 {index}: TTS文を変更')
             reading = updated
-        if rule.target in ('asr', 'both'):
+        if rule.target in ('match', 'both'):
             updated = replace(match_text)
             if trace is not None and updated != match_text:
-                trace.append(f'置換 {index}: ASR文を変更')
+                trace.append(f'置換 {index}: 原音照合文を変更')
             match_text = updated
     use_tts = profile.speaker_tts.get(speaker, profile.default_tts)
     voice = profile.speaker_voices.get(speaker, profile.default_voice)

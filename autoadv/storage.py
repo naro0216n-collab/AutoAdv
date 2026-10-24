@@ -20,8 +20,8 @@ class CommonSettings:
     reading_ms: int = 700
     per_character_wait_ms: int = 200
     native_helper: str = ''
-    asr_model: str = ''
-    asr_tokens: str = ''
+    alignment_model: str = ''
+    alignment_vocab: str = ''
     input_key: int = 13
     next_line_timeout_ms: int = 8000
 
@@ -107,7 +107,7 @@ def _profile_payload(p: Profile) -> dict:
         speaker_tts=p.speaker_tts, speaker_voices=p.speaker_voices,
         replacements=[vars(x) for x in p.replacements], name_readings=p.name_readings,
         source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
-        asr_model=p.asr_model, asr_tokens=p.asr_tokens,
+        alignment_model=p.alignment_model, alignment_vocab=p.alignment_vocab,
         next_line_timeout_ms=p.next_line_timeout_ms, inherit_common=p.inherit_common,
         reading_ms=p.reading_ms, per_character_wait_ms=p.per_character_wait_ms,
         hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
@@ -121,7 +121,13 @@ def _read_replacements(raw: list | dict) -> list[ReplacementRule]:
         return [ReplacementRule(str(before), str(after)) for before, after in raw.items()]
     if not isinstance(raw, list):
         raise ValueError('unsupported replacement data; settings preserved')
-    return [ReplacementRule(**rule) for rule in raw]
+    normalized = []
+    for rule in raw:
+        item = dict(rule)
+        if item.get('target') == 'asr':
+            item['target'] = 'match'
+        normalized.append(ReplacementRule(**item))
+    return normalized
 
 
 def _read_profile(raw: dict) -> Profile:
@@ -170,10 +176,18 @@ def _read_profile(raw: dict) -> Profile:
         name_readings=raw.get('name_readings', {}), source=raw.get('source', 'hook'),
         ocr=OCRSettings(**{**raw.get('ocr', {}),
                          'region': tuple(raw.get('ocr', {}).get('region', (0, 0, 640, 180)))}),
-        native_helper=raw.get('native_helper', ''), asr_model=raw.get('asr_model', ''),
-        asr_tokens=raw.get('asr_tokens', ''),
+        native_helper=raw.get('native_helper', ''),
+        # Free-ASR artifacts are not representation-compatible with the
+        # phoneme-CTC aligner.  A settings-v4 file written by an older AutoAdv
+        # revision may still contain ``asr_model``/``asr_tokens``; deliberately
+        # ignore those paths so the managed alignment runtime becomes the
+        # source of truth instead of attempting a false compatibility mapping.
+        alignment_model=raw.get('alignment_model', ''),
+        alignment_vocab=raw.get('alignment_vocab', ''),
         next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
-        inherit_common=list(raw.get('inherit_common', [])), reading_ms=raw.get('reading_ms', 700),
+        inherit_common=[k for k in raw.get('inherit_common', [])
+                        if k not in ('asr_model', 'asr_tokens')],
+        reading_ms=raw.get('reading_ms', 700),
         per_character_wait_ms=raw.get('per_character_wait_ms', 200),
         hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
         hook_max_buffer=int(raw.get('hook_max_buffer', 3000)),
@@ -246,7 +260,12 @@ def load(path: Path | None = None) -> Catalog:
                     review.append(f"{profile.get('name')}: reading_ms=0を700msへ変更しました。")
                     profile['reading_ms'] = 700
         raw['common'] = common
-    base_common = raw.get('common', {})
+    base_common = dict(raw.get('common', {}))
+    # Old free-ASR paths cannot be promoted to forced-alignment assets.  Drop
+    # them at the persistence boundary and use the managed alignment defaults
+    # unless an actual alignment override is already present.
+    base_common.pop('asr_model', None)
+    base_common.pop('asr_tokens', None)
     catalog = Catalog(raw.get('irodori_root', ''), raw.get('irodori_url', 'http://127.0.0.1:8088'),
                       raw.get('host_dll', ''), luna_imports=raw.get('luna_imports', {}),
                       common=CommonSettings(**{**base_common,

@@ -1,5 +1,5 @@
 {
-  "description": "ASR and difficult audio observations. Labels do not prove dialogue ownership. No blanket expected hold; same-text background-only is a diagnostic, not a negative acceptance case.",
+  "description": "Target-conditioned alignment and difficult audio observations. Labels do not prove dialogue ownership. No blanket expected hold; same-text background-only is a diagnostic, not a negative acceptance case.",
   "cases": [
     {
       "id": "clean_control",

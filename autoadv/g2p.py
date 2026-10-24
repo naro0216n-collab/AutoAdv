@@ -1,4 +1,4 @@
-"""Swappable Japanese grapheme-to-phoneme adapters for native ASR matching."""
+"""Swappable Japanese grapheme-to-phoneme adapters for target audio alignment."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,18 +33,18 @@ class HaqumeiG2P:
             from haqumei import Haqumei
             engine = Haqumei()
         self.engine = engine
-        # Target construction and ASR inference can briefly overlap across an
+        # Target construction and acoustic alignment can briefly overlap across an
         # utterance hand-off. Do not assume the native extension is re-entrant.
         self._lock = RLock()
 
     @staticmethod
     def _clean_word(word) -> tuple[str, ...]:
-        # Punctuation/space pauses vary between display text and ASR ITN and do
-        # not identify speech. A generic ``unk`` must not make two unrelated
-        # unknown proper nouns appear phonetically identical; retain its own
-        # normalized surface spelling as a conservative, text-specific unit.
+        # Punctuation/space pauses are not target phones. Unknown words may
+        # still carry a usable Haqumei pronunciation; only a literal ``unk``
+        # remains text-specific so the acoustic adapter can reject it rather
+        # than silently mapping unrelated text to one generic phone.
         phonemes = tuple(str(p) for p in word.phonemes if str(p) not in {'pau', 'sp', ''})
-        if getattr(word, 'is_unknown', False) or phonemes == ('unk',):
+        if phonemes == ('unk',):
             surface = unicodedata.normalize('NFKC', str(getattr(word, 'word', ''))).casefold()
             return (f'unk:{surface}',) if surface else ()
         return tuple(p for p in phonemes if p != 'unk')

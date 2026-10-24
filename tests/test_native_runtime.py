@@ -1,7 +1,5 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import json
-import os
 import unittest
 from unittest.mock import patch
 
@@ -9,30 +7,35 @@ from autoadv import native_runtime
 
 
 class ManagedNativeRuntimeTests(unittest.TestCase):
-    def test_managed_paths_are_stable_for_pinned_model_and_helper_source(self):
+    def test_managed_paths_are_stable_for_pinned_alignment_model_and_helper_source(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = native_runtime.managed_paths(runtime_root=root)
-            self.assertEqual(Path(paths.asr_model).parent.name, native_runtime.ASR_REVISION)
-            self.assertEqual(Path(paths.asr_model).name, 'model.int8.onnx')
-            self.assertEqual(Path(paths.asr_tokens).name, 'tokens.txt')
+            self.assertEqual(Path(paths.alignment_model).parent.name, native_runtime.ALIGNMENT_REVISION)
+            self.assertEqual(Path(paths.alignment_model).name, 'model.int8.onnx')
+            self.assertEqual(Path(paths.alignment_vocab).name, 'vocab.json')
             self.assertEqual(Path(paths.helper_dll).parent.name, paths.helper_digest)
             self.assertEqual(len(paths.helper_digest), 64)
 
-    def test_existing_pinned_asr_assets_are_verified_without_download(self):
+    def test_existing_pinned_alignment_asset_is_verified_without_download(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = native_runtime.managed_paths(runtime_root=root)
-            directory = Path(paths.asr_model).parent
-            directory.mkdir(parents=True)
-            payloads = {'model.int8.onnx': b'model', 'tokens.txt': b'tokens'}
-            expected = {name: native_runtime.hashlib.sha256(data).hexdigest()
-                        for name, data in payloads.items()}
-            with patch.object(native_runtime, 'ASR_FILES', expected):
-                for name, data in payloads.items():
-                    (directory / name).write_bytes(data)
-                result = native_runtime.prepare_asr_model(runtime_root=root, allow_download=False)
-            self.assertTrue(all(row['source'] == 'existing' for row in result['files']))
+            model = Path(paths.alignment_model)
+            model.parent.mkdir(parents=True)
+            payload = b'model'
+            model.write_bytes(payload)
+            expected = native_runtime.hashlib.sha256(payload).hexdigest()
+            with (patch.object(native_runtime, 'ALIGNMENT_MODEL_SHA256', expected),
+                  patch.object(native_runtime, 'ALIGNMENT_MODEL_BYTES', len(payload))):
+                result = native_runtime.prepare_alignment_model(
+                    runtime_root=root, allow_download=False)
+            self.assertEqual(result['model']['source'], 'existing')
+            self.assertEqual(result['license'], 'Apache-2.0')
+            self.assertTrue(Path(result['notice']).is_file())
+            vocab = Path(paths.alignment_vocab)
+            self.assertTrue(vocab.is_file())
+            self.assertEqual(native_runtime.json.loads(vocab.read_text()), native_runtime.ALIGNMENT_VOCAB)
 
     def test_helper_build_uses_the_proven_project_build_and_managed_cache(self):
         repo = Path(__file__).resolve().parents[1]
@@ -42,13 +45,15 @@ class ManagedNativeRuntimeTests(unittest.TestCase):
         self.assertNotIn('--output', command)
         self.assertFalse(any(arg.startswith('-p:BaseIntermediateOutputPath=') for arg in command))
 
-    def test_standard_windows_bootstrap_installs_runtime_dependencies_once(self):
+    def test_standard_windows_bootstrap_installs_alignment_runtime_not_free_asr_stack(self):
         from scripts import prepare_windows_runtime as runtime
         repo = Path(__file__).resolve().parents[1]
         requirements = runtime.runtime_requirements(repo)
         self.assertIn('PySide6-Essentials>=6.8,<7', requirements)
-        self.assertIn('sherpa-onnx>=1.11,<2', requirements)
+        self.assertIn('onnxruntime>=1.20,<2', requirements)
         self.assertIn('haqumei>=0.12,<0.13', requirements)
+        self.assertFalse(any('sherpa' in requirement for requirement in requirements))
+        self.assertFalse(any('webrtcvad' in requirement for requirement in requirements))
         source = Path('scripts/prepare_windows_runtime.py').read_text(encoding='utf-8')
         self.assertIn('--only-binary=:all:', source)
         self.assertNotIn('.[gui,audio,ocr,native]', source)

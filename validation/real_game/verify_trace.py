@@ -326,7 +326,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
 def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json') -> list[dict]:
     # These are test-side expectations, never a source of AutoAdv decisions.
     if phase == 'stress' and scenario_path == HERE / 'SCENARIO.json':
-        scenario_path = HERE / 'ASR_STRESS_SCENARIO.json'
+        scenario_path = HERE / 'ALIGNMENT_STRESS_SCENARIO.json'
     elif phase == 'accuracy' and scenario_path == HERE / 'SCENARIO.json':
         # Dedicated Windows auto-advance accuracy expectations deliberately differ
         # from the redistributable fixture's ordinary mixed scene. Runtime media
@@ -414,13 +414,13 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     native_onset_estimates: dict[tuple, int] = {}
     native_end_sources: dict[tuple, str] = {}
     native_end_estimate_sources: dict[tuple, str] = {}
-    asr_counts: dict[tuple, int] = {}
+    alignment_counts: dict[tuple, int] = {}
     out_of_scope_utterances: set[tuple] = set()
     post_collection_utterance: dict | None = None
     post_collection_timestamp: int | None = None
     measured: dict[str, list[float]] = {
         name: [] for name in (
-            'asr_decode_ms', 'asr_queue_ms', 'asr_rtf',
+            'alignment_ms', 'alignment_queue_ms', 'alignment_rtf',
             'tts_synthesis_ms', 'tts_synthesis_rtf', 'tts_playback_ms',
         )
     }
@@ -490,27 +490,25 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if source not in source_outputs:
                 errors.append(f'utterance without actual selected Luna output: {key}')
         elif event == 'native_ready':
-            if 'vad_only' in record:
-                product_issue(f'removed VAD-only audio configuration in product trace: {session}')
             if (session in active_monitoring and
                     record.get('audio_pid') == active_monitoring[session].get('audio_pid')):
                 readiness.add(session)
-                audio_methods[session] = 'asr'
+                audio_methods[session] = 'target_conditioned_forced_alignment'
                 audio_targets[session] = record.get('audio_pid')
         elif event == 'native_pcm':
             # PCM callbacks can precede the corresponding queued Utterance.
             pcm_records.append((record, active_monitoring.get(session)))
-        elif event == 'asr_inference':
+        elif event == 'alignment_inference':
             if key in utterances:
-                asr_counts[key] = asr_counts.get(key, 0) + 1
+                alignment_counts[key] = alignment_counts.get(key, 0) + 1
             if key in utterances and record.get('audio_ms', 0) > 0:
-                duration = record.get('decode_ms')
+                duration = record.get('align_ms')
                 queue = record.get('queue_ms')
                 if type(duration) in (int, float) and duration >= 0:
-                    measured['asr_decode_ms'].append(duration)
-                    measured['asr_rtf'].append(duration / record['audio_ms'])
+                    measured['alignment_ms'].append(duration)
+                    measured['alignment_rtf'].append(duration / record['audio_ms'])
                 if type(queue) in (int, float) and queue >= 0:
-                    measured['asr_queue_ms'].append(queue)
+                    measured['alignment_queue_ms'].append(queue)
         elif event == 'tts_timing':
             if key in utterances and type(record.get('duration_ms')) in (int, float):
                 duration = record['duration_ms']
@@ -542,16 +540,13 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         elif event == 'native_voice_end_estimate':
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')
-            # These are product-side process-loopback estimates, not known game
-            # source playback endpoints. ASR token timing, VAD boundaries and
-            # process-render quiescence are distinct product endpoint paths;
-            # none is the independent game oracle. Bounds are checked, and
-            # acoustic onset remains optional because VAD can miss whispers.
+            # This is the product-side endpoint estimated by the same
+            # target-conditioned alignment provenance that established target
+            # association. It is still not the independent game oracle.
             if (key not in utterances or type(estimate) is not int or
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
-                    not isinstance(evidence, str) or not evidence or
-                    evidence in ('asr_timestamp', 'asr_vad', 'render_quiescence', 'vad_only')):
+                    evidence != 'target_conditioned_alignment'):
                 product_issue(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
                 product_issue(f'duplicate native endpoint: {key}')
@@ -618,13 +613,13 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             else:
                 handoffs[key] = record['reason']
         elif event == 'native_capture_summary':
-            # Capture transport health and ASR/VAD judgement are independent.
+            # Capture transport health is independent from target-conditioned alignment.
             # No count or PCM threshold is a test pass condition.
             if key in utterances:
                 capture_summaries[key] = {
                     name: record.get(name) for name in
                     ('scope', 'pcm_packets', 'pcm_frames', 'heartbeats',
-                     'vad_positive_packets', 'vad_input_peak', 'capture_stereo_peak', 'failure')
+                     'capture_stereo_peak', 'failure')
                 }
         elif event == 'validation_driver_failure':
             reason = record.get('reason')
@@ -696,9 +691,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             product_issue(f'unknown native completion reason: {key}')
 
     for key in native:
-        if (key[0] not in readiness or key not in pcm or asr_counts.get(key, 0) <= 0 or
+        if (key[0] not in readiness or key not in pcm or alignment_counts.get(key, 0) <= 0 or
                 methods.get(key) != audio_methods.get(key[0])):
-            product_issue(f'native completion lacks matching real PCM and ASR evidence: {key}')
+            product_issue(f'native completion lacks matching real PCM and alignment evidence: {key}')
         if native_end_sources.get(key) != native_end_estimate_sources.get(key):
             product_issue(f'native endpoint provenance disagrees with knowledge: {key}')
 
@@ -874,7 +869,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'native_setup_ready': key[0] in readiness,
             'audio_judgement_method': audio_methods.get(key[0]),
             'pcm_observed': key in pcm,
-            'asr_inference_count': asr_counts.get(key, 0),
+            'alignment_inference_count': alignment_counts.get(key, 0),
             'capture_transport': capture_summaries.get(key),
             'native_association_observed': key in audio_started_at,
             'native_end_confirmed': key in native,
@@ -898,7 +893,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
 
     # Accuracy is a product-path measurement, not merely a progression count.
     # A safe text fallback can keep the game moving after an audio regression,
-    # so preserve independent coverage of the Process Loopback/ASR path rather
+    # so preserve independent coverage of the Process Loopback/target-conditioned alignment path rather
     # than allowing fallback success to masquerade as audio observation.
     expected_audio_lines = [line for line in line_results
                             if line.get('process_audio_expected') is True]
@@ -906,8 +901,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         label = line.get('scenario') or f"{line.get('session')}:{line.get('line')}"
         if not line.get('pcm_observed'):
             quality_issues.append(f'expected process audio PCM not observed: {label}')
-        if not line.get('asr_inference_count'):
-            quality_issues.append(f'expected ASR inference not observed: {label}')
+        if not line.get('alignment_inference_count'):
+            quality_issues.append(f'expected target-conditioned alignment inference not observed: {label}')
 
     collection_valid = not errors
     advancement_observed = bool(links)
@@ -949,7 +944,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     unvoiced_fallback = sum(
         line.get('completion_reason') == 'uncertain_text_fallback' for line in unvoiced_lines)
     pcm_observed = sum(bool(line.get('pcm_observed')) for line in expected_audio_lines)
-    asr_observed = sum(int(line.get('asr_inference_count') or 0) > 0 for line in expected_audio_lines)
+    alignment_observed = sum(int(line.get('alignment_inference_count') or 0) > 0 for line in expected_audio_lines)
     mix_lines = [line for line in line_results if line.get('mix_environment_verified') is not None]
     mix_verified = sum(line.get('mix_environment_verified') is True for line in mix_lines)
     quality = {
@@ -965,9 +960,9 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'recovery_rate': rate(len(recovery_inputs)),
         'process_audio_expected_cases': len(expected_audio_lines),
         'process_audio_observed_cases': pcm_observed,
-        'asr_observed_cases': asr_observed,
+        'alignment_observed_cases': alignment_observed,
         'process_audio_observation_rate': fraction(pcm_observed, len(expected_audio_lines)),
-        'asr_observation_rate': fraction(asr_observed, len(expected_audio_lines)),
+        'alignment_observation_rate': fraction(alignment_observed, len(expected_audio_lines)),
         'mix_environment_cases': len(mix_lines),
         'mix_environment_verified_cases': mix_verified,
         'mix_environment_observation_rate': fraction(mix_verified, len(mix_lines)),
@@ -1010,7 +1005,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'voice_safety_verified': voice_safety_verified,
         'reference_start_line': start + 1 if start is not None else None,
         'observed_lines': len(utterance_order), 'confirmed_advance_to_next_hook': len(links),
-        'confirmed_native_asr': len(confirmed_native),
+        'confirmed_native_alignment': len(confirmed_native),
         'confirmed_tts': len(confirmed_tts),
         'errors': errors, 'diagnostics': diagnostics, 'game_evidence': game_evidence, 'line_results': line_results,
     }

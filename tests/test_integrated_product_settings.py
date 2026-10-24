@@ -71,7 +71,7 @@ class SessionOwnership(unittest.TestCase):
 class CommonPreferencesContract(unittest.TestCase):
     def test_resolve_at_session_start_preserves_explicit_overrides_and_legacy_values(self):
         c = Catalog(common=CommonSettings(default_tts=True,
-                                          default_voice='narrator', asr_model='C:/asr', input_key=32))
+                                          default_voice='narrator', alignment_model='C:/asr', input_key=32))
         g = c.create_game('first')
         p = g.profiles[g.default_profile]
         self.assertEqual(c.effective_profile(p).default_voice, 'narrator')
@@ -80,7 +80,7 @@ class CommonPreferencesContract(unittest.TestCase):
         p.input_key = 13
         effective = c.effective_profile(p)
         self.assertEqual(effective.input_key, 13)
-        self.assertEqual(effective.asr_model, 'C:/asr')
+        self.assertEqual(effective.alignment_model, 'C:/asr')
         c.common.default_voice = 'another'
         self.assertEqual(effective.default_voice, 'narrator')  # snapshot is immutable to later config changes
         self.assertEqual(c.effective_profile(p).default_voice, 'another')
@@ -144,6 +144,30 @@ class UserConfirmedImport(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'already imported'):
                 add_legacy_games(restored, rows)
             self.assertEqual(snapshot, src.read_bytes())
+
+    def test_previous_free_asr_assets_are_reported_not_reinterpreted_as_alignment_assets(self):
+        prior_profile = {
+            'profile_id': 'pid', 'name': 'Old Profile', 'text': {},
+            'selected_hooks': [{'code': 'HW', 'name': 'thread', 'context': 1, 'context2': 2}],
+            'monitor': {
+                'loopback_helper': 'C:/old/loopback.dll',
+                'asr_model': 'C:/old/sensevoice.onnx',
+                'asr_tokens': 'C:/old/tokens.txt',
+            },
+        }
+        prior_game = {'game_id': 'gid', 'display_name': 'Previous',
+                      'paths': ['C:/previous.exe'], 'default_profile_id': 'pid',
+                      'profiles': {'pid': prior_profile}}
+        data = {'schema_version': 2, 'catalog': {'games': {'gid': prior_game}}, 'globals': {}}
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / 'previous.json'
+            src.write_text(json.dumps(data), encoding='utf-8')
+            row = inspect_legacy(src)[0]
+            profile = row.game.profiles['pid']
+            self.assertEqual(profile.native_helper, 'C:/old/loopback.dll')
+            self.assertEqual(profile.alignment_model, '')
+            self.assertEqual(profile.alignment_vocab, '')
+            self.assertTrue(any('free-ASR model/tokens' in item for item in row.unmapped))
 
 
 class OcrEvidence(unittest.TestCase):

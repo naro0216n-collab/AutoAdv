@@ -15,7 +15,7 @@ def validate(records, *, phase='mixed', **kwargs):
                      **kwargs)
 
 
-LINES = json.loads((Path(__file__).parent / 'ASR_STRESS_SCENARIO.json').read_text('utf-8'))['lines']
+LINES = json.loads((Path(__file__).parent / 'ALIGNMENT_STRESS_SCENARIO.json').read_text('utf-8'))['lines']
 
 
 def checker_only_records():
@@ -41,19 +41,19 @@ def checker_only_records():
             uncertain_text_fallback=False)
         if case['advance_mode'] == 'audio':
             add('native_pcm', **key, audio_pid=41, frames=960)
-            add('native_audio_observation', **key, kind='asr', matched_phonemes=5,
-                phonetic_target_units=5, phonetic_prefix_units=5, phonetic_edit_count=0)
-            add('asr_inference', **key, audio_ms=1200, decode_ms=121, queue_ms=6)
+            add('native_audio_observation', **key, kind='alignment', target_units=5, aligned_target_units=5,
+                target_associated=True, complete_alignment=True, committed_end=True)
+            add('alignment_inference', **key, audio_ms=1200, align_ms=121, queue_ms=6)
             if case['id'] == 'clean_control':
                 add('native_voice_knowledge', **key, target_associated=True,
                     target_end_confirmed=False, end_source='')
                 add('native_voice_knowledge', **key, target_associated=True,
-                    target_end_confirmed=True, end_source='asr_token_duration')
+                    target_end_confirmed=True, end_source='target_conditioned_alignment')
                 observed_time = len(records) * 1_000_000_000
                 add('native_voice_end_estimate', **key,
                     estimated_at_ns=observed_time - 300_000_000,
                     onset_estimated_at_ns=observed_time - 1_000_000_000,
-                    evidence='asr_token_duration')
+                    evidence='target_conditioned_alignment')
         if case['id'] in ('stress-intro', 'clean_control'):
             add('presentation_complete', **key, success=True,
                 reason='text' if case['advance_mode'] == 'text' else 'native')
@@ -75,7 +75,7 @@ class StressTraceVerifierTests(unittest.TestCase):
         self.assertTrue(all('expected_hold' not in c for c in LINES))
 
     def test_identical_audio_lexical_content_cannot_prove_background_owner(self):
-        cases = json.loads((Path(__file__).parent / 'ASR_STRESS.json').read_text('utf-8'))['cases']
+        cases = json.loads((Path(__file__).parent / 'ALIGNMENT_STRESS.json').read_text('utf-8'))['cases']
         identical = next(c for c in cases if c['id'] == 'background_only_same_text')
         self.assertEqual(identical['attribution'], 'unverified')
         self.assertEqual(identical['display'], 'ヒューズが飛んだ。')

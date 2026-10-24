@@ -148,12 +148,12 @@ class ValidationFixtureRuntimeContracts(unittest.TestCase):
         self.assertIn('launcher distribute', fixture)
         self.assertNotIn('RenPySdk', runner)
         self.assertNotIn('dotnet build', runner)
-        self.assertNotIn('prepare_asr_model', runner)
+        self.assertNotIn('prepare_alignment_model', runner)
 
 
     def test_accuracy_contract_is_not_a_broad_fixture_discovery_command(self):
         readme = Path('validation/real_game/README.md').read_text(encoding='utf-8')
-        self.assertIn('python -m unittest validation.real_game.test_native_audio -v', readme)
+        self.assertIn('python -m unittest validation.real_game.test_native_alignment_fixture -v', readme)
         self.assertIn('一括 `unittest discover` を自動進行精度実機計測として使用しない', readme)
 
     def test_hosted_live_excludes_accuracy_measurement_and_actual_machine_path_owns_it(self):

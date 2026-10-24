@@ -96,10 +96,12 @@ def inspect_legacy(path: Path) -> tuple[LegacyGame, ...]:
             monitor = row.get('monitor') or {}
             if not isinstance(monitor, dict):
                 raise ValueError('Invalid previous monitor settings')
-            for old_field, new_field in (('loopback_helper', 'native_helper'),
-                                         ('asr_model', 'asr_model'), ('asr_tokens', 'asr_tokens')):
+            for old_field, new_field in (('loopback_helper', 'native_helper'),):
                 if monitor.get(old_field):
                     setattr(profile, new_field, monitor[old_field])
+            if monitor.get('asr_model') or monitor.get('asr_tokens'):
+                unmapped.append(
+                    f'{pid}: old free-ASR model/tokens are not reusable by target-conditioned alignment')
             advance = monitor.get('advance_input') or {}
             if advance.get('mode', 'keyboard') == 'keyboard' and 'virtual_key' in advance:
                 profile.input_key = advance['virtual_key']

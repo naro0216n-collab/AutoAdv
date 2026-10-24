@@ -14,18 +14,29 @@ from validation.real_game.trace import ValidationTrace
 from autoadv.voice import VoiceJobs
 
 
-class IdentityG2P:
+class TimingG2P:
     def candidates(self, text, *, max_candidates=4):
-        from autoadv.audio_match import surface_key
         from autoadv.g2p import PronunciationCandidate
-        units = tuple(surface_key(text))
-        return (PronunciationCandidate(units),) if units and max_candidates else ()
+        return (PronunciationCandidate(('a', 'b', 'c')),) if max_candidates else ()
 
 
-TEST_G2P = IdentityG2P()
+class TimingPosterior:
+    frame_ms_hint = 20.0
+    vocab = {'PAD': 0, 'UNK': 1, 'SOS': 2, 'EOS': 3, 'a': 4, 'b': 5, 'c': 6}
+
+    def infer(self, chunks):
+        import numpy as np
+        logits = np.full((30, len(self.vocab)), -4.0, dtype=np.float32)
+        logits[:, 0] = 5.0
+        for phone, frame in zip(('a', 'b', 'c'), (5, 10, 15)):
+            logits[frame, 0] = 0.0
+            logits[frame, self.vocab[phone]] = 7.0
+        return logits
+
 
 def _native_audio(*args, **kwargs):
-    kwargs.setdefault('g2p', TEST_G2P)
+    kwargs.setdefault('g2p', TimingG2P())
+    kwargs.setdefault('model_backend', TimingPosterior())
     return NativeAudio(*args, **kwargs)
 
 
@@ -44,37 +55,30 @@ class PerformanceObservationTests(unittest.TestCase):
             self.assertEqual([entry['seq'] for entry in events[1:]], list(range(1, 81)))
             self.assertTrue(all(a['at_ns'] <= b['at_ns'] for a, b in zip(events, events[1:])))
 
-    def test_real_worker_reports_decode_latency_without_disclosing_transcript(self):
+    def test_alignment_worker_reports_latency_without_disclosing_transcript(self):
+        import numpy as np
         token = Token(1, 2)
-        chunk = PCMChunk(100, bytes(960 * 8), 48000, 2, 4)
+        raw = np.zeros((600 * 48, 2), dtype='<f4').tobytes()
+        chunk = PCMChunk(600, raw, 48000, 2, 4)
         reports = []
-        class Recognizer:
-            def recognize(self, chunks):
-                self_test.assertEqual(chunks, (chunk,))
-                return '猫はにゃーにゃーと鳴く。'
-        class Activity:
-            def observe_float32_stereo(self, frames):
-                return type('Status', (), {'frames_analyzed': True,
-                    'active': True, 'tail_silence_ms': 0})()
-        self_test = self
         native = _native_audio(101, Path('unused'), Path('unused'), Path('unused'),
-                             lambda *_: None, recognizer=Recognizer(), activity=Activity(),
-                             on_inference=lambda ticket, measurements: reports.append((ticket, measurements)))
+                               lambda *_: None,
+                               on_inference=lambda ticket, measurements: reports.append((ticket, measurements)))
         try:
             native.history.start(101)
             native.begin(token, '猫はにゃーにゃーと鳴く。')
             native.history.push(chunk, target_pid=101)
-            native._infer(token, native._generation, (chunk,))
+            native._infer(token, native._generation, (chunk,), native.aligner)
             self.assertEqual(len(reports), 1)
             measured = reports[0][1]
             self.assertEqual(reports[0][0], token)
-            self.assertEqual(measured['audio_ms'], 20)
-            self.assertGreaterEqual(measured['decode_ms'], 0)
+            self.assertEqual(measured['audio_ms'], 600)
+            self.assertGreaterEqual(measured['align_ms'], 0)
             self.assertGreaterEqual(measured['queue_ms'], 0)
-            self.assertIn('matched_phonemes', measured)
-            self.assertNotIn('frontier_matched_phonemes', measured)
-            self.assertNotIn('target_progressed', measured)
+            self.assertEqual(measured['target_units'], 3)
+            self.assertIn('path_margin', measured)
             self.assertNotIn('recognized', measured)
+            self.assertNotIn('transcript', measured)
         finally:
             native.close()
 

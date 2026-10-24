@@ -455,7 +455,7 @@ def test_application_starts_and_stops_native_audio_from_monitor_lifecycle(monkey
 
     class FakeNative:
         instances = []
-        def __init__(self, pid, helper, model, tokens, notify, **callbacks):
+        def __init__(self, pid, helper, model, vocab, notify, **callbacks):
             self.pid = pid
             self.notify = notify
             self.callbacks = callbacks
@@ -480,8 +480,8 @@ def test_application_starts_and_stops_native_audio_from_monitor_lifecycle(monkey
     profile.source = 'ocr'
     app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
     app.set_profile_setting('native_helper', 'helper.dll')
-    app.set_profile_setting('asr_model', 'model.onnx')
-    app.set_profile_setting('asr_tokens', 'tokens.txt')
+    app.set_profile_setting('alignment_model', 'model.onnx')
+    app.set_profile_setting('alignment_vocab', 'tokens.txt')
     app.select_primary_target(101, 500)
     app.select_audio_target(202)
     monkeypatch.setattr(app, '_start_ocr', lambda _profile: True)
@@ -517,8 +517,8 @@ def test_application_resolves_managed_native_runtime_when_profile_overrides_are_
 
     class FakeNative:
         instances = []
-        def __init__(self, pid, helper, model, tokens, notify, **callbacks):
-            self.pid, self.helper, self.model, self.tokens = pid, helper, model, tokens
+        def __init__(self, pid, helper, model, vocab, notify, **callbacks):
+            self.pid, self.helper, self.model, self.vocab = pid, helper, model, vocab
             self.closed = False
             FakeNative.instances.append(self)
         def start(self):
@@ -534,8 +534,8 @@ def test_application_resolves_managed_native_runtime_when_profile_overrides_are_
 
     managed = SimpleNamespace(
         helper_dll='C:/AutoAdv/runtime/native/loopback/helper.dll',
-        asr_model='C:/AutoAdv/runtime/native/asr/model.int8.onnx',
-        asr_tokens='C:/AutoAdv/runtime/native/asr/tokens.txt',
+        alignment_model='C:/AutoAdv/runtime/native/asr/model.int8.onnx',
+        alignment_vocab='C:/AutoAdv/runtime/native/alignment/vocab.json',
     )
     monkeypatch.setattr(application_module.threading, 'Thread', ImmediateThread)
     monkeypatch.setattr(application_module, 'NativeAudio', FakeNative)
@@ -545,8 +545,8 @@ def test_application_resolves_managed_native_runtime_when_profile_overrides_are_
     profile.source = 'ocr'
     app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
     assert app.current_profile().native_helper == ''
-    assert app.current_profile().asr_model == ''
-    assert app.current_profile().asr_tokens == ''
+    assert app.current_profile().alignment_model == ''
+    assert app.current_profile().alignment_vocab == ''
     app.select_primary_target(101, 500)
     monkeypatch.setattr(app, '_start_ocr', lambda _profile: True)
     app.configure_runtime_loop(schedule=lambda _delay, callback: callback())
@@ -554,8 +554,8 @@ def test_application_resolves_managed_native_runtime_when_profile_overrides_are_
     assert app.activate_selected_target() == 'monitoring'
     native = FakeNative.instances[-1]
     assert str(native.helper) == managed.helper_dll
-    assert str(native.model) == managed.asr_model
-    assert str(native.tokens) == managed.asr_tokens
+    assert str(native.model) == managed.alignment_model
+    assert str(native.vocab) == managed.alignment_vocab
     assert app.native_audio_available
 
 

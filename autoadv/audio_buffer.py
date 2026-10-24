@@ -1,4 +1,4 @@
-"""Timestamped bounded PCM history shared by process-loopback and ASR adapters.
+"""Timestamped bounded PCM history shared by process-loopback and alignment adapters.
 
 Ring buffer is intentionally independent of any audio library. It does not
 classify silence as 'native voice absent'. Upstream per-process loopback must
@@ -79,7 +79,7 @@ class AudioHistory:
             # The rolling history exists for bounded pre-HOOK replay.  A bound
             # Utterance may be longer than that window, so preserve its exact
             # observation interval until NativeAudio no longer needs full-line
-            # ASR.  Never keep packets older than the retained interval merely
+            # alignment.  Never keep packets older than the retained interval merely
             # because the line is active.
             cutoff = min(cutoff, self._retained_from_ms)
         while self._chunks and self._chunks[0].at_ms < cutoff:

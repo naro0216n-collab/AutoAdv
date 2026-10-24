@@ -1,9 +1,9 @@
 {
-  "description": "Independent expectations for the RenPy ASR stress branch ONLY (begin observation after selecting the manual menu entry). Never used by AutoAdv.",
+  "description": "Independent expectations for the RenPy alignment stress branch ONLY (begin observation after selecting the manual menu entry). Never used by AutoAdv.",
   "lines": [
     {
       "id": "stress-intro",
-      "text": "ASR特殊音声検証です。背景発話と非言語音声の進行判断を確認します。",
+      "text": "音響整列の特殊音声検証です。背景発話と非言語音声の進行判断を確認します。",
       "advance_mode": "text",
       "use_tts": false,
       "foreground_voice": false

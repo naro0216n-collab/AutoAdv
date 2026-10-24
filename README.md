@@ -2,11 +2,11 @@
 
 AutoAdv is a personal Windows GUI application for LunaHook dialogue acquisition, per-speaker Irodori TTS and authorized automatic dialogue advancement. The authoritative requirements are [docs/integration-spec.md](docs/integration-spec.md); code and former tests are not specifications.
 
-The rebuilt `develop` application uses one `Controller` for dialogue identity, presentation completion and game-input authority. Selectively reused Luna native Host/ABI, Irodori and Windows input adapters are attached to that single runtime contract. Salvaged Windows Process Loopback, Japanese ASR/VAD, Tesseract OCR, manual input monitoring, Luna settings import and text-rule interpretation have also been integrated. Previous controllers, simulators and diagnostic CLI are not alternative execution paths.
+The rebuilt `develop` application uses one `Controller` for dialogue identity, presentation completion and game-input authority. Selectively reused Luna native Host/ABI, Irodori and Windows input adapters are attached to that single runtime contract. Windows Process Loopback, target-conditioned phoneme alignment, Tesseract OCR, Luna settings import and text-rule interpretation are integrated through that same runtime. Previous controllers, simulators and diagnostic CLI are not alternative execution paths.
 
 ## Windowsでの起動と基本操作
 
-Python 3.11を導入した後は、リポジトリ内の **`AutoAdv.cmd` をダブルクリック**して起動する。初回はAutoAdv専用runtimeを`%LOCALAPPDATA%\AutoAdv\runtime`へ自動準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定ASR model/tokensを配置する。Process Loopback helperは同じ管理領域へsource digest単位で配置し、成立済みの依存・モデル・helperを毎回再作成しない。
+Python 3.11を導入した後は、リポジトリ内の **`AutoAdv.cmd` をダブルクリック**して起動する。初回はAutoAdv専用runtimeを`%LOCALAPPDATA%\AutoAdv\runtime`へ自動準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定target-conditioned alignment model/vocabularyを配置する。Process Loopback helperは同じ管理領域へsource digest単位で配置し、成立済みの依存・モデル・helperを毎回再作成しない。
 
 以後は同じ **`AutoAdv.cmd`** からGUIを起動できる。ショートカットはこのファイルから通常のWindowsの操作で作成できる。GUIは別のコンソールを必要とせず、起動に失敗した場合はエラーダイアログと`%LOCALAPPDATA%\AutoAdv\startup-error.log`に内容を表示・記録する。`.pyw`のPython関連付けが設定済みなら`AutoAdv.pyw`も直接起動できる。従来どおり`py -3.11 -m autoadv`も使用可能。
 
@@ -17,7 +17,7 @@ Python 3.11を導入した後は、リポジトリ内の **`AutoAdv.cmd` をダ�
 
 専用の雑多な「詳細・共通設定」タブはない。作品・HOOK取得・台詞調整・音声判断・入力それぞれの詳細項目は関連する操作領域から開く。GUIはLunaHostの診断を必要に応じて示すが、ゲームに関係する通常作業へ内部データを混入させない。
 
-LunaTranslator v12.1.2.12の固定Native/Host資産は`autoadv/luna_assets`に同梱される。起動時の再取得・再ビルドは行わない。Irodori TTSは既存サーバーや指定された環境を利用する。音声判断のASR/G2P/Process LoopbackはAutoAdv管理runtimeを既定とし、個別パス指定は上書き用途に限る。Process Loopback helperを初めて生成する環境では.NET 9 SDKが必要である。OCR利用時のTesseract本体は別途必要となる。
+LunaTranslator v12.1.2.12の固定Native/Host資産は`autoadv/luna_assets`に同梱される。起動時の再取得・再ビルドは行わない。Irodori TTSは既存サーバーや指定された環境を利用する。音声判断のforced alignment/G2P/Process LoopbackはAutoAdv管理runtimeを既定とし、個別パス指定は上書き用途に限る。Process Loopback helperを初めて生成する環境では.NET 9 SDKが必要である。OCR利用時のTesseract本体は別途必要となる。
 
 ## Validation scope
 

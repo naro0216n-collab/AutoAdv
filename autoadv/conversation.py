@@ -327,7 +327,7 @@ class Controller:
     def native_voice_ended(self, token: Token) -> bool:
         """Apply confirmed target-acoustic end knowledge to presentation.
 
-        The Controller does not infer this fact from ASR/VAD/transport data. It
+        The Controller does not infer this fact from acoustic/transport observations. It
         only consumes the positive knowledge supplied by the audio-knowledge
         reducer and combines it with the active Utterance policy.
         """

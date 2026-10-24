@@ -625,7 +625,7 @@ class AutoAdvApplication:
         if token is None or token != self.controller.token:
             return
         # Publish the admitted immutable Utterance before any presentation side
-        # effect can emit PCM/ASR/TTS/completion telemetry. Besides making the
+        # effect can emit PCM/alignment/TTS/completion telemetry. Besides making the
         # lifecycle causal, this gives validation a conservative reading-time
         # origin instead of timestamping the line after its timer has started.
         self._emit_runtime_event('utterance', token)
@@ -676,8 +676,8 @@ class AutoAdvApplication:
             return False
         if active.advance_mode.value == 'audio' or profile.advance_mode.value == 'audio':
             return (active.native_helper == profile.native_helper and
-                    active.asr_model == profile.asr_model and
-                    active.asr_tokens == profile.asr_tokens)
+                    active.alignment_model == profile.alignment_model and
+                    active.alignment_vocab == profile.alignment_vocab)
         return True
 
     def _request_capture_transition(self) -> None:
@@ -1158,8 +1158,8 @@ class AutoAdvApplication:
         from .native_runtime import managed_paths
         managed = managed_paths()
         native_helper = profile.native_helper or managed.helper_dll
-        asr_model = profile.asr_model or managed.asr_model
-        asr_tokens = profile.asr_tokens or managed.asr_tokens
+        alignment_model = profile.alignment_model or managed.alignment_model
+        alignment_vocab = profile.alignment_vocab or managed.alignment_vocab
         state = self.runtime_state()
         if state.target is None:
             return False
@@ -1197,22 +1197,23 @@ class AutoAdvApplication:
             self._native_knowledge = knowledge
 
             a = observation.alignment
+            fit = a.fit if a is not None else None
             self._emit_telemetry(
                 'native_audio_observation', token,
                 kind=observation.kind,
-                matched_phonemes=a.phonetic_matches,
-                phonetic_target_units=a.phonetic_target_units,
-                phonetic_prefix_units=a.phonetic_prefix_units,
-                phonetic_edit_count=a.phonetic_edits,
+                target_units=(a.target_units if a is not None else 0),
+                aligned_target_units=(a.aligned_target_units if a is not None else 0),
+                target_associated=(a.target_associated if a is not None else False),
+                complete_alignment=(a.complete_alignment if a is not None else False),
+                committed_end=(a.committed_end if a is not None else False),
+                reading_rank=(a.reading_rank if a is not None else -1),
+                path_margin=(fit.path_margin if fit is not None else None),
+                boundary_margin=(fit.boundary_margin if fit is not None else None),
+                capture_start_ms=observation.capture_start_ms,
                 capture_end_ms=observation.capture_end_ms,
-                target_last_token_start_ms=observation.target_last_token_start_ms,
-                target_successor_token_start_ms=observation.target_successor_token_start_ms,
                 target_acoustic_end_ms=observation.target_acoustic_end_ms,
                 pcm_last_frame_ms=observation.pcm_last_frame_ms,
                 heartbeat_at_ms=observation.heartbeat_at_ms,
-                vad_onset_ms=observation.vad_onset_ms,
-                vad_end_ms=observation.vad_end_ms,
-                vad_tail_ms=observation.vad_tail_ms,
             )
 
             association_changed = (
@@ -1230,8 +1231,6 @@ class AutoAdvApplication:
             self._emit_telemetry(
                 'native_voice_end_estimate', token,
                 estimated_at_ns=endpoint.estimated_end_ms * 1_000_000,
-                onset_estimated_at_ns=(endpoint.observation.vad_onset_ms * 1_000_000
-                    if endpoint.observation.vad_onset_ms is not None else None),
                 evidence=endpoint.source)
             completed = self.controller.native_voice_ended(token)
             self._finish_presentation_transition(token, completed)
@@ -1246,7 +1245,7 @@ class AutoAdvApplication:
 
         def publish_inference(token: Token, metrics: dict) -> None:
             if current():
-                self._emit_telemetry('asr_inference', token, **metrics)
+                self._emit_telemetry('alignment_inference', token, **metrics)
 
         def activate(native: NativeAudio) -> None:
             if not current():
@@ -1257,7 +1256,7 @@ class AutoAdvApplication:
             if (now.token is not None and now.utterance is not None and not now.sent and
                     not now.completed and now.utterance.advance_mode.value == 'audio' and
                     not now.utterance.use_tts):
-                native.begin(now.token, now.utterance.match_text)
+                self._begin_native_audio(now.token, now.utterance.match_text)
             self._emit_runtime_event('native_ready', None, session=session, ready=True,
                                      reason='', audio_pid=pid)
 
@@ -1275,7 +1274,7 @@ class AutoAdvApplication:
             native = None
             try:
                 native = NativeAudio(
-                    pid, Path(native_helper), Path(asr_model), Path(asr_tokens),
+                    pid, Path(native_helper), Path(alignment_model), Path(alignment_vocab),
                     publish_error,
                     replay_lookback_ms=self._native_replay_lookback_ms(profile),
                     on_pcm=publish_pcm,
@@ -1304,7 +1303,13 @@ class AutoAdvApplication:
     def _begin_native_audio(self, token: Token, match_text: str, *, replay_from_ms: int | None = None) -> bool:
         if self._native_audio is None:
             return False
-        self._native_audio.begin(token, match_text, replay_from_ms=replay_from_ms)
+        try:
+            self._native_audio.begin(token, match_text, replay_from_ms=replay_from_ms)
+        except Exception as exc:
+            detail = 'alignment target failure: ' + str(exc)
+            self._emit_runtime_event('native_audio_error', token, reason=detail)
+            self._handle_native_error(token, detail)
+            return False
         return True
 
     def _emit_native_capture_summary(self, token: Token) -> None:

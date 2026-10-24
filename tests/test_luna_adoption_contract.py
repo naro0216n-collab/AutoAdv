@@ -8,24 +8,6 @@ from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.model import Profile, HookSelection, AdvanceMode, SPEAKER_ONLY_RULE
 from autoadv.storage import Catalog, save, load
 from autoadv.native_audio import NativeAudio
-from autoadv.audio_buffer import PCMChunk
-from autoadv.audio_match import VADDecision
-from autoadv.audio_knowledge import NativeVoiceKnowledge, reduce_native_voice_knowledge
-
-
-class IdentityG2P:
-    def candidates(self, text, *, max_candidates=4):
-        from autoadv.audio_match import surface_key
-        from autoadv.g2p import PronunciationCandidate
-        units = tuple(surface_key(text))
-        return (PronunciationCandidate(units),) if units and max_candidates else ()
-
-
-TEST_G2P = IdentityG2P()
-
-def _native_audio(*args, **kwargs):
-    kwargs.setdefault('g2p', TEST_G2P)
-    return NativeAudio(*args, **kwargs)
 
 
 TEXT = ThreadSource(31, 0x100, 1, 2, 'HT', 'text')
@@ -104,45 +86,10 @@ class MultiHookProductContract(unittest.TestCase):
 
 
 class NativeRecognitionContract(unittest.TestCase):
-    def test_asr_model_and_tokens_are_required_without_injected_recognizer(self):
+    def test_alignment_model_and_vocab_are_required_without_injected_backend(self):
         with self.assertRaises(FileNotFoundError):
-            _native_audio(31, Path('unused.dll'), Path('missing.onnx'),
-                        Path('missing.tokens'), lambda *_: None)
-
-    def test_vad_activity_and_silence_cannot_complete_without_matching_asr(self):
-        assessments = []
-        decisions = iter([VADDecision(True, 0), VADDecision(True, 0),
-                          VADDecision(False, 450)])
-
-        class Activity:
-            def observe_float32_stereo(self, _frames):
-                return next(decisions)
-
-        class NoMatchRecognizer:
-            def recognize(self, _samples):
-                return ''
-
-        audio = _native_audio(31, Path('unused.dll'), Path('missing.onnx'),
-                            Path('missing.tokens'), lambda *_: None,
-                            activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0,
-                            g2p=TEST_G2P, on_observation=lambda _t, item: assessments.append(item))
-        try:
-            audio.begin(Token(1, 1), '台詞')
-            for ms in (100, 500, 1000):
-                audio.feed(PCMChunk(ms, bytes(8), 48000, 2, 4))
-            import time
-            for _ in range(200):
-                with audio._lock:
-                    busy = audio._inflight
-                if not busy:
-                    break
-                time.sleep(.001)
-            knowledge = NativeVoiceKnowledge()
-            for item in assessments:
-                knowledge = reduce_native_voice_knowledge(knowledge, item)
-            self.assertFalse(knowledge.target_end_confirmed)
-        finally:
-            audio.close()
+            NativeAudio(31, Path('unused.dll'), Path('missing.onnx'),
+                        Path('missing.json'), lambda *_: None)
 
     def test_profile_has_two_modes_and_no_vad_only_setting(self):
         catalog = Catalog()

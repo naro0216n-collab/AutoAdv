@@ -2,8 +2,6 @@
 from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
-from unittest.mock import patch
 import json
 import copy
 import unittest
@@ -13,24 +11,6 @@ from autoadv.model import (Profile, AdvanceMode, StructureRule, ReplacementRule,
 from autoadv.storage import Catalog, save, load
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
-from autoadv.audio_match import TargetMatcher, surface_key, VADDecision
-from autoadv.g2p import PronunciationCandidate
-from autoadv.audio_knowledge import NativeVoiceKnowledge, reduce_native_voice_knowledge
-from autoadv.audio_buffer import PCMChunk
-from autoadv.native_audio import NativeAudio
-
-
-class IdentityG2P:
-    def candidates(self, text, *, max_candidates=4):
-        units = tuple(surface_key(text))
-        return (PronunciationCandidate(units),) if units and max_candidates else ()
-
-
-TEST_G2P = IdentityG2P()
-
-def _native_audio(*args, **kwargs):
-    kwargs.setdefault('g2p', TEST_G2P)
-    return NativeAudio(*args, **kwargs)
 
 
 class SalvagedTextTests(unittest.TestCase):
@@ -43,11 +23,11 @@ class SalvagedTextTests(unittest.TestCase):
         self.assertEqual((b.speaker, b.text), ('冬', 'おやすみ'))
         self.assertEqual(a.source, 'src')
 
-    def test_ruby_names_and_independent_asr_tts_rules(self):
+    def test_ruby_names_and_independent_match_tts_rules(self):
         p = Profile('p', 'P')
         p.name_readings = {'京': 'みやこ'}
         p.replacements = [ReplacementRule('A', 'えー', target='tts'),
-                          ReplacementRule('B', 'びー', target='asr'),
+                          ReplacementRule('B', 'びー', target='match'),
                           ReplacementRule('C+', 'しー', regex=True, target='both')]
         u = interpret('京「京(みやこ)と東京とABCCC」', p, session=1, line=1, source='s', sequence=1)
         self.assertEqual(u.reading, 'みやこと東京とえーBしー')
@@ -152,84 +132,7 @@ class AcquisitionAndInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'body source'):
             Controller(lambda *_: None, lambda _: True).begin(p, Target(11, 22), 'h', 1)
 
-    def test_target_matcher_does_not_complete_unrelated_or_unstable_voice(self):
-        m = TargetMatcher('おはようございます', g2p=TEST_G2P)
-        self.assertLess(m.align('明日').phonetic_coverage, .9)
-        m2 = TargetMatcher('おはよう', g2p=TEST_G2P)
-        a = m2.align('おはよう')
-        b = m2.align('おはよう')
-        self.assertGreaterEqual(b.phonetic_coverage, .9)
-        self.assertEqual(a, b)
 
-
-class NativeAudioSessionTests(unittest.TestCase):
-    def test_autoadv_boundary_can_be_applied_before_hook_binding(self):
-        class Recognizer:
-            def recognize(self, chunks):
-                return ''
-        class VAD:
-            def reset(self):
-                pass
-            def observe_float32_stereo(self, frames):
-                return VADDecision(False, 0)
-        audio = _native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
-                            lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 3000)
-        from autoadv.conversation import Token
-        try:
-            audio.history.start(11)
-            for ts in (1200, 1800, 2400):
-                audio.history.push(PCMChunk(ts, b'\x00' * 80, 48000, 2, 4), target_pid=11)
-            audio.boundary(1500)
-            token = Token(1, 1)
-            audio.begin(token, '次の台詞')
-            self.assertEqual(audio.window_start_ms, 1500)
-            self.assertEqual([c.at_ms for c in audio.history.since(audio.window_start_ms)], [1800, 2400])
-        finally:
-            audio.close()
-
-    def test_callback_on_attributed_matching_voice_only(self):
-        class Recognizer:
-            def recognize(self, chunks):
-                return 'おはよう'
-        class VAD:
-            def __init__(self): self.index = 0
-            def observe_float32_stereo(self, frames):
-                self.index += 1
-                return VADDecision(self.index == 1, 300 if self.index > 1 else 0)
-        assessments = []
-        audio = _native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
-                 lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 1000,
-                 g2p=TEST_G2P, on_observation=lambda token, item: assessments.append((token, item)))
-        from autoadv.conversation import Token
-        token = Token(1, 2)
-        try:
-            audio.history.start(11)
-            audio.begin(token, 'おはよう')
-            # The helper callback stores PCM before sending it to the monitor.
-            for ts in (1000, 1600, 2200):
-                chunk = PCMChunk(ts, b'\x00'*80, 48000, 2, 4)
-                audio.history.push(chunk, target_pid=11)
-                audio.feed(chunk)
-                import time
-                for _ in range(100):
-                    with audio._lock:
-                        busy = audio._inflight
-                    if not busy: break
-                    time.sleep(.001)
-            knowledge = NativeVoiceKnowledge()
-            for observed_token, item in assessments:
-                self.assertEqual(observed_token, token)
-                knowledge = reduce_native_voice_knowledge(knowledge, item)
-            self.assertTrue(knowledge.target_associated)
-            self.assertFalse(knowledge.target_end_confirmed)
-            audio.cancel()
-            self.assertIsNone(audio.token)
-        finally:
-            audio.close()
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 class StoredSettingsTransitionTests(unittest.TestCase):
     def test_initial_v3_replacements_are_migrated_once_into_one_rule_engine(self):
@@ -247,3 +150,7 @@ class StoredSettingsTransitionTests(unittest.TestCase):
             save(restored, path)
             after = json.loads(path.read_text(encoding='utf-8'))
             self.assertIsInstance(after['games'][game.id]['profiles'][p.id]['replacements'], list)
+
+
+if __name__ == '__main__':
+    unittest.main()

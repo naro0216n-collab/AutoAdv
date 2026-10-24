@@ -16,7 +16,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertNotIn('Invoke-WebRequest', source)
         self.assertIn('scripts\\prepare_windows_runtime.py', source)
         self.assertIn('--require-native', source)
-        self.assertNotIn('validation.real_game.prepare_asr_model', source)
+        self.assertNotIn('validation.real_game.prepare_alignment_model', source)
         self.assertNotIn('dotnet build', source)
         self.assertIn("'-GameExecutable',$gameExecutable", source)
         self.assertNotIn('RenPySdk', source)
@@ -60,7 +60,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertIn('validation\\real_game\\run_windows_validation.ps1', source)
         self.assertIn('bootstrap-latest.log', source)
         self.assertIn('last-run.txt', source)
-        for stale in ('RenPySdk', 'prepare_asr_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
+        for stale in ('RenPySdk', 'prepare_alignment_model', 'AutoAdv.ProcessLoopback.csproj', 'run_live_check.ps1'):
             self.assertNotIn(stale, source)
 
     def test_accuracy_measurement_is_one_continuous_product_session_with_silent_cases_and_recovery(self):
@@ -90,7 +90,7 @@ class WindowsValidationLauncherContract(unittest.TestCase):
         self.assertNotIn("'.[native]'", orchestrator)
         self.assertNotIn("Assert-Command 'dotnet'", orchestrator)
         self.assertNotIn('dotnet build', orchestrator)
-        self.assertNotIn('validation.real_game.prepare_asr_model', orchestrator)
+        self.assertNotIn('validation.real_game.prepare_alignment_model', orchestrator)
         self.assertIn('Remove-CompletedRunResidue', orchestrator)
         self.assertIn("@('venv', 'validation-game')", orchestrator)
         self.assertIn('validation-summary.json', orchestrator)

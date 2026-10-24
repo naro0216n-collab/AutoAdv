@@ -129,7 +129,7 @@ class ProductTraceObserver:
             'presentation_complete', 'next_line_timeout', 'advance_attempt',
             'advance_input', 'audio_observation_boundary', 'audio_deadline_elapsed',
             'native_capture_summary', 'native_audio_error',
-            'native_pcm', 'asr_inference', 'native_audio_observation', 'native_voice_end_estimate',
+            'native_pcm', 'alignment_inference', 'native_audio_observation', 'native_voice_end_estimate',
             'tts_timing', 'tts_result', 'controller_handoff',
         }:
             self.trace.emit(event, **fields)

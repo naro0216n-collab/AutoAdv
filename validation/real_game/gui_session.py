@@ -207,13 +207,16 @@ class SessionDriver:
         )
 
         if self.options['phase'] in ('mixed', 'stress'):
-            for field in ('helper', 'model', 'tokens'):
-                path = self.options.get(field, '')
-                if not path or not Path(path).is_file():
-                    raise ValueError('real native audio dependency unavailable: ' + field)
-            self.product.set_profile_setting('native_helper', self.options['helper'])
-            self.product.set_profile_setting('asr_model', self.options['model'])
-            self.product.set_profile_setting('asr_tokens', self.options['tokens'])
+            overrides = {field: self.options.get(field, '') for field in ('helper', 'model', 'vocab')}
+            if any(overrides.values()):
+                if not all(overrides.values()):
+                    raise ValueError('native audio overrides must be supplied as one complete set')
+                for field, path in overrides.items():
+                    if not Path(path).is_file():
+                        raise ValueError('real native audio dependency unavailable: ' + field)
+                self.product.set_profile_setting('native_helper', overrides['helper'])
+                self.product.set_profile_setting('alignment_model', overrides['model'])
+                self.product.set_profile_setting('alignment_vocab', overrides['vocab'])
 
         if self.options['phase'] == 'tts':
             voice = self.options.get('voice', '').strip()
@@ -239,7 +242,7 @@ class SessionDriver:
             return False
         # Keep the same product extraction semantics that proved the calibration
         # body.  Forcing the raw string to ``body`` would later fold a speaker
-        # line into the ASR target and invalidate native-audio attribution.
+        # line into the acoustic alignment target and invalidate native-audio attribution.
         self.product.set_capture_extraction_preset(source.identity, source.address, 'auto')
         self.product.set_capture_field_source('body', source.identity, source.address)
         self.product.set_capture_field_source('speaker', None)

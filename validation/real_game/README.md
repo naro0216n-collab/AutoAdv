@@ -11,7 +11,7 @@ AutoAdv実経路で確認する対象は、LunaHookが受信した取得元と�
 実録音をProcess Loopback互換PCMへ変換し、AutoAdvの既存NativeAudioへ投入する局所契約である。ゲーム、Ren'Py、LunaHook、Windows入力を起動しない。
 
 ```powershell
-python -m unittest validation.real_game.test_native_audio -v
+python -m unittest validation.real_game.test_native_alignment_fixture -v
 ```
 
 これは音声判定の不変条件を確認するもので、実Process Loopback捕捉や実ゲーム自動送りの成立を証明しない。
@@ -22,7 +22,7 @@ fixture manifest、ゲームoracle、trace verifier、live-session adapter等は
 
 ### 3. Hosted WindowsのHOOK・文字送り経路
 
-AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phaseだけを実行する。ゲームPID/HWND検出、実LunaHost接続、実Hook候補からの校正、Controllerの文字時間判断、実Windows入力、次Hookを確認する。Process Loopback、ASR、NativeAudioはこのHosted経路の合否条件に含めない。
+AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phaseだけを実行する。ゲームPID/HWND検出、実LunaHost接続、実Hook候補からの校正、Controllerの文字時間判断、実Windows入力、次Hookを確認する。Process Loopback、target-conditioned alignment、NativeAudioはこのHosted経路の合否条件に含めない。
 
 ```powershell
 .\validation\real_game\run_live_check.ps1 -Phase reading `
@@ -35,13 +35,10 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
 
 ```powershell
 .\validation\real_game\run_live_check.ps1 -Phase accuracy `
-  -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated -MeasurementOnly -UncertainFallback `
-  -ProcessLoopbackHelper C:\path\to\AutoAdv.ProcessLoopback.dll `
-  -AsrModel C:\path\to\model.int8.onnx `
-  -AsrTokens C:\path\to\tokens.txt
+  -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated -MeasurementOnly -UncertainFallback
 ```
 
-標準ケースは**24台詞を一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで連続実行**する。7つの通常ゲーム場面を、静かな室内→BGM付き会話→BGMを維持した入店と群衆音→BGM切替と日本語背景発話→事件演出→旧BGMと機械環境音が重なる場面転換→静かな復帰、の順で一続きに通過する。場面境界でゲーム再起動、HOOK再選択、NativeAudio/ASR再初期化、profile再設定、検証用状態clearは行わない。
+標準ケースは**24台詞を一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで連続実行**する。7つの通常ゲーム場面を、静かな室内→BGM付き会話→BGMを維持した入店と群衆音→BGM切替と日本語背景発話→事件演出→旧BGMと機械環境音が重なる場面転換→静かな復帰、の順で一続きに通過する。場面境界でゲーム再起動、HOOK再選択、NativeAudio/alignment再初期化、profile再設定、検証用状態clearは行わない。
 
 24件中18件は原音あり、6件は原音なし。原音ありには通常短文・長文、JVS複数話者、囁き、泣き声・悲鳴、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音を含む。原音なしはclean、BGMのみ、BGM+群衆、BGM+日本語背景発話、BGM+SE残響、機械環境音のみへ分散し、明示フォールバックON時に文字数時間で進むことと、背景音を対象原音へ誤帰属して`native`完了しないことを測る。台詞境界をまたぐBGM・環境音・SEは意図的に保持する。独立game oracleはvoiceの開始・終了だけでなくmusic/ambient/background/SFXの実再生も記録し、`ADVANCEMENT_ACCURACY_SCENARIO.json`の想定mixが実際に成立しなかったrunは完全な計測として扱わない。
 
@@ -51,9 +48,9 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
 
 ## 標準Windows runtime
 
-ASR/G2P/Process Loopbackを検証専用環境として持たない。通常の`AutoAdv.cmd`は`%LOCALAPPDATA%\AutoAdv\runtime`にAutoAdv管理runtimeを準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定SenseVoice model/tokensを自動配置する。Process Loopback helperも同じ管理領域へhelperソースdigest単位で配置し、既に成立しているruntimeを毎回再構築しない。
+forced alignment/G2P/Process Loopbackを検証専用環境として持たない。通常の`AutoAdv.cmd`は`%LOCALAPPDATA%\AutoAdv\runtime`にAutoAdv管理runtimeを準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定target-conditioned alignment model/vocabularyを自動配置する。Process Loopback helperも同じ管理領域へhelperソースdigest単位で配置し、既に成立しているruntimeを毎回再構築しない。
 
-ASRの固定repository/revision/SHA-256は`autoadv.native_runtime`が所有する。精度計測、ASR benchmark、通常製品は同じmanaged model/tokensを使用し、検証専用ASR downloaderや第二の配置正本を持たない。個別パスは必要な場合だけ詳細設定から上書きできる。
+alignment modelの固定repository/revision/SHA-256は`autoadv.native_runtime`が所有する。精度計測、alignment benchmark、通常製品は同じmanaged model/vocabularyを使用し、検証専用model downloaderや第二の配置正本を持たない。個別パスは必要な場合だけ詳細設定から上書きできる。
 
 ## Prebuilt validation game
 
@@ -71,13 +68,13 @@ JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifa
 
 Windows実機計測のGitHub Issueは、チャット環境から比較・解析できるリモート診断面として使う。4個の固定履歴slotをリングとして扱い、通常runは同一runのslotまたは最古slotの1件だけをPATCHする。別に直近の完全計測・recoveryなし・voice safety成立runをbaselineとして保持する。完全なJSONLとtranscriptはローカルrun directoryにも残す。Issue更新は計測後の共有処理であり、GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
 
-## ASR品質・stress計測
+## Alignment品質・stress計測
 
-CER、完全一致率、RTFは原因分析用で、自動進行精度の代理合格条件ではない。必要時にmanaged ASR runtimeを使ってWindows実機で明示実行する。
+既知本文のassociation率、末尾境界誤差、早いcommit、未確認率、RTFを測り、自動進行精度とは分離して扱う。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
 
 ```powershell
-python -m validation.real_game.benchmark_asr --conditions clean quiet noise clipped truncated bgm --rounds 2 --output .\asr-performance.json
-python -m validation.real_game.stress_asr --selection all --rounds 2 --output .\asr-stress.json
+python -m validation.real_game.benchmark_alignment --conditions clean quiet noise clipped truncated bgm --rounds 2 --output .\alignment-performance.json
+python -m validation.real_game.stress_alignment --selection all --rounds 2 --output .\alignment-stress.json
 ```
 
 ## GitHub上の実行経路

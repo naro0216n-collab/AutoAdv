@@ -28,7 +28,7 @@ def _phase(name: str, *, report_present: bool = True, eligible_accuracy: bool = 
             "automatic_advance_rate": 1.0,
             "safe_automatic_advance_rate": 1.0,
             "process_audio_observation_rate": 1.0 if name == "accuracy" else None,
-            "asr_observation_rate": 1.0 if name == "accuracy" else None,
+            "alignment_observation_rate": 1.0 if name == "accuracy" else None,
             "mix_environment_observation_rate": 1.0 if name == "accuracy" else None,
             "foreground_native_completion_rate": 1.0 if name == "accuracy" else None,
             "recovery_rate": 0.0,
@@ -98,7 +98,7 @@ class IssueReportingContract(unittest.TestCase):
                     "outcome": "no_autoadv_input",
                     "completion_reason": None,
                     "pcm_observed": True,
-                    "asr_inference_count": 4,
+                    "alignment_inference_count": 4,
                     # game_outcome and game_end_to_input_ms are intentionally absent.
                 }],
                 "quality_issues": [],
@@ -186,7 +186,7 @@ class IssueReportingContract(unittest.TestCase):
             root = Path(directory) / "20261023T134156Z-b10d6904"
             root.mkdir()
             accuracy = _phase("accuracy", eligible_accuracy=True)
-            accuracy["quality"]["asr_observation_rate"] = 0.9565
+            accuracy["quality"]["alignment_observation_rate"] = 0.9565
             _write_summary(root, accuracy=accuracy)
 
             plan = issue_reporting.build_upload_plan(root, "e" * 40, _comments())

@@ -42,7 +42,7 @@ label start:
         while not _autoadv_fixture_os.path.isfile(_adv_gate + ".monitoring"):
             $ renpy.pause(.1, hard=True)
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "stress":
-        jump asr_stress
+        jump alignment_stress
     if _autoadv_fixture_os.environ.get("AUTOADV_VALIDATION_SCENARIO") == "accuracy":
         # Dedicated Windows auto-advance accuracy scene. Runtime-only media is hydrated by
         # run_windows_validation.ps1 before the game starts; it is never part
@@ -55,7 +55,7 @@ label start:
     "無音声の主人公は、AutoAdv側でIrodori TTSを指定して検証してください。"
 label advancement_accuracy:
     # One continuous ADV/novel-game playthrough. The game process, selected
-    # LunaHook, AutoAdv session, NativeAudio and ASR remain alive from the first
+    # LunaHook, AutoAdv session, NativeAudio and alignment remain alive from the first
     # measured line through the final recovery line. Scene transitions below
     # are ordinary presentation only; no validation boundary or product reset
     # is signalled to AutoAdv.
@@ -160,7 +160,7 @@ label advancement_accuracy:
     a "私はポピュラー音楽を聞きたい。"
 
     # Scene 7: ordinary quiet transition and final clean recovery. The same
-    # process/session must prove no stale PCM/VAD/ASR/background state leaks.
+    # process/session must prove no stale PCM/alignment/background state leaks.
     stop adv_ambient fadeout 0.3
     scene bg adv_quiet with fade
     voice "audio/voice/normal_035.wav"
@@ -213,8 +213,8 @@ label bgm_voice:
 
     "次の選択肢は、ユーザー操作によって進めてください。"
     menu:
-        "ASR非言語発声・背景音声テスト":
-            jump asr_stress
+        "音響整列・非言語発声・背景音声テスト":
+            jump alignment_stress
         "検証を続ける":
             jump continuation
         "検証を終了する":
@@ -237,12 +237,12 @@ label continuation:
 
 # Separate, optional real-engine challenge branch. No in-game AutoAdv control
 # channel is created; normal Ren'Py voice/sound/dialogue/input is used.
-label asr_stress:
+label alignment_stress:
     if not renpy.loadable("audio/voice/stress_cry.wav") or not renpy.loadable("audio/voice/stress_scream.wav"):
-        "CC0実録音の泣き声・叫び声が未配置です。ASR特殊音声の検収は実行できません。"
+        "CC0実録音の泣き声・叫び声が未配置です。音響整列の特殊音声検収は実行できません。"
         return
 
-    "ASR特殊音声検証です。背景発話と非言語音声の進行判断を確認します。"
+    "音響整列の特殊音声検証です。背景発話と非言語音声の進行判断を確認します。"
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
 
@@ -259,7 +259,7 @@ label asr_stress:
     # Background voice persists with no foreground voice at all.
     p "これは表示されただけの文章です。"
     # Identical background speech is acoustically indistinguishable from
-    # a foreground occurrence of this very line using mixed PCM + ASR.
+    # a foreground occurrence of this very line using mixed PCM + target-conditioned alignment.
     p "ヒューズが飛んだ。"
     stop sound
 
