@@ -23,6 +23,7 @@ from autoadv.native_runtime import managed_paths
 from .verify_trace import _summary
 
 HERE = Path(__file__).resolve().parent
+ENDPOINT_ORACLE = HERE / 'ALIGNMENT_ENDPOINT_ORACLE.json'
 CONDITIONS = ('clean', 'quiet', 'noise', 'clipped', 'truncated', 'bgm')
 
 
@@ -75,10 +76,14 @@ def _chunk(mono: np.ndarray) -> PCMChunk:
 
 
 def _result_row(sample: dict, condition: str, repetition: int,
-                alignment, elapsed_ms: float, audio_ms: float) -> dict:
+                alignment, elapsed_ms: float, audio_ms: float, oracle: dict) -> dict:
     fit = alignment.fit
     end_ms = (alignment.target_end_frame * alignment.frame_ms
               if alignment.target_end_frame is not None else None)
+    oracle_end_ms = float(oracle['speech_end_ms'])
+    oracle_uncertainty_ms = float(oracle['uncertainty_ms'])
+    endpoint_error_ms = (end_ms - oracle_end_ms) if end_ms is not None else None
+    committed_error = endpoint_error_ms if alignment.committed_end else None
     return {
         'id': sample['id'],
         'condition': condition,
@@ -93,6 +98,15 @@ def _result_row(sample: dict, condition: str, repetition: int,
         'complete_alignment': alignment.complete_alignment,
         'committed_end': alignment.committed_end,
         'target_end_ms': round(end_ms, 3) if end_ms is not None else None,
+        'oracle_end_ms': round(oracle_end_ms, 3),
+        'oracle_uncertainty_ms': round(oracle_uncertainty_ms, 3),
+        'endpoint_error_ms': round(endpoint_error_ms, 3) if endpoint_error_ms is not None else None,
+        'early_commit': bool(alignment.committed_end and committed_error is not None
+                             and committed_error < -oracle_uncertainty_ms),
+        'late_commit': bool(alignment.committed_end and committed_error is not None
+                            and committed_error > oracle_uncertainty_ms),
+        'endpoint_within_oracle': bool(alignment.committed_end and committed_error is not None
+                                       and abs(committed_error) <= oracle_uncertainty_ms),
         'post_target_free_frames': alignment.post_target_free_frames,
         'reading_rank': alignment.reading_rank,
         'path_margin': round(fit.path_margin, 4),
@@ -104,11 +118,32 @@ def _result_row(sample: dict, condition: str, repetition: int,
     }
 
 
+def _load_endpoint_oracle(manifest: dict) -> tuple[dict, dict[str, dict]]:
+    data = json.loads(ENDPOINT_ORACLE.read_text(encoding='utf-8'))
+    samples = data.get('samples', {})
+    expected = {sample['id'] for sample in manifest['samples']}
+    if set(samples) != expected:
+        missing = sorted(expected - set(samples))
+        extra = sorted(set(samples) - expected)
+        raise ValueError(f'alignment endpoint oracle mismatch: missing={missing}, extra={extra}')
+    for sample in manifest['samples']:
+        item = samples[sample['id']]
+        end_ms = float(item['speech_end_ms'])
+        uncertainty_ms = float(item['uncertainty_ms'])
+        duration_ms = float(sample['duration_s']) * 1000.0
+        if not (0 < end_ms <= duration_ms):
+            raise ValueError(f'invalid speech endpoint for {sample["id"]}')
+        if not (0 <= uncertainty_ms < duration_ms):
+            raise ValueError(f'invalid endpoint uncertainty for {sample["id"]}')
+    return {k: v for k, v in data.items() if k != 'samples'}, samples
+
+
 def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, seed: int,
         model_backend=None, g2p=None) -> dict:
     if rounds < 1:
         raise ValueError('rounds must be positive')
     manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
+    oracle_meta, endpoint_oracle = _load_endpoint_oracle(manifest)
     clips = [(sample, _load_pcm(HERE / 'renpy' / 'game' / sample['path'], sample['sha256']))
              for sample in manifest['samples']]
     bgm = _load_bgm() if 'bgm' in conditions else None
@@ -129,7 +164,8 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
                 alignment = aligner.align((chunk,))
                 elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
                 results.append(_result_row(
-                    sample, condition, repetition, alignment, elapsed_ms, chunk.duration_ms))
+                    sample, condition, repetition, alignment, elapsed_ms, chunk.duration_ms,
+                    endpoint_oracle[sample['id']]))
 
     by_condition = {}
     for condition in conditions:
@@ -142,10 +178,15 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
             'complete': sum(row['complete_alignment'] for row in rows),
             'committed': sum(row['committed_end'] for row in rows),
             'unconfirmed': sum(not row['committed_end'] for row in rows),
+            'early_commits': sum(row['early_commit'] for row in rows),
+            'late_commits': sum(row['late_commit'] for row in rows),
+            'endpoint_within_oracle': sum(row['endpoint_within_oracle'] for row in rows),
+            'endpoint_error_ms': _summary([row['endpoint_error_ms'] for row in rows
+                                           if row['committed_end'] and row['endpoint_error_ms'] is not None]),
             'runs': len(rows),
         }
     return {
-        'schema': 'autoadv-alignment-benchmark-v1',
+        'schema': 'autoadv-alignment-benchmark-v2',
         'device': platform.platform(),
         'python': platform.python_version(),
         'model_sha256': hashlib.sha256(model.read_bytes()).hexdigest() if model.is_file() else None,
@@ -156,7 +197,7 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
         'conditions': by_condition,
         'samples': results,
         'real_game_verified': False,
-        'endpoint_oracle': 'not_provided_offline',
+        'endpoint_oracle': oracle_meta,
     }
 
 

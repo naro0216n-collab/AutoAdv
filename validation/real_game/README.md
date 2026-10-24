@@ -70,7 +70,7 @@ Windows実機計測のGitHub Issueは、チャット環境から比較・解析�
 
 ## Alignment品質・stress計測
 
-既知本文のassociation率、末尾境界誤差、早いcommit、未確認率、RTFを測り、自動進行精度とは分離して扱う。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
+既知本文のassociation率、固定clean-source末尾annotationに対する境界誤差、早いcommit、未確認率、RTFを測り、自動進行精度とは分離して扱う。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
 
 ```powershell
 python -m validation.real_game.benchmark_alignment --conditions clean quiet noise clipped truncated bgm --rounds 2 --output .\alignment-performance.json

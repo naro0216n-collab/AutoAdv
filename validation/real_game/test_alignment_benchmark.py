@@ -9,7 +9,7 @@ import numpy as np
 
 from autoadv.g2p import PronunciationCandidate
 from autoadv import native_runtime
-from validation.real_game.benchmark_alignment import _degrade, run
+from validation.real_game.benchmark_alignment import _degrade, _load_endpoint_oracle, run
 
 
 class StaticG2P:
@@ -58,14 +58,28 @@ class OnDemandAlignmentBenchmarkContracts(unittest.TestCase):
             vocab.write_bytes(b'vocab placeholder')
             report = run(model, vocab, conditions=('clean',), rounds=1, seed=10,
                          model_backend=StaticModel(), g2p=StaticG2P())
-        self.assertEqual(report['schema'], 'autoadv-alignment-benchmark-v1')
+        self.assertEqual(report['schema'], 'autoadv-alignment-benchmark-v2')
         self.assertEqual(report['conditions']['clean']['runs'], 14)
         self.assertEqual(len(report['samples']), 14)
         self.assertEqual(report['conditions']['clean']['associated'], 14)
         self.assertNotIn('cer', report['conditions']['clean'])
         self.assertNotIn('recognized_hash', report['samples'][0])
         self.assertFalse(report['real_game_verified'])
-        self.assertEqual(report['endpoint_oracle'], 'not_provided_offline')
+        self.assertEqual(report['endpoint_oracle']['schema'], 'autoadv-alignment-endpoint-oracle-v1')
+        self.assertIn('endpoint_error_ms', report['conditions']['clean'])
+        self.assertIn('early_commits', report['conditions']['clean'])
+        self.assertIn('oracle_end_ms', report['samples'][0])
+        self.assertIn('oracle_uncertainty_ms', report['samples'][0])
+
+    def test_endpoint_oracle_covers_every_voice_and_is_not_file_end(self):
+        import json
+        manifest = json.loads((Path(__file__).parent / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
+        meta, oracle = _load_endpoint_oracle(manifest)
+        self.assertEqual(meta['schema'], 'autoadv-alignment-endpoint-oracle-v1')
+        self.assertEqual(set(oracle), {sample['id'] for sample in manifest['samples']})
+        for sample in manifest['samples']:
+            endpoint = oracle[sample['id']]['speech_end_ms']
+            self.assertLess(endpoint, sample['duration_s'] * 1000)
 
 
 if __name__ == '__main__':
