@@ -4,7 +4,7 @@ Normal progression is owned entirely by the product Controller. The validation
 driver does not interpret product state. For the continuous Windows accuracy
 fixture it only watches the fixture's authored case-start evidence and, after a
 fixed wall-clock watchdog, may send one explicitly traced recovery input so a
-failed case does not hide later cases.
+non-advancing case does not hide later cases.
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ class SessionDriver:
 
     @staticmethod
     def _send_validation_recovery(runtime):
-        """Advance only the validation fixture after the product has failed.
+        """Advance only the validation fixture after the fixed watchdog expires.
 
         This bypasses the normal AutoAdv input path and is never exposed as a
         product send.  The validation profile uses the ordinary per-flush repeat
@@ -269,7 +269,9 @@ class SessionDriver:
                         'validation_collection_target', phase=self.options['phase'],
                         dialogues=int(self.options.get('dialogues', 0)),
                         continue_collection=bool(
-                            self.options.get('continue_collection', False)))
+                            self.options.get('continue_collection', False)),
+                        case_watchdog_seconds=self.case_watchdog_seconds,
+                        final_observation_seconds=self.final_observation_seconds)
                     self.collection_target_emitted = True
                 if self.options['phase'] != 'hook':
                     self.w.permit()

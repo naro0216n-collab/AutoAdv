@@ -44,8 +44,8 @@ $scene = switch ($Phase) {
     'mixed'  { 'mixed' }
     default  { 'start' }
 }
-# The fixture evidence file records only authored case starts. It does not inspect
-# playback, Hook state or AutoAdv decisions.
+# The fixture evidence file records authored case starts and direct Ren'Py voice-command facts.
+# It does not inspect Hook state or AutoAdv decisions.
 if ($GameExecutable -and $Phase -eq 'accuracy' -and -not $Evidence) {
     $Evidence = Join-Path $scratch ('autoadv-fixture-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 }
@@ -152,18 +152,19 @@ try {
         if (Test-Path -LiteralPath $Trace) {
             $auditExit = Invoke-ValidationPython $arguments
         } else {
-            @{ok = $false; phase = $Phase; errors = @('GUI did not produce a product trace')} |
+            @{schema = 'autoadv-offline-verification-v1'; phase = $Phase; verdict = 'incomplete';
+              evidence_issues = @('GUI did not produce a product trace')} |
                 ConvertTo-Json | Set-Content -LiteralPath $Report -Encoding utf8
             $auditExit = 1
         }
         Write-Host "AutoAdv validation report: $Report"
         if ($guiExit -ne 0) {
-            throw "AutoAdv GUI returned exit code $guiExit; game not verified"
+            throw "AutoAdv GUI returned exit code $guiExit before evidence collection completed"
         }
         if ($auditExit -ne 0) {
-            throw "Real game measurement/verification could not complete (phase=$Phase, trace=$Trace)"
+            throw "Offline verification could not read collected evidence (phase=$Phase, trace=$Trace)"
         }
-        Write-Host "Collected AutoAdv and fixture evidence (phase=$Phase). Product behavior is left for later analysis."
+        Write-Host "Collected AutoAdv and fixture evidence and wrote offline comparison (phase=$Phase)."
     } finally {
         Pop-Location
     }

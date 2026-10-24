@@ -10,6 +10,8 @@ init -1 python:
 
     _adv_evidence_path = _adv_os.environ.get("AUTOADV_GAME_EVIDENCE", "")
     _adv_evidence_seq = 0
+    _adv_evidence_current_case = None
+    _adv_evidence_current_voice = None
 
     def _adv_evidence_write(event, **fields):
         global _adv_evidence_seq
@@ -37,9 +39,27 @@ init -1 python:
             ), ensure_ascii=False, separators=(",", ":")) + "\n")
 
     def _adv_evidence_case(case_id, text, voice_file=None):
+        global _adv_evidence_current_case, _adv_evidence_current_voice
+        _adv_evidence_current_case = case_id
+        _adv_evidence_current_voice = voice_file
         _adv_evidence_write(
             "fixture_case",
             case=case_id,
             text=text,
             voice_file=voice_file,
+        )
+
+    def _adv_evidence_voice_commanded():
+        # Called immediately after the fixture's ordinary ``voice``/``play voice``
+        # statement.  This records only what Ren'Py itself can report at that
+        # point: which authored case issued the command and the source duration.
+        # It does not inspect product state or infer whether playback has ended.
+        if not _adv_evidence_current_case or not _adv_evidence_current_voice:
+            return
+        duration = renpy.music.get_duration(channel="voice")
+        _adv_evidence_write(
+            "fixture_voice_commanded",
+            case=_adv_evidence_current_case,
+            voice_file=_adv_evidence_current_voice,
+            duration_ms=(round(float(duration) * 1000.0, 3) if duration else None),
         )

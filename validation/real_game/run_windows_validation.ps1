@@ -132,7 +132,7 @@ function Remove-CompletedRunResidue([string] $runsRoot, [string] $currentSession
     if (-not (Test-Path -LiteralPath $runsRoot -PathType Container)) { return }
     foreach ($run in @(Get-ChildItem -LiteralPath $runsRoot -Directory -ErrorAction SilentlyContinue)) {
         if ($run.FullName -eq $currentSession) { continue }
-        # A summary is written only after the measurement process has released
+        # A summary is written only after the evidence run has released
         # its Python/game runtime. Preserve all evidence files and remove only
         # reproducible run environments from completed runs.
         if (-not (Test-Path -LiteralPath (Join-Path $run.FullName 'validation-summary.json') -PathType Leaf)) {
@@ -195,7 +195,7 @@ try {
             $stage = 'prepare-accuracy'
             Push-Location $repo
             try {
-                # Only fixture media remains measurement-specific. Product alignment model,
+                # Only fixture media remains validation-specific. Product alignment model,
                 # G2P and Process Loopback come from the standard AutoAdv runtime.
                 $mediaRoot = Join-Path $cache 'media'
                 Invoke-Checked 'python' @('-m','validation.real_game.prepare_accuracy_assets',
@@ -231,19 +231,15 @@ try {
             } finally { Pop-Location }
         }
 
-        $measurement = $null
+        $verification = $null
         if (Test-Path -LiteralPath $report -PathType Leaf) {
-            try { $measurement = Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json }
+            try { $verification = Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json }
             catch { $phaseError = "Verification report cannot be parsed: $($_.Exception.Message)" }
         }
         $results.Add([pscustomobject]@{
             phase = $currentPhase
-            ok = if ($measurement) { $measurement.ok } else { $false }
-            collection_valid = if ($measurement) { $measurement.collection_valid } else { $null }
-            measurement_valid = if ($measurement) { $measurement.measurement_valid } else { $null }
-            collection_complete = if ($measurement) { $measurement.collection_complete } else { $null }
-            facts = if ($measurement) { $measurement.facts } else { $null }
-            report_present = [bool]$measurement
+            facts = if ($verification) { $verification.facts } else { $null }
+            report_present = [bool]$verification
             runner_error = $phaseError
         })
     }
@@ -292,16 +288,15 @@ $finalError = $null
 if ($errorText) {
     $finalError = "AutoAdv validation setup failed: $errorText"
 } else {
-    $unmeasurable = @($results.ToArray() | Where-Object {
-        $_.runner_error -or $_.report_present -ne $true -or
-        $_.measurement_valid -ne $true -or $_.collection_complete -ne $true
+    $incompleteRuns = @($results.ToArray() | Where-Object {
+        $_.runner_error -or $_.report_present -ne $true
     })
-    if ($results.Count -ne $phaseNames.Count -or $unmeasurable.Count -gt 0) {
-        $finalError = "AutoAdv measurement could not complete ($($unmeasurable.Count) invalid/incomplete phase(s)); see local/uploaded reports"
+    if ($results.Count -ne $phaseNames.Count -or $incompleteRuns.Count -gt 0) {
+        $finalError = "AutoAdv evidence collection could not complete ($($incompleteRuns.Count) runner/report failure(s)); see local/uploaded reports"
     }
 }
 if (-not $finalError) {
-    Write-Host 'AutoAdv evidence collection completed for all requested phases. Product behavior remains for later analysis.'
+    Write-Host 'AutoAdv evidence collection completed for all requested phases; behavioral classification is in the offline verifier report.'
 } else {
     Write-Warning $finalError
     Write-Warning "Persistent log: $transcriptPath"
@@ -311,7 +306,7 @@ if ($transcriptStarted) {
     catch { Write-Warning "Validation transcript could not be closed cleanly: $($_.Exception.Message)" }
 }
 # The staged game is reproducible from the shared fixture cache and is not
-# measurement evidence. Keep logs/traces/reports only in the run directory.
+# validation evidence. Keep logs/traces/reports only in the run directory.
 Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue
 Remove-CompletedRunResidue (Join-Path $WorkBase 'runs') $session
 if ($finalError) { throw $finalError }

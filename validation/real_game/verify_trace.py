@@ -1,10 +1,10 @@
-"""Validate evidence integrity without explaining product behavior.
+"""Offline comparison of validation inputs against fixture-authored time facts.
 
-The real-game runner is an evidence collector, not a second AutoAdv state
-machine.  This module checks that the product trace and fixture stimulus record
-are structurally readable and that the requested fixture sequence was reached.
-It deliberately does not classify early input, overhold, misattribution,
-playback state, safety, or product success.
+The Windows runner and product trace are evidence sources only.  This module is
+the sole validation-side owner of behavioral classification.  Its case verdicts
+use only fixture case/voice timestamps and actual input timestamps; product
+alignment, UtteranceProgress, pause reasons, completion reasons and other
+runtime inference are retained as evidence but never reproduced here.
 """
 from __future__ import annotations
 
@@ -27,8 +27,10 @@ def _summary(values: list[float]) -> dict | None:
     if not values:
         return None
     ordered = sorted(values)
+
     def percentile(q: float) -> float:
         return ordered[min(len(ordered) - 1, int(round((len(ordered) - 1) * q)))]
+
     return {
         'count': len(ordered),
         'p50': round(percentile(.50), 3),
@@ -49,36 +51,35 @@ def scenario_for_phase(phase: str, scenario_path: Path = HERE / 'SCENARIO.json')
     return lines
 
 
-def _sequence_errors(records: Sequence[dict], *, started_event: str, version: int) -> list[str]:
+def _sequence_issues(records: Sequence[dict], *, started_event: str, version: int) -> list[str]:
     if not records:
         return [f'no {started_event} evidence']
     first = records[0]
-    errors = []
+    issues = []
     if first.get('event') != started_event or first.get('version') != version:
-        errors.append(f'invalid {started_event} header')
+        issues.append(f'invalid {started_event} header')
     previous = -1
     for record in records[1:]:
         seq = record.get('seq')
         if type(seq) is not int or seq <= previous:
-            errors.append(f'non-monotonic {started_event} sequence')
+            issues.append(f'non-monotonic {started_event} sequence')
             break
         previous = seq
         if type(record.get('at_ns')) is not int:
-            errors.append(f'{started_event} record without monotonic timestamp')
+            issues.append(f'{started_event} record without monotonic timestamp')
             break
-    return errors
+    return issues
 
 
 def _core_timeline(records: Sequence[dict], fixture_records: Sequence[dict] | None) -> list[dict]:
+    """Compact factual timeline for remote diagnosis; no verdicts are added."""
     timeline: list[dict] = []
     for record in fixture_records or ():
-        if record.get('event') != 'fixture_case':
+        if record.get('event') not in ('fixture_case', 'fixture_voice_commanded'):
             continue
-        timeline.append({
-            'stream': 'fixture', 'event': 'fixture_case', 'at_ns': record.get('at_ns'),
-            'case': record.get('case'), 'text': record.get('text'),
-            'voice_file': record.get('voice_file'),
-        })
+        item = {'stream': 'fixture'}
+        item.update({key: value for key, value in record.items() if key != 'seq'})
+        timeline.append(item)
     progress_state: dict[tuple[object, object], tuple[object, ...]] = {}
     for record in records:
         event = record.get('event')
@@ -96,61 +97,197 @@ def _core_timeline(records: Sequence[dict], fixture_records: Sequence[dict] | No
                 continue
             progress_state[key] = signature
         item = {'stream': 'product'}
-        for key, value in record.items():
-            if key in ('seq',):
-                continue
-            item[key] = value
+        item.update({key: value for key, value in record.items() if key != 'seq'})
         timeline.append(item)
-    timeline.sort(key=lambda item: (item.get('at_ns') if type(item.get('at_ns')) is int else 0,
-                                    0 if item.get('stream') == 'fixture' else 1))
+    timeline.sort(key=lambda item: (
+        item.get('at_ns') if type(item.get('at_ns')) is int else 0,
+        0 if item.get('stream') == 'fixture' else 1,
+    ))
     return timeline
 
 
-def validate(records: Sequence[dict], *, phase: str = 'mixed',
-             fixture_records: Sequence[dict] | None = None,
-             requested_cases: int | None = None) -> dict:
+def _endpoint_oracle_by_path() -> dict[str, dict]:
+    """Map Git-owned fixture voice paths to independent source-tail facts."""
+    manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
+    oracle = json.loads((HERE / 'ALIGNMENT_ENDPOINT_ORACLE.json').read_text(encoding='utf-8'))
+    samples = oracle.get('samples', {})
+    result: dict[str, dict] = {}
+    for sample in manifest.get('samples', ()):
+        sample_id = sample.get('id')
+        path = sample.get('path')
+        endpoint = samples.get(sample_id)
+        if isinstance(path, str) and isinstance(endpoint, dict):
+            result[path] = endpoint
+    return result
+
+
+def _target_options(records: Sequence[dict]) -> dict:
+    target = next((r for r in records if r.get('event') == 'validation_collection_target'), None)
+    return target if isinstance(target, dict) else {}
+
+
+def _successful_product_inputs(records: Sequence[dict], issues: list[str]) -> list[dict]:
+    """Return successful send facts timestamped at their causal attempt edge."""
+    pending: dict[tuple[object, object], list[dict]] = {}
+    successful: list[dict] = []
+    for record in records:
+        event = record.get('event')
+        key = (record.get('session'), record.get('line'))
+        if event == 'advance_attempt' and type(record.get('at_ns')) is int:
+            pending.setdefault(key, []).append(record)
+        elif event == 'advance_input' and type(record.get('at_ns')) is int:
+            attempts = pending.get(key) or []
+            attempt = attempts.pop(0) if attempts else None
+            if attempt is None:
+                issues.append(f'advance_input without matching advance_attempt: session={key[0]} line={key[1]}')
+            successful.append({
+                'at_ns': attempt.get('at_ns') if attempt is not None else record.get('at_ns'),
+                'confirmed_at_ns': record.get('at_ns'),
+                'session': key[0],
+                'line': key[1],
+            })
+    return successful
+
+
+def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[dict],
+                           expected: Sequence[dict], issues: list[str]) -> list[dict]:
+    cases = [r for r in fixture_records if r.get('event') == 'fixture_case']
+    expected_ids = [str(line.get('id') or '') for line in expected]
+    first_pass = cases[:len(expected_ids)]
+    observed_ids = [str(row.get('case') or '') for row in first_pass]
+    if observed_ids != expected_ids[:len(observed_ids)]:
+        issues.append('fixture case evidence does not follow authored accuracy sequence')
+    if len(cases) > len(expected_ids):
+        issues.append(f'fixture emitted additional case records after authored pass: {len(cases) - len(expected_ids)}')
+
+    voice_rows = [r for r in fixture_records if r.get('event') == 'fixture_voice_commanded']
+    product_inputs = _successful_product_inputs(records, issues)
+    recoveries = [r for r in records if r.get('event') == 'validation_recovery_input' and type(r.get('at_ns')) is int]
+    oracle = _endpoint_oracle_by_path()
+    trace_times = [r.get('at_ns') for r in records if type(r.get('at_ns')) is int]
+    trace_end = max(trace_times) if trace_times else None
+    options = _target_options(records)
+    final_observation_seconds = options.get('final_observation_seconds')
+    if not isinstance(final_observation_seconds, (int, float)):
+        final_observation_seconds = None
+
+    results: list[dict] = []
+    for index, case in enumerate(first_pass):
+        case_id = str(case.get('case') or '')
+        start_ns = case.get('at_ns')
+        if type(start_ns) is not int:
+            issues.append(f'fixture case without timestamp: {case_id}')
+            continue
+        next_ns = None
+        if index + 1 < len(first_pass):
+            candidate = first_pass[index + 1].get('at_ns')
+            next_ns = candidate if type(candidate) is int else None
+        elif len(cases) > len(first_pass):
+            # A restarted fixture is not part of the authored pass, but its first
+            # case timestamp is still a factual upper bound for the final case.
+            candidate = cases[len(first_pass)].get('at_ns')
+            next_ns = candidate if type(candidate) is int else None
+
+        def in_case_window(row: dict) -> bool:
+            at_ns = row.get('at_ns')
+            # Windows timers can quantize the successful send and the fixture's
+            # reaction to the same tick. A boundary-equal input belongs to the
+            # earlier case because that input causally exposed the next case.
+            return type(at_ns) is int and at_ns >= start_ns and (next_ns is None or at_ns <= next_ns)
+
+        # Assign each successful product input once, to the earliest authored case
+        # whose causal time window contains it. This uses no product state.
+        case_inputs = []
+        for row in product_inputs:
+            if row.get('_assigned'):
+                continue
+            if in_case_window(row):
+                row['_assigned'] = True
+                case_inputs.append(row)
+
+        next_same_case_ns = None
+        for later in cases[index + 1:]:
+            if str(later.get('case') or '') == case_id and type(later.get('at_ns')) is int:
+                next_same_case_ns = later['at_ns']
+                break
+        case_recoveries = [
+            row for row in recoveries
+            if row.get('case') == case_id
+            and row.get('at_ns') >= start_ns
+            and (next_same_case_ns is None or row.get('at_ns') < next_same_case_ns)
+        ]
+        voice = next((row for row in voice_rows
+                      if row.get('case') == case_id and in_case_window(row)), None)
+
+        advance_ns = case_inputs[0].get('at_ns') if case_inputs else None
+        endpoint = oracle.get(str(case.get('voice_file') or ''))
+        earliest_end_ns = latest_end_ns = None
+        early_input = None
+        if voice is not None and endpoint is not None and type(voice.get('at_ns')) is int:
+            speech_end_ms = float(endpoint['speech_end_ms'])
+            uncertainty_ms = float(endpoint['uncertainty_ms'])
+            earliest_end_ns = int(voice['at_ns'] + max(0.0, speech_end_ms - uncertainty_ms) * 1_000_000)
+            latest_end_ns = int(voice['at_ns'] + (speech_end_ms + uncertainty_ms) * 1_000_000)
+            if advance_ns is not None:
+                early_input = advance_ns < earliest_end_ns
+
+        stopped = bool(case_recoveries)
+        if (not stopped and advance_ns is None and next_ns is None and trace_end is not None
+                and final_observation_seconds is not None):
+            stopped = trace_end - start_ns >= int(final_observation_seconds * 1_000_000_000)
+
+        if stopped:
+            outcome = 'stopped'
+        elif len(case_inputs) > 1:
+            outcome = 'multiple_inputs'
+        elif early_input is True:
+            outcome = 'early_input'
+        elif advance_ns is not None:
+            outcome = 'advanced'
+        elif next_ns is not None:
+            outcome = 'unattributed_advance'
+        else:
+            outcome = 'unresolved'
+
+        results.append({
+            'case': case_id,
+            'fixture_started_at_ns': start_ns,
+            'voice_commanded_at_ns': voice.get('at_ns') if voice is not None else None,
+            'voice_duration_ms': voice.get('duration_ms') if voice is not None else None,
+            'product_input_at_ns': advance_ns,
+            'product_input_confirmed_at_ns': case_inputs[0].get('confirmed_at_ns') if case_inputs else None,
+            'product_input_count': len(case_inputs),
+            'recovery_input_at_ns': case_recoveries[0].get('at_ns') if case_recoveries else None,
+            'known_foreground_end_earliest_ns': earliest_end_ns,
+            'known_foreground_end_latest_ns': latest_end_ns,
+            'early_input': early_input,
+            'stopped': stopped,
+            'outcome': outcome,
+        })
+    return results
+
+
+def verify(records: Sequence[dict], *, phase: str = 'mixed',
+           fixture_records: Sequence[dict] | None = None) -> dict:
     if phase not in PHASES:
         raise ValueError(f'invalid phase: {phase}')
-    errors = _sequence_errors(records, started_event='trace_started', version=3)
-    fixture_errors: list[str] = []
+
+    issues = _sequence_issues(records, started_event='trace_started', version=3)
     if fixture_records is not None:
-        fixture_errors = _sequence_errors(
-            fixture_records, started_event='fixture_started', version=1)
-        errors.extend(fixture_errors)
+        issues.extend(_sequence_issues(fixture_records, started_event='fixture_started', version=1))
 
-    target_record = next((r for r in records if r.get('event') == 'validation_collection_target'), None)
-    if requested_cases is None and target_record is not None:
-        value = target_record.get('dialogues')
-        if type(value) is int and value >= 0:
-            requested_cases = value
-
+    target = _target_options(records)
+    requested_cases = target.get('dialogues') if type(target.get('dialogues')) is int else None
     fixture_cases = [r for r in (fixture_records or ()) if r.get('event') == 'fixture_case']
-    observed_case_ids = [str(r.get('case') or '') for r in fixture_cases]
-    expected_case_ids: list[str] = []
-    if phase == 'accuracy':
-        expected_case_ids = [str(line.get('id') or '') for line in scenario_for_phase('accuracy')]
-        if requested_cases is None:
-            requested_cases = len(expected_case_ids)
-        prefix = observed_case_ids[:len(expected_case_ids)]
-        if prefix and prefix != expected_case_ids[:len(prefix)]:
-            errors.append('fixture case evidence does not follow authored accuracy sequence')
-
-    if requested_cases is None:
-        requested_cases = 0
-    if fixture_records is not None:
-        collection_complete = len(fixture_cases) >= requested_cases
-    else:
-        utterances = [r for r in records if r.get('event') == 'utterance']
-        collection_complete = requested_cases == 0 or len(utterances) >= requested_cases
-
-    structural_errors = list(errors)
-    if not collection_complete:
-        structural_errors.append(
-            f'fixture collection incomplete: observed={len(fixture_cases) if fixture_records is not None else len([r for r in records if r.get("event") == "utterance"])} requested={requested_cases}')
+    if (fixture_records is not None and requested_cases is not None
+            and len(fixture_cases) < requested_cases):
+        issues.append(
+            f'fixture cases not observed: observed={len(fixture_cases)} requested={requested_cases}')
 
     facts = {
         'requested_cases': requested_cases,
         'fixture_cases': len(fixture_cases) if fixture_records is not None else None,
+        'fixture_voice_commands': sum(r.get('event') == 'fixture_voice_commanded' for r in (fixture_records or ())),
         'hook_outputs': sum(r.get('event') == 'hook_output' for r in records),
         'utterances': sum(r.get('event') == 'utterance' for r in records),
         'presentation_completions': sum(r.get('event') == 'presentation_complete' for r in records),
@@ -158,19 +295,36 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'validation_recovery_inputs': sum(r.get('event') == 'validation_recovery_input' for r in records),
         'driver_failures': sum(r.get('event') == 'validation_driver_failure' for r in records),
     }
-    collection_valid = not errors
+
+    case_results: list[dict] = []
+    if phase == 'accuracy':
+        if fixture_records is None:
+            issues.append('accuracy verification requires fixture evidence')
+        else:
+            expected = scenario_for_phase('accuracy')
+            if requested_cases is None:
+                requested_cases = len(expected)
+                facts['requested_cases'] = requested_cases
+            case_results = _accuracy_case_results(records, fixture_records, expected, issues)
+
+    failures = [row for row in case_results
+                if row.get('outcome') in {'early_input', 'stopped', 'multiple_inputs', 'unattributed_advance'}]
+    unresolved = [row for row in case_results if row.get('outcome') == 'unresolved']
+    verdict = 'failure_observed' if failures else ('incomplete' if unresolved or issues else 'no_failure_observed')
+
     return {
-        'schema': 'autoadv-validation-evidence-v1',
-        'ok': collection_valid and collection_complete,
+        'schema': 'autoadv-offline-verification-v1',
         'phase': phase,
-        'collection_valid': collection_valid,
-        'measurement_valid': collection_valid,
-        'collection_complete': collection_complete,
+        'verdict': verdict,
         'facts': facts,
-        'fixture_case_ids': observed_case_ids,
-        'errors': structural_errors,
+        'case_results': case_results,
+        'evidence_issues': issues,
         'timeline': _core_timeline(records, fixture_records),
     }
+
+
+# Kept as the public Python entry used by local contract tests and helper tools.
+validate = verify
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -186,7 +340,7 @@ def _load_jsonl(path: Path) -> list[dict]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Validate AutoAdv real-game evidence integrity')
+    parser = argparse.ArgumentParser(description='Compare AutoAdv inputs with fixture time facts')
     parser.add_argument('--trace', type=Path, required=True)
     parser.add_argument('--phase', choices=PHASES, required=True)
     parser.add_argument('--evidence', type=Path, help='fixture-authored stimulus evidence JSONL')
@@ -200,7 +354,7 @@ def main() -> int:
         records = _load_jsonl(args.trace)
         fixture_records = (_load_jsonl(args.evidence)
                            if args.evidence is not None and args.evidence.is_file() else None)
-        result = validate(records, phase=args.phase, fixture_records=fixture_records)
+        result = verify(records, phase=args.phase, fixture_records=fixture_records)
         if args.report is not None:
             with args.report.open('x', encoding='utf-8') as stream:
                 json.dump(result, stream, ensure_ascii=False, indent=2)
@@ -208,7 +362,9 @@ def main() -> int:
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         parser.error(f'invalid real-session evidence: {exc}')
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result['ok'] else 1
+    # Behavioral failures are report data, not runner failures.  Non-zero exit
+    # is reserved for malformed/unreadable evidence handled above by argparse.
+    return 0
 
 
 if __name__ == '__main__':

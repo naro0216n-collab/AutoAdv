@@ -93,30 +93,47 @@ def test_accuracy_measurement_scope_remains_realistic_and_continuous():
         line.get('vocal_source_class') for line in scenario}
 
 
-def test_verifier_preserves_facts_without_quality_oracle():
-    raw = 'また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。\nこれは音声のない台詞です。'
+def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
+    case = ACCURACY_SCENARIO[0]
+    start_ns = 1_000_000_000
+    voice_ns = 1_010_000_000
+    input_ns = 2_500_000_000
     records = [
-        {'event': 'trace_started', 'version': 3, 'at_ns': 1},
-        {'event': 'validation_collection_target', 'seq': 1, 'at_ns': 2, 'phase': 'accuracy', 'dialogues': 2},
-        {'event': 'hook_output', 'seq': 2, 'at_ns': 10, 'raw': raw, 'source': 'HOOK|1|2'},
-        {'event': 'utterance', 'seq': 3, 'at_ns': 11, 'session': 1, 'line': 1,
-         'raw': raw, 'body': raw, 'speaker': ''},
-        {'event': 'advance_input', 'seq': 4, 'at_ns': 12, 'session': 1, 'line': 1},
+        {'event': 'trace_started', 'version': 3, 'at_ns': start_ns},
+        {'event': 'validation_collection_target', 'seq': 1, 'at_ns': start_ns + 1,
+         'phase': 'accuracy', 'dialogues': 1, 'final_observation_seconds': 12.0},
+        # Deliberately contradictory product inference. Offline classification must
+        # not consume it.
+        {'event': 'utterance_progress', 'seq': 2, 'at_ns': start_ns + 2,
+         'session': 1, 'line': 1, 'state': 'finite_vocal_active'},
+        {'event': 'advance_attempt', 'seq': 3, 'at_ns': input_ns, 'session': 1, 'line': 1},
+        {'event': 'advance_input', 'seq': 4, 'at_ns': input_ns + 1, 'session': 1, 'line': 1},
     ]
     fixture = [
-        {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': 1, 'pid': 50},
-        {'event': 'fixture_case', 'seq': 1, 'at_ns': 5, 'case': ACCURACY_SCENARIO[0]['id'],
-         'text': ACCURACY_SCENARIO[0]['text'], 'voice_file': ACCURACY_SCENARIO[0].get('foreground_file')},
-        {'event': 'fixture_case', 'seq': 2, 'at_ns': 9, 'case': ACCURACY_SCENARIO[1]['id'],
-         'text': ACCURACY_SCENARIO[1]['text'], 'voice_file': ACCURACY_SCENARIO[1].get('foreground_file')},
+        {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': start_ns, 'pid': 50},
+        {'event': 'fixture_case', 'seq': 1, 'at_ns': start_ns + 5, 'case': case['id'],
+         'text': case['text'], 'voice_file': case['foreground_file']},
+        {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': voice_ns, 'case': case['id'],
+         'voice_file': case['foreground_file'], 'duration_ms': 1637.0},
     ]
-    result = validate(records, phase='accuracy', fixture_records=fixture, requested_cases=2)
-    assert result['collection_valid'] and result['collection_complete'] and result['ok']
-    assert result['facts']['hook_outputs'] == 1 and result['facts']['advance_inputs'] == 1
-    assert any(item.get('raw') == raw for item in result['timeline'])
-    for forbidden in ('quality', 'game_evidence', 'line_results', 'voice_safety_verified',
-                      'early_inputs', 'overholds', 'misattributions'):
-        assert forbidden not in result
+    result = validate(records, phase='accuracy', fixture_records=fixture)
+    assert result['verdict'] == 'no_failure_observed'
+    assert result['case_results'][0]['outcome'] == 'advanced'
+    assert result['case_results'][0]['early_input'] is False
+    assert result['facts']['advance_inputs'] == 1
+    for removed in ('ok', 'collection_valid', 'measurement_valid', 'collection_complete'):
+        assert removed not in result
+
+    changed = [dict(row) for row in records]
+    changed[2]['state'] = 'ended'
+    assert validate(changed, phase='accuracy', fixture_records=fixture)['case_results'] == result['case_results']
+
+    early = [dict(row) for row in records]
+    early[3]['at_ns'] = voice_ns + 100_000_000
+    early[4]['at_ns'] = early[3]['at_ns'] + 1
+    early_result = validate(early, phase='accuracy', fixture_records=fixture)
+    assert early_result['case_results'][0]['outcome'] == 'early_input'
+    assert early_result['verdict'] == 'failure_observed'
 
 
 def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpretation():
@@ -228,8 +245,7 @@ def test_issue_reporting_publishes_direct_timeline_and_never_updates_inferred_ba
         summary = {
             'schema': 'autoadv-local-validation-v3', 'phase_requested': 'accuracy',
             'started_utc': '2026-10-25T00:00:00Z', 'ended_utc': '2026-10-25T00:01:00Z',
-            'phases': [{'phase': 'accuracy', 'collection_valid': True, 'measurement_valid': True,
-                        'collection_complete': True, 'report_present': True, 'runner_error': None,
+            'phases': [{'phase': 'accuracy', 'report_present': True, 'runner_error': None,
                         'facts': {'requested_cases': 2, 'fixture_cases': 2, 'hook_outputs': 1,
                                   'utterances': 1, 'presentation_completions': 1,
                                   'advance_inputs': 1, 'validation_recovery_inputs': 0}}],
@@ -237,13 +253,14 @@ def test_issue_reporting_publishes_direct_timeline_and_never_updates_inferred_ba
         }
         (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
         raw = 'case2\ncase3'
-        report = {'errors': [], 'timeline': [
+        report = {'verdict': 'failure_observed', 'evidence_issues': [], 'timeline': [
             {'stream': 'fixture', 'event': 'fixture_case', 'at_ns': 10, 'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
             {'stream': 'product', 'event': 'hook_output', 'at_ns': 11, 'raw': raw},
         ]}
         (root / 'autoadv-accuracy.result.json').write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
         snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
         assert 'analysis evidence timeline' in snapshot.body
+        assert 'Offline verifier: `failure_observed`' in snapshot.body
         assert '"raw":"case2\\ncase3"' in snapshot.body
         assert 'base64' not in snapshot.body and 'safe' not in snapshot.body
         plan = issue_reporting.build_upload_plan(root, 'a' * 40, _comments())

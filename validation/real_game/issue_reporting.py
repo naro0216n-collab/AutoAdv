@@ -79,7 +79,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         f"Requested: `{summary.get('phase_requested', '-')}` · "
         f"{summary.get('started_utc', '-')} → {summary.get('ended_utc', '-')}",
         "",
-        "| phase | fixture/requested | hook outputs | utterances | presentations | inputs | recovery | collection | error |",
+        "| phase | fixture/requested | hook outputs | utterances | presentations | inputs | recovery | report | error |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for phase in summary.get("phases", ()):
@@ -90,17 +90,20 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
             f"{_metric(facts.get('hook_outputs'))} | {_metric(facts.get('utterances'))} | "
             f"{_metric(facts.get('presentation_completions'))} | {_metric(facts.get('advance_inputs'))} | "
             f"{_metric(facts.get('validation_recovery_inputs'))} | "
-            f"{_metric(phase.get('collection_complete'))} | {_cell(phase.get('runner_error'))} |"
+            f"{_metric(phase.get('report_present'))} | {_cell(phase.get('runner_error'))} |"
         )
     if summary.get("launcher_error"):
         lines.extend(("", f"Launcher error: `{_cell(summary.get('launcher_error'))}`"))
 
     report = _read_json(root / "autoadv-accuracy.result.json")
     if report is not None:
-        errors = [str(item) for item in report.get("errors", ()) if str(item).strip()]
-        if errors:
-            lines.extend(("", "**Evidence integrity errors**"))
-            lines.extend(f"- {sanitize_public_issue(item)}" for item in errors[:12])
+        verdict = report.get("verdict")
+        if verdict:
+            lines.extend(("", f"Offline verifier: `{_cell(verdict)}`"))
+        issues = [str(item) for item in report.get("evidence_issues", ()) if str(item).strip()]
+        if issues:
+            lines.extend(("", "**Evidence issues**"))
+            lines.extend(f"- {sanitize_public_issue(item)}" for item in issues[:12])
         timeline = report.get("timeline")
         if isinstance(timeline, list):
             lines.extend(("", "<details open><summary>analysis evidence timeline</summary>", "", "```jsonl"))

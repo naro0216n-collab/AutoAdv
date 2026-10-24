@@ -81,9 +81,11 @@ label advancement_accuracy:
     scene bg adv_room with fade
     $ _adv_evidence_case("room-clean-short", "えっ嘘でしょ。", "audio/voice/normal_001.wav")
     voice "audio/voice/normal_001.wav"
+    $ _adv_evidence_voice_commanded()
     a "えっ嘘でしょ。"
     $ _adv_evidence_case("room-clean-jvs001", "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。", "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav")
     voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
+    $ _adv_evidence_voice_commanded()
     a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
     $ _adv_evidence_case("room-clean-unvoiced", "これは音声のない台詞です。", None)
     p "これは音声のない台詞です。"
@@ -93,18 +95,22 @@ label advancement_accuracy:
     # has already progressed. No product-side HOOK is injected.
     $ _adv_evidence_case("hook-delay-moderate", "猫はにゃーにゃーと鳴く。", "audio/voice/normal_022.wav")
     play voice "audio/voice/normal_022.wav"
+    $ _adv_evidence_voice_commanded()
     $ renpy.pause(.55, hard=True)
     a "猫はにゃーにゃーと鳴く。"
     $ _adv_evidence_case("hook-delay-late", "あなたは流感になりかけているか、もっと重い病気かもしれません。", "audio/voice/normal_030.wav")
     play voice "audio/voice/normal_030.wav"
+    $ _adv_evidence_voice_commanded()
     $ renpy.pause(4.10, hard=True)
     a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
     $ _adv_evidence_case("hook-delay-after-end", "えっ嘘でしょ。", "audio/voice/normal_001.wav")
     play voice "audio/voice/normal_001.wav"
+    $ _adv_evidence_voice_commanded()
     $ renpy.pause(2.10, hard=True)
     a "えっ嘘でしょ。"
     $ _adv_evidence_case("hook-delay-nonverbal", "うっ……うう……", "audio/voice/stress_cry.wav")
     play voice "audio/voice/stress_cry.wav"
+    $ _adv_evidence_voice_commanded()
     $ renpy.pause(1.25, hard=True)
     a "うっ……うう……"
 
@@ -113,15 +119,19 @@ label advancement_accuracy:
     # human-vocal clips before Ren'Py distribution.
     $ _adv_evidence_case("duration-same-text-long-tail", "えっ嘘でしょ。", "audio/voice/derived_same_text_long_tail.wav")
     voice "audio/voice/derived_same_text_long_tail.wav"
+    $ _adv_evidence_voice_commanded()
     a "えっ嘘でしょ。"
     $ _adv_evidence_case("duration-long-text-fast", "あなたは流感になりかけているか、もっと重い病気かもしれません。", "audio/voice/derived_normal_030_fast.wav")
     voice "audio/voice/derived_normal_030_fast.wav"
+    $ _adv_evidence_voice_commanded()
     a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
     $ _adv_evidence_case("nonverbal-panting-temporal", "はっ……はっ……はっ……", "audio/voice/derived_panting_temporal.wav")
     voice "audio/voice/derived_panting_temporal.wav"
+    $ _adv_evidence_voice_commanded()
     a "はっ……はっ……はっ……"
     $ _adv_evidence_case("nonverbal-breath-internal-silence", "……ふぅ……", "audio/voice/derived_breath_pause.wav")
     voice "audio/voice/derived_breath_pause.wav"
+    $ _adv_evidence_voice_commanded()
     s "……ふぅ……"
 
     # Scene 2: the same conversation continues while BGM fades in and remains
@@ -129,11 +139,13 @@ label advancement_accuracy:
     play music "audio/runtime/music/Heavenly Loop_0.ogg" loop fadein 0.8 volume 0.24
     $ _adv_evidence_case("room-bgm-fadein", "あっベルが鳴ってる。", "audio/voice/normal_017.wav")
     voice "audio/voice/normal_017.wav"
+    $ _adv_evidence_voice_commanded()
     a "あっベルが鳴ってる。"
     $ _adv_evidence_case("room-bgm-unvoiced", "返事をする前に、少し考えた。", None)
     p "返事をする前に、少し考えた。"
     $ _adv_evidence_case("room-bgm-whisper", "えっ嘘でしょ。", "audio/voice/whisper_001.wav")
     voice "audio/voice/whisper_001.wav"
+    $ _adv_evidence_voice_commanded()
     s "えっ嘘でしょ。"
 
     # Scene 3: enter a busy cafe without resetting the session. BGM continues;
@@ -143,12 +155,15 @@ label advancement_accuracy:
     play adv_ambient "audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg" loop fadein 0.4 volume 0.22
     $ _adv_evidence_case("cafe-entry-door", "猫はにゃーにゃーと鳴く。", "audio/voice/normal_022.wav")
     voice "audio/voice/normal_022.wav"
+    $ _adv_evidence_voice_commanded()
     a "猫はにゃーにゃーと鳴く。"
     $ _adv_evidence_case("cafe-crowd-local", "彼女はスタッフをまとめていけると思いますか？", "audio/voice/normal_028.wav")
     voice "audio/voice/normal_028.wav"
+    $ _adv_evidence_voice_commanded()
     a "彼女はスタッフをまとめていけると思いますか？"
     $ _adv_evidence_case("cafe-crowd-jvs002", "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。", "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav")
     voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
+    $ _adv_evidence_voice_commanded()
     b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
     $ _adv_evidence_case("cafe-crowd-unvoiced", "人の多い店内で、主人公は黙って頷いた。", None)
     p "人の多い店内で、主人公は黙って頷いた。"
@@ -161,10 +176,12 @@ label advancement_accuracy:
     play music "audio/runtime/music/LofiLoop_2.ogg" loop fadeout 0.8 fadein 0.8 volume 0.28
     $ _adv_evidence_case("street-bgm-transition", "私はいつもミネラルウォーターを持ち歩いています。", "audio/voice/normal_026.wav")
     voice "audio/voice/normal_026.wav"
+    $ _adv_evidence_voice_commanded()
     a "私はいつもミネラルウォーターを持ち歩いています。"
     play adv_background "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
     $ _adv_evidence_case("street-background-japanese", "彼のあだ名は言い得て妙だよね。", "audio/voice/normal_010.wav")
     voice "audio/voice/normal_010.wav"
+    $ _adv_evidence_voice_commanded()
     a "彼のあだ名は言い得て妙だよね。"
     $ _adv_evidence_case("street-background-unvoiced", "この場面の主人公にも音声は付いていない。", None)
     p "この場面の主人公にも音声は付いていない。"
@@ -174,9 +191,11 @@ label advancement_accuracy:
     # product session. No test-only utterance boundary is inserted.
     $ _adv_evidence_case("street-repeat-first", "ヒューズが飛んだ。", "audio/voice/normal_020.wav")
     voice "audio/voice/normal_020.wav"
+    $ _adv_evidence_voice_commanded()
     a "ヒューズが飛んだ。"
     $ _adv_evidence_case("street-repeat-second", "ヒューズが飛んだ。", "audio/voice/normal_020.wav")
     voice "audio/voice/normal_020.wav"
+    $ _adv_evidence_voice_commanded()
     a "ヒューズが飛んだ。"
 
     # Human-vocal recurrence classes. The loop starts after the first case's
@@ -186,15 +205,18 @@ label advancement_accuracy:
     play adv_background "audio/voice/normal_020.wav" loop volume 0.18
     $ _adv_evidence_case("vocal-loop-started-in-epoch-target", "猫はにゃーにゃーと鳴く。", "audio/voice/normal_022.wav")
     voice "audio/voice/normal_022.wav"
+    $ _adv_evidence_voice_commanded()
     a "猫はにゃーにゃーと鳴く。"
     $ _adv_evidence_case("vocal-loop-cross-epoch-target", "あっベルが鳴ってる。", "audio/voice/normal_017.wav")
     voice "audio/voice/normal_017.wav"
+    $ _adv_evidence_voice_commanded()
     a "あっベルが鳴ってる。"
     $ _adv_evidence_case("vocal-loop-cross-epoch-unvoiced", "繰り返す声は背景のままで、主人公には音声がない。", None)
     p "繰り返す声は背景のままで、主人公には音声がない。"
     stop adv_background fadeout 0.1
     $ _adv_evidence_case("finite-vocal-natural-repetition", "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。", "audio/voice/derived_finite_repetition.wav")
     voice "audio/voice/derived_finite_repetition.wav"
+    $ _adv_evidence_voice_commanded()
     a "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。"
 
     # Scene 5: emotional/incident sequence. Non-lexical voice is followed by a
@@ -204,10 +226,12 @@ label advancement_accuracy:
     scene bg adv_incident with dissolve
     $ _adv_evidence_case("incident-nonlexical-cry", "うっ……うう……", "audio/voice/stress_cry.wav")
     voice "audio/voice/stress_cry.wav"
+    $ _adv_evidence_voice_commanded()
     a "うっ……うう……"
     show screen adv_delayed_sfx(0.8, "audio/runtime/sfx/DOORMetl_GarageDoorClose_OS_01.ogg", 0.32)
     $ _adv_evidence_case("incident-midvoice-sfx", "あなたは流感になりかけているか、もっと重い病気かもしれません。", "audio/voice/normal_030.wav")
     voice "audio/voice/normal_030.wav"
+    $ _adv_evidence_voice_commanded()
     a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
     hide screen adv_delayed_sfx
     $ _adv_evidence_case("incident-sfx-tail-unvoiced", "大きな音の余韻だけが、その場に残った。", None)
@@ -215,6 +239,7 @@ label advancement_accuracy:
     stop adv_sfx
     $ _adv_evidence_case("incident-nonlexical-scream", "あああっ！", "audio/voice/stress_scream.wav")
     voice "audio/voice/stress_scream.wav"
+    $ _adv_evidence_voice_commanded()
     s "あああっ！"
 
     # Scene 6: move into a machine room while the old BGM remains. The next
@@ -225,15 +250,18 @@ label advancement_accuracy:
     play adv_ambient "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg" loop fadein 0.4 volume 0.25
     $ _adv_evidence_case("machine-transition-jvs003", "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。", "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav")
     voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
+    $ _adv_evidence_voice_commanded()
     c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
     stop music fadeout 1.2
     $ _adv_evidence_case("machine-fading-bgm-whisper", "あっベルが鳴ってる。", "audio/voice/whisper_017.wav")
     voice "audio/voice/whisper_017.wav"
+    $ _adv_evidence_voice_commanded()
     s "あっベルが鳴ってる。"
     $ _adv_evidence_case("machine-unvoiced", "機械音の中で、ナレーションだけが表示される。", None)
     p "機械音の中で、ナレーションだけが表示される。"
     $ _adv_evidence_case("machine-local", "私はポピュラー音楽を聞きたい。", "audio/voice/normal_021.wav")
     voice "audio/voice/normal_021.wav"
+    $ _adv_evidence_voice_commanded()
     a "私はポピュラー音楽を聞きたい。"
 
     # Scene 7: ordinary quiet transition and final clean recovery. The same
@@ -242,9 +270,9 @@ label advancement_accuracy:
     scene bg adv_quiet with fade
     $ _adv_evidence_case("quiet-recovery", "彼女は息子に家で行儀よくするように言った。", "audio/voice/normal_035.wav")
     voice "audio/voice/normal_035.wav"
+    $ _adv_evidence_voice_commanded()
     a "彼女は息子に家で行儀よくするように言った。"
     return
-
 
 label standard_tts:
     p "これは無音声の台詞です。"

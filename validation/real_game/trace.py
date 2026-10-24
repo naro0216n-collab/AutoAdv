@@ -88,8 +88,6 @@ class ProductTraceObserver:
             return
         fields = dict(detail)
         fields.update(self._token_fields(token))
-        if event == 'presentation_complete':
-            fields['success'] = True
         if event == 'monitor_ended':
             fields.setdefault('session', detail.get('session', 0))
         if event == 'audio_observation_boundary' and token is not None:
