@@ -17,7 +17,7 @@ _ROOT_KEYS = frozenset({'schema_version', 'irodori_root', 'irodori_url', 'host_d
 _COMMON_KEYS = frozenset(COMMON_FIELDS)
 _GAME_KEYS = frozenset({'id', 'name', 'executable', 'audio_executable', 'input_executable', 'default_profile', 'profiles'})
 _PROFILE_KEYS = frozenset({
-    'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules',
+    'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules', 'unwrap_speaker_enclosed_body',
     'inserted_hooks', 'insert_pc_hooks', 'advance_mode', 'uncertain_text_fallback',
     'default_tts', 'default_voice', 'speaker_tts', 'speaker_voices', 'replacements',
     'name_readings', 'source', 'ocr', 'native_helper', 'alignment_model',
@@ -126,6 +126,7 @@ def _profile_payload(p: Profile) -> dict:
         body_source=p.body_source, speaker_source=p.speaker_source,
         source_rules={identity: [vars(rule) for rule in rules]
                       for identity, rules in p.source_rules.items()},
+        unwrap_speaker_enclosed_body=p.unwrap_speaker_enclosed_body,
         inserted_hooks=p.inserted_hooks, insert_pc_hooks=p.insert_pc_hooks,
         advance_mode=p.advance_mode.value, uncertain_text_fallback=p.uncertain_text_fallback,
         default_tts=p.default_tts, default_voice=p.default_voice,
@@ -169,7 +170,8 @@ def _read_profile(raw: object) -> Profile:
     p = Profile(
         id=raw['id'], name=raw['name'], hooks=hooks,
         body_source=raw['body_source'], speaker_source=raw['speaker_source'],
-        source_rules=source_rules, inserted_hooks=list(raw['inserted_hooks']),
+        source_rules=source_rules, unwrap_speaker_enclosed_body=raw['unwrap_speaker_enclosed_body'],
+        inserted_hooks=list(raw['inserted_hooks']),
         insert_pc_hooks=raw['insert_pc_hooks'], advance_mode=AdvanceMode(raw['advance_mode']),
         uncertain_text_fallback=raw['uncertain_text_fallback'], default_tts=raw['default_tts'],
         default_voice=raw['default_voice'], speaker_tts=dict(raw['speaker_tts']),

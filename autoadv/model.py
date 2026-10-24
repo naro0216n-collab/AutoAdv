@@ -201,6 +201,7 @@ class Profile:
     # Source identity -> ordered extraction rules. Missing identity uses the
     # structural defaults above.  'ocr' may also be configured here.
     source_rules: dict[str, list[StructureRule]] = field(default_factory=dict)
+    unwrap_speaker_enclosed_body: bool = False
     inserted_hooks: list[str] = field(default_factory=list)
     insert_pc_hooks: bool = False
     advance_mode: AdvanceMode = AdvanceMode.TEXT
@@ -246,6 +247,8 @@ class Profile:
             raise ValueError('speaker source requires body source')
         if self.speaker_source and self.speaker_source not in selected:
             raise ValueError('invalid speaker source')
+        if type(self.unwrap_speaker_enclosed_body) is not bool:
+            raise ValueError('invalid speaker-aware body formatting')
         if any(identity not in selected and identity != 'ocr' for identity in self.source_rules):
             raise ValueError('extraction rules require a selected source')
         for rules in self.source_rules.values():
@@ -315,6 +318,74 @@ class Utterance:
 
 
 _RUBY = re.compile(r'([\u3400-\u9fff]+)\(([\u3040-\u30ffー]{1,30})\)')
+
+
+
+_SPEAKER_BODY_WRAPPERS = {
+    '（': '）',
+    '(': ')',
+    '「': '」',
+    '『': '』',
+}
+
+def _speaker_key(value: str) -> str:
+    return unicodedata.normalize('NFKC', value).strip().casefold()
+
+def configured_speaker_names(profile: Profile) -> tuple[str, ...]:
+    """Return the profile's existing user-defined speaker names once."""
+    return tuple(dict.fromkeys((*profile.speaker_tts, *profile.speaker_voices)))
+
+def resolve_speaker_enclosed_body(
+        body: str, speaker: str, configured_speakers: Sequence[str] = ()) -> tuple[str, str]:
+    """Resolve ``speaker + one outer wrapper`` from existing speaker information.
+
+    An already assembled speaker is authoritative.  When the current dialogue has
+    no speaker candidate, an exact match against the profile's existing speaker
+    settings may identify the prefix.  Wrapper syntax alone never creates a new
+    speaker, so prose such as ``東京（とうきょう）`` or ``本文（補足）`` stays
+    untouched unless that prefix is already known as a speaker.
+    """
+    speaker_key = _speaker_key(speaker)
+    configured_by_key: dict[str, list[str]] = {}
+    for name in configured_speakers:
+        key = _speaker_key(name)
+        if key:
+            configured_by_key.setdefault(key, []).append(name)
+    sample = body.strip()
+    if not sample:
+        return speaker, body
+    for opener, closer in _SPEAKER_BODY_WRAPPERS.items():
+        open_at = sample.find(opener)
+        if open_at <= 0 or not sample.endswith(closer):
+            continue
+        prefix_key = _speaker_key(sample[:open_at])
+        resolved_speaker = speaker
+        if speaker_key:
+            if prefix_key != speaker_key:
+                continue
+        else:
+            matches = configured_by_key.get(prefix_key, ())
+            if len(matches) != 1:
+                continue
+            resolved_speaker = matches[0]
+        depth = 0
+        closed_at = -1
+        for index in range(open_at, len(sample)):
+            ch = sample[index]
+            if ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth < 0:
+                    break
+                if depth == 0:
+                    closed_at = index
+                    break
+        if closed_at != len(sample) - 1:
+            continue
+        inner = sample[open_at + 1:closed_at]
+        return (resolved_speaker, inner) if inner.strip() else (speaker, body)
+    return speaker, body
 
 def extraction_rules_for(profile: Profile, source_identity: str) -> tuple[StructureRule, ...]:
     configured = profile.source_rules.get(source_identity)

@@ -137,6 +137,89 @@ def test_different_sources_can_supply_only_the_correct_field_from_each_mixed_out
     assert {hook.identity for hook in updated.hooks} == {body.identity, speaker.identity}
 
 
+
+
+def test_speaker_enclosed_body_option_uses_existing_speaker_field_for_preview_and_runtime():
+    app, calls = app_with_game()
+    speaker = source('SPEAKER', 1)
+    body = source('BODY', 5, address=2)
+    app.capture.observe(speaker, 'A', sequence=1)
+    app.capture.observe(body, 'A（心の声）', sequence=2)
+    app.set_capture_extraction_preset(speaker.identity, speaker.address, 'speaker')
+    app.set_capture_extraction_preset(body.identity, body.address, 'body')
+    app.set_capture_field_source('speaker', speaker.identity, speaker.address)
+    app.set_capture_field_source('body', body.identity, body.address)
+    app.set_capture_unwrap_speaker_enclosed_body(True)
+
+    capture_group(app, (
+        HookEvent('output', 'host', 1, 1, 100, 101, speaker, 'A'),
+        HookEvent('output', 'host', 1, 2, 110, 101, body, 'A（心の声）'),
+    ))
+    view = app.capture_view()
+    assert view.unwrap_speaker_enclosed_body
+    assert [(item.speaker, item.body) for item in view.assembly] == [('A', '心の声')]
+
+    updated = app.commit_capture()
+    assert updated.unwrap_speaker_enclosed_body
+    assert calls == ['save']
+
+    controller = __import__('autoadv.conversation', fromlist=['Controller']).Controller(
+        lambda *_: None, lambda *_: True, TEST_G2P)
+    controller.begin(updated, Target(101, 500), 'host', 1)
+    token = controller.observe_group((
+        HookEvent('output', 'host', 1, 3, 120, 101, speaker, 'A'),
+        HookEvent('output', 'host', 1, 4, 130, 101, body, 'A「通常の台詞」'),
+    ))
+    assert token is not None
+    assert controller.utterance.speaker == 'A'
+    assert controller.utterance.text == '通常の台詞'
+
+
+def test_speaker_enclosed_body_option_reuses_existing_registered_speaker_without_new_speaker_state():
+    app, _ = app_with_game()
+    body = source('BODY', 5, address=2)
+    app.current_profile().speaker_tts['A'] = False
+    app.capture.observe(body, 'A（心の声）', sequence=1)
+    app.set_capture_extraction_preset(body.identity, body.address, 'body')
+    app.set_capture_field_source('body', body.identity, body.address)
+    app.set_capture_unwrap_speaker_enclosed_body(True)
+
+    view = app.capture_view()
+    assert [(item.speaker, item.body) for item in view.assembly] == [('A', '心の声')]
+
+
+def test_speaker_enclosed_body_option_does_not_reinterpret_supplement_or_ruby_like_text():
+    app, _ = app_with_game()
+    speaker = source('SPEAKER', 1)
+    body = source('BODY', 5, address=2)
+    app.capture.observe(speaker, 'A', sequence=1)
+    app.capture.observe(body, '本文（補足）', sequence=2)
+    app.set_capture_extraction_preset(speaker.identity, speaker.address, 'speaker')
+    app.set_capture_extraction_preset(body.identity, body.address, 'body')
+    app.set_capture_field_source('speaker', speaker.identity, speaker.address)
+    app.set_capture_field_source('body', body.identity, body.address)
+    app.set_capture_unwrap_speaker_enclosed_body(True)
+
+    for sequence, raw in enumerate(('本文（補足）', '東京（とうきょう）', 'B『別話者』'), 10):
+        capture_group(app, (
+            HookEvent('output', 'host', 1, sequence, 100 + sequence, 101, speaker, 'A'),
+            HookEvent('output', 'host', 1, sequence + 100, 200 + sequence, 101, body, raw),
+        ))
+    assert [item.body for item in app.capture_view().assembly[-3:]] == [
+        '本文（補足）', '東京（とうきょう）', 'B『別話者』']
+
+
+def test_speaker_enclosed_body_option_handles_width_and_nested_wrappers_without_partial_strip():
+    from autoadv.model import resolve_speaker_enclosed_body
+
+    assert resolve_speaker_enclosed_body('Ａ（内心（補足））', 'A') == ('A', '内心（補足）')
+    assert resolve_speaker_enclosed_body('A『独白』', 'A') == ('A', '独白')
+    assert resolve_speaker_enclosed_body('A「引用」続き「末尾」', 'A') == ('A', 'A「引用」続き「末尾」')
+    assert resolve_speaker_enclosed_body('本文（補足）', 'A') == ('A', '本文（補足）')
+    assert resolve_speaker_enclosed_body('A（心の声）', '') == ('', 'A（心の声）')
+    assert resolve_speaker_enclosed_body('A（心の声）', '', ('A',)) == ('A', '心の声')
+
+
 def test_capture_recipe_does_not_persist_until_committed():
     app, calls = app_with_game()
     candidate = source('T', 1)

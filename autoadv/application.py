@@ -28,7 +28,8 @@ from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
 from .model import (HookSelection, OCRSettings, Profile, ReplacementRule, StructureRule,
                     Utterance, EXTRACTION_PRESETS, assemble_dialogue_fields,
-                    extract_fields, interpret)
+                    configured_speaker_names, extract_fields, interpret,
+                    resolve_speaker_enclosed_body)
 from .native_audio import NativeAudio
 from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
@@ -77,6 +78,7 @@ class CaptureWorkspaceView:
     assembly: tuple[CaptureAssemblyView, ...]
     body_source: str | None
     speaker_source: str | None
+    unwrap_speaker_enclosed_body: bool
     dirty: bool
     can_commit: bool
     problem: CaptureProblemView | None
@@ -233,6 +235,7 @@ class CaptureRecipe:
     body_source: str
     speaker_source: str
     source_rules: dict[str, list[StructureRule]]
+    unwrap_speaker_enclosed_body: bool
     inserted_hooks: list[str]
 
     @classmethod
@@ -242,6 +245,7 @@ class CaptureRecipe:
             body_source=profile.body_source,
             speaker_source=profile.speaker_source,
             source_rules=deepcopy(profile.source_rules),
+            unwrap_speaker_enclosed_body=profile.unwrap_speaker_enclosed_body,
             inserted_hooks=list(profile.inserted_hooks),
         )
 
@@ -251,6 +255,7 @@ class CaptureRecipe:
         result.body_source = self.body_source
         result.speaker_source = self.speaker_source
         result.source_rules = deepcopy(self.source_rules)
+        result.unwrap_speaker_enclosed_body = self.unwrap_speaker_enclosed_body
         result.inserted_hooks = list(self.inserted_hooks)
         return result
 
@@ -399,6 +404,15 @@ class CaptureWorkspace:
         else:
             self._draft.speaker_source = value
 
+    def set_unwrap_speaker_enclosed_body(self, enabled: bool) -> None:
+        self._draft.unwrap_speaker_enclosed_body = bool(enabled)
+
+    def _format_assembled_body(
+            self, body: str, speaker: str, configured_speakers: Sequence[str]) -> tuple[str, str]:
+        if not self._draft.unwrap_speaker_enclosed_body:
+            return speaker, body
+        return resolve_speaker_enclosed_body(body, speaker, configured_speakers)
+
     def set_extraction_preset(self, identity: str, address: int, preset: str) -> None:
         if preset not in EXTRACTION_PRESETS:
             raise ValueError('不明な整形方式です')
@@ -422,7 +436,8 @@ class CaptureWorkspace:
                    if candidate_identity == identity]
         return matches[0] if len(matches) == 1 and not matches[0].ambiguous else None
 
-    def _assembly_from_events(self, events: Sequence[HookEvent]) -> CaptureAssemblyView | None:
+    def _assembly_from_events(
+            self, events: Sequence[HookEvent], configured_speakers: Sequence[str]) -> CaptureAssemblyView | None:
         body_identity = self._draft.body_source
         if not body_identity:
             return None
@@ -438,10 +453,12 @@ class CaptureWorkspace:
         body_event = candidates[assembly.body_index]
         speaker_source = (self._draft.speaker_source or
                           (body_identity if assembly.speaker else None))
-        return CaptureAssemblyView(body_event.sequence, assembly.speaker, assembly.body,
+        speaker, body = self._format_assembled_body(
+            assembly.body, assembly.speaker, configured_speakers)
+        return CaptureAssemblyView(body_event.sequence, speaker, body,
                                    body_identity, speaker_source)
 
-    def _assembly(self) -> tuple[CaptureAssemblyView, ...]:
+    def _assembly(self, configured_speakers: Sequence[str]) -> tuple[CaptureAssemblyView, ...]:
         body_identity = self._draft.body_source
         if not body_identity:
             return ()
@@ -449,7 +466,7 @@ class CaptureWorkspace:
         assembled: list[CaptureAssemblyView] = []
         if speaker_identity != body_identity:
             for group in self._groups:
-                value = self._assembly_from_events(group)
+                value = self._assembly_from_events(group, configured_speakers)
                 if value is not None:
                     assembled.append(value)
         else:
@@ -458,13 +475,15 @@ class CaptureWorkspace:
                 for sequence, raw in record.history:
                     fields = self._extract(raw, body_identity)
                     if fields.body:
+                        speaker, body = self._format_assembled_body(
+                            fields.body, fields.speaker, configured_speakers)
                         assembled.append(CaptureAssemblyView(
-                            sequence, fields.speaker, fields.body, body_identity,
+                            sequence, speaker, body, body_identity,
                             body_identity if fields.speaker else None))
         assembled.sort(key=lambda item: item.sequence)
         return tuple(assembled[-12:])
 
-    def view(self) -> CaptureWorkspaceView:
+    def view(self, configured_speakers: Sequence[str] = ()) -> CaptureWorkspaceView:
         candidates = []
         for (_, address), record in self._observed.items():
             if not record.history:
@@ -479,9 +498,10 @@ class CaptureWorkspace:
         if ambiguous_selected:
             problem = CaptureProblemView('選択した取得元を一意に識別できません。別の取得元を選択してください。')
         return CaptureWorkspaceView(
-            candidates=tuple(candidates), assembly=self._assembly(),
+            candidates=tuple(candidates), assembly=self._assembly(configured_speakers),
             body_source=self._draft.body_source or None,
             speaker_source=self._draft.speaker_source or None,
+            unwrap_speaker_enclosed_body=self._draft.unwrap_speaker_enclosed_body,
             dirty=self.dirty, can_commit=bool(self._draft.body_source) and not ambiguous_selected,
             problem=problem)
 
@@ -673,6 +693,7 @@ class AutoAdvApplication:
                 active.body_source == profile.body_source and
                 active.speaker_source == profile.speaker_source and
                 active.source_rules == profile.source_rules and
+                active.unwrap_speaker_enclosed_body == profile.unwrap_speaker_enclosed_body and
                 not (profile.source == 'ocr' and active.ocr != profile.ocr)):
             return False
         if active.advance_mode != profile.advance_mode:
@@ -2079,6 +2100,11 @@ class AutoAdvApplication:
             self.capture.adopt_inserted_hook(source.hook_code)
         self._reconcile_hook_sync()
 
+    def set_capture_unwrap_speaker_enclosed_body(self, enabled: bool) -> None:
+        if not self.capture:
+            raise ValueError('作品を選択してください')
+        self.capture.set_unwrap_speaker_enclosed_body(enabled)
+
     def set_capture_extraction_preset(self, identity: str, address: int, preset: str) -> None:
         if not self.capture:
             raise ValueError('作品を選択してください')
@@ -2124,13 +2150,16 @@ class AutoAdvApplication:
 
     def capture_view(self) -> CaptureWorkspaceView:
         if not self.capture:
-            return CaptureWorkspaceView((), (), None, None, False, False, self._runtime_capture_problem)
-        view = self.capture.view()
+            return CaptureWorkspaceView((), (), None, None, False, False, False, self._runtime_capture_problem)
+        profile = self.current_profile()
+        view = self.capture.view(configured_speaker_names(profile) if profile else ())
         if view.problem is not None or self._runtime_capture_problem is None:
             return view
         return CaptureWorkspaceView(
             candidates=view.candidates, assembly=view.assembly, body_source=view.body_source,
-            speaker_source=view.speaker_source, dirty=view.dirty, can_commit=view.can_commit,
+            speaker_source=view.speaker_source,
+            unwrap_speaker_enclosed_body=view.unwrap_speaker_enclosed_body,
+            dirty=view.dirty, can_commit=view.can_commit,
             problem=self._runtime_capture_problem)
 
     def _report_capture_problem(self, message: str, action: str = 'open_capture_recovery') -> None:
@@ -2213,7 +2242,7 @@ class AutoAdvApplication:
             raise ValueError('作品を選択してください')
         updated = deepcopy(current)
         mutate(updated)
-        capture_transaction_fields = ('hooks', 'body_source', 'speaker_source', 'source_rules', 'inserted_hooks')
+        capture_transaction_fields = ('hooks', 'body_source', 'speaker_source', 'source_rules', 'unwrap_speaker_enclosed_body', 'inserted_hooks')
         changed_capture_fields = [
             field for field in capture_transaction_fields
             if getattr(updated, field) != getattr(current, field)
@@ -2380,7 +2409,7 @@ class AutoAdvApplication:
         internal to the application; the GUI never toggles an inheritance field.
         """
         if (name not in Profile.__dataclass_fields__ or
-                name in {'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules', 'inserted_hooks'}):
+                name in {'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules', 'unwrap_speaker_enclosed_body', 'inserted_hooks'}):
             raise ValueError('unsupported profile setting')
 
         def change(profile: Profile) -> None:

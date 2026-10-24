@@ -261,6 +261,11 @@ def run_gui() -> int:
             self.capture_speaker_source.currentIndexChanged.connect(self.capture_speaker_source_changed)
             assembly_form.addRow('本文を使う取得元', self.capture_body_source)
             assembly_form.addRow('話者を使う取得元', self.capture_speaker_source)
+            self.capture_unwrap_speaker_body = QCheckBox('話者名 + 囲み本文は本文だけを使う')
+            self.capture_unwrap_speaker_body.setToolTip(
+                '取得した話者、または既存の話者設定と本文先頭が一致する場合だけ、話者（本文）・話者「本文」・話者『本文』の囲み部分を本文にします。')
+            self.capture_unwrap_speaker_body.toggled.connect(self.capture_unwrap_speaker_body_changed)
+            assembly_form.addRow('', self.capture_unwrap_speaker_body)
             assembly_column.addLayout(assembly_form)
             assembly_column.addWidget(QLabel('最終結果プレビュー'))
             self.capture_result_table = QTableWidget(0, 2)
@@ -1692,6 +1697,15 @@ def run_gui() -> int:
                 return data[0], int(data[1])
             return None, None
 
+        def capture_unwrap_speaker_body_changed(self, enabled):
+            if getattr(self, '_refreshing_capture_controls', False):
+                return
+            try:
+                self.application.set_capture_unwrap_speaker_enclosed_body(bool(enabled))
+                self.refresh_capture_workspace()
+            except Exception as exc:
+                self.note('話者を使った本文整形を変更できません: ' + str(exc))
+
         def capture_body_source_changed(self, *_):
             if getattr(self, '_refreshing_capture_controls', False):
                 return
@@ -1719,6 +1733,7 @@ def run_gui() -> int:
             try:
                 self.capture_body_source.blockSignals(True)
                 self.capture_speaker_source.blockSignals(True)
+                self.capture_unwrap_speaker_body.blockSignals(True)
                 self.capture_body_source.clear()
                 self.capture_speaker_source.clear()
                 self.capture_body_source.addItem('本文の取得元を選択', None)
@@ -1736,9 +1751,11 @@ def run_gui() -> int:
                         speaker_index = self.capture_speaker_source.count() - 1
                 self.capture_body_source.setCurrentIndex(body_index)
                 self.capture_speaker_source.setCurrentIndex(speaker_index)
+                self.capture_unwrap_speaker_body.setChecked(view.unwrap_speaker_enclosed_body)
             finally:
                 self.capture_body_source.blockSignals(False)
                 self.capture_speaker_source.blockSignals(False)
+                self.capture_unwrap_speaker_body.blockSignals(False)
                 self._refreshing_capture_controls = False
 
         def refresh_capture_workspace(self):

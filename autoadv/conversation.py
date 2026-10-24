@@ -6,7 +6,8 @@ from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
 from .g2p import G2PBackend
 from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
-                    extract_source_fields, interpret)
+                    configured_speaker_names, extract_source_fields, interpret,
+                    resolve_speaker_enclosed_body)
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class Controller:
                 profile.body_source != self.profile.body_source or
                 profile.speaker_source != self.profile.speaker_source or
                 profile.source_rules != self.profile.source_rules or
+                profile.unwrap_speaker_enclosed_body != self.profile.unwrap_speaker_enclosed_body or
                 (profile.source == 'ocr' and profile.ocr != self.profile.ocr)):
             raise ValueError('capture ownership changes require a new monitoring session')
         staged = deepcopy(profile)
@@ -131,7 +133,12 @@ class Controller:
             return None
         self.highest_sequence = sequence
         speaker = (fields.speaker if self.profile.speaker_source in ('', identity) else '')
-        return self._accept_line(sequence=sequence, raw=text, body=fields.body, speaker=speaker,
+        if self.profile.unwrap_speaker_enclosed_body:
+            speaker, body = resolve_speaker_enclosed_body(
+                fields.body, speaker, configured_speaker_names(self.profile))
+        else:
+            body = fields.body
+        return self._accept_line(sequence=sequence, raw=text, body=body, speaker=speaker,
                                  origin=identity, verified_boundary=False, received_ns=received_ns)
 
     def observe_group(self, events: Sequence[HookEvent]) -> Token | None:
@@ -180,9 +187,15 @@ class Controller:
         assert assembly.body_index is not None
         body_event = matching[assembly.body_index]
 
+        speaker = assembly.speaker
+        if self.profile.unwrap_speaker_enclosed_body:
+            speaker, body = resolve_speaker_enclosed_body(
+                assembly.body, speaker, configured_speaker_names(self.profile))
+        else:
+            body = assembly.body
         result = self._accept_line(
-            sequence=body_event.sequence, raw=body_event.text, body=assembly.body,
-            speaker=assembly.speaker, origin=self.profile.body_source, verified_boundary=False,
+            sequence=body_event.sequence, raw=body_event.text, body=body,
+            speaker=speaker, origin=self.profile.body_source, verified_boundary=False,
             received_ns=body_event.received_ns)
         self.highest_sequence = max(self.highest_sequence, ordered[-1].sequence)
         return result
@@ -207,8 +220,14 @@ class Controller:
         fields = extract_source_fields(text, self.profile, 'ocr')
         if not fields.body:
             return None
-        return self._accept_line(sequence=sequence, raw=text, body=fields.body,
-                                 speaker=fields.speaker, origin='ocr',
+        speaker = fields.speaker
+        if self.profile.unwrap_speaker_enclosed_body:
+            speaker, body = resolve_speaker_enclosed_body(
+                fields.body, speaker, configured_speaker_names(self.profile))
+        else:
+            body = fields.body
+        return self._accept_line(sequence=sequence, raw=text, body=body,
+                                 speaker=speaker, origin='ocr',
                                  verified_boundary=had_blank)
 
     def _accept_line(self, *, sequence: int, raw: str, body: str, speaker: str, origin: str,

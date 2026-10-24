@@ -16,6 +16,7 @@ class SettingsContract(unittest.TestCase):
             p.hooks = [HookSelection('HX', 1, 2), HookSelection('HY', 5, 6)]
             p.body_source = p.hooks[0].identity
             p.speaker_source = p.hooks[1].identity
+            p.unwrap_speaker_enclosed_body = True
             p.speaker_tts = {'大和': True}
             p.speaker_voices = {'大和': 'voice-m'}
             p.replacements = [ReplacementRule('東京', 'とうきょう')]
@@ -27,6 +28,7 @@ class SettingsContract(unittest.TestCase):
             self.assertEqual(q.hooks, p.hooks)
             self.assertEqual(q.body_source, p.body_source)
             self.assertEqual(q.speaker_source, p.speaker_source)
+            self.assertTrue(q.unwrap_speaker_enclosed_body)
             self.assertEqual(q.speaker_tts['大和'], True)
             self.assertEqual(q.speaker_voices['大和'], 'voice-m')
             self.assertEqual(q.replacements, p.replacements)
