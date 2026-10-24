@@ -41,7 +41,7 @@ class OnDemandAlignmentBenchmarkContracts(unittest.TestCase):
         paths = native_runtime.managed_paths()
         repo = Path(__file__).resolve().parents[2]
         self.assertFalse(Path(paths.alignment_model).resolve().is_relative_to(repo))
-        self.assertEqual(Path(paths.alignment_model).name, 'model.int8.onnx')
+        self.assertEqual(Path(paths.alignment_model).name, 'model.q4.onnx')
         self.assertEqual(Path(paths.alignment_vocab).name, 'vocab.json')
         with TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):

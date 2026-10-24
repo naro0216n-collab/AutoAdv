@@ -17,24 +17,24 @@ import subprocess
 import tempfile
 from urllib.request import urlopen
 
-ALIGNMENT_REPOSITORY = "mnaoizyyy/charsiu-js-models"
-ALIGNMENT_REVISION = "8d38ee8ae5a0f4d7c0e6834ceb2c0c9237d6bc5c"
-ALIGNMENT_REMOTE_MODEL = "japanese-hubert-base-phoneme-ctc/model_quantized.onnx"
-ALIGNMENT_MODEL_SHA256 = "ad29e980cb0f50044854bf25324506ace4ff0c48b98b4d194953028236c3ab6f"
-ALIGNMENT_MODEL_BYTES = 122_970_180
-MAX_ALIGNMENT_FILE_BYTES = 160 * 1024 * 1024
+ALIGNMENT_REPOSITORY = "air-air/japanese-hubert-base-phoneme-ctc-v4-ONNX"
+ALIGNMENT_REVISION = "a36617c5fbf7cfde02caa067716961c03cf4d87e"
+ALIGNMENT_REMOTE_MODEL = "onnx/model_q4.onnx"
+ALIGNMENT_MODEL_SHA256 = "0151f5bd899a86aab0d34c06dba74689e60a95e6dce0a6642b6c005b74aef630"
+ALIGNMENT_MODEL_BYTES = 63_010_793
+MAX_ALIGNMENT_FILE_BYTES = 80 * 1024 * 1024
 
 # Exact vocabulary of the ONNX source model.  It is deliberately kept beside
 # the pinned artifact contract rather than fetched from an independent moving
 # revision.  PAD=0 is the CTC blank consumed by the backend adapter.
 ALIGNMENT_VOCAB = {
     "EOS": 3, "I": 9, "N": 28, "PAD": 0, "SOS": 2, "U": 10, "UNK": 1,
-    "a": 4, "b": 19, "by": 36, "ch": 31, "cl": 29, "d": 16, "dy": 42,
-    "e": 7, "f": 25, "fy": 41, "g": 12, "gw": 44, "gy": 34, "h": 18,
-    "hy": 35, "i": 5, "j": 26, "k": 11, "kw": 43, "ky": 33, "m": 21,
-    "my": 38, "n": 17, "ny": 39, "o": 8, "p": 20, "pau": 45, "py": 37,
-    "r": 23, "ry": 40, "s": 13, "sh": 30, "sil": 46, "t": 15, "ts": 32,
-    "u": 6, "v": 27, "w": 24, "y": 22, "z": 14,
+    "a": 4, "b": 19, "by": 36, "ch": 31, "cl": 29, "d": 16, "dy": 43,
+    "e": 7, "f": 25, "fy": 41, "g": 12, "gw": 45, "gy": 34, "h": 18,
+    "hy": 35, "i": 5, "j": 26, "k": 11, "kw": 44, "ky": 33, "m": 21,
+    "my": 38, "n": 17, "ny": 39, "o": 8, "p": 20, "pau": 46, "py": 37,
+    "r": 23, "ry": 40, "s": 13, "sh": 30, "sil": 47, "t": 15, "ts": 32,
+    "ty": 42, "u": 6, "v": 27, "w": 24, "y": 22, "z": 14,
 }
 
 HELPER_FILES = (
@@ -99,7 +99,7 @@ def managed_paths(*, repo_root: Path | None = None,
     helper_root = runtime_root / "loopback" / digest
     return NativeRuntimePaths(
         root=str(runtime_root),
-        alignment_model=str(alignment_root / "model.int8.onnx"),
+        alignment_model=str(alignment_root / "model.q4.onnx"),
         alignment_vocab=str(alignment_root / "vocab.json"),
         helper_dll=str(helper_root / "AutoAdv.ProcessLoopback.dll"),
         helper_digest=digest,
@@ -147,7 +147,7 @@ def prepare_alignment_model(*, runtime_root: Path | None = None,
     return {
         "repository": ALIGNMENT_REPOSITORY,
         "revision": ALIGNMENT_REVISION,
-        "source_model": "prj-beatrice/japanese-hubert-base-phoneme-ctc",
+        "source_model": "prj-beatrice/japanese-hubert-base-phoneme-ctc-v4",
         "license": "Apache-2.0",
         "notice": str(Path(__file__).resolve().parent / "alignment_assets" / "NOTICE.txt"),
         "directory": str(destination),

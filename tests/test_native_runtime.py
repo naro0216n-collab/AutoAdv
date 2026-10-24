@@ -12,10 +12,16 @@ class ManagedNativeRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             paths = native_runtime.managed_paths(runtime_root=root)
             self.assertEqual(Path(paths.alignment_model).parent.name, native_runtime.ALIGNMENT_REVISION)
-            self.assertEqual(Path(paths.alignment_model).name, 'model.int8.onnx')
+            self.assertEqual(Path(paths.alignment_model).name, 'model.q4.onnx')
             self.assertEqual(Path(paths.alignment_vocab).name, 'vocab.json')
             self.assertEqual(Path(paths.helper_dll).parent.name, paths.helper_digest)
             self.assertEqual(len(paths.helper_digest), 64)
+            self.assertEqual(native_runtime.ALIGNMENT_REPOSITORY,
+                             'air-air/japanese-hubert-base-phoneme-ctc-v4-ONNX')
+            self.assertEqual(native_runtime.ALIGNMENT_REMOTE_MODEL, 'onnx/model_q4.onnx')
+            self.assertEqual(native_runtime.ALIGNMENT_MODEL_BYTES, 63_010_793)
+            self.assertEqual(native_runtime.ALIGNMENT_VOCAB['ty'], 42)
+            self.assertEqual(max(native_runtime.ALIGNMENT_VOCAB.values()) + 1, 48)
 
     def test_existing_pinned_alignment_asset_is_verified_without_download(self):
         with TemporaryDirectory() as tmp:
