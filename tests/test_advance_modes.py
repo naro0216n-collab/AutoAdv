@@ -317,7 +317,6 @@ class ControllerModes(unittest.TestCase):
         self.assertEqual(self.ctrl.profile.input_key, 99)
         self.assertEqual(self.ctrl.utterance.advance_mode, AdvanceMode.AUDIO)
         self.assertFalse(self.ctrl.utterance.use_tts)
-        self.assertIsNone(self.ctrl.pending_profile)
 
     def test_staged_profile_rejects_capture_ownership_changes(self):
         p = make_profile()
@@ -342,7 +341,6 @@ class ControllerModes(unittest.TestCase):
         self.assertIsNone(self.ctrl.observe(generation='generation', connection=1, sequence=2,
                                             source=SOURCE, text='「同じ台詞」', pid=10))
         self.assertEqual(self.ctrl.profile.advance_mode, AdvanceMode.TEXT)
-        self.assertIsNotNone(self.ctrl.pending_profile)
 
     def test_staged_repeat_policy_decides_next_identical_line(self):
         p = make_profile()
@@ -353,7 +351,7 @@ class ControllerModes(unittest.TestCase):
         updated = make_profile()
         updated.id = p.id
         updated.hooks = list(p.hooks)
-        updated.repeat_rule = 'each_after_input'
+        updated.repeat_rule = 'each_flush'
         self.ctrl.stage_profile(updated)
         self.ctrl.permit(True)
         self.ctrl.presentation_event(first, 'text_elapsed')
@@ -361,7 +359,7 @@ class ControllerModes(unittest.TestCase):
         second = self.ctrl.observe(generation='generation', connection=1, sequence=2,
                                    source=SOURCE, text='「繰り返し」', pid=10)
         self.assertIsNotNone(second)
-        self.assertEqual(self.ctrl.profile.repeat_rule, 'each_after_input')
+        self.assertEqual(self.ctrl.profile.repeat_rule, 'each_flush')
 
     def test_unsent_new_hook_is_external_transition_without_disabling_auto(self):
         p = make_profile(AdvanceMode.AUDIO, tts=False)

@@ -55,7 +55,6 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.external_transition_ns = 0
-        self.confirmed_external_boundary = False
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
         profile.validate()
@@ -85,7 +84,6 @@ class Controller:
         self.awaiting_next = False
         self.ocr_blank = False
         self.external_transition_ns = 0
-        self.confirmed_external_boundary = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_end_confirmed = False
@@ -216,23 +214,20 @@ class Controller:
     def _accept_line(self, *, sequence: int, raw: str, body: str, speaker: str, origin: str,
                      verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
         old = self.utterance
-        known_boundary = self.confirmed_external_boundary
-        verified_boundary = verified_boundary or known_boundary
         external_transition = bool(
-            old and not self.sent and verified_boundary and received_ns > 0)
-        if old and not self.sent and raw != old.raw and received_ns > 0:
-            external_transition = True
-        if old and not self.sent and old.raw == raw and not verified_boundary:
+            old and not self.sent and received_ns > 0 and
+            (verified_boundary or raw != old.raw or self.profile.repeat_rule == 'each_flush'))
+        if (old and not self.sent and old.raw == raw and not verified_boundary and
+                self.profile.repeat_rule != 'each_flush'):
             return None
         if self.pending_profile is not None:
             self.profile = self.pending_profile
             self.pending_profile = None
-        if old and self.sent and not verified_boundary and raw == old.raw:
-            if self.profile.repeat_rule != 'each_after_input':
-                self.pause('ambiguous_identical_line')
-                return None
+        if (old and self.sent and not verified_boundary and raw == old.raw and
+                self.profile.repeat_rule != 'each_flush'):
+            self.pause('ambiguous_identical_line')
+            return None
         self.external_transition_ns = received_ns if external_transition else 0
-        self.confirmed_external_boundary = False
         self.line_no += 1
         self.utterance = interpret(
             raw, self.profile, session=self.session, line=self.line_no, source=origin,
@@ -246,23 +241,6 @@ class Controller:
         self.awaiting_next = False
         self.hold_reason = None
         return Token(self.session, self.line_no)
-
-    def confirm_external_advance(self, token: Token) -> bool:
-        """Mark one test/validation-forced advance as an authoritative boundary.
-
-        Normal product operation never calls this.  It exists only for a test
-        harness that is about to send a forced game input and therefore knows
-        that the current dialogue boundary is authoritative even when the next
-        Hook text is identical.  The forced input is not credited as an AutoAdv
-        send.
-        """
-        if token != self.token or self.utterance is None:
-            return False
-        self.confirmed_external_boundary = True
-        self.completed = False
-        self.hold_reason = None
-        self.awaiting_next = True
-        return True
 
     def take_external_transition(self, token: Token) -> int:
         """Return the HOOK arrival time that replaced an unsent line once.

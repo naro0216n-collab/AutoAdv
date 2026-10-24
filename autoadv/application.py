@@ -717,22 +717,6 @@ class AutoAdvApplication:
     def _begin_runtime(self, profile: Profile, target: Target, generation: str, connection: int) -> int:
         return self.controller.begin(profile, target, generation, connection)
 
-    def confirm_external_advance(self, token: Token) -> bool:
-        """Prepare one test/validation-forced advance without product credit.
-
-        This is the deliberate test-only exception to the normal runtime API.
-        The harness calls it immediately before its forced game input.  It
-        closes the native-audio observation interval first, then records the
-        known dialogue boundary, but never emits AutoAdv input evidence.
-        """
-        if self._native_audio is not None:
-            self._native_audio.boundary()
-        confirmed = self.controller.confirm_external_advance(token)
-        if not confirmed:
-            return False
-        self._notify_runtime()
-        return True
-
     def _attempt_advance(self) -> bool:
         sent = self.controller.try_advance()
         state = self.runtime_state()

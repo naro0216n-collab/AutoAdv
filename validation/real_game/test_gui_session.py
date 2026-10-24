@@ -143,7 +143,7 @@ class LiveGuiSessionContract(unittest.TestCase):
                          'accuracy must exercise Application managed-runtime resolution')
 
     def test_native_product_handoff_forces_one_recovery_and_keeps_run_alive(self):
-        actions, traces, recoveries, boundaries = [], [], [], []
+        actions, traces, recoveries = [], [], []
         clock = [1.0]
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=1),
                                   pause_reason='target_unavailable', sent=False,
@@ -157,16 +157,13 @@ class LiveGuiSessionContract(unittest.TestCase):
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True}, trace,
-            clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
-            recovery_confirm=lambda state: (
-                boundaries.append(state.token.line), setattr(runtime, 'pause_reason', None)))
+            clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line))
         driver.state = 'running'
         driver.tick()
         self.assertEqual(recoveries, [])
         clock[0] = 1.3
         driver.tick()
         self.assertEqual(recoveries, [1])
-        self.assertEqual(boundaries, [1])
         self.assertEqual(actions, [])
         self.assertEqual(traces[-1][0], 'validation_recovery_input')
         self.assertEqual(traces[-1][1]['reason'], 'target_unavailable')
@@ -192,8 +189,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             window, qt_app,
             {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True}, trace,
-            clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line),
-            recovery_confirm=lambda state: None)
+            clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.token.line))
         driver.state = 'running'
         driver.tick()
         self.assertEqual(recoveries, [])
@@ -216,8 +212,7 @@ class LiveGuiSessionContract(unittest.TestCase):
             {'timeout_seconds': 30, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True}, trace,
             clock=lambda: clock[0],
-            recovery_send=lambda state: recoveries.append(state.token.line),
-            recovery_confirm=lambda state: None)
+            recovery_send=lambda state: recoveries.append(state.token.line))
         driver.state = 'running'
         driver.tick()
         self.assertEqual(recoveries, [])

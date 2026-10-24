@@ -233,7 +233,7 @@ class Profile:
         if (not 0 <= self.hook_flush_ms <= 10000 or not 0 <= self.hook_codepage <= 65535
                 or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
             raise ValueError('invalid Luna capture settings')
-        if (self.repeat_rule not in ('distinct_only', 'each_after_input') or not 1 <= self.input_key <= 254
+        if (self.repeat_rule not in ('distinct_only', 'each_flush') or not 1 <= self.input_key <= 254
                 or not 1000 <= self.next_line_timeout_ms <= 120000):
             raise ValueError('invalid advancement settings')
         identities = [hook.identity for hook in self.hooks]

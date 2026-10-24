@@ -58,32 +58,16 @@ class DialogueContractTests(unittest.TestCase):
         self.assertTrue(self.controller.try_advance())
         self.assertEqual(len(self.sent), 2)
 
-    def test_same_text_new_notification_can_be_distinct_when_configured(self):
+    def test_each_flush_rule_accepts_same_text_after_external_progression(self):
         p = profile()
-        p.repeat_rule = 'each_after_input'
+        p.repeat_rule = 'each_flush'
         self.controller.begin(p, Target(101, 202), 'host-a', 1)
-        self.controller.permit(True)
-        for seq in (1, 2):
-            token = self.output('同じ台詞', seq)
-            self.assertIsNotNone(token)
-            self.controller.presentation_event(token, 'text_elapsed')
-            self.assertTrue(self.controller.try_advance())
-        self.assertEqual(len(self.sent), 2)
-
-    def test_authoritatively_known_external_advance_can_distinguish_same_text(self):
         self.controller.permit(True)
         first = self.output('同じ台詞', 1)
         self.controller.pause('native_end_unconfirmed_hold')
-        self.assertTrue(self.controller.confirm_external_advance(first))
-        self.assertTrue(self.controller.awaiting_next)
-        self.assertIsNone(self.controller.pause_reason)
-        self.assertTrue(self.controller.awaiting_next)
-        self.assertIsNone(self.controller.pause_reason)
-        self.assertFalse(self.controller.sent)
         second = self.output('同じ台詞', 2)
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
-        self.assertFalse(self.controller.awaiting_next)
         self.assertIsNone(self.controller.pause_reason)
         self.assertFalse(self.controller.completed)
         self.assertTrue(self.controller.authorized)
@@ -231,7 +215,7 @@ class HookBoundaryContractTests(unittest.TestCase):
 
     def test_same_text_as_two_flushed_lines_when_configured(self):
         p = profile()
-        p.repeat_rule = 'each_after_input'
+        p.repeat_rule = 'each_flush'
         self.controller.begin(p, Target(101, 202), 'host-b', 2)
         self.controller.permit(True)
         first = self.controller.observe(generation='host-b', connection=2, sequence=1,

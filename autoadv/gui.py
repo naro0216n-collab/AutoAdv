@@ -416,7 +416,7 @@ def run_gui() -> int:
             self.wait_preview=QLabel('')
             self.input_key=QSpinBox(); self.input_key.setRange(1,254)
             self.next_line_timeout=QSpinBox(); self.next_line_timeout.setRange(1000,120000)
-            self.repeat=QComboBox(); self.repeat.addItem('連続同文は重複として扱う','distinct_only'); self.repeat.addItem('送り後の同文は別台詞','each_after_input')
+            self.repeat=QComboBox(); self.repeat.addItem('連続同文は重複として扱う','distinct_only'); self.repeat.addItem('連続同文は各flushを別台詞として扱う','each_flush')
             game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('1読み単位待機',setting_row('per_reading_unit_wait_ms', self.per_reading_unit_wait_ms)); game_settings.addRow('本文待機の最低時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('次台詞待ち',setting_row('next_line_timeout_ms', self.next_line_timeout)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
 
             target_details = group('別プロセスを使う作品', page='game', section='target_details', detail=True)

@@ -193,7 +193,8 @@ def _read_profile(raw: dict) -> Profile:
         hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
         hook_max_buffer=int(raw.get('hook_max_buffer', 3000)),
         hook_max_history=int(raw.get('hook_max_history', 1000000)),
-        repeat_rule=raw.get('repeat_rule', 'distinct_only'), input_key=int(raw.get('input_key', 13)))
+        repeat_rule=('each_flush' if raw.get('repeat_rule') == 'each_after_input' else raw.get('repeat_rule', 'distinct_only')),
+        input_key=int(raw.get('input_key', 13)))
     p.validate()
     return p
 

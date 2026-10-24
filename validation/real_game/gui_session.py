@@ -74,12 +74,11 @@ def select_game_window(windows, class_name):
 
 class SessionDriver:
     def __init__(self, window, qt_app, options, trace, *, clock=time.monotonic,
-                 recovery_send=None, recovery_confirm=None):
+                 recovery_send=None):
         self.w, self.qt_app, self.options, self.trace = window, qt_app, options, trace
         self.product = window.application
         self.clock = clock
         self.recovery_send = recovery_send or self._send_validation_recovery
-        self.recovery_confirm = recovery_confirm or self._confirm_validation_recovery
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.audio_deadline = None
@@ -131,19 +130,14 @@ class SessionDriver:
         """Advance only the validation fixture after the product has failed.
 
         This bypasses the normal AutoAdv input path and is never exposed as a
-        product send.  The harness separately confirms only the known boundary
-        so an identical next Hook can still be collected after forced progress.
+        product send.  The validation profile uses the ordinary per-flush repeat
+        rule, so an identical next Hook follows the same product path as any other line.
         """
         from autoadv.windows_input import WindowsAdvancementInput
         if runtime.target is None or runtime.profile is None:
             raise RuntimeError('validation recovery has no bound game target')
         WindowsAdvancementInput(
             runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
-
-    def _confirm_validation_recovery(self, runtime):
-        token = runtime.token
-        if token is None or not self.product.confirm_external_advance(token):
-            raise RuntimeError('validation recovery lost the active utterance boundary')
 
     def _continue_collection_after_hold(self, runtime):
         token = runtime.token
@@ -165,9 +159,6 @@ class SessionDriver:
         self.trace.emit(
             'validation_recovery_attempt', session=token.session, line=token.line,
             reason=reason)
-        # Establish the known test-only boundary immediately before the forced
-        # input, matching the product input/audio-boundary ordering.
-        self.recovery_confirm(runtime)
         self.recovery_send(runtime)
         self.trace.emit(
             'validation_recovery_input', session=token.session, line=token.line,
@@ -189,7 +180,7 @@ class SessionDriver:
         self.product.set_profile_setting('default_tts', self.options['phase'] == 'tts')
         self.product.set_profile_setting(
             'uncertain_text_fallback', bool(self.options.get('fallback', False)))
-        self.product.set_profile_setting('repeat_rule', 'each_after_input')
+        self.product.set_profile_setting('repeat_rule', 'each_flush')
 
         profile = self.product.current_profile()
         if profile is None:
