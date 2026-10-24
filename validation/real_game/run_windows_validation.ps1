@@ -134,7 +134,7 @@ function Remove-CompletedRunResidue([string] $runsRoot, [string] $currentSession
         if ($run.FullName -eq $currentSession) { continue }
         # A summary is written only after the measurement process has released
         # its Python/game runtime. Preserve all evidence files and remove only
-        # reproducible legacy environments from completed runs.
+        # reproducible run environments from completed runs.
         if (-not (Test-Path -LiteralPath (Join-Path $run.FullName 'validation-summary.json') -PathType Leaf)) {
             continue
         }

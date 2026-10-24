@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from .luna_runtime import LunaRuntime, inject, is_process_64bit
 from .luna_abi import (ThreadParam,SearchParam,PROCESS,CREATE,THREAD,OUTPUT,INFO,
-                       INSERT,EMBED,I18N,EMU,FIND,HISTORY,load_exports,validate_abi)
+                       INSERT,EMBED,I18N,EMU,FIND,load_exports,validate_abi)
 
 class NativeHost:
     def __init__(self,dll_path:Path,send):
@@ -80,7 +80,7 @@ class NativeHost:
         self.emit('disconnected',pid=pid)
 
     def command(self,message):
-        action=message.get('action')
+        action=message['action']
         pid=message.get('pid')
         if action=='settings':
             values = tuple(message[key] for key in ('flush_ms', 'codepage', 'max_buffer', 'max_history'))
@@ -135,10 +135,10 @@ class NativeHost:
             src=message['source']
             tp=ThreadParam(src['process_id'],src['address'],src['context'],src['context2'])
             if tp.processId not in self.connected:raise ValueError('thread is not attached')
-            self.dll.Luna_SyncThread(tp,bool(message.get('enabled',True)))
+            self.dll.Luna_SyncThread(tp, bool(message['enabled']))
         elif action=='find_hooks':
             if type(pid) is not int or pid not in self.connected:raise ValueError('search requires attached process')
-            parameters=message.get('parameters') or {}
+            parameters = message['parameters']
             valid={field for field,_ in SearchParam._fields_}
             if set(parameters)-valid:raise ValueError('invalid hook search parameter')
             sp=SearchParam()
@@ -153,7 +153,7 @@ class NativeHost:
             sp.searchTime=30000
             sp.maxRecords=100000
             sp.codepage=self.codepage
-            module=message.get('boundary_module', '')
+            module = message['boundary_module']
             if not isinstance(module, str) or len(module)>119 or ('\\' in module or '/' in module):
                 raise ValueError('search boundary_module must be an executable basename')
             sp.boundaryModule=module
@@ -163,12 +163,7 @@ class NativeHost:
                 self.emit('hook_found',pid=pid,text=sample,detail=code)
             cb=FIND(found)
             self.find_callbacks.append(cb)  # Native search may finish asynchronously.
-            self.dll.Luna_FindHooks(pid,sp,cb,message.get('addresses',''))
-        elif action=='history':
-            source=message['source']
-            tp=ThreadParam(source['process_id'],source['address'],source['context'],source['context2'])
-            cb=HISTORY(lambda s:self.emit('diagnostic',pid=tp.processId,detail='history',text=s))
-            self.dll.Luna_QueryThreadHistory(tp,bool(message.get('latest',True)),cb)
+            self.dll.Luna_FindHooks(pid, sp, cb, message['addresses'])
         elif action=='stop':
             for connected_pid in tuple(self.connected & self.managed):
                 self.dll.Luna_DetachProcess(connected_pid)

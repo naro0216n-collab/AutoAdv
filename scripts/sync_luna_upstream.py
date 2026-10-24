@@ -89,7 +89,7 @@ def adopt(destination:Path,*,revision:str=PIN,local_upstream:Path|None=None,writ
             destination.parent.mkdir(parents=True,exist_ok=True)
             staged_manifest=staged/'manifest.json'
             staged_manifest.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-            # Archive old adoption until the new coherent one is fully staged.
+            # Archive the current adoption until the replacement is fully staged.
             previous=destination.with_name(destination.name+'.previous')
             if previous.exists():raise RuntimeError('unreviewed prior source backup exists')
             try:

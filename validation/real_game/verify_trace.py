@@ -565,10 +565,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 presentation_at[key] = at
                 reasons[key] = record.get('reason', '')
         elif event in ('permit_requested', 'pause_requested'):
-            # Legacy diagnostics no longer define product authorization. The
-            # Controller owns the user preference and an actual advance_input
-            # can only be emitted through its authorized try_advance path.
-            pass
+            errors.append(f'unsupported trace event: {event}')
         elif event == 'advance_attempt':
             if key in attempts:
                 product_issue(f'duplicate advance input attempt: {key}')

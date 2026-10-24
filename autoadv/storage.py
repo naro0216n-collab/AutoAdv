@@ -11,6 +11,31 @@ from .model import (AdvanceMode, Game, HookSelection, Profile, StructureRule, Re
                     COMMON_FIELDS)
 
 
+
+
+_ROOT_KEYS = frozenset({'schema_version', 'irodori_root', 'irodori_url', 'host_dll', 'luna_imports', 'common', 'games'})
+_COMMON_KEYS = frozenset(COMMON_FIELDS)
+_GAME_KEYS = frozenset({'id', 'name', 'executable', 'audio_executable', 'input_executable', 'default_profile', 'profiles'})
+_PROFILE_KEYS = frozenset({
+    'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules',
+    'inserted_hooks', 'insert_pc_hooks', 'advance_mode', 'uncertain_text_fallback',
+    'default_tts', 'default_voice', 'speaker_tts', 'speaker_voices', 'replacements',
+    'name_readings', 'source', 'ocr', 'native_helper', 'alignment_model',
+    'alignment_vocab', 'next_line_timeout_ms', 'inherit_common', 'reading_ms',
+    'per_reading_unit_wait_ms', 'hook_flush_ms', 'hook_codepage', 'hook_max_buffer',
+    'hook_max_history', 'repeat_rule', 'input_key',
+})
+_HOOK_KEYS = frozenset({'code', 'context', 'context2'})
+_STRUCTURE_RULE_KEYS = frozenset({'pattern', 'condition', 'enabled'})
+_REPLACEMENT_KEYS = frozenset({'pattern', 'replacement', 'regex', 'target', 'enabled'})
+_OCR_KEYS = frozenset({'executable', 'language', 'region', 'interval_ms', 'stable_samples'})
+
+
+def _require_object(value: object, expected: frozenset[str], label: str) -> dict:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError(f'invalid current settings {label}')
+    return value
+
 @dataclass
 class CommonSettings:
     advance_mode: AdvanceMode = AdvanceMode.TEXT
@@ -114,44 +139,49 @@ def _profile_payload(p: Profile) -> dict:
         hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
         repeat_rule=p.repeat_rule, input_key=p.input_key)
 
-def _read_replacements(raw: list) -> list[ReplacementRule]:
+def _read_replacements(raw: object) -> list[ReplacementRule]:
     if not isinstance(raw, list):
-        raise ValueError('unsupported replacement data; settings preserved')
-    return [ReplacementRule(**dict(rule)) for rule in raw]
+        raise ValueError('invalid current settings replacements')
+    return [ReplacementRule(**_require_object(rule, _REPLACEMENT_KEYS, 'replacement')) for rule in raw]
 
 
-def _read_profile(raw: dict) -> Profile:
-    raw_hooks = list(raw.get('hooks', []))
-    hooks = [HookSelection(h['code'], int(h['context']), int(h['context2'])) for h in raw_hooks]
-    body_source = str(raw.get('body_source', '') or '')
-    speaker_source = str(raw.get('speaker_source', '') or '')
-    source_rules = {identity: [StructureRule(**rule) for rule in rules]
-                    for identity, rules in raw.get('source_rules', {}).items()}
+def _read_profile(raw: object) -> Profile:
+    raw = _require_object(raw, _PROFILE_KEYS, 'profile')
+    raw_hooks = raw['hooks']
+    if not isinstance(raw_hooks, list):
+        raise ValueError('invalid current settings hooks')
+    hooks = [HookSelection(**_require_object(h, _HOOK_KEYS, 'hook')) for h in raw_hooks]
+    source_rules_raw = raw['source_rules']
+    if not isinstance(source_rules_raw, dict):
+        raise ValueError('invalid current settings source rules')
+    source_rules: dict[str, list[StructureRule]] = {}
+    for identity, rules in source_rules_raw.items():
+        if not isinstance(identity, str) or not isinstance(rules, list):
+            raise ValueError('invalid current settings source rules')
+        source_rules[identity] = [
+            StructureRule(**_require_object(rule, _STRUCTURE_RULE_KEYS, 'structure rule'))
+            for rule in rules
+        ]
+    ocr_raw = _require_object(raw['ocr'], _OCR_KEYS, 'OCR')
+    region = ocr_raw['region']
+    if not isinstance(region, list) or len(region) != 4:
+        raise ValueError('invalid current settings OCR region')
     p = Profile(
         id=raw['id'], name=raw['name'], hooks=hooks,
-        body_source=body_source, speaker_source=speaker_source, source_rules=source_rules,
-        inserted_hooks=list(raw.get('inserted_hooks', [])),
-        insert_pc_hooks=raw.get('insert_pc_hooks', False),
-        advance_mode=AdvanceMode(raw.get('advance_mode', 'text')),
-        uncertain_text_fallback=raw.get('uncertain_text_fallback', False),
-        default_tts=raw.get('default_tts', False), default_voice=raw.get('default_voice', ''),
-        speaker_tts=dict(raw.get('speaker_tts', {})), speaker_voices=raw.get('speaker_voices', {}),
-        replacements=_read_replacements(raw.get('replacements', [])),
-        name_readings=raw.get('name_readings', {}), source=raw.get('source', 'hook'),
-        ocr=OCRSettings(**{**raw.get('ocr', {}),
-                         'region': tuple(raw.get('ocr', {}).get('region', (0, 0, 640, 180)))}),
-        native_helper=raw.get('native_helper', ''),
-        alignment_model=raw.get('alignment_model', ''),
-        alignment_vocab=raw.get('alignment_vocab', ''),
-        next_line_timeout_ms=raw.get('next_line_timeout_ms', 8000),
-        inherit_common=list(raw.get('inherit_common', [])),
-        reading_ms=raw.get('reading_ms', 700),
-        per_reading_unit_wait_ms=raw.get('per_reading_unit_wait_ms', 200),
-        hook_flush_ms=int(raw.get('hook_flush_ms', 500)), hook_codepage=int(raw.get('hook_codepage', 932)),
-        hook_max_buffer=int(raw.get('hook_max_buffer', 3000)),
-        hook_max_history=int(raw.get('hook_max_history', 1000000)),
-        repeat_rule=raw.get('repeat_rule', 'distinct_only'),
-        input_key=int(raw.get('input_key', 13)))
+        body_source=raw['body_source'], speaker_source=raw['speaker_source'],
+        source_rules=source_rules, inserted_hooks=list(raw['inserted_hooks']),
+        insert_pc_hooks=raw['insert_pc_hooks'], advance_mode=AdvanceMode(raw['advance_mode']),
+        uncertain_text_fallback=raw['uncertain_text_fallback'], default_tts=raw['default_tts'],
+        default_voice=raw['default_voice'], speaker_tts=dict(raw['speaker_tts']),
+        speaker_voices=dict(raw['speaker_voices']), replacements=_read_replacements(raw['replacements']),
+        name_readings=dict(raw['name_readings']), source=raw['source'],
+        ocr=OCRSettings(**{**ocr_raw, 'region': tuple(region)}), native_helper=raw['native_helper'],
+        alignment_model=raw['alignment_model'], alignment_vocab=raw['alignment_vocab'],
+        next_line_timeout_ms=raw['next_line_timeout_ms'], inherit_common=list(raw['inherit_common']),
+        reading_ms=raw['reading_ms'], per_reading_unit_wait_ms=raw['per_reading_unit_wait_ms'],
+        hook_flush_ms=raw['hook_flush_ms'], hook_codepage=raw['hook_codepage'],
+        hook_max_buffer=raw['hook_max_buffer'], hook_max_history=raw['hook_max_history'],
+        repeat_rule=raw['repeat_rule'], input_key=raw['input_key'])
     p.validate()
     return p
 
@@ -184,20 +214,27 @@ def load(path: Path | None = None) -> Catalog:
     path = path or user_settings_path()
     if not path.exists():
         return Catalog()
-    raw = json.loads(path.read_text(encoding='utf-8'))
-    if raw.get('schema_version') != 4:
-        raise ValueError('unsupported settings schema; original settings preserved')
-    base_common = dict(raw.get('common', {}))
-    catalog = Catalog(raw.get('irodori_root', ''), raw.get('irodori_url', 'http://127.0.0.1:8088'),
-                      raw.get('host_dll', ''), luna_imports=raw.get('luna_imports', {}),
-                      common=CommonSettings(**{**base_common,
-                          'advance_mode': AdvanceMode(base_common.get('advance_mode', 'text'))}))
+    raw = _require_object(json.loads(path.read_text(encoding='utf-8')), _ROOT_KEYS, 'root')
+    if raw['schema_version'] != 4:
+        raise ValueError('unsupported settings schema')
+    common_raw = _require_object(raw['common'], _COMMON_KEYS, 'common settings')
+    catalog = Catalog(
+        raw['irodori_root'], raw['irodori_url'], raw['host_dll'],
+        luna_imports=dict(raw['luna_imports']),
+        common=CommonSettings(**{**common_raw, 'advance_mode': AdvanceMode(common_raw['advance_mode'])}))
     catalog.common.validate()
-    for gid, row in raw.get('games', {}).items():
-        profiles = {pid: _read_profile(p) for pid, p in row['profiles'].items()}
+    games_raw = raw['games']
+    if not isinstance(games_raw, dict):
+        raise ValueError('invalid current settings games')
+    for gid, value in games_raw.items():
+        row = _require_object(value, _GAME_KEYS, 'game')
+        profiles_raw = row['profiles']
+        if not isinstance(profiles_raw, dict):
+            raise ValueError('invalid current settings profiles')
+        profiles = {pid: _read_profile(profile) for pid, profile in profiles_raw.items()}
         if gid != row['id'] or row['default_profile'] not in profiles:
             raise ValueError('inconsistent stored game identity')
-        catalog.games[gid] = Game(gid, row['name'], row.get('executable', ''),
-                                  profiles, row['default_profile'], row.get('audio_executable', ''),
-                                  row.get('input_executable', ''))
+        catalog.games[gid] = Game(
+            gid, row['name'], row['executable'], profiles, row['default_profile'],
+            row['audio_executable'], row['input_executable'])
     return catalog

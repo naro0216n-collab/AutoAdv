@@ -30,7 +30,6 @@ EMBED = C.CFUNCTYPE(None,C.c_wchar_p,ThreadParam)
 I18N = C.CFUNCTYPE(C.c_void_p,C.c_wchar_p)
 EMU = C.CFUNCTYPE(None,C.c_wchar_p,C.c_wchar_p,C.c_wchar_p)
 FIND = C.CFUNCTYPE(None,C.c_wchar_p,C.c_wchar_p)
-HISTORY = C.CFUNCTYPE(None,C.c_wchar_p)
 START_CALLBACKS = (PROCESS,PROCESS,CREATE,THREAD,OUTPUT,INFO,INSERT,EMBED,I18N,EMU)
 
 
@@ -45,7 +44,6 @@ def load_exports(dll):
         'Luna_InsertPCHooks':((C.c_uint32,C.c_int),None),
         'Luna_RemoveHook':((C.c_uint32,C.c_uint64),None),
         'Luna_Settings':((C.c_int,C.c_int,C.c_int,C.c_int,C.c_bool),None),
-        'Luna_QueryThreadHistory':((ThreadParam,C.c_bool,HISTORY),None),
         'Luna_FindHooks':((C.c_uint32,SearchParam,FIND,C.c_wchar_p),None),
         'Luna_SyncThread':((ThreadParam,C.c_bool),None),
     }

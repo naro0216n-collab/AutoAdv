@@ -14,16 +14,17 @@ _AUDIO_SUFFIXES = ('.wav','.flac','.mp3','.m4a','.ogg','.opus','.aac','.webm','.
 
 
 def locate_python(root: Path) -> Path:
-    for relative in ('.venv/Scripts/python.exe','.venv/bin/python','venv/Scripts/python.exe','venv/bin/python'):
-        executable = root / relative
-        if executable.is_file():return executable
-    raise ValueError('existing Irodori Python environment not found (.venv or venv)')
+    executable = root / '.venv' / 'Scripts' / 'python.exe'
+    if executable.is_file():
+        return executable
+    raise ValueError('existing Irodori .venv Python environment not found')
 
 
 def validate_folder(folder: str | Path) -> Path:
     root = Path(folder).expanduser().resolve()
-    if not root.is_dir() or not (root/'irodori_openai_tts').is_dir() and not (root/'pyproject.toml').is_file():
-        raise ValueError('not an installed Irodori server root')
+    if (not root.is_dir() or not (root / 'pyproject.toml').is_file()
+            or not (root / 'src' / 'irodori_openai_tts').is_dir()):
+        raise ValueError('not a current Irodori-TTS-Server root')
     locate_python(root)
     return root
 
@@ -62,14 +63,14 @@ def local_voice_ids(root:Path) -> tuple[str,...]:
     return tuple(sorted(names))
 
 
-def _parse_api_voices(body:object) -> tuple[str,...]:
-    values=body.get('voices',body.get('data',[])) if isinstance(body,dict) else body
-    if not isinstance(values,list):raise ValueError('Irodori voice response must contain a list')
-    ids=[]
-    for row in values:
-        value=row if isinstance(row,str) else row.get('id') if isinstance(row,dict) else None
-        if not isinstance(value,str) or not value:raise ValueError('invalid Voice ID response')
-        ids.append(value)
+def _parse_api_voices(body: object) -> tuple[str, ...]:
+    if not isinstance(body, dict) or body.get('object') != 'list' or not isinstance(body.get('data'), list):
+        raise ValueError('invalid current Irodori voice response')
+    ids = []
+    for row in body['data']:
+        if not isinstance(row, dict) or not isinstance(row.get('id'), str) or not row['id']:
+            raise ValueError('invalid current Irodori Voice ID response')
+        ids.append(row['id'])
     return tuple(sorted(set(ids)))
 
 

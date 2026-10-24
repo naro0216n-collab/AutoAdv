@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,14 +32,6 @@ class SettingsContract(unittest.TestCase):
             self.assertEqual(q.replacements, p.replacements)
             self.assertNotIn('pid', path.read_text(encoding='utf-8'))
 
-
-    def test_unrecognized_old_settings_are_not_overwritten(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'settings.json'
-            path.write_text('{"schema_version": 2, "original": 42}', encoding='utf-8')
-            with self.assertRaises(ValueError):
-                load(path)
-            self.assertEqual(json.loads(path.read_text())['original'], 42)
 
 
 if __name__ == '__main__':

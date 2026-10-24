@@ -188,7 +188,7 @@ try {
       (index.next_execution_index === null) !== (firstIndex + treeCount === index.total_tree_count)))
     throw Error('Invalid segmented Connector execution index; no GitHub write');
   if (!segmented && segmentNumber !== null)
-    throw Error('Legacy execution index cannot be a segment');
+    throw Error('Non-segmented execution index cannot be a segment');
   if (segmented && index.next_execution_index) {
     const nextSegment = String(segmentNumber + 1).padStart(3, '0');
     const suffix = new RegExp('(?:^|[\\/])segments[\\/]segment-' + nextSegment +

@@ -10,15 +10,27 @@ from dataclasses import asdict
 from .hook_protocol import HookEvent,ThreadSource
 
 
-def parse_host_event(packet:dict)->HookEvent:
-    if packet.get('kind')=='fatal':raise RuntimeError(packet.get('reason','native Host failure'))
-    source=packet.get('source')
+def parse_host_event(packet: dict) -> HookEvent:
+    if not isinstance(packet, dict):
+        raise ValueError('invalid native Host packet')
+    if packet.get('kind') == 'fatal':
+        if set(packet) != {'kind', 'reason'} or not isinstance(packet['reason'], str) or not packet['reason']:
+            raise ValueError('invalid native Host fatal packet')
+        raise RuntimeError(packet['reason'])
+    expected = {
+        'kind', 'host_generation', 'connection_generation', 'sequence', 'received_ns',
+        'process_id', 'source', 'text', 'detail',
+    }
+    if set(packet) != expected:
+        raise ValueError('invalid native Host event packet')
+    source = packet['source']
     if source is not None:
-        source=ThreadSource(**source)
-    return HookEvent(kind=packet['kind'],host_generation=packet['host_generation'],
-        connection_generation=packet['connection_generation'],sequence=packet['sequence'],
-        received_ns=packet['received_ns'],process_id=packet.get('process_id'),
-        source=source,text=packet.get('text',''),detail=packet.get('detail',''))
+        source = ThreadSource(**source)
+    return HookEvent(
+        kind=packet['kind'], host_generation=packet['host_generation'],
+        connection_generation=packet['connection_generation'], sequence=packet['sequence'],
+        received_ns=packet['received_ns'], process_id=packet['process_id'],
+        source=source, text=packet['text'], detail=packet['detail'])
 
 class HookHost:
     def __init__(self,dll_path:Path,on_event:Callable[[HookEvent],None],on_closed:Callable[[str],None],

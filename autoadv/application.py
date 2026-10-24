@@ -2027,7 +2027,7 @@ class AutoAdvApplication:
     def start_recovery_hook_search(self, boundary_module: str = '') -> None:
         pid = self._connected_hook_pid()
         self._hook_command('find_hooks', pid=pid, boundary_module=boundary_module,
-                          parameters={'maxRecords': 64})
+                          parameters={'maxRecords': 64}, addresses='')
 
     def insert_pc_recovery_hooks(self) -> None:
         pid = self._connected_hook_pid()

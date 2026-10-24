@@ -14,7 +14,7 @@ class NativeBoundary(unittest.TestCase):
         packet = dict(kind='output', host_generation='h', connection_generation=1,
                       sequence=2, received_ns=5, process_id=31,
                       source=dict(process_id=31, address=5, context=3, context2=4,
-                                  hook_code='AA', hook_name='text'), text='Hello')
+                                  hook_code='AA', hook_name='text'), text='Hello', detail='')
         event = parse_host_event(packet)
         self.assertEqual(event.source.identity, 'AA|3|4')
         packet['process_id'] = 32
@@ -58,7 +58,7 @@ class NativeBoundary(unittest.TestCase):
             with self.subTest(target_64bit=target_64bit), \
                  patch('autoadv.hook_host_worker.is_process_64bit', return_value=target_64bit):
                 host.command({'action': 'find_hooks', 'pid': 31,
-                              'boundary_module': 'Game.exe'})
+                              'boundary_module': 'Game.exe', 'parameters': {}, 'addresses': ''})
                 pid, search, callback, addresses = host.dll.Luna_FindHooks.call_args.args
                 self.assertEqual(pid, 31)
                 self.assertEqual(search.pattern, expected)
@@ -70,7 +70,7 @@ class NativeBoundary(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'basename'):
             with patch('autoadv.hook_host_worker.is_process_64bit', return_value=True):
                 host.command({'action': 'find_hooks', 'pid': 31,
-                              'boundary_module': 'C:/Game.exe'})
+                              'boundary_module': 'C:/Game.exe', 'parameters': {}, 'addresses': ''})
 
     def test_upstream_pc_hook_insertion_uses_both_native_families(self):
         # The native helper must request Luna's existing hooks, not invent any
@@ -93,7 +93,7 @@ class NativeBoundary(unittest.TestCase):
             'Luna_Start', 'Luna_ConnectProcess', 'Luna_DetachProcess',
             'Luna_CheckIfNeedInject', 'Luna_InsertHookCode',
             'Luna_InsertPCHooks', 'Luna_RemoveHook', 'Luna_Settings',
-            'Luna_QueryThreadHistory', 'Luna_FindHooks', 'Luna_SyncThread')})
+            'Luna_FindHooks', 'Luna_SyncThread')})
         load_exports(dll)
         self.assertEqual(len(dll.Luna_InsertPCHooks.argtypes), 2)
 

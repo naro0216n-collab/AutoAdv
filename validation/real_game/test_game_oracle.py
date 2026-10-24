@@ -86,7 +86,7 @@ class IndependentGameOracleContract(unittest.TestCase):
         game = [dict(x) for x in self.game]
         first_start = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
         first_end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
-        # Reproduce the old oracle failure mode: a previous line's channel is
+        # A previous line's channel may still be active when the next line starts;
         # spuriously started/ended under the current line before the current
         # foreground voice lifecycle. The verifier must not select the first
         # convenient end and certify the input as safe.
