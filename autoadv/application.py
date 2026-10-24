@@ -18,7 +18,9 @@ from typing import Callable
 from collections.abc import Sequence
 
 from .conversation import Controller, Target, Token
-from .audio_evidence import VoiceEvidence, assess_voice
+from .audio_knowledge import (
+    NativeAudioObservation, NativeVoiceKnowledge, reduce_native_voice_knowledge,
+)
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
@@ -198,7 +200,7 @@ _PLAY_ISSUES = {
     'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ocr_unverified_change': ('OCRの変化を次の台詞と確認できないため自動送りを保留しています。', 'open_capture'),
     'ocr_failure': ('OCRで台詞を取得できないため、自動送りを保留しています。', 'open_capture'),
-    'native_inconclusive_hold': ('原音の終了を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
+    'native_end_unconfirmed_hold': ('原音の終了を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_failure': ('ゲーム音声を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_unavailable_hold': ('音声判断を利用できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'tts_playback_failed': ('TTS再生に失敗したため、この台詞の自動送りを保留しています。', 'open_voice'),
@@ -541,6 +543,8 @@ class AutoAdvApplication:
         self._irodori_epoch = 0
         self._native_audio: NativeAudio | None = None
         self._native_audio_epoch = 0
+        self._native_knowledge_token: Token | None = None
+        self._native_knowledge = NativeVoiceKnowledge()
         self._ocr_worker: OCRWorker | None = None
         self._ocr_epoch = 0
         self._voice_jobs: VoiceJobs | None = None
@@ -779,7 +783,7 @@ class AutoAdvApplication:
         completed = self.controller.presentation_event(token, 'audio_deadline_elapsed')
         self._finish_presentation_transition(token, completed)
         if (not completed and
-                self.runtime_state().pause_reason == 'native_inconclusive_hold'):
+                self.runtime_state().pause_reason == 'native_end_unconfirmed_hold'):
             self._emit_native_capture_summary(token)
 
     @staticmethod
@@ -801,6 +805,8 @@ class AutoAdvApplication:
             return 0
         self._cancel_voice()
         self._cancel_native_audio()
+        self._native_knowledge_token = token
+        self._native_knowledge = NativeVoiceKnowledge()
         external_ns = self.controller.take_external_transition(token)
         if external_ns:
             self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns)
@@ -825,6 +831,8 @@ class AutoAdvApplication:
 
     def _close_runtime(self, reason: str = 'stopped') -> None:
         self._hook_output_group.clear()
+        self._native_knowledge_token = None
+        self._native_knowledge = NativeVoiceKnowledge()
         self.controller.close(reason)
         self._notify_runtime()
 
@@ -1175,31 +1183,62 @@ class AutoAdvApplication:
             if current():
                 self._dispatch_runtime(lambda: consume_error(token, detail))
 
-        def consume_evidence(token: Token, evidence: VoiceEvidence) -> None:
+        def consume_observation(token: Token, observation: NativeAudioObservation) -> None:
             if not current():
                 return
-            assessment = assess_voice(evidence)
             state = self.runtime_state()
             if token != state.token or state.completed or state.sent:
                 return
-            if assessment.state is self.controller.voice_state:
+            if self._native_knowledge_token != token:
+                self._native_knowledge_token = token
+                self._native_knowledge = NativeVoiceKnowledge()
+            previous = self._native_knowledge
+            knowledge = reduce_native_voice_knowledge(previous, observation)
+            self._native_knowledge = knowledge
+
+            a = observation.alignment
+            self._emit_telemetry(
+                'native_audio_observation', token,
+                kind=observation.kind,
+                matched_phonemes=a.phonetic_matches,
+                phonetic_target_units=a.phonetic_target_units,
+                phonetic_prefix_units=a.phonetic_prefix_units,
+                phonetic_edit_count=a.phonetic_edits,
+                capture_end_ms=observation.capture_end_ms,
+                target_last_token_start_ms=observation.target_last_token_start_ms,
+                target_successor_token_start_ms=observation.target_successor_token_start_ms,
+                target_acoustic_end_ms=observation.target_acoustic_end_ms,
+                pcm_last_frame_ms=observation.pcm_last_frame_ms,
+                heartbeat_at_ms=observation.heartbeat_at_ms,
+                vad_onset_ms=observation.vad_onset_ms,
+                vad_end_ms=observation.vad_end_ms,
+                vad_tail_ms=observation.vad_tail_ms,
+            )
+
+            association_changed = (
+                previous.association is None and knowledge.association is not None)
+            end_changed = previous.end is None and knowledge.end is not None
+            if association_changed or end_changed:
+                self._emit_runtime_event(
+                    'native_voice_knowledge', token,
+                    target_associated=knowledge.target_associated,
+                    target_end_confirmed=knowledge.target_end_confirmed,
+                    end_source=(knowledge.end.source if knowledge.end is not None else ''))
+            if not end_changed or knowledge.end is None:
                 return
-            self._emit_runtime_event(
-                'voice_assessment', token, state=assessment.state.value, method='asr',
-                endpoint_source=assessment.endpoint_source)
-            if assessment.state.value == 'ended' and assessment.estimated_end_ms is not None:
-                self._emit_telemetry(
-                    'native_voice_end_estimate', token,
-                    estimated_at_ns=assessment.estimated_end_ms * 1_000_000,
-                    onset_estimated_at_ns=(evidence.vad_onset_ms * 1_000_000
-                        if evidence.vad_onset_ms is not None else None),
-                    evidence=assessment.endpoint_source)
-            completed = self.controller.voice_assessment(token, assessment.state)
+            endpoint = knowledge.end
+            self._emit_telemetry(
+                'native_voice_end_estimate', token,
+                estimated_at_ns=endpoint.estimated_end_ms * 1_000_000,
+                onset_estimated_at_ns=(endpoint.observation.vad_onset_ms * 1_000_000
+                    if endpoint.observation.vad_onset_ms is not None else None),
+                evidence=endpoint.source)
+            completed = self.controller.native_voice_ended(token)
             self._finish_presentation_transition(token, completed)
 
-        def publish_evidence(token: Token, evidence: VoiceEvidence) -> None:
+        def publish_observation(token: Token, observation: NativeAudioObservation) -> None:
             if current():
-                self._dispatch_runtime(lambda: consume_evidence(token, evidence))
+                self._dispatch_runtime(lambda: consume_observation(token, observation))
 
         def publish_pcm(token: Token, frames: int) -> None:
             if current():
@@ -1241,7 +1280,7 @@ class AutoAdvApplication:
                     replay_lookback_ms=self._native_replay_lookback_ms(profile),
                     on_pcm=publish_pcm,
                     on_inference=publish_inference,
-                    on_evidence=publish_evidence)
+                    on_observation=publish_observation)
                 native.start()
                 self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:

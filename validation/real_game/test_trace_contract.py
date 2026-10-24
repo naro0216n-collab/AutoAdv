@@ -26,7 +26,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 ValidationTrace(str(path))
 
-    def test_trace_keeps_raw_audio_observation_separate_from_voice_assessment(self):
+    def test_trace_keeps_raw_audio_observation_separate_from_voice_knowledge(self):
         class Application:
             def configure_telemetry(self, observer):
                 self.observer = observer
@@ -37,20 +37,23 @@ class EvidenceIntegrityTests(unittest.TestCase):
             observer = ProductTraceObserver(ValidationTrace(path), app)
             observer.install()
             token = Token(4, 2)
-            app.observer('asr_inference', token, {
-                'phonetic_coverage': .75, 'frontier_matched_phonemes': 3,
-                'vad_tail_ms': 0,
+            app.observer('native_audio_observation', token, {
+                'kind': 'asr', 'matched_phonemes': 3,
+                'phonetic_target_units': 4, 'phonetic_prefix_units': 3,
+                'phonetic_edit_count': 0, 'vad_tail_ms': 0,
             })
-            app.observer('voice_assessment', token, {
-                'state': 'playing', 'method': 'asr', 'endpoint_source': '',
+            app.observer('native_voice_knowledge', token, {
+                'target_associated': True, 'target_end_confirmed': False,
+                'end_source': '',
             })
             records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
-            raw = next(record for record in records if record['event'] == 'asr_inference')
-            judged = next(record for record in records if record['event'] == 'voice_assessment')
-            self.assertEqual(raw['phonetic_coverage'], .75)
-            self.assertNotIn('state', raw)
-            self.assertEqual(judged['state'], 'playing')
-            self.assertNotIn('phonetic_coverage', judged)
+            raw = next(record for record in records if record['event'] == 'native_audio_observation')
+            knowledge = next(record for record in records if record['event'] == 'native_voice_knowledge')
+            self.assertEqual(raw['matched_phonemes'], 3)
+            self.assertNotIn('target_end_confirmed', raw)
+            self.assertTrue(knowledge['target_associated'])
+            self.assertFalse(knowledge['target_end_confirmed'])
+            self.assertNotIn('matched_phonemes', knowledge)
 
     def test_no_actual_autoadv_events_is_always_unverified(self):
         result = validate([])

@@ -14,7 +14,7 @@ import wave
 from types import SimpleNamespace
 
 from autoadv.audio_buffer import PCMChunk
-from autoadv.audio_evidence import VoiceState, assess_voice
+from autoadv.audio_knowledge import NativeVoiceKnowledge, reduce_native_voice_knowledge
 from autoadv.conversation import Token
 from autoadv.native_audio import NativeAudio
 
@@ -57,7 +57,7 @@ def replay_pcm_into_real_native_activity(file: Path, token: Token):
         Path("unused-asr.onnx"), Path("unused-asr.tokens"),
         lambda t, reason: errors.append((t, reason)),
         recognizer=SimpleNamespace(recognize=lambda _: ''),
-        on_evidence=lambda t, item: evidence.append((t, item)),
+        on_observation=lambda t, item: evidence.append((t, item)),
         clock=lambda: 0,
     )
     try:
@@ -102,10 +102,12 @@ class RealRecordedAudioContracts(unittest.TestCase):
                 self.assertGreaterEqual(vad_tail_ms, 300)
                 self.assertTrue(evidence)
                 self.assertTrue(all(t == ticket for t, _ in evidence))
-                self.assertFalse(any(
-                    assess_voice(item).state is VoiceState.ENDED
-                    for _, item in evidence
-                ), 'VAD plus an empty ASR alignment must not fabricate target completion')
+                knowledge = NativeVoiceKnowledge()
+                for _, item in evidence:
+                    knowledge = reduce_native_voice_knowledge(knowledge, item)
+                self.assertFalse(
+                    knowledge.target_end_confirmed,
+                    'VAD plus an empty ASR alignment must not fabricate target completion')
         self.assertEqual(kinds, {"normal", "whisper"})
 
     def test_cancelled_utterance_cannot_emit_new_evidence_for_old_recording(self):
@@ -121,7 +123,7 @@ class RealRecordedAudioContracts(unittest.TestCase):
             lambda token, reason: errors.append((token, reason)),
             recognizer=SimpleNamespace(recognize=lambda _: ''),
             on_pcm=lambda token, frames: observed_pcm.append((token, frames)),
-            on_evidence=lambda token, item: evidence.append((token, item)),
+            on_observation=lambda token, item: evidence.append((token, item)),
             clock=lambda: 0,
         )
         old = Token(20, 5)

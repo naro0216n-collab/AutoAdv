@@ -187,7 +187,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         actions, recoveries = [], []
         clock = [1.0]
         runtime = SimpleNamespace(token=SimpleNamespace(session=1, line=3),
-                                  pause_reason='native_inconclusive_hold', sent=False)
+                                  pause_reason='native_end_unconfirmed_hold', sent=False)
         product = SimpleNamespace(runtime_state=lambda: runtime)
         window = SimpleNamespace(application=product, close=lambda: actions.append('close'))
         trace = SimpleNamespace(emit=lambda *args, **kwargs: None)
@@ -226,7 +226,7 @@ class LiveGuiSessionContract(unittest.TestCase):
         driver.tick()
         self.assertEqual(recoveries, [])
         self.assertEqual(actions, [])
-        runtime.pause_reason = 'native_inconclusive_hold'
+        runtime.pause_reason = 'native_end_unconfirmed_hold'
         clock[0] = 1.7
         driver.tick()
         self.assertEqual(recoveries, [])

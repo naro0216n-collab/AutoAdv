@@ -339,7 +339,7 @@ def test_play_view_hides_normal_internal_state_and_surfaces_only_actionable_hold
     view = app.play_view()
     assert view.advance_authorized
     assert view.issue is None
-    app.controller.hold_reason = 'native_inconclusive_hold'
+    app.controller.hold_reason = 'native_end_unconfirmed_hold'
     view = app.play_view()
     assert view.issue is not None
     assert '原音の終了' in view.issue.message
@@ -495,7 +495,7 @@ def test_application_starts_and_stops_native_audio_from_monitor_lifecycle(monkey
     assert native.pid == 202
     assert native.started
     assert app.native_audio_available
-    assert {'on_pcm', 'on_inference', 'on_evidence'} <= set(native.callbacks)
+    assert {'on_pcm', 'on_inference', 'on_observation'} <= set(native.callbacks)
     assert any(name == 'native_ready' and detail['ready']
                for name, _, detail in runtime_events)
 
@@ -1147,7 +1147,7 @@ def test_application_owns_uncertain_audio_fallback_policy():
 
     app._native_audio = RetainedNative()
     deadline()
-    assert app.runtime_state().pause_reason == 'native_inconclusive_hold'
+    assert app.runtime_state().pause_reason == 'native_end_unconfirmed_hold'
     assert not app.runtime_state().sent
 
 def test_application_auto_advance_can_complete_without_gui_runtime_policy():

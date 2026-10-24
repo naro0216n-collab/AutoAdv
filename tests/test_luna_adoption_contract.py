@@ -10,7 +10,7 @@ from autoadv.storage import Catalog, save, load
 from autoadv.native_audio import NativeAudio
 from autoadv.audio_buffer import PCMChunk
 from autoadv.audio_match import VADDecision
-from autoadv.audio_evidence import VoiceState, assess_voice
+from autoadv.audio_knowledge import NativeVoiceKnowledge, reduce_native_voice_knowledge
 
 
 class IdentityG2P:
@@ -125,7 +125,7 @@ class NativeRecognitionContract(unittest.TestCase):
         audio = _native_audio(31, Path('unused.dll'), Path('missing.onnx'),
                             Path('missing.tokens'), lambda *_: None,
                             activity=Activity(), recognizer=NoMatchRecognizer(), clock=lambda: 0,
-                            g2p=TEST_G2P, on_evidence=lambda _t, e: assessments.append(assess_voice(e).state))
+                            g2p=TEST_G2P, on_observation=lambda _t, item: assessments.append(item))
         try:
             audio.begin(Token(1, 1), '台詞')
             for ms in (100, 500, 1000):
@@ -137,7 +137,10 @@ class NativeRecognitionContract(unittest.TestCase):
                 if not busy:
                     break
                 time.sleep(.001)
-            self.assertNotIn(VoiceState.ENDED, assessments)
+            knowledge = NativeVoiceKnowledge()
+            for item in assessments:
+                knowledge = reduce_native_voice_knowledge(knowledge, item)
+            self.assertFalse(knowledge.target_end_confirmed)
         finally:
             audio.close()
 

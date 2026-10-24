@@ -15,7 +15,7 @@ from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.conversation import Controller, Target
 from autoadv.audio_match import TargetMatcher, surface_key, VADDecision
 from autoadv.g2p import PronunciationCandidate
-from autoadv.audio_evidence import VoiceState, assess_voice
+from autoadv.audio_knowledge import NativeVoiceKnowledge, reduce_native_voice_knowledge
 from autoadv.audio_buffer import PCMChunk
 from autoadv.native_audio import NativeAudio
 
@@ -199,7 +199,7 @@ class NativeAudioSessionTests(unittest.TestCase):
         assessments = []
         audio = _native_audio(11, Path('not-installed.dll'), Path('not-installed.onnx'), Path('no.tokens'),
                  lambda *_: None, recognizer=Recognizer(), activity=VAD(), clock=lambda: 1000,
-                 g2p=TEST_G2P, on_evidence=lambda token, e: assessments.append((token, assess_voice(e).state)))
+                 g2p=TEST_G2P, on_observation=lambda token, item: assessments.append((token, item)))
         from autoadv.conversation import Token
         token = Token(1, 2)
         try:
@@ -216,7 +216,12 @@ class NativeAudioSessionTests(unittest.TestCase):
                         busy = audio._inflight
                     if not busy: break
                     time.sleep(.001)
-            self.assertIn((token, VoiceState.ENDED), assessments)
+            knowledge = NativeVoiceKnowledge()
+            for observed_token, item in assessments:
+                self.assertEqual(observed_token, token)
+                knowledge = reduce_native_voice_knowledge(knowledge, item)
+            self.assertTrue(knowledge.target_associated)
+            self.assertFalse(knowledge.target_end_confirmed)
             audio.cancel()
             self.assertIsNone(audio.token)
         finally:

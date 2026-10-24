@@ -277,7 +277,6 @@ try {
                     '-Automated','-MeasurementOnly','-Trace',$trace,'-Report',$report,
                     '-TimeoutSeconds','360'
                 )
-                if ($currentPhase -eq 'accuracy') { $arguments += '-UncertainFallback' }
                 & powershell.exe @arguments
                 if ($LASTEXITCODE -ne 0) { throw "run_live_check.ps1 exited with $LASTEXITCODE" }
             } catch {

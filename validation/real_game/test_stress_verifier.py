@@ -41,10 +41,19 @@ def checker_only_records():
             uncertain_text_fallback=False)
         if case['advance_mode'] == 'audio':
             add('native_pcm', **key, audio_pid=41, frames=960)
+            add('native_audio_observation', **key, kind='asr', matched_phonemes=5,
+                phonetic_target_units=5, phonetic_prefix_units=5, phonetic_edit_count=0)
             add('asr_inference', **key, audio_ms=1200, decode_ms=121, queue_ms=6)
             if case['id'] == 'clean_control':
-                add('voice_assessment', **key, state='playing', method='asr')
-                add('voice_assessment', **key, state='ended', method='asr')
+                add('native_voice_knowledge', **key, target_associated=True,
+                    target_end_confirmed=False, end_source='')
+                add('native_voice_knowledge', **key, target_associated=True,
+                    target_end_confirmed=True, end_source='asr_token_duration')
+                observed_time = len(records) * 1_000_000_000
+                add('native_voice_end_estimate', **key,
+                    estimated_at_ns=observed_time - 300_000_000,
+                    onset_estimated_at_ns=observed_time - 1_000_000_000,
+                    evidence='asr_token_duration')
         if case['id'] in ('stress-intro', 'clean_control'):
             add('presentation_complete', **key, success=True,
                 reason='text' if case['advance_mode'] == 'text' else 'native')

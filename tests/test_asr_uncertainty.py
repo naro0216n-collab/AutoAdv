@@ -1,7 +1,10 @@
-"""Raw alignment observations and the minimal product voice assessment stay separate."""
+"""Native observations, monotonic knowledge and Controller policy stay separate."""
 import unittest
 
-from autoadv.audio_evidence import VoiceEvidence, VoiceState, assess_voice
+from autoadv.audio_knowledge import (
+    NativeAudioObservation, NativeVoiceKnowledge, alignment_associates_target,
+    alignment_reaches_target_tail, reduce_native_voice_knowledge,
+)
 from autoadv.audio_match import TargetAlignment, TargetMatcher, surface_key
 from autoadv.g2p import PronunciationCandidate
 from autoadv.conversation import Controller, Target
@@ -17,26 +20,8 @@ class IdentityG2P:
 IDENTITY_G2P = IdentityG2P()
 
 
-def evidence(alignment, *, observation_kind='asr', frontier_alignment=None,
-             capture_end_ms=1000, frontier_capture_end_ms=0,
-             target_last_token_ms=None, target_boundary_ms=None,
-             render_end_ms=None, render_quiet_at_ms=None,
-             vad_tail_ms=0, vad_end_ms=None):
-    return VoiceEvidence(
-        observation_kind=observation_kind,
-        alignment=alignment,
-        frontier_alignment=frontier_alignment or TargetAlignment(),
-        capture_end_ms=capture_end_ms,
-        frontier_capture_end_ms=frontier_capture_end_ms,
-        target_last_token_ms=target_last_token_ms,
-        target_boundary_ms=target_boundary_ms,
-        render_end_ms=render_end_ms,
-        render_quiet_at_ms=render_quiet_at_ms,
-        vad_onset_ms=None,
-        vad_tail_ms=vad_tail_ms,
-        vad_end_ms=vad_end_ms,
-    )
-
+def observation(alignment=TargetAlignment(), **kwargs):
+    return NativeAudioObservation(kind=kwargs.pop('kind', 'asr'), alignment=alignment, **kwargs)
 
 
 class ASRCues(unittest.TestCase):
@@ -56,68 +41,65 @@ class ASRCues(unittest.TestCase):
         substitution = TargetMatcher('ヒューズが飛んだ', g2p=IDENTITY_G2P).align('シューズが飛んだ')
         self.assertEqual(substitution.phonetic_edits, 1)
 
-    def test_prefix_only_and_background_lead_in_remain_distinct_alignments(self):
-        partial = TargetMatcher('今日は晴れです', g2p=IDENTITY_G2P).align('今日は')
-        self.assertLess(partial.phonetic_prefix_units, partial.phonetic_target_units)
-        noise = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('別の台詞ですおはようございます')
-        self.assertGreater(noise.phonetic_edits, 0)
-
-    def test_complete_target_without_endpoint_is_inconclusive(self):
-        alignment = TargetMatcher('はい', g2p=IDENTITY_G2P).align('はい')
-        assessed = assess_voice(evidence(alignment))
-        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
-
-    def test_following_token_bounds_completed_target(self):
+    def test_association_does_not_claim_target_end(self):
         alignment = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('おはようございます')
-        assessed = assess_voice(evidence(
-            alignment, target_last_token_ms=800, target_boundary_ms=900))
-        self.assertEqual(assessed.state, VoiceState.ENDED)
-        self.assertEqual(assessed.estimated_end_ms, 900)
+        knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observation(alignment))
+        self.assertTrue(knowledge.target_associated)
+        self.assertFalse(knowledge.target_end_confirmed)
 
-    def test_target_support_in_new_pcm_is_playing(self):
-        matcher = TargetMatcher('おはようございます', g2p=IDENTITY_G2P)
-        previous = matcher.align('おはよう')
-        alignment = matcher.align('おはようござ')
-        assessed = assess_voice(evidence(
-            alignment, frontier_alignment=previous, frontier_capture_end_ms=700,
-            target_last_token_ms=800))
-        self.assertEqual(assessed.state, VoiceState.PLAYING)
+    def test_successor_token_start_is_not_an_acoustic_endpoint(self):
+        alignment = TargetMatcher('おはようございます', g2p=IDENTITY_G2P).align('おはようございます')
+        knowledge = reduce_native_voice_knowledge(
+            NativeVoiceKnowledge(),
+            observation(alignment, target_last_token_start_ms=800,
+                        target_successor_token_start_ms=900))
+        self.assertTrue(knowledge.target_associated)
+        self.assertFalse(knowledge.target_end_confirmed)
 
-    def test_partial_target_can_end_at_acoustic_boundary_without_tail_recognition(self):
+    def test_vad_and_render_observations_do_not_manufacture_target_end(self):
+        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdefgh')
+        first = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observation(alignment))
+        for item in (
+            observation(kind='transport', pcm_last_frame_ms=1000, heartbeat_at_ms=1400),
+            observation(vad_end_ms=1000, vad_tail_ms=400),
+        ):
+            with self.subTest(kind=item.kind):
+                knowledge = reduce_native_voice_knowledge(first, item)
+                self.assertTrue(knowledge.target_associated)
+                self.assertFalse(knowledge.target_end_confirmed)
+
+    def test_direct_target_tail_end_forms_end_knowledge_with_provenance(self):
+        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdefgh')
+        item = observation(
+            alignment,
+            target_last_token_start_ms=800,
+            target_acoustic_end_ms=940,
+            target_acoustic_end_source='asr_token_duration')
+        knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), item)
+        self.assertTrue(alignment_reaches_target_tail(alignment))
+        self.assertTrue(knowledge.target_end_confirmed)
+        self.assertEqual(knowledge.end.estimated_end_ms, 940)
+        self.assertEqual(knowledge.end.source, 'asr_token_duration')
+        self.assertIs(knowledge.end.observation, item)
+
+    def test_direct_end_does_not_excuse_unobserved_target_tail(self):
         alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
-        self.assertLess(alignment.phonetic_prefix_units, alignment.phonetic_target_units)
-        assessed = assess_voice(evidence(
-            alignment, target_last_token_ms=800, vad_tail_ms=220, vad_end_ms=900))
-        self.assertEqual(assessed.state, VoiceState.ENDED)
-        self.assertEqual(assessed.endpoint_source, 'asr_vad')
+        knowledge = reduce_native_voice_knowledge(
+            NativeVoiceKnowledge(),
+            observation(alignment, target_acoustic_end_ms=900,
+                        target_acoustic_end_source='asr_token_duration'))
+        self.assertTrue(alignment_associates_target(alignment))
+        self.assertFalse(alignment_reaches_target_tail(alignment))
+        self.assertFalse(knowledge.target_end_confirmed)
 
-    def test_successor_token_can_bound_small_unrecognized_tail(self):
-        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
-        assessed = assess_voice(evidence(
-            alignment, target_last_token_ms=800, target_boundary_ms=900))
-        self.assertEqual(assessed.state, VoiceState.ENDED)
-        self.assertEqual(assessed.endpoint_source, 'asr_timestamp')
-
-    def test_successor_token_does_not_excuse_large_unrecognized_tail(self):
-        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abc')
-        assessed = assess_voice(evidence(
-            alignment, target_last_token_ms=700, target_boundary_ms=900))
-        self.assertNotEqual(assessed.state, VoiceState.ENDED)
-
-    def test_early_prefix_plus_acoustic_boundary_does_not_prove_completion(self):
-        alignment = TargetMatcher('abcdefghij', g2p=IDENTITY_G2P).align('abcd')
-        assessed = assess_voice(evidence(
-            alignment, observation_kind='transport', target_last_token_ms=700,
-            render_end_ms=1000, render_quiet_at_ms=1300))
-        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
-
-    def test_same_error_budget_allows_small_tail_loss_at_render_boundary(self):
-        alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
-        assessed = assess_voice(evidence(
-            alignment, observation_kind='transport', target_last_token_ms=800,
-            render_end_ms=1000, render_quiet_at_ms=1300))
-        self.assertEqual(assessed.state, VoiceState.ENDED)
-        self.assertEqual(assessed.endpoint_source, 'render_quiescence')
+    def test_asr_regression_does_not_erase_prior_association(self):
+        matcher = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P)
+        strong = observation(matcher.align('abcdef'))
+        weak = observation(matcher.align('ab'))
+        first = reduce_native_voice_knowledge(NativeVoiceKnowledge(), strong)
+        second = reduce_native_voice_knowledge(first, weak)
+        self.assertTrue(second.target_associated)
+        self.assertIs(second.association.observation, strong)
 
     def test_unconfigured_reading_does_not_match_by_surface_fallback(self):
         matcher = TargetMatcher('東京へ行く', g2p=IDENTITY_G2P)

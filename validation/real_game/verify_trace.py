@@ -412,6 +412,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     audio_completed_at: dict[tuple, int] = {}
     native_end_estimates: dict[tuple, int] = {}
     native_onset_estimates: dict[tuple, int] = {}
+    native_end_sources: dict[tuple, str] = {}
+    native_end_estimate_sources: dict[tuple, str] = {}
     asr_counts: dict[tuple, int] = {}
     out_of_scope_utterances: set[tuple] = set()
     post_collection_utterance: dict | None = None
@@ -519,18 +521,24 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                             measured['tts_synthesis_rtf'].append(duration / record['audio_ms'])
                     elif record.get('stage') == 'playback':
                         measured['tts_playback_ms'].append(duration)
-        elif event == 'voice_assessment':
-            if record.get('method') != 'asr':
-                product_issue(f'voice assessment without ASR judgement method: {key}')
-            state = record.get('state')
-            if state in ('playing', 'ended'):
-                audio_started_at.setdefault(key, at)
-            if state == 'ended':
-                audio_completed_at[key] = at
-                methods[key] = record.get('method', '')
-                native.add(key)
-            elif state not in ('playing', 'inconclusive'):
-                product_issue(f'invalid voice assessment state: {key}')
+        elif event == 'native_voice_knowledge':
+            associated = record.get('target_associated')
+            ended = record.get('target_end_confirmed')
+            source = record.get('end_source', '')
+            if type(associated) is not bool or type(ended) is not bool:
+                product_issue(f'invalid native voice knowledge: {key}')
+            elif ended and not associated:
+                product_issue(f'native end knowledge without target association: {key}')
+            else:
+                if associated:
+                    audio_started_at.setdefault(key, at)
+                if ended:
+                    if not isinstance(source, str) or not source:
+                        product_issue(f'native end knowledge lacks provenance: {key}')
+                    audio_completed_at[key] = at
+                    methods[key] = audio_methods.get(session, '')
+                    native_end_sources[key] = source
+                    native.add(key)
         elif event == 'native_voice_end_estimate':
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')
@@ -542,12 +550,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             if (key not in utterances or type(estimate) is not int or
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
-                    evidence not in ('asr_timestamp', 'asr_vad', 'render_quiescence')):
+                    not isinstance(evidence, str) or not evidence or
+                    evidence in ('asr_timestamp', 'asr_vad', 'render_quiescence', 'vad_only')):
                 product_issue(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
                 product_issue(f'duplicate native endpoint: {key}')
             else:
                 native_end_estimates[key] = estimate
+                native_end_estimate_sources[key] = evidence
                 if onset is not None:
                     native_onset_estimates[key] = onset
         elif event == 'tts_result':
@@ -689,6 +699,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if (key[0] not in readiness or key not in pcm or asr_counts.get(key, 0) <= 0 or
                 methods.get(key) != audio_methods.get(key[0])):
             product_issue(f'native completion lacks matching real PCM and ASR evidence: {key}')
+        if native_end_sources.get(key) != native_end_estimate_sources.get(key):
+            product_issue(f'native endpoint provenance disagrees with knowledge: {key}')
 
     hashes = [utterances[key].get('body_hash') for key in utterance_order]
     # A run may start from a known line in a larger game. It must not skip
@@ -750,8 +762,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 diagnostics.append(f'dialogue observed after validation recovery input: {previous}')
             elif previous not in sent and phase != 'hook':
                 diagnostics.append(f'dialogue observed without preceding AutoAdv advance input: {previous}')
-    confirmed_native = [k for k in links if k in native and k in pcm
-                        and methods.get(k) == 'asr']
+    confirmed_native = [k for k in links if k in native and k in pcm]
     confirmed_tts = [k for k in links if k in tts and utterances[k].get('use_tts') is True]
     if not utterance_order:
         errors.append('no live dialogue observed')
@@ -865,8 +876,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'pcm_observed': key in pcm,
             'asr_inference_count': asr_counts.get(key, 0),
             'capture_transport': capture_summaries.get(key),
-            'native_judgement_started': key in audio_started_at,
-            'native_judgement_completed': key in native,
+            'native_association_observed': key in audio_started_at,
+            'native_end_confirmed': key in native,
             'native_end_estimate_ns': native_end_estimates.get(key),
             'input_attempted': key in attempts,
             'input_sent': key in sent,

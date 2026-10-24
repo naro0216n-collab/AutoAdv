@@ -40,9 +40,9 @@ class SessionOwnership(unittest.TestCase):
         token = c.observe(generation='host', connection=1, sequence=1,
                           source=source, text='line', pid=10)
         c.permit(True)
-        c.pause('native_inconclusive_hold')
+        c.pause('native_end_unconfirmed_hold')
         c.presentation_event(token, 'text_elapsed')
-        self.assertEqual(c.pause_reason, 'native_inconclusive_hold')
+        self.assertEqual(c.pause_reason, 'native_end_unconfirmed_hold')
         self.assertTrue(c.authorized)
         second = c.observe(generation='host', connection=1, sequence=2,
                            source=source, text='another', pid=10)

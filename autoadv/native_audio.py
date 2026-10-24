@@ -1,20 +1,20 @@
 """Process-scoped native audio recognition for non-TTS audio-judgment utterances.
 
 Actual audio is captured by Windows Process Loopback, then converted into
-immutable alignment/timing/acoustic evidence. NativeAudio never owns dialogue
-completion or a fallback deadline; the pure evidence model assigns the current
-ENDED / PLAYING / INCONCLUSIVE assessment and Controller owns progression.
+immutable alignment/timing/acoustic observations. NativeAudio never owns dialogue
+completion, target-end inference, or a fallback deadline; knowledge reduction and
+Controller policy live outside acquisition.
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Callable
 import time
 from .audio_buffer import AudioHistory, PCMChunk
-from .audio_match import TargetAlignment, TargetMatcher, VoiceActivity, alignment_support_rank
-from .audio_evidence import VoiceEvidence
+from .audio_match import TargetMatcher, VoiceActivity
+from .audio_knowledge import NativeAudioObservation
 from .conversation import Token
 from .process_audio import ProcessCapture, CaptureHealth
 
@@ -24,6 +24,7 @@ class ASRResult:
     text: str
     tokens: tuple[str, ...] = ()
     timestamps: tuple[float, ...] = ()
+    durations: tuple[float, ...] = ()
 
 
 def _coerce_asr_result(value) -> ASRResult:
@@ -35,6 +36,7 @@ def _coerce_asr_result(value) -> ASRResult:
         str(getattr(value, 'text', '')),
         tuple(str(x) for x in (getattr(value, 'tokens', ()) or ())),
         tuple(float(x) for x in (getattr(value, 'timestamps', ()) or ())),
+        tuple(float(x) for x in (getattr(value, 'durations', ()) or ())),
     )
 
 
@@ -62,6 +64,7 @@ class JapaneseASR:
             str(result.text),
             tuple(str(x) for x in (getattr(result, 'tokens', ()) or ())),
             tuple(float(x) for x in (getattr(result, 'timestamps', ()) or ())),
+            tuple(float(x) for x in (getattr(result, 'durations', ()) or ())),
         )
 
 
@@ -75,12 +78,12 @@ class NativeAudio:
                  replay_lookback_ms: int = DEFAULT_REPLAY_HISTORY_MS,
                  on_pcm: Callable[[Token, int], None] | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None,
-                 on_evidence: Callable[[Token, VoiceEvidence], None] | None = None):
+                 on_observation: Callable[[Token, NativeAudioObservation], None] | None = None):
         self.pid = pid
         self.on_error = on_error
         self.on_pcm = on_pcm
         self.on_inference = on_inference
-        self.on_evidence = on_evidence
+        self.on_observation = on_observation
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         if replay_lookback_ms < 0:
             raise ValueError('native replay lookback must be nonnegative')
@@ -126,9 +129,6 @@ class NativeAudio:
         self._vad_active = False
         self._vad_contains_speech = False
         self._pcm_reported = False
-        self._latest_evidence: VoiceEvidence | None = None
-        self._frontier_alignment = TargetAlignment()
-        self._frontier_capture_end_ms: int | None = None
         self._last_pcm_end_ms = -1
 
     def start(self):
@@ -171,9 +171,6 @@ class NativeAudio:
         self.vad_onset_ms = -1
         self.vad_end_ms = -1
         self.vad_tail_ms = 0
-        self._latest_evidence = None
-        self._frontier_alignment = TargetAlignment()
-        self._frontier_capture_end_ms = None
         self._last_pcm_end_ms = -1
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
@@ -211,10 +208,6 @@ class NativeAudio:
             # prefix after the replay horizon expires.
             self.history.retain_from(self.window_start_ms)
             self._reset_observation()
-            # Pre-HOOK replay may help endpoint attribution, but target support
-            # wholly before the accepted HOOK is not current PLAYING evidence.
-            # The first ASR snapshot therefore compares against the HOOK time.
-            self._frontier_capture_end_ms = self.start_ms
             # ProcessCapture pushes a packet before calling feed(). Replaying
             # under this lock makes an in-flight packet idempotent.
             buffered = self.history.since(self.window_start_ms)
@@ -270,14 +263,8 @@ class NativeAudio:
             self.history.release_retention()
 
     def health(self, status: CaptureHealth):
-        """Record transport health as transport facts, not voice semantics.
-
-        The helper emits a heartbeat only after process-loopback DataAvailable
-        has stopped.  That is a render-quiescence observation, not proof that a
-        target voice ended or that no voice exists.  The pure assessment layer
-        combines it with target attribution and timing facts.
-        """
-        refreshed = None
+        """Publish transport health as transport observations only."""
+        observation = None
         token = None
         with self._lock:
             if status.healthy:
@@ -286,20 +273,18 @@ class NativeAudio:
                     self._capture_pcm_frames += status.pcm_frames
                 else:
                     self._capture_heartbeats += 1
-                    latest = self._latest_evidence
-                    if (not self._inflight and self.token is not None and latest is not None
-                            and self._last_pcm_end_ms >= 0):
-                        refreshed = replace(
-                            latest, observation_kind='transport',
-                            render_end_ms=self._last_pcm_end_ms,
-                            render_quiet_at_ms=status.at_ms)
-                        self._latest_evidence = refreshed
+                    if self.token is not None and self._last_pcm_end_ms >= 0:
+                        observation = NativeAudioObservation(
+                            kind='transport',
+                            pcm_last_frame_ms=self._last_pcm_end_ms,
+                            heartbeat_at_ms=status.at_ms,
+                        )
                         token = self.token
             else:
                 self._capture_error = status.reason
                 token = self.token
-        if refreshed is not None and token is not None and self.on_evidence is not None:
-            self.on_evidence(token, refreshed)
+        if observation is not None and token is not None and self.on_observation is not None:
+            self.on_observation(token, observation)
             return
         if not status.healthy and token is not None:
             # Before the first line there is no token to notify. begin() replays
@@ -331,7 +316,7 @@ class NativeAudio:
         return self.window_start_ms
 
     def _consume_locked(self, chunk: PCMChunk, *, replay: bool = False):
-        """Record one PCM packet and optionally schedule one evidence snapshot.
+        """Record one PCM packet and optionally schedule one observation snapshot.
 
         VAD and capture are observations only. They never decide that the target
         voice started, ended, or should keep a text deadline open.
@@ -368,7 +353,7 @@ class NativeAudio:
                 self._vad_active = bool(activity.active)
                 self._vad_contains_speech = bool(activity.contains_speech)
                 if target_acoustic_activity:
-                                self.vad_end_ms = -1
+                    self.vad_end_ms = -1
                 elif self.vad_onset_ms >= 0 and activity.tail_silence_ms > 0:
                     # This is a process-mix VAD observation, not a target-voice
                     # endpoint assertion.
@@ -376,8 +361,8 @@ class NativeAudio:
             self.vad_tail_ms = int(activity.tail_silence_ms)
 
             if activity.frames_analyzed and not replay:
-                # Cumulative ASR runs on one fixed cadence. VAD influences only
-                # endpoint evidence, never when recognition is allowed to run.
+                # Cumulative ASR runs on one fixed cadence. VAD remains an
+                # observation and never controls when recognition may run.
                 enough_pcm = chunk.at_ms - self.window_start_ms >= 300
                 decode_due = (self._inference_at < 0 or
                               chunk.at_ms - self._inference_at >= 500)
@@ -449,35 +434,46 @@ class NativeAudio:
     @classmethod
     def _token_timing_observations(cls, samples, result: ASRResult,
                                    observed_token_count: int
-                                   ) -> tuple[int | None, int | None]:
-        """Return raw target-token timing observations on the capture timeline.
+                                   ) -> tuple[int | None, int | None, int | None]:
+        """Map raw ASR token timing onto the capture timeline.
 
-        SenseVoice timestamps are token starts. A following token therefore
-        bounds the selected target prefix but is not itself declared to be the
-        acoustic end of the target voice.
+        Token starts and a successor-token start remain lexical timing facts.
+        ``target_end_ms`` is returned only when the recognizer itself supplies a
+        duration for the selected final token; no duration is synthesized from
+        the successor token, VAD, render gaps, or decode latency.
         """
         if not samples or observed_token_count <= 0 or not result.timestamps:
-            return None, None
+            return None, None, None
         timestamps = result.timestamps
         if (observed_token_count > len(timestamps)
                 or any(t < 0 for t in timestamps)
                 or any(a > b for a, b in zip(timestamps, timestamps[1:]))):
-            return None, None
+            return None, None, None
         total_audio_ms = sum(chunk.duration_ms for chunk in samples)
         last_offset_ms = timestamps[observed_token_count - 1] * 1000.0
         if last_offset_ms > total_audio_ms + 1e-6:
-            return None, None
+            return None, None, None
         last_wall = cls._audio_offset_to_wall_ms(samples, last_offset_ms)
         target_last_ms = int(round(last_wall)) if last_wall is not None else None
-        if observed_token_count >= len(timestamps):
-            return target_last_ms, None
-        boundary_offset_ms = timestamps[observed_token_count] * 1000.0
-        if boundary_offset_ms < last_offset_ms or boundary_offset_ms > total_audio_ms + 1e-6:
-            return target_last_ms, None
-        boundary_wall = cls._audio_offset_to_wall_ms(samples, boundary_offset_ms)
-        if boundary_wall is None:
-            return target_last_ms, None
-        return target_last_ms, int(round(boundary_wall))
+
+        successor_ms = None
+        if observed_token_count < len(timestamps):
+            boundary_offset_ms = timestamps[observed_token_count] * 1000.0
+            if last_offset_ms <= boundary_offset_ms <= total_audio_ms + 1e-6:
+                boundary_wall = cls._audio_offset_to_wall_ms(samples, boundary_offset_ms)
+                if boundary_wall is not None:
+                    successor_ms = int(round(boundary_wall))
+
+        target_end_ms = None
+        if len(result.durations) >= observed_token_count:
+            duration_s = result.durations[observed_token_count - 1]
+            if duration_s >= 0:
+                end_offset_ms = last_offset_ms + duration_s * 1000.0
+                if end_offset_ms <= total_audio_ms + 1e-6:
+                    end_wall = cls._audio_offset_to_wall_ms(samples, end_offset_ms)
+                    if end_wall is not None:
+                        target_end_ms = int(round(end_wall))
+        return target_last_ms, successor_ms, target_end_ms
 
     def _infer(self, token, generation, samples, submitted_ns=0,
                submitted_vad_tail_ms=None, submitted_end_ms=None,
@@ -488,13 +484,13 @@ class NativeAudio:
         try:
             result = _coerce_asr_result(self.asr.recognize(samples))
             decoded_ns = time.perf_counter_ns() if self.on_inference else 0
-            evidence = None
+            observation = None
             with self._lock:
                 if (self._closed or self._generation != generation or token != self.token
                         or not self.matcher or not self.history.healthy):
                     return
                 alignment = self.matcher.align(result.text, tokens=result.tokens)
-                target_last_ms, target_boundary_ms = self._token_timing_observations(
+                target_last_ms, successor_ms, target_end_ms = self._token_timing_observations(
                     samples, result, alignment.observed_token_count)
                 audio_ms = sum(chunk.duration_ms for chunk in samples)
                 capture_end_ms = int(samples[-1].at_ms) if samples else None
@@ -502,61 +498,54 @@ class NativeAudio:
                                              else submitted_vad_tail_ms))
                 vad_end = (self.vad_end_ms if submitted_end_ms is None
                            else submitted_end_ms)
-                evidence = VoiceEvidence(
-                    observation_kind='asr',
+                observation = NativeAudioObservation(
+                    kind='asr',
                     alignment=alignment,
-                    frontier_alignment=self._frontier_alignment,
                     capture_end_ms=capture_end_ms,
-                    frontier_capture_end_ms=self._frontier_capture_end_ms,
-                    target_last_token_ms=target_last_ms,
-                    target_boundary_ms=target_boundary_ms,
-                    render_end_ms=None,
-                    render_quiet_at_ms=None,
+                    target_last_token_start_ms=target_last_ms,
+                    target_successor_token_start_ms=successor_ms,
+                    target_acoustic_end_ms=target_end_ms,
+                    target_acoustic_end_source=('asr_token_duration' if target_end_ms is not None else ''),
+                    pcm_last_frame_ms=(self._last_pcm_end_ms if self._last_pcm_end_ms >= 0 else None),
+                    heartbeat_at_ms=None,
                     vad_onset_ms=(self.vad_onset_ms if self.vad_onset_ms >= 0 else None),
                     vad_tail_ms=tail_at_decode,
                     vad_end_ms=(int(vad_end) if vad_end is not None and vad_end >= 0 else None),
                 )
-                self._latest_evidence = evidence
-                # Preserve one coherent ASR frontier. Do not combine a match
-                # maximum from one hypothesis with a timestamp/capture boundary
-                # from another, and do not move the frontier backward on ASR
-                # regression.
-                if (alignment_support_rank(alignment)
-                        > alignment_support_rank(self._frontier_alignment)):
-                    self._frontier_alignment = alignment
-                    self._frontier_capture_end_ms = capture_end_ms
 
-            if self.on_inference and evidence is not None:
-                a = evidence.alignment
+            if self.on_inference and observation is not None:
+                a = observation.alignment
                 measurements = {
                     'queue_ms': round(max(0, started_ns - submitted_ns) / 1_000_000, 3),
                     'decode_ms': round(max(0, decoded_ns - started_ns) / 1_000_000, 3),
                     'audio_ms': round(audio_ms, 3),
                     'phonetic_coverage': round(a.phonetic_coverage, 4),
                     'matched_phonemes': a.phonetic_matches,
+                    'phonetic_target_units': a.phonetic_target_units,
+                    'phonetic_prefix_units': a.phonetic_prefix_units,
                     'phonetic_edit_count': a.phonetic_edits,
                     'reading_rank': a.reading_rank,
                     'observed_reading_rank': a.observed_reading_rank,
                     'asr_token_timestamp_count': len(result.timestamps),
+                    'asr_token_duration_count': len(result.durations),
                     'target_token_count': a.observed_token_count,
-                    'target_last_token_ms': evidence.target_last_token_ms,
-                    'target_boundary_ms': evidence.target_boundary_ms,
-                    'capture_end_ms': evidence.capture_end_ms,
-                    'frontier_capture_end_ms': evidence.frontier_capture_end_ms,
-                    'frontier_matched_phonemes': evidence.frontier_alignment.phonetic_matches,
+                    'target_last_token_start_ms': observation.target_last_token_start_ms,
+                    'target_successor_token_start_ms': observation.target_successor_token_start_ms,
+                    'target_acoustic_end_ms': observation.target_acoustic_end_ms,
+                    'capture_end_ms': observation.capture_end_ms,
                     'vad_active': bool(submitted_vad_active),
                     'vad_contains_speech': bool(submitted_contains_speech),
-                    'vad_onset_ms': evidence.vad_onset_ms,
-                    'vad_tail_ms': evidence.vad_tail_ms,
-                    'vad_end_ms': evidence.vad_end_ms,
+                    'vad_onset_ms': observation.vad_onset_ms,
+                    'vad_tail_ms': observation.vad_tail_ms,
+                    'vad_end_ms': observation.vad_end_ms,
                 }
                 try:
                     self.on_inference(token, measurements)
                 except Exception:
                     pass
 
-            if self.on_evidence is not None and evidence is not None:
-                self.on_evidence(token, evidence)
+            if self.on_observation is not None and observation is not None:
+                self.on_observation(token, observation)
         except Exception as exc:
             self.on_error(token, 'ASR failure: ' + str(exc))
         finally:

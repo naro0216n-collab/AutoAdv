@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
-from .audio_evidence import VoiceState
 from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
                     extract_source_fields, interpret)
 
@@ -46,7 +45,7 @@ class Controller:
         self.presentation_reason: str | None = None
         self.text_elapsed = False
         self.tts_finished = False
-        self.voice_state = VoiceState.INCONCLUSIVE
+        self.native_end_confirmed = False
         self.audio_deadline_elapsed = False
         self.sent = False
         self.hold_reason: str | None = None
@@ -87,7 +86,7 @@ class Controller:
         self.confirmed_external_boundary = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
-        self.voice_state = VoiceState.INCONCLUSIVE
+        self.native_end_confirmed = False
         self.audio_deadline_elapsed = False
         self.hold_reason = reason
 
@@ -239,7 +238,7 @@ class Controller:
         self.completed = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
-        self.voice_state = VoiceState.INCONCLUSIVE
+        self.native_end_confirmed = False
         self.audio_deadline_elapsed = False
         self.sent = False
         self.awaiting_next = False
@@ -308,15 +307,12 @@ class Controller:
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
             self.audio_deadline_elapsed = True
-            if self.voice_state is VoiceState.ENDED:
-                self._resolve_pause('native_inconclusive_hold')
+            if self.native_end_confirmed:
+                self._resolve_pause('native_end_unconfirmed_hold')
                 return self._presentation_done('native')
-            if self.voice_state is VoiceState.PLAYING:
-                self._resolve_pause('native_inconclusive_hold')
-                return False
             if u.uncertain_text_fallback:
                 return self._presentation_done('uncertain_text_fallback')
-            self.pause('native_inconclusive_hold')
+            self.pause('native_end_unconfirmed_hold')
             return False
         if event in ('native_unavailable', 'native_failed'):
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
@@ -328,30 +324,25 @@ class Controller:
         raise ValueError(f'unknown presentation event: {event}')
 
 
-    def voice_assessment(self, token: Token, state: VoiceState) -> bool:
-        """Apply the one semantic native-voice assessment to progression.
+    def native_voice_ended(self, token: Token) -> bool:
+        """Apply confirmed target-acoustic end knowledge to presentation.
 
-        Evidence production and assessment do not own presentation completion.
-        Controller combines the assessment with the one text-derived deadline.
+        The Controller does not infer this fact from ASR/VAD/transport data. It
+        only consumes the positive knowledge supplied by the audio-knowledge
+        reducer and combines it with the active Utterance policy.
         """
         if token != self.token or self.sent or self.completed or not self.utterance:
             return False
         u = self.utterance
         if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
             return False
-        self.voice_state = VoiceState(state)
-        if self.voice_state is VoiceState.ENDED:
-            self._resolve_pause('native_inconclusive_hold')
-            return self._presentation_done('native')
-        if not self.audio_deadline_elapsed:
-            return False
-        if self.voice_state is VoiceState.PLAYING:
-            self._resolve_pause('native_inconclusive_hold')
-            return False
-        if u.uncertain_text_fallback:
-            return self._presentation_done('uncertain_text_fallback')
-        self.pause('native_inconclusive_hold')
-        return False
+        self.native_end_confirmed = True
+        if self.hold_reason in {
+                'native_end_unconfirmed_hold',
+                'native_audio_unavailable_hold',
+                'native_audio_failure'}:
+            self.hold_reason = None
+        return self._presentation_done('native')
 
     def _presentation_done(self, reason: str) -> bool:
         self.completed = True

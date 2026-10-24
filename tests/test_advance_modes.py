@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from autoadv.conversation import Controller, Target
-from autoadv.audio_evidence import VoiceState
 from autoadv.model import (AdvanceMode, Profile, HookSelection, OCRSettings, ReplacementRule,
                            count_reading_characters, interpret, matching_structure_rule, StructureRule)
 from autoadv.storage import Catalog, CommonSettings, load, save
@@ -102,8 +101,8 @@ class ControllerModes(unittest.TestCase):
     def done(self, event, success=True):
         return self.ctrl.presentation_event(self.token, event, success=success)
 
-    def voice(self, state):
-        return self.ctrl.voice_assessment(self.token, state)
+    def native_end(self):
+        return self.ctrl.native_voice_ended(self.token)
 
     def test_staged_speaker_voice_change_applies_only_to_the_next_utterance(self):
         profile = make_profile(AdvanceMode.TEXT, True)
@@ -141,7 +140,7 @@ class ControllerModes(unittest.TestCase):
 
     def test_text_non_tts_does_not_accept_asr_as_completion(self):
         self.begin(AdvanceMode.TEXT, False)
-        self.assertFalse(self.voice(VoiceState.ENDED))
+        self.assertFalse(self.native_end())
         self.assertFalse(self.done('tts_finished'))
         self.assertFalse(self.ctrl.try_advance())
         self.assertTrue(self.done('text_elapsed'))
@@ -150,7 +149,7 @@ class ControllerModes(unittest.TestCase):
     def test_audio_tts_ignores_native_and_fallback(self):
         self.begin(AdvanceMode.AUDIO, True, True)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertFalse(self.voice(VoiceState.ENDED))
+        self.assertFalse(self.native_end())
         self.assertFalse(self.done('text_elapsed'))
         self.assertFalse(self.ctrl.try_advance())
         self.assertTrue(self.done('tts_finished'))
@@ -160,7 +159,7 @@ class ControllerModes(unittest.TestCase):
     def test_audio_without_tts_confirmed_native_end(self):
         self.begin(AdvanceMode.AUDIO, False)
         self.assertFalse(self.ctrl.try_advance())
-        self.assertTrue(self.voice(VoiceState.ENDED))
+        self.assertTrue(self.native_end())
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertTrue(self.ctrl.try_advance())
 
@@ -177,31 +176,30 @@ class ControllerModes(unittest.TestCase):
         self.begin(AdvanceMode.AUDIO, False, True)
         self.assertTrue(self.done('audio_deadline_elapsed'))
         self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
-        self.assertFalse(self.voice(VoiceState.ENDED))
+        self.assertFalse(self.native_end())
         self.assertTrue(self.ctrl.try_advance())
 
     def test_uncertain_audio_without_opt_in_hands_control_back_at_reading_deadline(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
         self.assertTrue(self.ctrl.authorized)
         self.assertIsNone(self.ctrl.presentation_reason)
         self.assertFalse(self.ctrl.try_advance())
 
-    def test_playing_at_audio_deadline_falls_back_only_after_evidence_becomes_inconclusive(self):
+    def test_audio_deadline_uses_fallback_without_inventing_a_negative_voice_state(self):
         self.begin(AdvanceMode.AUDIO, False, True)
-        self.assertFalse(self.voice(VoiceState.PLAYING))
-        self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertFalse(self.ctrl.completed)
-        self.assertTrue(self.voice(VoiceState.INCONCLUSIVE))
+        self.assertFalse(self.ctrl.native_end_confirmed)
+        self.assertTrue(self.done('audio_deadline_elapsed'))
         self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
+        self.assertFalse(self.ctrl.native_end_confirmed)
 
     def test_late_native_finish_resolves_only_the_inconclusive_native_hold(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
 
-        self.assertTrue(self.voice(VoiceState.ENDED))
+        self.assertTrue(self.native_end())
         self.assertIsNone(self.ctrl.pause_reason)
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertTrue(self.ctrl.try_advance())
@@ -210,7 +208,7 @@ class ControllerModes(unittest.TestCase):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.ctrl.pause('host_changed')
 
-        self.assertTrue(self.voice(VoiceState.ENDED))
+        self.assertTrue(self.native_end())
         self.assertEqual(self.ctrl.pause_reason, 'host_changed')
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertFalse(self.ctrl.try_advance())
@@ -238,11 +236,11 @@ class ControllerModes(unittest.TestCase):
         self.ctrl.permit(False)
         self.assertFalse(self.ctrl.authorized)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
 
         self.ctrl.permit(True)
         self.assertTrue(self.ctrl.authorized)
-        self.assertEqual(self.ctrl.pause_reason, 'native_inconclusive_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
         self.assertFalse(self.ctrl.try_advance())
 
     def test_tts_failure_remains_actionable_while_auto_is_off(self):
@@ -363,7 +361,7 @@ class ControllerModes(unittest.TestCase):
         self.assertTrue(self.ctrl.authorized)
         self.assertEqual(self.ctrl.take_external_transition(second), 2_500)
         self.assertEqual(self.ctrl.take_external_transition(second), 0)
-        self.assertFalse(self.ctrl.voice_assessment(first, VoiceState.ENDED))
+        self.assertFalse(self.ctrl.native_voice_ended(first))
 
     def test_unsent_identical_hook_is_not_guessed_as_external_transition(self):
         p = make_profile(AdvanceMode.TEXT, tts=False)

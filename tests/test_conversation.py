@@ -71,7 +71,7 @@ class DialogueContractTests(unittest.TestCase):
     def test_authoritatively_known_external_advance_can_distinguish_same_text(self):
         self.controller.permit(True)
         first = self.output('同じ台詞', 1)
-        self.controller.pause('native_inconclusive_hold')
+        self.controller.pause('native_end_unconfirmed_hold')
         self.assertTrue(self.controller.confirm_external_advance(first))
         self.assertTrue(self.controller.awaiting_next)
         self.assertIsNone(self.controller.pause_reason)
@@ -107,7 +107,7 @@ class DialogueContractTests(unittest.TestCase):
     def test_runtime_hold_preserves_auto_mode_and_next_line_resumes(self):
         token = self.output('まだ読む', 1)
         self.controller.permit(True)
-        self.controller.pause('native_inconclusive_hold')
+        self.controller.pause('native_end_unconfirmed_hold')
         self.controller.presentation_event(token, 'text_elapsed')
         self.assertFalse(self.controller.try_advance())
         self.assertTrue(self.controller.authorized)
