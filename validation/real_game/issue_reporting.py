@@ -194,57 +194,99 @@ def _run_from_body(body: str) -> str | None:
     return match.group("run") if match else None
 
 
-def choose_history_slot(comments: Iterable[dict[str, Any]], run: str) -> tuple[int, int]:
-    """Return (slot_number, comment_id) for one idempotent ring update.
+def _flatten_comments(value: Any) -> list[dict[str, Any]]:
+    """Normalize GitHub CLI --paginate --slurp output without inferring absence.
 
-    Existing content for the same run is rewritten in place. Otherwise an empty
-    slot is preferred, then the slot containing the lexicographically oldest
-    timestamped run. The run prefix is UTC YYYYMMDDTHHMMSSZ, so lexical order
-    is chronological.
+    gh emits one JSON array per page and --slurp wraps those pages in one outer
+    array.  A plain one-page JSON array is accepted as well so the planner is
+    testable independently of the shell.  Anything else is an acquisition
+    failure, not an empty Issue.
     """
-    slots: dict[int, dict[str, Any]] = {}
+    if not isinstance(value, list):
+        raise ValueError("GitHub issue comments must be a JSON array")
+    if value and all(isinstance(page, list) for page in value):
+        items = [comment for page in value for comment in page]
+    else:
+        items = value
+    if not all(isinstance(comment, dict) for comment in items):
+        raise ValueError("GitHub issue comments contain a non-object entry")
+    return list(items)
+
+
+def _fixed_issue_surface(comments: Iterable[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    """Require exactly one pre-existing comment for every machine-owned marker."""
+    matches: dict[str, list[dict[str, Any]]] = {
+        **{history_marker(slot): [] for slot in range(1, HISTORY_SLOT_COUNT + 1)},
+        BASELINE_MARKER: [],
+    }
     for comment in comments:
-        body = str(comment.get("body") or "")
-        for slot in range(1, HISTORY_SLOT_COUNT + 1):
-            if body.lstrip().startswith(history_marker(slot)):
-                slots.setdefault(slot, comment)
+        body = str(comment.get("body") or "").lstrip()
+        for marker in matches:
+            if body.startswith(marker):
+                matches[marker].append(comment)
                 break
-    missing = [slot for slot in range(1, HISTORY_SLOT_COUNT + 1) if slot not in slots]
-    if missing:
-        raise ValueError(f"Validation history slot {missing[0]} is missing")
 
-    for slot, comment in slots.items():
-        if _run_from_body(str(comment.get("body") or "")) == run:
-            return slot, int(comment["id"])
+    invalid = [
+        f"{marker}: {len(found)}"
+        for marker, found in matches.items()
+        if len(found) != 1
+    ]
+    if invalid:
+        raise ValueError(
+            "Validation Issue surface is not canonical; expected exactly one "
+            "comment for each fixed marker (" + ", ".join(invalid) + ")"
+        )
 
-    candidates: list[tuple[str, int, int]] = []
-    for slot, comment in slots.items():
-        existing = _run_from_body(str(comment.get("body") or ""))
-        # Malformed/empty fixed slots are the first replacement candidates.
-        sort_key = existing or ""
-        candidates.append((sort_key, slot, int(comment["id"])))
+    slots = {
+        slot: matches[history_marker(slot)][0]
+        for slot in range(1, HISTORY_SLOT_COUNT + 1)
+    }
+    return slots, matches[BASELINE_MARKER][0]
+
+
+def _choose_history_slot(slots: dict[int, dict[str, Any]], run: str) -> tuple[int, int]:
+    same_run = [
+        (slot, int(comment["id"]))
+        for slot, comment in slots.items()
+        if _run_from_body(str(comment.get("body") or "")) == run
+    ]
+    if len(same_run) > 1:
+        raise ValueError(f"Validation run {run} exists in multiple history slots")
+    if same_run:
+        return same_run[0]
+
+    candidates = [
+        (
+            _run_from_body(str(comment.get("body") or "")) or "",
+            slot,
+            int(comment["id"]),
+        )
+        for slot, comment in slots.items()
+    ]
     _, slot, comment_id = min(candidates)
     return slot, comment_id
+
+
+def choose_history_slot(comments: Iterable[dict[str, Any]], run: str) -> tuple[int, int]:
+    """Return the one fixed history comment to PATCH for this run."""
+    slots, _ = _fixed_issue_surface(comments)
+    return _choose_history_slot(slots, run)
 
 
 def build_upload_plan(root: Path, sha: str,
                       comments: Iterable[dict[str, Any]]) -> dict[str, Any]:
     snapshot = format_snapshot(root, sha)
     comments = list(comments)
-    slot, comment_id = choose_history_slot(comments, snapshot.run)
+    slots, baseline = _fixed_issue_surface(comments)
+    history_slot, comment_id = _choose_history_slot(slots, snapshot.run)
+
     operations = [{
         "role": "history",
-        "slot": slot,
+        "slot": history_slot,
         "comment_id": comment_id,
-        "body": f"{history_marker(slot)}\n{snapshot.body}",
+        "body": f"{history_marker(history_slot)}\n{snapshot.body}",
     }]
     if baseline_eligible(snapshot.summary):
-        baseline = next((
-            comment for comment in comments
-            if str(comment.get("body") or "").lstrip().startswith(BASELINE_MARKER)
-        ), None)
-        if baseline is None:
-            raise ValueError("Validation baseline slot is missing")
         operations.append({
             "role": "baseline",
             "comment_id": int(baseline["id"]),
@@ -260,9 +302,7 @@ def main() -> int:
     parser.add_argument("--comments", type=Path, required=True)
     args = parser.parse_args()
     with args.comments.open("r", encoding="utf-8-sig") as stream:
-        comments = json.load(stream)
-    if not isinstance(comments, list):
-        raise ValueError("comments JSON must be a list")
+        comments = _flatten_comments(json.load(stream))
     plan = build_upload_plan(args.root, args.sha, comments)
     print(json.dumps(plan, ensure_ascii=False))
     return 0

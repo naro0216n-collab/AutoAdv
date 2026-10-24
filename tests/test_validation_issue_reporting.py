@@ -205,20 +205,51 @@ class IssueReportingContract(unittest.TestCase):
 
             self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
 
-    def test_windows_runner_delegates_testable_planning_and_has_no_rotation_loop(self):
+    def test_paginated_gh_slurp_output_is_flattened_before_planning(self):
+        comments = _comments()
+        flattened = issue_reporting._flatten_comments([comments[:2], comments[2:]])
+        self.assertEqual(flattened, comments)
+
+    def test_duplicate_fixed_marker_is_an_error(self):
+        comments = _comments()
+        comments.append({"id": 9999, "body": f"{issue_reporting.history_marker(2)}\nduplicate"})
+        with self.assertRaisesRegex(ValueError, "slot-2.*2"):
+            issue_reporting.choose_history_slot(comments, "20261023T134156Z-b10d6904")
+
+    def test_same_run_in_multiple_history_slots_is_an_error(self):
+        comments = _comments()
+        run = "20261023T134156Z-b10d6904"
+        comments[0]["body"] = f"{issue_reporting.history_marker(1)}\n<!-- autoadv-validation-run:{run} -->"
+        comments[1]["body"] = f"{issue_reporting.history_marker(2)}\n<!-- autoadv-validation-run:{run} -->"
+        with self.assertRaisesRegex(ValueError, "multiple history slots"):
+            issue_reporting.choose_history_slot(comments, run)
+
+    def test_duplicate_baseline_is_an_error_even_for_nonbaseline_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "20261023T134156Z-b10d6904"
+            root.mkdir()
+            _write_summary(root, accuracy=_phase("accuracy", eligible_accuracy=False))
+            comments = _comments()
+            comments.append({"id": 9999, "body": f"{issue_reporting.BASELINE_MARKER}\nduplicate"})
+            with self.assertRaisesRegex(ValueError, "baseline.*2"):
+                issue_reporting.build_upload_plan(root, "a" * 40, comments)
+
+    def test_missing_fixed_marker_is_an_error(self):
+        comments = [comment for comment in _comments() if comment["id"] != 1004]
+        with self.assertRaisesRegex(ValueError, "slot-4.*0"):
+            issue_reporting.choose_history_slot(comments, "20261023T134156Z-b10d6904")
+
+    def test_windows_runner_only_patches_preexisting_comments(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn("validation.real_game.issue_reporting", source)
         self.assertIn("foreach ($operation in @($plan.operations))", source)
-        self.assertNotIn("for ($slot = 4; $slot -ge 2; $slot--)", source)
-        self.assertNotIn("Format-IssueSnapshot", source)
-        self.assertIn("PATCH", source)
-
-    def test_windows_runner_treats_marker_lookup_as_nullable_scalar(self):
-        source = RUNNER.read_text(encoding="utf-8")
-        self.assertIn("$null -eq (Find-IssueCommentByMarker $comments $marker)", source)
-        self.assertIn("$null -eq (Find-IssueCommentByMarker $comments $baselineMarker)", source)
-        self.assertNotIn("(Find-IssueCommentByMarker $comments $marker).Count", source)
-        self.assertNotIn("(Find-IssueCommentByMarker $comments $baselineMarker).Count", source)
+        self.assertIn("'--paginate', '--slurp'", source)
+        self.assertIn("Invoke-GitHubIssueApi 'PATCH'", source)
+        self.assertNotIn("Invoke-GitHubIssueApi 'POST'", source)
+        self.assertNotIn("Ensure-IssueHistorySlots", source)
+        self.assertNotIn("Find-IssueCommentByMarker", source)
+        self.assertNotIn("Get-IssueComments", source)
+        self.assertNotIn("ForEach-Object", source[source.index("function Get-IssueUploadPlan"):source.index("function Upload-Result")])
 
 
 if __name__ == "__main__":

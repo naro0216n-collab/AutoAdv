@@ -122,75 +122,54 @@ function Invoke-GitHubIssueApi([string] $method, [string] $url, [string] $conten
         if ($requestFile) { Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue }
     }
 }
-function Get-IssueComments {
-    $raw = Invoke-GitHubIssueApi 'GET' "repos/$repository/issues/$IssueNumber/comments?per_page=100"
-    if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
-    return @($raw | ConvertFrom-Json)
-}
-function Set-IssueComment($commentId, [string] $content) {
-    if ($null -ne $commentId) {
-        $raw = Invoke-GitHubIssueApi 'PATCH' "repos/$repository/issues/comments/$([long]$commentId)" $content
-    } else {
-        $raw = Invoke-GitHubIssueApi 'POST' "repos/$repository/issues/$IssueNumber/comments" $content
-    }
+function Set-IssueComment([long] $commentId, [string] $content) {
+    # Normal validation never creates or repairs the fixed Issue surface.  It
+    # can only PATCH a comment ID that the planner obtained from a complete,
+    # unambiguous read of the existing Issue.
+    $raw = Invoke-GitHubIssueApi 'PATCH' "repos/$repository/issues/comments/$commentId" $content
     $response = $raw | ConvertFrom-Json
     if (-not $response.html_url -or $response.html_url -notmatch '^https://github\.com/') {
         throw 'GitHub returned no valid issue comment URL'
     }
     Write-Host "Uploaded: $($response.html_url)"
-    return $response
 }
-function Get-HistorySlotMarker([int] $slot) { return "<!-- autoadv-validation-slot-$slot -->" }
-function Find-IssueCommentByMarker($comments, [string] $marker) {
-    # This is a nullable single-object lookup, not a collection API. PowerShell
-    # enumerates arrays returned from functions, so a one-item result becomes a
-    # scalar under Windows PowerShell 5.1. Callers must test against $null rather
-    # than relying on a .Count property that the scalar does not have in StrictMode.
-    return ($comments | Where-Object { ([string]$_.body).TrimStart().StartsWith($marker) } | Select-Object -First 1)
-}
-function Ensure-IssueHistorySlots {
-    $comments = @(Get-IssueComments)
-    foreach ($slot in 1..4) {
-        $marker = Get-HistorySlotMarker $slot
-        if ($null -eq (Find-IssueCommentByMarker $comments $marker)) {
-            [void](Set-IssueComment $null "$marker`n_No validation run stored yet._")
-            $comments = @(Get-IssueComments)
-        }
-    }
-    $baselineMarker = '<!-- autoadv-validation-baseline -->'
-    if ($null -eq (Find-IssueCommentByMarker $comments $baselineMarker)) {
-        [void](Set-IssueComment $null "$baselineMarker`n_No successful accuracy baseline stored yet._")
-        $comments = @(Get-IssueComments)
-    }
-    return $comments
-}
-function Get-IssueUploadPlan([string] $root, [string] $sha, $comments) {
+function Get-IssueUploadPlan([string] $root, [string] $sha) {
     $commentsPath = Join-Path $session ('issue-comments-' + [Guid]::NewGuid().ToString('N') + '.json')
     try {
-        $compact = @($comments | ForEach-Object {
-            [ordered]@{ id = [long]$_.id; body = [string]$_.body }
-        })
-        [IO.File]::WriteAllText(
-            $commentsPath,
-            (ConvertTo-Json -InputObject $compact -Depth 4),
-            ([Text.UTF8Encoding]::new($false)))
+        Ensure-GitHubLogin
+        # Keep GitHub's JSON opaque to Windows PowerShell 5.1.  Its array
+        # unrolling semantics previously turned one comments page into a nested
+        # System.Object[] and made marker absence indistinguishable from a parse
+        # problem.  Python validates all paginated pages and every fixed marker.
+        $apiArgs = @(
+            'api', '--method', 'GET', '--paginate', '--slurp',
+            "repos/$repository/issues/$IssueNumber/comments?per_page=100"
+        )
+        $responseLines = @(& $script:GitHubCli @apiArgs)
+        if ($LASTEXITCODE -ne 0) {
+            throw "GitHub issue API failed (GET comments, exit code $LASTEXITCODE)"
+        }
+        $raw = $responseLines -join "`n"
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            throw 'GitHub issue comments response was empty'
+        }
+        [IO.File]::WriteAllText($commentsPath, $raw, ([Text.UTF8Encoding]::new($false)))
         $planLines = @(& python -m validation.real_game.issue_reporting `
             --root $root --sha $sha --comments $commentsPath)
         if ($LASTEXITCODE -ne 0) { throw "Issue report planner failed (exit code $LASTEXITCODE)" }
-        $raw = $planLines -join "`n"
-        if ([string]::IsNullOrWhiteSpace($raw)) { throw 'Issue report planner returned no plan' }
-        return ($raw | ConvertFrom-Json)
+        $planRaw = $planLines -join "`n"
+        if ([string]::IsNullOrWhiteSpace($planRaw)) { throw 'Issue report planner returned no plan' }
+        return ($planRaw | ConvertFrom-Json)
     } finally {
         Remove-Item -LiteralPath $commentsPath -Force -ErrorAction SilentlyContinue
     }
 }
 function Upload-Result([string] $root, [string] $sha) {
-    # Four fixed comments form a bounded ring. One run overwrites only its
-    # existing slot or the oldest slot, avoiding a non-atomic 4-comment
-    # rotation. A newly eligible accuracy baseline is the only optional second
-    # PATCH operation.
-    $comments = @(Ensure-IssueHistorySlots)
-    $plan = Get-IssueUploadPlan $root $sha $comments
+    # The Issue already owns four history comments and one baseline comment.
+    # A normal run performs one history PATCH plus, only for an eligible
+    # accuracy baseline, one baseline PATCH. Missing/duplicate/unreadable
+    # markers fail closed and leave the Issue untouched.
+    $plan = Get-IssueUploadPlan $root $sha
     foreach ($operation in @($plan.operations)) {
         [void](Set-IssueComment ([long]$operation.comment_id) ([string]$operation.body))
         if ($operation.role -eq 'history') {
