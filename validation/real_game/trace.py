@@ -105,14 +105,6 @@ class ProductTraceObserver:
                     audio_pid=detail.get('audio_pid', 0))
             return
 
-        if event == 'native_voice_knowledge' and token is not None:
-            self.trace.emit(
-                'native_voice_knowledge', session=token.session, line=token.line,
-                target_associated=bool(detail.get('target_associated')),
-                target_acoustic_completed=bool(detail.get('target_acoustic_completed')),
-                completion_source=detail.get('completion_source', ''))
-            return
-
         fields = dict(detail)
         fields.update(self._token_fields(token))
         if event == 'presentation_complete':
@@ -127,7 +119,8 @@ class ProductTraceObserver:
             'presentation_complete', 'next_line_timeout', 'advance_attempt',
             'advance_input', 'audio_observation_boundary', 'audio_deadline_elapsed',
             'native_capture_summary', 'native_audio_error',
-            'native_pcm', 'alignment_inference', 'native_audio_observation', 'native_target_acoustic_completion_estimate',
+            'native_pcm', 'alignment_inference', 'native_audio_observation',
+            'utterance_progress', 'utterance_progress_end_estimate',
             'tts_timing', 'tts_result', 'controller_handoff',
         }:
             self.trace.emit(event, **fields)

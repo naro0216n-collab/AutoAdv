@@ -8,7 +8,7 @@ AutoAdv実経路で確認する対象は、LunaHookが受信した取得元と�
 
 ### 1. NativeAudio局所契約
 
-NativeAudioのPCM provenance、世代失効、target-conditioned alignmentへの引き渡し、transport観測と音響完了の分離を局所契約として確認する。ゲーム、Ren'Py、LunaHook、Windows入力は起動しない。
+NativeAudioのcontinuous PCM provenance、Presentation Epoch境界、世代失効、target-conditioned alignment・human-vocal・recurrence observerから`UtteranceProgress`への引き渡し、transport観測と進行推論の分離を局所契約として確認する。ゲーム、Ren'Py、LunaHook、Windows入力は起動しない。
 
 ```powershell
 python -m pytest -q tests/test_audio_lifecycle_contracts.py tests/test_domain_contracts.py
@@ -44,9 +44,9 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
   -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated -MeasurementOnly
 ```
 
-標準ケースは**24台詞を一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで連続実行**する。7つの通常ゲーム場面を、静かな室内→BGM付き会話→BGMを維持した入店と群衆音→BGM切替と日本語背景発話→事件演出→旧BGMと機械環境音が重なる場面転換→静かな復帰、の順で一続きに通過する。場面境界でゲーム再起動、HOOK再選択、NativeAudio/alignment再初期化、profile再設定、検証用状態clearは行わない。
+標準ケースは**件数を固定契約にせず、一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで全ケースを連続実行**する。通常のclean/mix場面に加え、実発声開始より遅いHOOK、同一本文を異なる時間で演じるpaired case、長い非言語tail、内部短無音を含む非言語発声、epoch内開始とepoch跨ぎのvocal loop、有限の自然反復を含める。場面境界でゲーム再起動、HOOK再選択、NativeAudio/`UtteranceProgress`再初期化、profile再設定、検証用状態clearは行わない。HOOK遅延はゲーム側でvoiceを先に再生してから通常のLunaHook経路へ台詞を出し、製品へ固定HOOK通知を注入しない。
 
-24件中18件は原音あり、6件は原音なし。原音ありには通常短文・長文、JVS複数話者、囁き、泣き声・悲鳴、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音を含む。原音なしはclean、BGMのみ、BGM+群衆、BGM+日本語背景発話、BGM+SE残響、機械環境音のみへ分散し、accuracyで常時ONのフォールバックによりG2P由来の本文時間で進むことと、背景音を対象原音へ誤帰属して`native`完了しないことを測る。台詞境界をまたぐBGM・環境音・SEは意図的に保持する。独立game oracleはvoice開始時にisolated foreground WAVからclean-source acoustic endpointを算出し、voice channel inactiveは別の再生system診断として記録する。AutoAdv入力がvoice channelを途中停止させても、開始時に固定した独立source acoustic endpointとの比較で早送りを判定できる。さらにmusic/ambient/background/SFXの実再生も記録し、`ADVANCEMENT_ACCURACY_SCENARIO.json`の想定mixが実際に成立しなかったrunは完全な計測として扱わない。
+原音ありでは通常短文・長文、複数話者、囁き、泣き・叫び・喘ぎ相当、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音に加え、本文量と原音durationが相関しない条件を測る。原音なしは複数のmixへ分散し、accuracyで常時ONのフォールバックが`UtteranceProgress`成功とは別理由で働くことと、背景音・背景人声・loopを有限targetへ誤帰属しないことを測る。台詞境界をまたぐBGM・環境音・SE・persistent vocalは意図的に保持する。独立game oracleはisolated foreground WAVからclean-source acoustic endpointを算出し、実際のsource開始時刻をHOOK到着とは独立に記録する。AutoAdv入力がvoice channelを途中停止させても、開始時に固定した独立source acoustic endpointとの比較で早送りを判定できる。music/ambient/background/SFXの実再生も記録し、`ADVANCEMENT_ACCURACY_SCENARIO.json`の想定mixが実際に成立しなかったrunは完全な計測として扱わない。
 
 途中で保留、早送り、誤帰属、入力失敗、次Hook未取得等になっても品質値として記録し、後続ケースの実測を失わないためだけに`validation_recovery_input`を送って収集を継続できる。回復入力はAutoAdvの成功へ算入しない。固定合格点は置かず、trace/oracle破損、fixture・実音声経路の未成立、要求ケースの収集未完了等だけを計測不能としてrunner異常にする。
 
@@ -54,7 +54,7 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
 
 ## 標準Windows runtime
 
-forced alignment/G2P/Process Loopbackを検証専用環境として持たない。通常の`AutoAdv.cmd`は`%LOCALAPPDATA%\AutoAdv\runtime`にAutoAdv管理runtimeを準備し、GUI・audio・OCR・native依存、Haqumei G2P、固定target-conditioned alignment model/vocabularyを自動配置する。Process Loopback helperも同じ管理領域へhelperソースdigest単位で配置し、既に成立しているruntimeを毎回再構築しない。
+forced alignment/G2P/human-vocal observer/Process Loopbackを検証専用環境として持たない。通常の`AutoAdv.cmd`は`%LOCALAPPDATA%\AutoAdv\runtime`にAutoAdv管理runtimeを準備し、GUI・audio・OCR・native依存、Haqumei G2P、音響observer、固定target-conditioned alignment model/vocabularyを自動配置する。Process Loopback helperも同じ管理領域へhelperソースdigest単位で配置し、既に成立しているruntimeを毎回再構築しない。
 
 alignment modelの固定repository/revision/SHA-256は`autoadv.native_runtime`が所有する。精度計測、alignment benchmark、通常製品は同じmanaged model/vocabularyを使用し、検証専用model downloaderや第二の配置正本を持たない。個別パスは必要な場合だけ詳細設定から上書きできる。
 
@@ -80,7 +80,7 @@ Windows実機計測のGitHub Issueは、チャット環境から比較・解析�
 
 ## Alignment品質・stress計測
 
-既知本文のassociation率、固定clean-source末尾annotationに対する境界誤差、早いcommit、未確認率、推論費用を測り、自動進行精度とは分離して扱う。full fileを一度だけalignせず、製品と同じ300ms開始・500ms間隔の累積snapshot、単一workerの推論backpressure、PCM idle時の未解析tail drainを再生し、成立後に撤回されない**最初のassociation / committed target end**を評価する。tail drainはheartbeatを音声終了証拠へ使わず、既に捕捉済みのPCMをforced alignmentへ渡すscheduler動作だけを再現する。これにより、途中で誤commitした後にfull-file alignmentだけが正常化するケースや、実行時には存在しないfile末尾強制snapshotを隠れた成功条件にしない。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
+既知本文のassociation率、固定clean-source annotationに対するlexical境界誤差、alignment未確認率、推論費用を測り、自動進行精度とは分離して扱う。full fileを一度だけalignせず、製品と同じ累積snapshot、単一workerの推論backpressure、PCM idle時の未解析tail drainを再生し、既知本文へどの範囲を対応付けたかを評価する。forced alignmentの`committed target end`はlexical/phonetic evidenceの品質値であり、human vocal event終了や`UtteranceProgress`成功とは扱わない。tail drainはheartbeatを音声終了証拠へ使わず、既に捕捉済みのPCMをforced alignmentへ渡すscheduler動作だけを再現する。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
 
 ```powershell
 python -m validation.real_game.benchmark_alignment --conditions clean quiet noise clipped truncated bgm --rounds 2 --output .\alignment-performance.json

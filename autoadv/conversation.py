@@ -5,6 +5,7 @@ from copy import deepcopy
 from collections.abc import Callable, Sequence
 from .hook_protocol import HookEvent
 from .g2p import G2PBackend
+from .utterance_progress import UtteranceProgress, UtteranceProgressState
 from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
                     configured_speaker_names, extract_source_fields, interpret,
                     resolve_speaker_enclosed_body)
@@ -48,7 +49,7 @@ class Controller:
         self.presentation_reason: str | None = None
         self.text_elapsed = False
         self.tts_finished = False
-        self.native_acoustic_complete = False
+        self.native_progress = UtteranceProgress()
         self.audio_deadline_elapsed = False
         self.sent = False
         self.hold_reason: str | None = None
@@ -87,7 +88,7 @@ class Controller:
         self.external_transition_ns = 0
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
-        self.native_acoustic_complete = False
+        self.native_progress = UtteranceProgress()
         self.audio_deadline_elapsed = False
         self.hold_reason = reason
 
@@ -254,7 +255,7 @@ class Controller:
         self.completed = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
-        self.native_acoustic_complete = False
+        self.native_progress = UtteranceProgress()
         self.audio_deadline_elapsed = False
         self.sent = False
         self.awaiting_next = False
@@ -306,12 +307,20 @@ class Controller:
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
             self.audio_deadline_elapsed = True
-            if self.native_acoustic_complete:
-                self._resolve_pause('native_acoustic_unconfirmed_hold')
-                return self._presentation_done('native')
-            if u.uncertain_text_fallback:
+            if self.native_progress.ended:
+                self._resolve_pause('utterance_progress_unresolved_hold')
+                self._resolve_pause('utterance_progress_active_hold')
+                return self._presentation_done('utterance_progress')
+            # The text deadline is a fallback policy, not a duration estimate.
+            # It must never cut a finite human-vocal event that acoustic
+            # inference says is still active or ending.  Only unresolved or
+            # persistent/looping states may use the explicitly enabled
+            # uncertainty fallback.
+            if u.uncertain_text_fallback and not self.native_progress.finite_vocal_incomplete:
                 return self._presentation_done('uncertain_text_fallback')
-            self.pause('native_acoustic_unconfirmed_hold')
+            self.pause('utterance_progress_active_hold'
+                       if self.native_progress.finite_vocal_incomplete
+                       else 'utterance_progress_unresolved_hold')
             return False
         if event in ('native_unavailable', 'native_failed'):
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
@@ -323,25 +332,33 @@ class Controller:
         raise ValueError(f'unknown presentation event: {event}')
 
 
-    def native_acoustic_completed(self, token: Token) -> bool:
-        """Apply confirmed target-correlated acoustic completion to presentation.
-
-        The Controller consumes the positive completion supplied by the audio
-        knowledge reducer; it does not reinterpret that evidence as physical
-        voice-file/channel EOF.
-        """
+    def apply_utterance_progress(self, token: Token, progress: UtteranceProgress) -> bool:
+        """Consume the unified audio inference without reinterpreting its evidence."""
         if token != self.token or self.sent or self.completed or not self.utterance:
             return False
         u = self.utterance
         if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
             return False
-        self.native_acoustic_complete = True
-        if self.hold_reason in {
-                'native_acoustic_unconfirmed_hold',
-                'native_audio_unavailable_hold',
-                'native_audio_failure'}:
-            self.hold_reason = None
-        return self._presentation_done('native')
+        self.native_progress = progress
+        if progress.ended:
+            if self.hold_reason in {
+                    'utterance_progress_unresolved_hold',
+                    'utterance_progress_active_hold',
+                    'native_audio_unavailable_hold',
+                    'native_audio_failure'}:
+                self.hold_reason = None
+            return self._presentation_done('utterance_progress')
+        if self.audio_deadline_elapsed and u.uncertain_text_fallback:
+            if not progress.finite_vocal_incomplete:
+                if self.hold_reason in {
+                        'utterance_progress_unresolved_hold',
+                        'utterance_progress_active_hold',
+                        'native_audio_unavailable_hold',
+                        'native_audio_failure'}:
+                    self.hold_reason = None
+                return self._presentation_done('uncertain_text_fallback')
+            self.pause('utterance_progress_active_hold')
+        return False
 
     def _presentation_done(self, reason: str) -> bool:
         self.completed = True

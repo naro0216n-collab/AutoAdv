@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 
 from autoadv.audio_buffer import PCMChunk
-from autoadv.audio_knowledge import NativeAudioObservation, NativeVoiceKnowledge, reduce_native_voice_knowledge
+from autoadv.acoustic_observers import HumanVocalEvidence, VocalRecurrenceEvidence
+from autoadv.utterance_progress import (
+    LexicalProgressEvidence, NativeAudioObservation, PresentationBoundaryCertainty,
+    UtteranceProgressEstimator, UtteranceProgressState,
+)
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import HaqumeiG2P, PronunciationCandidate, count_reading_units, reading_units_from_candidates
 from autoadv.model import ReplacementRule, StructureRule, interpret, matching_structure_rule, resolve_speaker_enclosed_body
@@ -191,32 +195,83 @@ def test_forced_alignment_requires_target_evidence_and_right_context_from_one_pa
     assert ambiguous.complete_alignment and not ambiguous.committed_target_end
 
 
-def test_alignment_reading_selection_and_knowledge_are_evidence_monotonic():
+def test_alignment_reading_selection_and_utterance_progress_preserve_evidence_meaning():
     logits, vocab = logits_with_phones(('a', 'd', 'c'), frames=30)
     aligner = TargetConditionedAligner(
         Posterior(logits, vocab), g2p=StaticG2P(('a', 'b', 'c'), ('a', 'd', 'c')))
     aligner.set_target('target')
     chosen = aligner.align(chunks(30))
     assert (chosen.reading_rank, chosen.target_phonemes, chosen.committed_target_end) == (1, ('a', 'd', 'c'), True)
+    lexical = LexicalProgressEvidence.from_alignment(chosen, 1320)
 
-    observation = NativeAudioObservation(
-        kind='alignment', alignment=chosen, capture_start_ms=1000,
-        capture_end_ms=1600, target_acoustic_completion_ms=1320,
-    )
-    knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observation)
-    assert knowledge.target_associated and knowledge.target_acoustic_completed
-    assert knowledge.completion.estimated_completion_ms == 1320
+    def vocal(*, first=1100, last=1580, end=1600, mean=.8, active=.8, pre=0.0):
+        return HumanVocalEvidence(
+            start_ms=1000, end_ms=end, frame_count=20, mean_probability=mean,
+            peak_probability=.95, active_fraction=active, first_active_ms=first,
+            last_active_ms=last, pre_epoch_active_fraction=pre)
 
-    transport = reduce_native_voice_knowledge(
-        NativeVoiceKnowledge(),
-        NativeAudioObservation(kind='transport', pcm_last_frame_ms=1200, heartbeat_at_ms=1250),
-    )
-    assert not transport.target_associated and not transport.target_acoustic_completed
+    # Full forced alignment is lexical evidence, not an utterance endpoint.
+    estimator = UtteranceProgressEstimator()
+    active = estimator.observe(NativeAudioObservation(
+        kind='acoustic', lexical=lexical, vocal=vocal(),
+        recurrence=VocalRecurrenceEvidence(), capture_start_ms=1000, capture_end_ms=1600,
+        boundary_at_ms=1000, boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert active.lexical_target_ended
+    assert active.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
 
-    absent = align(('a', 'd', 'c'), (), frames=30)
-    preserved = reduce_native_voice_knowledge(
-        knowledge, NativeAudioObservation(kind='alignment', alignment=absent))
-    assert preserved == knowledge
+    # The same lexical completion becomes ENDED only after independent vocal-tail
+    # evidence establishes that the finite vocal event is no longer active.
+    ended = estimator.observe(NativeAudioObservation(
+        kind='acoustic', lexical=lexical,
+        vocal=vocal(last=1580, end=1800, mean=.1, active=.2),
+        recurrence=VocalRecurrenceEvidence(), capture_start_ms=1000, capture_end_ms=1800,
+        boundary_at_ms=1000, boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert ended.state == UtteranceProgressState.ENDED and ended.ended_at_ms == 1580
+
+    # A recurring human source can continue after target lexical completion
+    # without holding the finite target forever.
+    looping = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', lexical=lexical, vocal=vocal(),
+        recurrence=VocalRecurrenceEvidence(strength=.9, period_ms=900, period_stability=.8, recent_strength=.85),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=1000,
+        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert looping.state == UtteranceProgressState.ENDED
+
+    # A persistent source observed earlier must not erase a newly changed vocal
+    # tail.  Without current recurrence evidence the finite tail remains active.
+    changed_tail = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', lexical=lexical, vocal=vocal(),
+        recurrence=VocalRecurrenceEvidence(
+            strength=.9, period_ms=900, period_stability=.8, recent_strength=.2),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=1000,
+        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert changed_tail.state == UtteranceProgressState.FINITE_VOCAL_ACTIVE
+
+    # Lexical completion without any observed human vocal event does not invent
+    # a finite-vocal state.  This keeps an actually unvoiced line eligible for
+    # the Controller's explicit uncertainty fallback.
+    unvoiced = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', lexical=lexical,
+        vocal=vocal(first=None, last=None, end=1600, mean=0.0, active=0.0),
+        recurrence=VocalRecurrenceEvidence(), capture_start_ms=1000, capture_end_ms=1600,
+        boundary_at_ms=1000, boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    assert unvoiced.state == UtteranceProgressState.UNRESOLVED
+    assert unvoiced.lexical_target_ended and not unvoiced.finite_vocal_observed
+
+    # Non-lexical finite vocal events can finish under a strong AutoAdv boundary,
+    # while the identical observations under an unknown external boundary do not
+    # manufacture an endpoint from HOOK time.
+    quiet = vocal(last=1250, end=1600, mean=.1, active=.2)
+    auto = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', vocal=quiet, recurrence=VocalRecurrenceEvidence(),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=1000,
+        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    external = UtteranceProgressEstimator().observe(NativeAudioObservation(
+        kind='acoustic', vocal=quiet, recurrence=VocalRecurrenceEvidence(),
+        capture_start_ms=1000, capture_end_ms=1600, boundary_at_ms=None,
+        boundary_certainty=PresentationBoundaryCertainty.EXTERNAL_UNKNOWN))
+    assert auto.state == UtteranceProgressState.ENDED
+    assert external.state == UtteranceProgressState.FINITE_VOCAL_ENDING
 
 
 class _FakeOnnxSession:

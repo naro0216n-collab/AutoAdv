@@ -195,7 +195,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         f"Requested: `{summary.get('phase_requested', '-')}` · "
         f"{summary.get('started_utc', '-')} → {summary.get('ended_utc', '-')}",
         "",
-        "| phase | observed/requested | collection | measurement | auto | safe | PCM | alignment | mix | native fg | native early | fallback fg | fallback early | recovery | early | overhold | misattr | error |",
+        "| phase | observed/requested | collection | measurement | auto | safe | PCM | alignment | mix | progress fg | progress early | fallback fg | fallback early | recovery | early | overhold | misattr | error |",
         "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for phase in summary.get("phases", ()):
@@ -209,8 +209,8 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
             f"{_metric(quality.get('process_audio_observation_rate'))} | "
             f"{_metric(quality.get('alignment_observation_rate'))} | "
             f"{_metric(quality.get('mix_environment_observation_rate'))} | "
-            f"{_metric(quality.get('foreground_native_completion_rate'))} | "
-            f"{_metric(quality.get('native_early_input_rate'))} | "
+            f"{_metric(quality.get('foreground_progress_completion_rate'))} | "
+            f"{_metric(quality.get('progress_early_input_rate'))} | "
             f"{_metric(quality.get('foreground_fallback_rate'))} | "
             f"{_metric(quality.get('fallback_early_input_rate'))} | "
             f"{_metric(quality.get('recovery_rate'))} | {_metric(quality.get('early_input_rate'))} | "

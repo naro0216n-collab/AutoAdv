@@ -6,10 +6,12 @@ from copy import deepcopy
 import pytest
 
 from autoadv.application import AutoAdvApplication
+from autoadv.acoustic_observers import HumanVocalEvidence, VocalRecurrenceEvidence
 from autoadv.conversation import Target
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection
 from autoadv.storage import Catalog
+from autoadv.utterance_progress import NativeAudioObservation, PresentationBoundaryCertainty
 from tests.contracts_support import app_with_game, capture_group, connect_hook, runtime_hook, source
 from tests.g2p_support import TEST_G2P
 
@@ -185,8 +187,43 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     app._native_audio = RetainedNative()
     deadline()
     state = app.runtime_state()
-    assert state.pause_reason == 'native_acoustic_unconfirmed_hold'
+    assert state.pause_reason == 'utterance_progress_unresolved_hold'
     assert state.authorized and not state.sent
+
+    # The Application must propagate non-terminal progress into Controller
+    # state before the fallback deadline; otherwise an active finite voice
+    # would be indistinguishable from unresolved audio at the policy boundary.
+    active_app, _ = app_with_game()
+    ap = active_app.current_profile()
+    active_source = source('ACTIVE', 2)
+    ap.hooks = [HookSelection('ACTIVE', 2, 3)]
+    ap.body_source = active_source.identity
+    active_app.select_profile(active_app.game_id, active_app.profile_id)
+    active_app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    active_app.set_profile_setting('uncertain_text_fallback', True)
+    active_scheduled = []
+    active_app.configure_runtime_loop(
+        schedule=lambda delay, callback: active_scheduled.append((delay, callback)))
+    connect_hook(active_app)
+    active_token = runtime_hook(active_app, active_source, '短い本文', 2)
+    assert active_token is not None
+    active_app._native_audio = RetainedNative()
+    active_app._consume_native_observation(active_token, NativeAudioObservation(
+        kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
+        vocal=HumanVocalEvidence(
+            start_ms=1000, end_ms=1500, frame_count=20, mean_probability=.8,
+            peak_probability=.95, active_fraction=.8, first_active_ms=1050,
+            last_active_ms=1490, pre_epoch_active_fraction=0.0),
+        recurrence=VocalRecurrenceEvidence(), boundary_at_ms=1000,
+        boundary_certainty=PresentationBoundaryCertainty.AUTOADV))
+    active_app.set_auto_advance(True)
+    active_deadline = next(
+        callback for delay, callback in active_scheduled
+        if delay == active_app.runtime_state().utterance.text_wait_ms)
+    active_deadline()
+    active_state = active_app.runtime_state()
+    assert active_state.pause_reason == 'utterance_progress_active_hold'
+    assert active_state.authorized and not active_state.sent and not active_state.completed
 
     text_app, _ = app_with_game()
     text_source = source('TEXT', 3)
@@ -248,7 +285,8 @@ def test_play_view_exposes_only_actionable_runtime_holds():
     app.controller.authorized = True
     expected = {
         None: None,
-        'native_acoustic_unconfirmed_hold': 'open_audio_policy',
+        'utterance_progress_unresolved_hold': 'open_audio_policy',
+        'utterance_progress_active_hold': 'open_audio_policy',
         'ocr_failure': 'open_capture',
         'presenting': None,
         'tts_playback_failed': 'open_voice',

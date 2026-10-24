@@ -85,6 +85,34 @@ label advancement_accuracy:
     a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
     p "これは音声のない台詞です。"
 
+    # Delayed-HOOK equivalence classes. The ordinary voice channel starts before
+    # the dialogue statement, so Luna receives the real HOOK only after audio
+    # has already progressed. No product-side HOOK is injected.
+    play voice "audio/voice/normal_022.wav"
+    $ renpy.pause(.55, hard=True)
+    a "猫はにゃーにゃーと鳴く。"
+    play voice "audio/voice/normal_030.wav"
+    $ renpy.pause(4.10, hard=True)
+    a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
+    play voice "audio/voice/normal_001.wav"
+    $ renpy.pause(2.10, hard=True)
+    a "えっ嘘でしょ。"
+    play voice "audio/voice/stress_cry.wav"
+    $ renpy.pause(1.25, hard=True)
+    a "うっ……うう……"
+
+    # Text amount is deliberately decoupled from source duration. Derived WAVs
+    # are deterministic fixture-only single sources built from the licensed
+    # human-vocal clips before Ren'Py distribution.
+    voice "audio/voice/derived_same_text_long_tail.wav"
+    a "えっ嘘でしょ。"
+    voice "audio/voice/derived_normal_030_fast.wav"
+    a "あなたは流感になりかけているか、もっと重い病気かもしれません。"
+    voice "audio/voice/derived_panting_temporal.wav"
+    a "はっ……はっ……はっ……"
+    voice "audio/voice/derived_breath_pause.wav"
+    s "……ふぅ……"
+
     # Scene 2: the same conversation continues while BGM fades in and remains
     # across voiced, unvoiced and whispered lines.
     play music "audio/runtime/music/Heavenly Loop_0.ogg" loop fadein 0.8 volume 0.24
@@ -127,6 +155,20 @@ label advancement_accuracy:
     a "ヒューズが飛んだ。"
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
+
+    # Human-vocal recurrence classes. The loop starts after the first case's
+    # epoch boundary, then persists across later AutoAdv boundaries. A finite
+    # target overlaps it, an unvoiced line must not wait forever for it, and a
+    # highly recurrent but finite foreground event follows after the loop stops.
+    play adv_background "audio/voice/normal_020.wav" loop volume 0.18
+    voice "audio/voice/normal_022.wav"
+    a "猫はにゃーにゃーと鳴く。"
+    voice "audio/voice/normal_017.wav"
+    a "あっベルが鳴ってる。"
+    p "繰り返す声は背景のままで、主人公には音声がない。"
+    stop adv_background fadeout 0.1
+    voice "audio/voice/derived_finite_repetition.wav"
+    a "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。"
 
     # Scene 5: emotional/incident sequence. Non-lexical voice is followed by a
     # long normal line. A long one-shot effect starts *during* that voice on a
@@ -204,6 +246,20 @@ label bgm_voice:
     a "ヒューズが飛んだ。"
     voice "audio/voice/normal_020.wav"
     a "ヒューズが飛んだ。"
+
+    # Human-vocal recurrence classes. The loop starts after the first case's
+    # epoch boundary, then persists across later AutoAdv boundaries. A finite
+    # target overlaps it, an unvoiced line must not wait forever for it, and a
+    # highly recurrent but finite foreground event follows after the loop stops.
+    play adv_background "audio/voice/normal_020.wav" loop volume 0.18
+    voice "audio/voice/normal_022.wav"
+    a "猫はにゃーにゃーと鳴く。"
+    voice "audio/voice/normal_017.wav"
+    a "あっベルが鳴ってる。"
+    p "繰り返す声は背景のままで、主人公には音声がない。"
+    stop adv_background fadeout 0.1
+    voice "audio/voice/derived_finite_repetition.wav"
+    a "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。"
 
     # Normal AutoAdv progression ends here in the test-run scene. The original
     # player-facing menu remains unchanged when no test scene is selected.

@@ -7,7 +7,9 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import tempfile
+import wave
 from types import SimpleNamespace
 from unittest.mock import Mock
 import zipfile
@@ -23,6 +25,7 @@ from validation.real_game import issue_reporting, prepare_accuracy_assets as med
 from validation.real_game._synthetic_checker_oracle import synthetic_game_observations
 from validation.real_game.benchmark_alignment import contract_failures, run as run_alignment_benchmark
 from validation.real_game.gui_session import CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source, load_session
+from validation.real_game.renpy.prepare_derived_audio import build as build_derived_audio
 from validation.real_game.trace import ProductTraceObserver, ValidationTrace, text_digest
 from validation.real_game.verify_trace import scenario_for_phase, validate as _validate
 
@@ -48,7 +51,7 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
     for i in range(first, last):
         line = lines[i]
         key = {'session': 1, 'line': i - first + 1}
-        chosen = mode or ('tts' if line['use_tts'] else ('native' if line['advance_mode'] == 'audio' else 'reading'))
+        chosen = mode or ('tts' if line['use_tts'] else ('progress' if line['advance_mode'] == 'audio' else 'reading'))
         raw = text_digest('明日香「' + line['text'] + '」')
         add('hook_output', session=1, pid=50, generation='host-a', connection=1,
             source='HOOK|1|2', address=902, hook_sequence=i + 1, context=1, context2=2, raw_hash=raw)
@@ -56,25 +59,29 @@ def contract_records(first: int, last: int, *, mode=None, advance=True, lines=No
             raw_hash=raw, body_hash=text_digest(line['text']),
             advance_mode='text' if chosen == 'reading' else 'audio', use_tts=chosen == 'tts',
             text_wait_ms=500, reading_units=5, uncertain_text_fallback=False, speaker='明日香')
-        if chosen == 'native':
+        if chosen == 'progress':
             add('native_pcm', **key, frames=960, audio_pid=50)
-            add('native_audio_observation', **key, kind='alignment', target_units=5,
+            add('native_audio_observation', **key, kind='acoustic', target_units=5,
                 aligned_target_units=5, target_associated=True, complete_alignment=True,
-                committed_target_end=True)
+                committed_target_end=True, vocal_first_active_ms=1000, vocal_last_active_ms=1400,
+                vocal_mean_probability=.8, vocal_active_fraction=.7,
+                recurrence_strength=.1, recurrence_stability=.1, cross_epoch_persistence=0.0)
             add('alignment_inference', **key, audio_ms=500, align_ms=50, queue_ms=5)
-            add('native_voice_knowledge', **key, target_associated=True,
-                target_acoustic_completed=False, completion_source='')
-            add('native_voice_knowledge', **key, target_associated=True,
-                target_acoustic_completed=True, completion_source='target_conditioned_alignment')
+            add('utterance_progress', **key, state='finite_vocal_active', ended_at_ms=None,
+                lexical_target_associated=True, lexical_target_ended=True,
+                finite_vocal_observed=True, persistent_vocal_observed=False,
+                boundary_certainty='autoadv')
+            add('utterance_progress', **key, state='ended', ended_at_ms=1400,
+                lexical_target_associated=True, lexical_target_ended=True,
+                finite_vocal_observed=True, persistent_vocal_observed=False,
+                boundary_certainty='autoadv')
             observed = len(records) * 1_000_000_000
-            add('native_target_acoustic_completion_estimate', **key,
-                estimated_at_ns=observed - 300_000_000,
-                onset_estimated_at_ns=observed - 1_000_000_000,
-                evidence='target_conditioned_alignment')
+            add('utterance_progress_end_estimate', **key,
+                estimated_at_ns=observed - 300_000_000, evidence='utterance_progress')
         elif chosen == 'tts':
             add('tts_result', **key, success=True)
         add('presentation_complete', **key, success=True,
-            reason='tts' if chosen == 'tts' else ('native' if chosen == 'native' else 'text'))
+            reason='tts' if chosen == 'tts' else ('utterance_progress' if chosen == 'progress' else 'text'))
         if advance and i + 1 < last and not line.get('manual_handoff'):
             add('advance_attempt', **key)
             add('advance_input', **key)
@@ -89,9 +96,8 @@ def resequence(records):
             record['seq'] = i
         if record['event'] == 'hook_output':
             record['received_ns'] = record['at_ns'] - 1
-        elif record['event'] == 'native_target_acoustic_completion_estimate':
+        elif record['event'] == 'utterance_progress_end_estimate':
             record['estimated_at_ns'] = record['at_ns'] - 300_000_000
-            record['onset_estimated_at_ns'] = record['at_ns'] - 1_000_000_000
     return records
 
 def validate(records, *, phase='mixed', **kwargs):
@@ -108,25 +114,58 @@ def accuracy_pos(case_id):
     return next(i for i, line in enumerate(ACCURACY_SCENARIO) if line['id'] == case_id)
 
 
+def test_accuracy_fixture_and_manifest_form_one_continuous_sequence_with_deterministic_derived_audio():
+    script = (HERE / 'renpy' / 'game' / 'script.rpy').read_text(encoding='utf-8')
+    block = script.split('label advancement_accuracy:', 1)[1].split('\nlabel standard_tts:', 1)[0]
+    fixture_texts = re.findall(r'^\s+(?:a|s|p|b|c) "(.*)"\s*$', block, re.M)
+    assert fixture_texts == [line['text'] for line in ACCURACY_SCENARIO]
+
+    source = HERE / 'renpy' / 'game' / 'audio' / 'voice'
+    required = ('normal_001.wav', 'normal_020.wav', 'normal_030.wav', 'stress_cry.wav', 'whisper_001.wav')
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        for name in required:
+            shutil.copy2(source / name, target / name)
+        build_derived_audio(target)
+        derived = sorted(path.name for path in target.glob('derived_*.wav'))
+        expected = sorted({Path(line['foreground_file']).name for line in ACCURACY_SCENARIO
+                           if str(line.get('foreground_file', '')).startswith('audio/voice/derived_')})
+        assert derived == expected
+        for name in derived:
+            with wave.open(str(target / name), 'rb') as reader:
+                assert (reader.getframerate(), reader.getnchannels(), reader.getsampwidth()) == (48_000, 1, 2)
+                assert reader.getnframes() > 0
+
+
 def test_accuracy_measurement_scope_is_one_continuous_realistic_sequence_not_case_restarts():
     scenario = ACCURACY_SCENARIO
-    assert len(scenario) == 24
+    assert len(scenario) >= 30
     assert (scenario[0]['id'], scenario[-1]['id']) == ('room-clean-short', 'quiet-recovery')
-    assert sum(bool(line['foreground_voice']) for line in scenario) == 18
-    assert sum(not bool(line['foreground_voice']) for line in scenario) == 6
+    assert sum(bool(line['foreground_voice']) for line in scenario) > sum(not bool(line['foreground_voice']) for line in scenario)
     assert all(line['advance_mode'] == 'audio' and not line['use_tts'] for line in scenario)
     channels = {channel for line in scenario for channel in line['expected_mix_channels']}
     assert {'adv_background', 'adv_sfx'}.issubset(channels)
     assert any(line['speaker_family'] == 'nonlexical' for line in scenario)
+    assert {'mid_voice', 'most_voice_elapsed', 'after_foreground_end', 'nonverbal_mid_voice'} <= {line.get('hook_delay_class') for line in scenario}
+    pair = [line for line in scenario if line.get('duration_pair') == 'same-text-001']
+    assert {line.get('duration_variant') for line in pair} == {'short', 'long_nonverbal_tail'}
+    assert {'loop_started_current_epoch', 'persistent_cross_epoch', 'finite_recurrent'} <= {line.get('vocal_source_class') for line in scenario}
+    assert {'panting', 'breath'} <= {line.get('vocal_class') for line in scenario}
 
 
-def test_verifier_separates_collection_from_quality_and_native_from_fallback():
+def test_verifier_separates_collection_from_quality_and_progress_from_fallback():
     records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
     result = validate(records, phase='accuracy')
     assert result['collection_valid'] and result['measurement_valid'] and result['ok']
-    assert result['quality']['foreground_native_completion_rate'] is not None
+    assert result['quality']['foreground_progress_completion_rate'] is not None
+    full = validate(contract_records(0, len(ACCURACY_SCENARIO), lines=ACCURACY_SCENARIO), phase='accuracy')
+    assert {'mid_voice', 'most_voice_elapsed', 'after_foreground_end', 'nonverbal_mid_voice'} <= set(full['category_quality']['hook_delay'])
+    assert 'same-text-001' in full['category_quality']['duration_pairs']
+    assert 'finite_recurrent' in full['category_quality']['vocal_source']
+    assert full['quality']['nonverbal_cases'] > 0
+    assert full['quality']['finite_vocal_loop_control_cases'] > 0
 
-    # Unvoiced lines may advance by explicit fallback, but native completion on them is misattribution.
+    # Unvoiced lines may advance by explicit fallback, but audio-derived progress completion on them is misattribution.
     idx = accuracy_pos('room-clean-unvoiced')
     fallback = contract_records(idx, idx + 2, lines=ACCURACY_SCENARIO)
     rewritten = []
@@ -135,9 +174,9 @@ def test_verifier_separates_collection_from_quality_and_native_from_fallback():
         if record.get('line') == 1:
             if record['event'] == 'utterance':
                 record['uncertain_text_fallback'] = True
-            if record['event'] == 'native_target_acoustic_completion_estimate':
+            if record['event'] == 'utterance_progress_end_estimate':
                 continue
-            if record['event'] == 'native_voice_knowledge' and record.get('target_acoustic_completed'):
+            if record['event'] == 'utterance_progress' and record.get('state') == 'ended':
                 continue
             if record['event'] == 'presentation_complete':
                 record['reason'] = 'uncertain_text_fallback'
@@ -148,8 +187,8 @@ def test_verifier_separates_collection_from_quality_and_native_from_fallback():
     assert fallback_result['quality']['misattribution_rate'] == 0.0
     assert fallback_result['quality']['fallback_early_input_rate'] == 0.0
 
-    native_result = validate(fallback, phase='accuracy', start_line=idx + 1)
-    assert native_result['quality']['misattribution_rate'] > 0.0
+    progress_result = validate(fallback, phase='accuracy', start_line=idx + 1)
+    assert progress_result['quality']['misattribution_rate'] > 0.0
 
 
 def test_independent_source_endpoint_is_safety_truth_and_channel_inactive_cannot_hide_early_input():
@@ -168,7 +207,7 @@ def test_independent_source_endpoint_is_safety_truth_and_channel_inactive_cannot
     assert not result['ok']
     assert result['game_evidence']['early_inputs'] == 1
     assert result['performance']['source_acoustic_end_to_input_ms']['p50'] < 0
-    assert result['quality']['native_early_input_rate'] > 0.0
+    assert result['quality']['progress_early_input_rate'] > 0.0
 
     indeterminate = [dict(x) for x in game]
     onset = next(x for x in indeterminate if x['event'] == 'voice_started' and x['line'] == 1)
@@ -233,8 +272,11 @@ def test_trace_records_product_selected_provenance_and_keeps_observation_separat
         observer.install()
         token = Token(4, 2)
         app.observer('native_audio_observation', token, {'kind': 'alignment', 'matched_phonemes': 3})
-        app.observer('native_voice_knowledge', token, {
-            'target_associated': True, 'target_acoustic_completed': False, 'completion_source': ''})
+        app.observer('utterance_progress', token, {
+            'state': 'finite_vocal_active', 'ended_at_ms': None,
+            'lexical_target_associated': True, 'lexical_target_ended': False,
+            'finite_vocal_observed': True, 'persistent_vocal_observed': False,
+            'boundary_certainty': 'autoadv'})
         source = ThreadSource(50, 0x100, 1, 2, 'T', 'T')
         output = HookEvent('output', 'host-a', 7, 3, 30, 50, source, '選択台詞')
         app.observer('selected_hook_output', None, {
@@ -245,8 +287,8 @@ def test_trace_records_product_selected_provenance_and_keeps_observation_separat
             'hook_event': output, 'outcome': HookEventOutcome(capture=CaptureHostEventOutcome(changed=True))})
         records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
         raw = next(r for r in records if r['event'] == 'native_audio_observation')
-        knowledge = next(r for r in records if r['event'] == 'native_voice_knowledge')
-        assert 'target_acoustic_completed' not in raw and 'matched_phonemes' not in knowledge
+        progress = next(r for r in records if r['event'] == 'utterance_progress')
+        assert 'state' not in raw and 'matched_phonemes' not in progress
         assert len([r for r in records if r['event'] == 'hook_output']) == 1
         assert len([r for r in records if r['event'] == 'hook_candidate_output']) == 1
         assert 'raw' not in next(r for r in records if r['event'] == 'hook_output')
@@ -280,14 +322,14 @@ def _phase(name: str, *, eligible_accuracy: bool = False) -> dict:
         'automatic_continuation_verified': True, 'validation_recovery_inputs': 0,
         'voice_safety_verified': True if eligible_accuracy else None,
         'quality': {
-            'requested_cases': 24 if name == 'accuracy' else 3,
-            'observed_cases': 24 if name == 'accuracy' else 3,
+            'requested_cases': len(ACCURACY_SCENARIO) if name == 'accuracy' else 3,
+            'observed_cases': len(ACCURACY_SCENARIO) if name == 'accuracy' else 3,
             'automatic_advance_rate': 1.0, 'safe_automatic_advance_rate': 1.0,
             'process_audio_observation_rate': 1.0 if name == 'accuracy' else None,
             'alignment_observation_rate': 1.0 if name == 'accuracy' else None,
             'mix_environment_observation_rate': 1.0 if name == 'accuracy' else None,
-            'foreground_native_completion_rate': 1.0 if name == 'accuracy' else None,
-            'native_early_input_rate': 0.0 if name == 'accuracy' else None,
+            'foreground_progress_completion_rate': 1.0 if name == 'accuracy' else None,
+            'progress_early_input_rate': 0.0 if name == 'accuracy' else None,
             'fallback_early_input_rate': 0.0 if name == 'accuracy' else None,
             'recovery_rate': 0.0, 'early_input_rate': 0.0 if name == 'accuracy' else None,
             'overhold_rate': 0.0 if name == 'accuracy' else None,
@@ -325,12 +367,12 @@ def test_issue_reporting_is_reconstructable_fixed_surface_and_baseline_is_indepe
         (root / 'autoadv-accuracy.result.json').write_text(json.dumps({'line_results': [{
             'scenario': 'case-a', 'scene': 'room', 'speaker_family': 'local',
             'audio_environment': 'clean', 'mix_channels_observed': [], 'outcome': 'next_hook_observed',
-            'completion_reason': 'native', 'pcm_observed': True, 'alignment_inference_count': 1,
+            'completion_reason': 'utterance_progress', 'pcm_observed': True, 'alignment_inference_count': 1,
             'game_outcome': 'source_acoustic_end_then_input', 'source_acoustic_end_to_input_ms': 123.5,
         }], 'performance': {}}), encoding='utf-8')
         (root / 'validation.log').write_text('C:\\Users\\private\\x token github_pat_1234567890abcdef\n', encoding='utf-8')
         snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
-        assert 'native early' in snapshot.body and 'fallback fg' in snapshot.body and 'fallback early' in snapshot.body
+        assert 'progress early' in snapshot.body and 'fallback fg' in snapshot.body and 'fallback early' in snapshot.body
         assert 'source end→input ms' in snapshot.body and '123.5' in snapshot.body
         match = re.search(re.escape(issue_reporting.EVIDENCE_MARKER) + r'.*?```text\n(?P<data>[A-Za-z0-9+/=]+)\n```', snapshot.body, re.S)
         assert match

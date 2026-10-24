@@ -8,6 +8,7 @@ import pytest
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection, ReplacementRule, BODY_ONLY_RULE, SPEAKER_ONLY_RULE
+from autoadv.utterance_progress import UtteranceProgress, UtteranceProgressState
 from tests.contracts_support import SOURCE, controller, observe, profile, source
 from tests.g2p_support import TEST_G2P
 
@@ -20,7 +21,7 @@ def test_progress_mode_state_model_has_one_completion_reason_and_one_send():
         (AdvanceMode.TEXT, True, False, ('text_elapsed', 'tts_finished'), False, 'tts_and_text'),
         (AdvanceMode.AUDIO, True, True, ('audio_deadline_elapsed', 'text_elapsed', 'tts_finished'), True, 'tts'),
         (AdvanceMode.AUDIO, False, True, ('audio_deadline_elapsed',), False, 'uncertain_text_fallback'),
-        (AdvanceMode.AUDIO, False, False, (), True, 'native'),
+        (AdvanceMode.AUDIO, False, False, (), True, 'utterance_progress'),
     )
     for mode, tts, fallback, events, native, expected in scenarios:
         ctrl, sent, _ = controller(mode=mode, tts=tts, fallback=fallback)
@@ -30,21 +31,21 @@ def test_progress_mode_state_model_has_one_completion_reason_and_one_send():
         for event in events:
             ctrl.presentation_event(token, event)
         if native:
-            ctrl.native_acoustic_completed(token)
+            ctrl.apply_utterance_progress(token, UtteranceProgress(state=UtteranceProgressState.ENDED))
         assert ctrl.presentation_reason == expected
         assert ctrl.try_advance()
         assert not ctrl.try_advance()
         assert len(sent) == 1
         # Any late evidence for the same token is inert after reservation/send.
         assert not ctrl.presentation_event(token, 'text_elapsed')
-        assert not ctrl.native_acoustic_completed(token)
+        assert not ctrl.apply_utterance_progress(token, UtteranceProgress(state=UtteranceProgressState.ENDED))
 
 
 def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_relabel_native():
     ctrl, _, _ = controller(mode=AdvanceMode.TEXT, tts=False, fallback=True)
     token = observe(ctrl, '「本文」')
     assert token is not None
-    assert not ctrl.native_acoustic_completed(token)
+    assert not ctrl.apply_utterance_progress(token, UtteranceProgress(state=UtteranceProgressState.ENDED))
     assert not ctrl.presentation_event(token, 'tts_finished')
     assert ctrl.presentation_event(token, 'text_elapsed')
     assert ctrl.presentation_reason == 'text'
@@ -53,10 +54,10 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     token = observe(ctrl, '「本文」')
     assert token is not None
     assert not ctrl.presentation_event(token, 'audio_deadline_elapsed')
-    assert ctrl.pause_reason == 'native_acoustic_unconfirmed_hold'
+    assert ctrl.pause_reason == 'utterance_progress_unresolved_hold'
     assert ctrl.presentation_reason is None
-    assert ctrl.native_acoustic_completed(token)
-    assert ctrl.presentation_reason == 'native'
+    assert ctrl.apply_utterance_progress(token, UtteranceProgress(state=UtteranceProgressState.ENDED))
+    assert ctrl.presentation_reason == 'utterance_progress'
     assert ctrl.pause_reason is None
 
     ctrl, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=True)
@@ -67,13 +68,32 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     assert ctrl.presentation_event(token, 'audio_deadline_elapsed')
     assert ctrl.presentation_reason == 'uncertain_text_fallback'
 
+    # A text deadline is never allowed to cut a finite vocal event that the
+    # unified inference still observes as active.  If the state later becomes
+    # uncertain/persistent after the deadline, the explicit fallback may act.
+    active, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=True)
+    active_token = observe(active, '「短い本文」')
+    assert active_token is not None
+    assert not active.apply_utterance_progress(active_token, UtteranceProgress(
+        state=UtteranceProgressState.FINITE_VOCAL_ACTIVE, finite_vocal_observed=True))
+    assert not active.presentation_event(active_token, 'audio_deadline_elapsed')
+    assert active.pause_reason == 'utterance_progress_active_hold'
+    assert active.presentation_reason is None
+    assert not active.apply_utterance_progress(active_token, UtteranceProgress(
+        state=UtteranceProgressState.FINITE_VOCAL_ENDING, finite_vocal_observed=True))
+    assert active.presentation_reason is None
+    assert active.apply_utterance_progress(active_token, UtteranceProgress(
+        state=UtteranceProgressState.PERSISTENT_OR_LOOPING,
+        finite_vocal_observed=True, persistent_vocal_observed=True))
+    assert active.presentation_reason == 'uncertain_text_fallback'
+
     strict, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=False)
     strict_token = observe(strict, '「本文」')
     assert strict_token is not None
     assert not strict.presentation_event(strict_token, 'native_unavailable')
     assert strict.pause_reason == 'native_audio_unavailable_hold'
-    assert strict.native_acoustic_completed(strict_token)
-    assert strict.pause_reason is None and strict.presentation_reason == 'native'
+    assert strict.apply_utterance_progress(strict_token, UtteranceProgress(state=UtteranceProgressState.ENDED))
+    assert strict.pause_reason is None and strict.presentation_reason == 'utterance_progress'
 
 
 def test_user_authorization_runtime_holds_and_input_failure_are_independent_state():

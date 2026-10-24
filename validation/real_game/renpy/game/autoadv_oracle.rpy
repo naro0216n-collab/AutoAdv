@@ -19,6 +19,7 @@ init -1 python:
     _adv_oracle_voice = None
     _adv_oracle_voice_line = None
     _adv_oracle_last_channel_active = None
+    _adv_oracle_preline_voice = None
     _adv_oracle_source_cache = {}
     _adv_oracle_mix_channels = ("music", "adv_ambient", "adv_background", "adv_sfx")
     _adv_oracle_mix = {}
@@ -122,7 +123,8 @@ init -1 python:
         timing = _adv_oracle_source_timing(filename)
         observed_at = _adv_time.monotonic_ns()
         fields = dict(line=_adv_oracle_voice_line, file=filename,
-                      channel_position_ms=round(position * 1000.0, 3))
+                      channel_position_ms=round(position * 1000.0, 3),
+                      source_started_at_ns=observed_at - int(position * 1000000000.0))
         fields.update(timing)
         endpoint_ms = timing.get("source_acoustic_end_ms")
         duration_ms = timing.get("source_duration_ms")
@@ -134,6 +136,47 @@ init -1 python:
                 (duration_ms - position * 1000.0) * 1000000.0)
         _adv_oracle_write("voice_started", at_ns=observed_at, **fields)
         _adv_oracle_last_channel_active = observed_at
+
+
+    def _adv_oracle_observe_preline_voice(filename, position):
+        """Remember voice-channel playback that precedes the next dialogue HOOK.
+
+        Delayed-HOOK fixtures intentionally start ordinary game voice before the
+        Character statement.  This state is evaluation-only and is claimed by
+        the next real dialogue; it is never visible to AutoAdv.
+        """
+        global _adv_oracle_preline_voice
+        observed_at = _adv_time.monotonic_ns()
+        if (_adv_oracle_preline_voice is not None and
+                _adv_oracle_preline_voice.get("file") == filename):
+            _adv_oracle_preline_voice["last_observed_at_ns"] = observed_at
+            return
+        timing = dict(_adv_oracle_source_timing(filename))
+        fields = dict(file=filename,
+                      channel_position_ms=round(position * 1000.0, 3),
+                      source_started_at_ns=observed_at - int(position * 1000000000.0),
+                      last_observed_at_ns=observed_at)
+        fields.update(timing)
+        endpoint_ms = timing.get("source_acoustic_end_ms")
+        duration_ms = timing.get("source_duration_ms")
+        if isinstance(endpoint_ms, (float, int)):
+            fields["source_acoustic_end_at_ns"] = fields["source_started_at_ns"] + int(endpoint_ms * 1000000.0)
+        if isinstance(duration_ms, (float, int)):
+            fields["source_file_end_at_ns"] = fields["source_started_at_ns"] + int(duration_ms * 1000000.0)
+        _adv_oracle_preline_voice = fields
+
+    def _adv_oracle_claim_preline_voice():
+        global _adv_oracle_preline_voice, _adv_oracle_voice, _adv_oracle_voice_line, _adv_oracle_last_channel_active
+        if _adv_oracle_preline_voice is None or _adv_oracle_current is None:
+            return
+        fields = dict(_adv_oracle_preline_voice)
+        last_observed = fields.pop("last_observed_at_ns", None)
+        fields["line"] = _adv_oracle_current
+        _adv_oracle_write("voice_started", at_ns=_adv_time.monotonic_ns(), **fields)
+        _adv_oracle_voice = fields["file"]
+        _adv_oracle_voice_line = _adv_oracle_current
+        _adv_oracle_last_channel_active = last_observed or fields["source_started_at_ns"]
+        _adv_oracle_preline_voice = None
 
     def _adv_oracle_mix_playing(channel):
         try:
@@ -175,22 +218,21 @@ init -1 python:
         playing, position = _adv_oracle_playing()
         if playing:
             if _adv_oracle_voice is None:
-                # A new voice can only be attributed while a dialogue is
-                # current. Once started, its ownership survives line changes
-                # until the audio engine reports channel inactivity/replacement.
                 if _adv_oracle_current is None:
-                    return
-                _adv_oracle_voice_started(playing, position)
+                    _adv_oracle_observe_preline_voice(playing, position)
+                else:
+                    _adv_oracle_voice_started(playing, position)
             elif playing != _adv_oracle_voice:
                 _adv_oracle_write("voice_interrupted", line=_adv_oracle_voice_line,
                                   file=_adv_oracle_voice, replacement=playing,
                                   last_channel_active_at_ns=_adv_oracle_last_channel_active)
+                _adv_oracle_voice = None
+                _adv_oracle_voice_line = None
+                _adv_oracle_last_channel_active = None
                 if _adv_oracle_current is None:
-                    _adv_oracle_voice = None
-                    _adv_oracle_voice_line = None
-                    _adv_oracle_last_channel_active = None
-                    return
-                _adv_oracle_voice_started(playing, position)
+                    _adv_oracle_observe_preline_voice(playing, position)
+                else:
+                    _adv_oracle_voice_started(playing, position)
             else:
                 _adv_oracle_last_channel_active = _adv_time.monotonic_ns()
         elif _adv_oracle_voice is not None:
@@ -216,6 +258,7 @@ init -1 python:
             normalized = _adv_unicode.normalize("NFKC", what).strip()
             _adv_oracle_write("line_started", line=_adv_oracle_current,
                 body_hash=_adv_hashlib.sha256(normalized.encode("utf-8")).hexdigest())
+            _adv_oracle_claim_preline_voice()
             _adv_oracle_sample()
             _adv_oracle_mix_snapshot()
         elif event == "end" and _adv_oracle_current is not None:

@@ -19,8 +19,8 @@ from collections.abc import Sequence
 
 from .conversation import Controller, Target, Token
 from .g2p import G2PBackend, default_g2p
-from .audio_knowledge import (
-    NativeAudioObservation, NativeVoiceKnowledge, reduce_native_voice_knowledge,
+from .utterance_progress import (
+    NativeAudioObservation, UtteranceProgressEstimator, UtteranceProgressState,
 )
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
@@ -203,7 +203,8 @@ _PLAY_ISSUES = {
     'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ocr_unverified_change': ('OCRの変化を次の台詞と確認できないため自動送りを保留しています。', 'open_capture'),
     'ocr_failure': ('OCRで台詞を取得できないため、自動送りを保留しています。', 'open_capture'),
-    'native_acoustic_unconfirmed_hold': ('対象台詞の音響完了を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
+    'utterance_progress_unresolved_hold': ('現在の発声が終了したと確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
+    'utterance_progress_active_hold': ('人の発声が続いているため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_failure': ('ゲーム音声を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_unavailable_hold': ('音声判断を利用できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'tts_playback_failed': ('TTS再生に失敗したため、この台詞の自動送りを保留しています。', 'open_voice'),
@@ -566,8 +567,8 @@ class AutoAdvApplication:
         self._irodori_epoch = 0
         self._native_audio: NativeAudio | None = None
         self._native_audio_epoch = 0
-        self._native_knowledge_token: Token | None = None
-        self._native_knowledge = NativeVoiceKnowledge()
+        self._progress_token: Token | None = None
+        self._progress_estimator = UtteranceProgressEstimator()
         self._ocr_worker: OCRWorker | None = None
         self._ocr_epoch = 0
         self._voice_jobs: VoiceJobs | None = None
@@ -669,10 +670,13 @@ class AutoAdvApplication:
     def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
         token = self.controller.token
         self._emit_runtime_event('advance_attempt', token)
+        self._raw_input_send(target, virtual_key)
+        # Only a successfully issued AutoAdv input is a strong Presentation
+        # Epoch boundary.  A failed input attempt must leave the current epoch
+        # intact rather than inventing a transition the game never received.
         if self._native_audio is not None:
             self._native_audio.boundary()
             self._emit_runtime_event('audio_observation_boundary', token)
-        self._raw_input_send(target, virtual_key)
         self._emit_runtime_event(
             'advance_input', token, presentation_reason=self.controller.presentation_reason)
 
@@ -790,16 +794,9 @@ class AutoAdvApplication:
                                  text_wait_ms=utterance.text_wait_ms)
         completed = self.controller.presentation_event(token, 'audio_deadline_elapsed')
         self._finish_presentation_transition(token, completed)
-        if (not completed and
-                self.runtime_state().pause_reason == 'native_acoustic_unconfirmed_hold'):
+        if (not completed and self.runtime_state().pause_reason in {
+                'utterance_progress_unresolved_hold', 'utterance_progress_active_hold'}):
             self._emit_native_capture_summary(token)
-
-    @staticmethod
-    def _native_replay_lookback_ms(profile: Profile) -> int:
-        # Luna flush delay plus the bounded multi-source assembly window is the
-        # only pre-HOOK interval that may be reconsidered after external
-        # progression. Keep this formula shared by capture retention and replay.
-        return max(100, profile.hook_flush_ms + 100)
 
     def _start_presentation(self, token: Token) -> int:
         """Start every presentation effect for the current immutable Utterance.
@@ -813,21 +810,21 @@ class AutoAdvApplication:
             return 0
         self._cancel_voice()
         self._cancel_native_audio()
-        self._native_knowledge_token = token
-        self._native_knowledge = NativeVoiceKnowledge()
+        self._progress_token = token
+        self._progress_estimator = UtteranceProgressEstimator()
         external_ns = self.controller.take_external_transition(token)
         if external_ns:
-            self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns)
+            if self._native_audio is not None:
+                self._native_audio.external_transition()
+            self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns,
+                                     boundary_certainty='external_unknown')
         if utterance.advance_mode.value == 'text':
             self._schedule(utterance.text_wait_ms,
                            lambda t=token: self._runtime_presentation_event(t, 'text_elapsed'))
         elif not utterance.use_tts:
             if self.native_audio_available:
-                replay_from_ms = None
-                if external_ns and state.profile is not None:
-                    lookback_ms = self._native_replay_lookback_ms(state.profile)
-                    replay_from_ms = max(0, external_ns // 1_000_000 - lookback_ms)
-                self._begin_native_audio(token, utterance.speech.alignment_text, utterance.speech.alignment_candidates, replay_from_ms=replay_from_ms)
+                self._begin_native_audio(token, utterance.speech.alignment_text,
+                                         utterance.speech.alignment_candidates)
             self._schedule(utterance.text_wait_ms, lambda t=token: self._audio_deadline_due(t))
         if utterance.use_tts:
             if not utterance.voice:
@@ -839,8 +836,8 @@ class AutoAdvApplication:
 
     def _close_runtime(self, reason: str = 'stopped') -> None:
         self._hook_output_group.clear()
-        self._native_knowledge_token = None
-        self._native_knowledge = NativeVoiceKnowledge()
+        self._progress_token = None
+        self._progress_estimator = UtteranceProgressEstimator()
         self.controller.close(reason)
         self._notify_runtime()
 
@@ -1158,6 +1155,70 @@ class AutoAdvApplication:
     def native_audio_available(self) -> bool:
         return self._native_audio is not None
 
+    def _consume_native_observation(self, token: Token, observation: NativeAudioObservation) -> bool:
+        """Apply one current-generation acoustic observation to product state."""
+        state = self.runtime_state()
+        if token != state.token or state.completed or state.sent:
+            return False
+        if self._progress_token != token:
+            self._progress_token = token
+            self._progress_estimator = UtteranceProgressEstimator()
+        previous = self._progress_estimator.progress
+        progress = self._progress_estimator.observe(observation)
+
+        lexical = observation.lexical
+        vocal = observation.vocal
+        recurrence = observation.recurrence
+        self._emit_telemetry(
+            'native_audio_observation', token,
+            kind=observation.kind,
+            target_units=(lexical.target_units if lexical is not None else 0),
+            aligned_target_units=(lexical.aligned_target_units if lexical is not None else 0),
+            target_associated=(lexical.target_associated if lexical is not None else False),
+            complete_alignment=(lexical.complete_alignment if lexical is not None else False),
+            committed_target_end=(lexical.committed_target_end if lexical is not None else False),
+            lexical_target_end_ms=(lexical.target_end_ms if lexical is not None else None),
+            capture_start_ms=observation.capture_start_ms,
+            capture_end_ms=observation.capture_end_ms,
+            boundary_at_ms=observation.boundary_at_ms,
+            boundary_certainty=observation.boundary_certainty.value,
+            history_truncated=observation.history_truncated,
+            vocal_mean_probability=(vocal.mean_probability if vocal is not None else 0.0),
+            vocal_active_fraction=(vocal.active_fraction if vocal is not None else 0.0),
+            vocal_first_active_ms=(vocal.first_active_ms if vocal is not None else None),
+            vocal_last_active_ms=(vocal.last_active_ms if vocal is not None else None),
+            recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
+            recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
+            recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),
+            cross_epoch_persistence=(recurrence.cross_epoch_persistence if recurrence is not None else 0.0),
+            recent_recurrence_strength=(recurrence.recent_strength if recurrence is not None else 0.0),
+            pcm_last_frame_ms=observation.pcm_last_frame_ms,
+            heartbeat_at_ms=observation.heartbeat_at_ms,
+        )
+
+        if progress != previous:
+            self._emit_runtime_event(
+                'utterance_progress', token,
+                state=progress.state.value,
+                ended_at_ms=progress.ended_at_ms,
+                lexical_target_associated=progress.lexical_target_associated,
+                lexical_target_ended=progress.lexical_target_ended,
+                finite_vocal_observed=progress.finite_vocal_observed,
+                persistent_vocal_observed=progress.persistent_vocal_observed,
+                boundary_certainty=progress.boundary_certainty.value)
+        if progress.state == UtteranceProgressState.ENDED and progress.ended_at_ms is not None:
+            self._emit_telemetry(
+                'utterance_progress_end_estimate', token,
+                estimated_at_ns=progress.ended_at_ms * 1_000_000,
+                evidence='utterance_progress')
+
+        # Controller needs every state transition so the fallback deadline can
+        # distinguish uncertainty from a known finite vocal event in progress.
+        completed = self.controller.apply_utterance_progress(token, progress)
+        if completed:
+            self._finish_presentation_transition(token, True)
+        return completed
+
     def _start_native_audio(self, profile: Profile) -> bool:
         """Own process audio capture and publish only semantic/telemetry events."""
         self._close_native_audio()
@@ -1192,56 +1253,8 @@ class AutoAdvApplication:
                 self._dispatch_runtime(lambda: consume_error(token, detail))
 
         def consume_observation(token: Token, observation: NativeAudioObservation) -> None:
-            if not current():
-                return
-            state = self.runtime_state()
-            if token != state.token or state.completed or state.sent:
-                return
-            if self._native_knowledge_token != token:
-                self._native_knowledge_token = token
-                self._native_knowledge = NativeVoiceKnowledge()
-            previous = self._native_knowledge
-            knowledge = reduce_native_voice_knowledge(previous, observation)
-            self._native_knowledge = knowledge
-
-            a = observation.alignment
-            fit = a.fit if a is not None else None
-            self._emit_telemetry(
-                'native_audio_observation', token,
-                kind=observation.kind,
-                target_units=(a.target_units if a is not None else 0),
-                aligned_target_units=(a.aligned_target_units if a is not None else 0),
-                target_associated=(a.target_associated if a is not None else False),
-                complete_alignment=(a.complete_alignment if a is not None else False),
-                committed_target_end=(a.committed_target_end if a is not None else False),
-                reading_rank=(a.reading_rank if a is not None else -1),
-                path_margin=(fit.path_margin if fit is not None else None),
-                boundary_margin=(fit.boundary_margin if fit is not None else None),
-                capture_start_ms=observation.capture_start_ms,
-                capture_end_ms=observation.capture_end_ms,
-                target_acoustic_completion_ms=observation.target_acoustic_completion_ms,
-                pcm_last_frame_ms=observation.pcm_last_frame_ms,
-                heartbeat_at_ms=observation.heartbeat_at_ms,
-            )
-
-            association_changed = (
-                previous.association is None and knowledge.association is not None)
-            completion_changed = previous.completion is None and knowledge.completion is not None
-            if association_changed or completion_changed:
-                self._emit_runtime_event(
-                    'native_voice_knowledge', token,
-                    target_associated=knowledge.target_associated,
-                    target_acoustic_completed=knowledge.target_acoustic_completed,
-                    completion_source=(knowledge.completion.source if knowledge.completion is not None else ''))
-            if not completion_changed or knowledge.completion is None:
-                return
-            completion = knowledge.completion
-            self._emit_telemetry(
-                'native_target_acoustic_completion_estimate', token,
-                estimated_at_ns=completion.estimated_completion_ms * 1_000_000,
-                evidence=completion.source)
-            completed = self.controller.native_acoustic_completed(token)
-            self._finish_presentation_transition(token, completed)
+            if current():
+                self._consume_native_observation(token, observation)
 
         def publish_observation(token: Token, observation: NativeAudioObservation) -> None:
             if current():
@@ -1284,7 +1297,6 @@ class AutoAdvApplication:
                 native = NativeAudio(
                     pid, Path(native_helper), Path(alignment_model), Path(alignment_vocab),
                     publish_error,
-                    replay_lookback_ms=self._native_replay_lookback_ms(profile),
                     on_pcm=publish_pcm,
                     on_inference=publish_inference,
                     on_observation=publish_observation)
@@ -1308,11 +1320,11 @@ class AutoAdvApplication:
         if self._native_audio is not None:
             self._native_audio.cancel()
 
-    def _begin_native_audio(self, token: Token, alignment_text: str, candidates, *, replay_from_ms: int | None = None) -> bool:
+    def _begin_native_audio(self, token: Token, alignment_text: str, candidates) -> bool:
         if self._native_audio is None:
             return False
         try:
-            self._native_audio.begin(token, alignment_text, candidates=candidates, replay_from_ms=replay_from_ms)
+            self._native_audio.begin(token, alignment_text, candidates=candidates)
         except Exception as exc:
             detail = 'alignment target failure: ' + str(exc)
             self._emit_runtime_event('native_audio_error', token, reason=detail)
