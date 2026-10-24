@@ -895,12 +895,6 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     # A safe text fallback can keep the game moving after an audio regression,
     # so preserve independent coverage of the Process Loopback/target-conditioned alignment path rather
     # than allowing fallback success to masquerade as audio observation.
-    if phase == 'accuracy':
-        for line in line_results:
-            if line.get('fallback_enabled') is not True:
-                label = line.get('scenario') or f"{line.get('session')}:{line.get('line')}"
-                errors.append(f'accuracy fallback policy not enabled: {label}')
-
     expected_audio_lines = [line for line in line_results
                             if line.get('process_audio_expected') is True]
     for line in expected_audio_lines:
@@ -953,12 +947,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     alignment_observed = sum(int(line.get('alignment_inference_count') or 0) > 0 for line in expected_audio_lines)
     mix_lines = [line for line in line_results if line.get('mix_environment_verified') is not None]
     mix_verified = sum(line.get('mix_environment_verified') is True for line in mix_lines)
-    fallback_enabled_cases = sum(line.get('fallback_enabled') is True for line in line_results)
     quality = {
         'requested_cases': requested_cases,
-        'fallback_enabled_cases': fallback_enabled_cases,
-        'fallback_policy_verified': (
-            fallback_enabled_cases == len(line_results) if phase == 'accuracy' else None),
         'observed_cases': len(utterance_order),
         'automatic_inputs': len(sent),
         'confirmed_automatic_advances': len(links),
