@@ -15,6 +15,13 @@ import wave
 RATE = 48_000
 CHANNELS = 1
 WIDTH = 2
+DERIVED_FILES = (
+    "derived_same_text_long_tail.wav",
+    "derived_normal_030_fast.wav",
+    "derived_panting_temporal.wav",
+    "derived_breath_pause.wav",
+    "derived_finite_repetition.wav",
+)
 
 
 def _read(path: Path) -> array:
@@ -99,11 +106,21 @@ def build(voice_dir: Path) -> None:
     ])
 
 
+def verify(voice_dir: Path) -> None:
+    """Fail fixture construction if any derived source is absent or empty."""
+    for name in DERIVED_FILES:
+        path = voice_dir / name
+        values = _read(path)
+        if not values:
+            raise ValueError(f"derived fixture WAV is empty: {path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("voice_dir", type=Path)
     args = parser.parse_args()
     build(args.voice_dir)
+    verify(args.voice_dir)
     return 0
 
 
