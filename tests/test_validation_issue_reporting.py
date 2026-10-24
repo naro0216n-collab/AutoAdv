@@ -257,48 +257,42 @@ class IssueReportingContract(unittest.TestCase):
             self.assertEqual([op["role"] for op in plan["operations"]], ["history", "baseline"])
             self.assertEqual(plan["operations"][1]["comment_id"], 2000)
 
-    def test_missing_audio_coverage_cannot_replace_known_good_baseline(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "20261023T134156Z-b10d6904"
-            root.mkdir()
-            accuracy = _phase("accuracy", eligible_accuracy=True)
-            accuracy["quality"]["alignment_observation_rate"] = 0.9565
-            _write_summary(root, accuracy=accuracy)
-
-            plan = issue_reporting.build_upload_plan(root, "e" * 40, _comments())
-
-            self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
-
-    def test_missing_game_mix_coverage_cannot_replace_known_good_baseline(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "20261023T134156Z-b10d6904"
-            root.mkdir()
-            accuracy = _phase("accuracy", eligible_accuracy=True)
-            accuracy["quality"]["mix_environment_observation_rate"] = 0.9583
-            _write_summary(root, accuracy=accuracy)
-
-            plan = issue_reporting.build_upload_plan(root, "f" * 40, _comments())
-
-            self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
+    def test_incomplete_accuracy_coverage_cannot_replace_known_good_baseline(self):
+        for metric, value in (("alignment_observation_rate", 0.9565),
+                              ("mix_environment_observation_rate", 0.9583)):
+            with self.subTest(metric=metric), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "20261023T134156Z-b10d6904"
+                root.mkdir()
+                accuracy = _phase("accuracy", eligible_accuracy=True)
+                accuracy["quality"][metric] = value
+                _write_summary(root, accuracy=accuracy)
+                plan = issue_reporting.build_upload_plan(root, "e" * 40, _comments())
+                self.assertEqual([op["role"] for op in plan["operations"]], ["history"])
 
     def test_paginated_gh_slurp_output_is_flattened_before_planning(self):
         comments = _comments()
         flattened = issue_reporting._flatten_comments([comments[:2], comments[2:]])
         self.assertEqual(flattened, comments)
 
-    def test_duplicate_fixed_marker_is_an_error(self):
-        comments = _comments()
-        comments.append({"id": 9999, "body": f"{issue_reporting.history_marker(2)}\nduplicate"})
-        with self.assertRaisesRegex(ValueError, "slot-2.*2"):
-            issue_reporting.choose_history_slot(comments, "20261023T134156Z-b10d6904")
-
-    def test_same_run_in_multiple_history_slots_is_an_error(self):
-        comments = _comments()
+    def test_history_ring_rejects_ambiguous_or_incomplete_slot_identity(self):
         run = "20261023T134156Z-b10d6904"
-        comments[0]["body"] = f"{issue_reporting.history_marker(1)}\n<!-- autoadv-validation-run:{run} -->"
-        comments[1]["body"] = f"{issue_reporting.history_marker(2)}\n<!-- autoadv-validation-run:{run} -->"
-        with self.assertRaisesRegex(ValueError, "multiple history slots"):
-            issue_reporting.choose_history_slot(comments, run)
+        cases = []
+
+        duplicate = _comments()
+        duplicate.append({"id": 9999, "body": f"{issue_reporting.history_marker(2)}\nduplicate"})
+        cases.append((duplicate, "slot-2.*2"))
+
+        repeated_run = _comments()
+        repeated_run[0]["body"] = f"{issue_reporting.history_marker(1)}\n<!-- autoadv-validation-run:{run} -->"
+        repeated_run[1]["body"] = f"{issue_reporting.history_marker(2)}\n<!-- autoadv-validation-run:{run} -->"
+        cases.append((repeated_run, "multiple history slots"))
+
+        missing = [comment for comment in _comments() if comment["id"] != 1004]
+        cases.append((missing, "slot-4.*0"))
+
+        for comments, pattern in cases:
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(ValueError, pattern):
+                issue_reporting.choose_history_slot(comments, run)
 
     def test_duplicate_baseline_is_an_error_even_for_nonbaseline_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -309,11 +303,6 @@ class IssueReportingContract(unittest.TestCase):
             comments.append({"id": 9999, "body": f"{issue_reporting.BASELINE_MARKER}\nduplicate"})
             with self.assertRaisesRegex(ValueError, "baseline.*2"):
                 issue_reporting.build_upload_plan(root, "a" * 40, comments)
-
-    def test_missing_fixed_marker_is_an_error(self):
-        comments = [comment for comment in _comments() if comment["id"] != 1004]
-        with self.assertRaisesRegex(ValueError, "slot-4.*0"):
-            issue_reporting.choose_history_slot(comments, "20261023T134156Z-b10d6904")
 
     def test_reporter_patches_and_verifies_history_without_shell_body_transport(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -73,6 +73,14 @@ def test_capture_workspace_observes_real_output_without_manual_refresh():
         ('大和', '一つ目'), ('大和', '二つ目')]
     assert candidate.used_for == ()
 
+    raw = '  ＡＢＣ１２３　ﾊﾟﾋﾟﾌﾟ  \n'
+    untouched = source('RAW', 9)
+    app.capture.observe(untouched, raw, sequence=3)
+    sample = next(item for item in app.capture_view().candidates if item.identity == untouched.identity)
+    assert sample.history == (raw,)
+    assert sample.samples[0].raw == raw
+    assert sample.samples[0].body == raw
+
 
 def test_one_source_can_supply_both_speaker_and_body_without_exclusive_role():
     app, _ = app_with_game()
@@ -435,10 +443,6 @@ def test_play_view_hides_normal_internal_state_and_surfaces_only_actionable_hold
     assert view.issue.action == 'open_capture'
     app.controller.hold_reason = 'presenting'
     assert app.play_view().issue is None
-
-
-def test_play_view_keeps_tts_failure_actionable_even_when_auto_is_off():
-    app, _ = app_with_game()
     app.controller.authorized = False
     app.controller.hold_reason = 'tts_playback_failed'
     view = app.play_view()
@@ -1555,14 +1559,3 @@ def test_capture_source_rule_commands_remain_inside_capture_transaction():
     app.commit_capture()
     assert app.current_profile().source_rules[candidate.identity][0] == rule
     assert calls == ['save']
-
-
-def test_capture_history_preserves_original_spaces_width_and_source_newline():
-    app, _ = app_with_game()
-    hook = source('RAW', 9)
-    raw = '  ＡＢＣ１２３　ﾊﾟﾋﾟﾌﾟ  \n'
-    app.capture.observe(hook, raw, sequence=1)
-    sample = app.capture_view().candidates[0]
-    assert sample.history == (raw,)
-    assert sample.samples[0].raw == raw
-    assert sample.samples[0].body == raw

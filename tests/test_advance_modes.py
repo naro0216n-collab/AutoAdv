@@ -87,71 +87,27 @@ class ReadingTiming(unittest.TestCase):
         self.assertEqual(trace, ['抽出: 優先順位 2', '読み: 京 → みやこ',
                                  '置換 1: TTS文を変更', '置換 2: 原音照合文を変更'])
 
-    def test_explicit_ruby_is_not_rewritten_by_a_registered_reading_of_its_output(self):
-        p = make_profile()
-        p.name_readings['みやこ'] = '別読み'
-        g2p = FakeG2P(word_spans={'みやこ': ((0, 3),)})
-        u = interpret('「京(みやこ)」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-        self.assertEqual(u.speech.resolved_text, 'みやこ')
-
-    def test_registered_reading_cannot_span_across_explicit_ruby(self):
-        p = make_profile()
-        p.name_readings['みやこ様'] = '別読み'
-        g2p = FakeG2P(word_spans={'みやこ様': ((0, 3), (3, 4))})
-        u = interpret('「京(みやこ)様」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-        self.assertEqual(u.speech.resolved_text, 'みやこ様')
-
-    def test_name_reading_requires_primary_word_boundaries(self):
-        p = make_profile()
-        p.name_readings['京'] = 'みやこ'
-        g2p = FakeG2P(
-            word_spans={
-                '東京の京': ((0, 2), (2, 3), (3, 4)),
-            },
-        )
-        u = interpret('「東京の京」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-        self.assertEqual(u.speech.resolved_text, '東京のみやこ')
-
-    def test_registered_reading_may_span_complete_adjacent_words(self):
-        p = make_profile()
-        p.name_readings['大和京'] = 'やまとみやこ'
-        g2p = FakeG2P(word_spans={'大和京': ((0, 2), (2, 3))})
-        u = interpret('「大和京」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-        self.assertEqual(u.speech.resolved_text, 'やまとみやこ')
-
-    def test_name_reading_boundary_rule_is_not_character_specific(self):
+    def test_registered_readings_apply_only_to_complete_unprotected_word_spans(self):
         cases = (
-            ('東京の京', '京', 'みやこ', ((0, 2), (2, 3), (3, 4)), '東京のみやこ'),
-            ('山田の田', '田', 'た', ((0, 2), (2, 3), (3, 4)), '山田のた'),
-            ('世界と世', '世', 'せ', ((0, 2), (2, 3), (3, 4)), '世界とせ'),
+            ('京(みやこ)', {'みやこ': '別読み'}, {'みやこ': ((0, 3),)}, 'みやこ'),
+            ('京(みやこ)様', {'みやこ様': '別読み'}, {'みやこ様': ((0, 3), (3, 4))}, 'みやこ様'),
+            ('東京の京', {'京': 'みやこ'}, {'東京の京': ((0, 2), (2, 3), (3, 4))}, '東京のみやこ'),
+            ('山田の田', {'田': 'た'}, {'山田の田': ((0, 2), (2, 3), (3, 4))}, '山田のた'),
+            ('世界と世', {'世': 'せ'}, {'世界と世': ((0, 2), (2, 3), (3, 4))}, '世界とせ'),
+            ('大和京', {'大和京': 'やまとみやこ'}, {'大和京': ((0, 2), (2, 3))}, 'やまとみやこ'),
+            ('甲乙', {'甲乙': 'こうおつ'}, {'甲乙': ((0, 1),)}, '甲乙'),
+            ('ﾊﾟ京', {'京': 'みやこ'}, {'ﾊﾟ京': ((0, 1), (1, 2))}, 'ﾊﾟみやこ'),
+            ('㍑京', {'京': 'みやこ'}, {'㍑京': ((0, 4), (4, 5))}, '㍑みやこ'),
         )
-        for text, surface, reading, spans, expected in cases:
-            with self.subTest(text=text, surface=surface):
-                p = make_profile()
-                p.name_readings[surface] = reading
-                g2p = FakeG2P(word_spans={text: spans})
-                u = interpret(f'「{text}」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-                self.assertEqual(u.speech.resolved_text, expected)
-
-    def test_name_reading_projects_source_boundaries_through_nfkc(self):
-        cases = (
-            ('ﾊﾟ京', ((0, 1), (1, 2)), 'ﾊﾟみやこ'),
-            ('㍑京', ((0, 4), (4, 5)), '㍑みやこ'),
-        )
-        for text, spans, expected in cases:
-            with self.subTest(text=text):
-                p = make_profile()
-                p.name_readings['京'] = 'みやこ'
-                g2p = FakeG2P(word_spans={text: spans})
-                u = interpret(f'「{text}」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-                self.assertEqual(u.speech.resolved_text, expected)
-
-    def test_name_reading_requires_contiguous_complete_words(self):
-        p = make_profile()
-        p.name_readings['甲乙'] = 'こうおつ'
-        g2p = FakeG2P(word_spans={'甲乙': ((0, 1),)})
-        u = interpret('「甲乙」', p, session=1, line=1, source='x', sequence=1, g2p=g2p)
-        self.assertEqual(u.speech.resolved_text, '甲乙')
+        for body, readings, spans, expected in cases:
+            with self.subTest(body=body):
+                profile = make_profile()
+                profile.name_readings.update(readings)
+                utterance = interpret(
+                    f'「{body}」', profile, session=1, line=1, source='x', sequence=1,
+                    g2p=FakeG2P(word_spans=spans),
+                )
+                self.assertEqual(utterance.speech.resolved_text, expected)
 
     def test_both_replacement_updates_shared_pronunciation_base(self):
         p = make_profile()
@@ -240,49 +196,28 @@ class ControllerModes(unittest.TestCase):
         self.assertEqual(self.ctrl.presentation_reason, 'tts')
         self.assertTrue(self.ctrl.try_advance())
 
-    def test_audio_without_tts_confirmed_native_end(self):
-        self.begin(AdvanceMode.AUDIO, False)
-        self.assertFalse(self.ctrl.try_advance())
+    def test_audio_non_tts_completion_state_model(self):
+        # Native completion and uncertainty fallback are independent terminal paths.
+        self.begin(AdvanceMode.AUDIO, False, False)
         self.assertTrue(self.native_end())
+        self.assertTrue(self.ctrl.native_acoustic_complete)
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertTrue(self.ctrl.try_advance())
 
-    def test_audio_fallback_requires_explicit_optin(self):
-        self.begin(AdvanceMode.AUDIO, False, False)
-        self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertFalse(self.ctrl.try_advance())
         self.begin(AdvanceMode.AUDIO, False, True)
         self.assertTrue(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
-        self.assertTrue(self.ctrl.try_advance())
-
-    def test_audio_fallback_without_sound_is_not_evidence_of_voice_absence(self):
-        self.begin(AdvanceMode.AUDIO, False, True)
-        self.assertTrue(self.done('audio_deadline_elapsed'))
+        self.assertFalse(self.ctrl.native_acoustic_complete)
         self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
         self.assertFalse(self.native_end())
         self.assertTrue(self.ctrl.try_advance())
 
-    def test_uncertain_audio_without_opt_in_hands_control_back_at_reading_deadline(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('audio_deadline_elapsed'))
+        self.assertFalse(self.ctrl.native_acoustic_complete)
         self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
         self.assertTrue(self.ctrl.authorized)
         self.assertIsNone(self.ctrl.presentation_reason)
         self.assertFalse(self.ctrl.try_advance())
-
-    def test_audio_deadline_uses_fallback_without_inventing_a_negative_voice_state(self):
-        self.begin(AdvanceMode.AUDIO, False, True)
-        self.assertFalse(self.ctrl.native_acoustic_complete)
-        self.assertTrue(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
-        self.assertFalse(self.ctrl.native_acoustic_complete)
-
-    def test_late_native_finish_resolves_only_the_inconclusive_native_hold(self):
-        self.begin(AdvanceMode.AUDIO, False, False)
-        self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
-
         self.assertTrue(self.native_end())
         self.assertIsNone(self.ctrl.pause_reason)
         self.assertEqual(self.ctrl.presentation_reason, 'native')
@@ -297,7 +232,7 @@ class ControllerModes(unittest.TestCase):
         self.assertEqual(self.ctrl.presentation_reason, 'native')
         self.assertFalse(self.ctrl.try_advance())
 
-    def test_native_failure_policy_is_owned_by_controller(self):
+    def test_native_failure_respects_fallback_policy_and_existing_holds(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('native_failed'))
         self.assertEqual(self.ctrl.pause_reason, 'native_audio_failure')
@@ -309,42 +244,28 @@ class ControllerModes(unittest.TestCase):
         self.assertTrue(self.done('audio_deadline_elapsed'))
         self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
 
-    def test_existing_runtime_hold_is_not_replaced_by_later_unrelated_failure(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.ctrl.pause('target_unavailable')
         self.assertFalse(self.done('native_failed'))
         self.assertEqual(self.ctrl.pause_reason, 'target_unavailable')
 
-    def test_runtime_hold_survives_auto_off_on_cycle(self):
-        self.begin(AdvanceMode.AUDIO, False, False)
-        self.ctrl.permit(False)
-        self.assertFalse(self.ctrl.authorized)
-        self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
-
-        self.ctrl.permit(True)
-        self.assertTrue(self.ctrl.authorized)
-        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
-        self.assertFalse(self.ctrl.try_advance())
-
-    def test_tts_failure_remains_actionable_while_auto_is_off(self):
-        self.begin(AdvanceMode.TEXT, True)
-        self.ctrl.permit(False)
-        self.assertFalse(self.done('tts_finished', success=False))
-        self.assertEqual(self.ctrl.pause_reason, 'tts_playback_failed')
-        self.ctrl.permit(True)
-        self.assertEqual(self.ctrl.pause_reason, 'tts_playback_failed')
-        self.assertFalse(self.ctrl.try_advance())
-
-    def test_failure_pause_and_stale_token_cannot_send(self):
-        self.begin(AdvanceMode.AUDIO, True)
-        self.assertFalse(self.done('tts_finished', success=False))
-        self.assertEqual(self.ctrl.pause_reason, 'tts_playback_failed')
-        self.assertFalse(self.ctrl.try_advance())
-        old = self.token
-        self.ctrl.begin(make_profile(), Target(11, 22), 'second', 1)
-        self.assertFalse(self.ctrl.presentation_event(old, 'tts_finished'))
-        self.assertFalse(self.ctrl.try_advance())
+    def test_runtime_holds_are_independent_of_user_auto_authorization(self):
+        scenarios = (
+            (AdvanceMode.AUDIO, False, 'audio_deadline_elapsed', True,
+             'native_acoustic_unconfirmed_hold'),
+            (AdvanceMode.TEXT, True, 'tts_finished', False, 'tts_playback_failed'),
+        )
+        for mode, tts, event, success, expected_hold in scenarios:
+            with self.subTest(event=event):
+                self.begin(mode, tts, False)
+                self.ctrl.permit(False)
+                self.assertFalse(self.ctrl.authorized)
+                self.assertFalse(self.done(event, success=success))
+                self.assertEqual(self.ctrl.pause_reason, expected_hold)
+                self.ctrl.permit(True)
+                self.assertTrue(self.ctrl.authorized)
+                self.assertEqual(self.ctrl.pause_reason, expected_hold)
+                self.assertFalse(self.ctrl.try_advance())
 
     def test_settings_mutation_does_not_rewrite_active_utterance(self):
         p = make_profile(AdvanceMode.TEXT, tts=True)
@@ -386,15 +307,23 @@ class ControllerModes(unittest.TestCase):
         self.assertEqual(self.ctrl.utterance.advance_mode, AdvanceMode.AUDIO)
         self.assertFalse(self.ctrl.utterance.use_tts)
 
-    def test_staged_profile_rejects_capture_ownership_changes(self):
-        p = make_profile()
-        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
-        self.ctrl.begin(p, Target(10, 20), 'generation', 1)
-        changed = make_profile()
-        changed.id = p.id
-        changed.hooks = [HookSelection('OTHER', 9, 10)]
-        with self.assertRaises(ValueError):
-            self.ctrl.stage_profile(changed)
+    def test_staged_profile_cannot_change_active_capture_ownership(self):
+        cases = ('hook', 'ocr')
+        for source_kind in cases:
+            with self.subTest(source_kind=source_kind):
+                profile = make_profile()
+                if source_kind == 'ocr':
+                    profile.source = 'ocr'
+                    profile.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 640, 180), stable_samples=2)
+                ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
+                ctrl.begin(profile, Target(10, 20), 'ocr' if source_kind == 'ocr' else 'generation', 1)
+                changed = deepcopy(profile)
+                if source_kind == 'hook':
+                    changed.hooks = [HookSelection('OTHER', 9, 10)]
+                else:
+                    changed.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 800, 240), stable_samples=2)
+                with self.assertRaises(ValueError):
+                    ctrl.stage_profile(changed)
 
     def test_staged_profile_waits_through_same_utterance_duplicate(self):
         p = make_profile()
@@ -456,21 +385,6 @@ class ControllerModes(unittest.TestCase):
                                             source=SOURCE, text='「同じ台詞」', pid=10, received_ns=2_500))
         self.assertEqual(self.ctrl.token, first)
         self.assertTrue(self.ctrl.authorized)
-
-    def test_staged_profile_rejects_active_ocr_capture_changes(self):
-        p = make_profile()
-        p.source = 'ocr'
-        p.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 640, 180), stable_samples=2)
-        self.ctrl = Controller(lambda *_: None, lambda *_: True, TEST_G2P)
-        self.ctrl.begin(p, Target(10, 20), 'ocr', 1)
-        changed = make_profile()
-        changed.id = p.id
-        changed.source = 'ocr'
-        changed.hooks = list(p.hooks)
-        changed.ocr = OCRSettings('tesseract', 'jpn', (0, 0, 800, 240), stable_samples=2)
-        with self.assertRaises(ValueError):
-            self.ctrl.stage_profile(changed)
-
 
 class StorageModes(unittest.TestCase):
     def test_common_and_game_overrides_roundtrip(self):

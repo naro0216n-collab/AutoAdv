@@ -82,13 +82,31 @@ class DialogueContractTests(unittest.TestCase):
         self.controller.presentation_event(b, 'text_elapsed')
         self.assertTrue(self.controller.try_advance())
 
-    def test_session_switch_invalidates_old_audio_but_preserves_user_auto_choice(self):
-        self.controller.permit(True)
-        old = self.output('古い', 1)
-        self.controller.begin(profile(), Target(102, 203), 'host-b', 1)
-        self.assertFalse(self.controller.presentation_event(old, 'text_elapsed'))
-        self.assertTrue(self.controller.authorized)
-        self.assertFalse(self.controller.try_advance())
+    def test_user_authorization_is_independent_of_runtime_session_and_holds(self):
+        controller = Controller(lambda *_: None, lambda _: True, TEST_G2P)
+        controller.permit(True)
+        self.assertTrue(controller.authorized)
+        controller.begin(profile(), Target(101, 202), 'host-a', 1)
+        token = controller.observe(generation='host-a', connection=1, sequence=1,
+                                   source=SOURCE, text='古い', pid=101)
+        self.assertTrue(controller.authorized)
+
+        controller.begin(profile(), Target(102, 203), 'host-b', 1)
+        self.assertFalse(controller.presentation_event(token, 'text_elapsed'))
+        self.assertTrue(controller.authorized)
+        self.assertFalse(controller.try_advance())
+
+        self.assertIsNone(controller.observe(generation='wrong-host', connection=1, sequence=2,
+                                              source=SOURCE, text='wrong gen', pid=102))
+        self.assertEqual(controller.pause_reason, 'host_changed')
+        self.assertTrue(controller.authorized)
+
+        controller.close('session_changed')
+        self.assertTrue(controller.authorized)
+        self.assertEqual(controller.pause_reason, 'session_changed')
+        controller.permit(False)
+        self.assertFalse(controller.authorized)
+        self.assertEqual(controller.pause_reason, 'session_changed')
 
     def test_runtime_hold_preserves_auto_mode_and_next_line_resumes(self):
         token = self.output('まだ読む', 1)
@@ -108,13 +126,6 @@ class DialogueContractTests(unittest.TestCase):
         self.assertIsNotNone(token)
         self.assertIsNone(self.output('stale', 1))
         self.assertEqual(self.controller.utterance.raw, 'OK')
-
-    def test_host_generation_change_holds_without_rewriting_user_mode(self):
-        self.controller.permit(True)
-        self.assertIsNone(self.output('wrong gen', 1, gen='host-b'))
-        self.assertEqual(self.controller.pause_reason, 'host_changed')
-        self.assertTrue(self.controller.authorized)
-        self.assertFalse(self.controller.try_advance())
 
     def test_target_readiness_hold_can_resume_without_rewriting_auto_mode(self):
         self.controller.permit(True)
@@ -147,22 +158,6 @@ class DialogueContractTests(unittest.TestCase):
         self.assertEqual(result.use_tts, False)
         self.assertEqual(result.speaker, '京')
 
-
-    def test_auto_can_be_enabled_before_monitoring_and_survives_begin_close(self):
-        c = Controller(lambda *_: None, lambda _: True, TEST_G2P)
-        self.assertFalse(c.authorized)
-        c.permit(True)
-        self.assertTrue(c.authorized)
-        self.assertIsNone(c.pause_reason)
-        c.begin(profile(), Target(101, 202), 'host-a', 1)
-        self.assertTrue(c.authorized)
-        self.assertFalse(c.try_advance())
-        c.close('session_changed')
-        self.assertTrue(c.authorized)
-        self.assertEqual(c.pause_reason, 'session_changed')
-        c.permit(False)
-        self.assertFalse(c.authorized)
-        self.assertEqual(c.pause_reason, 'session_changed')
 
     def test_duplicate_selected_hook_is_rejected(self):
         p = profile()

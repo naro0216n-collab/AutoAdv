@@ -22,22 +22,19 @@ class HaqumeiAdapterTests(unittest.TestCase):
             PronunciationCandidate(('a', 'n', 'o'), 1, 3),
         ))
 
-    def test_unknown_word_is_not_collapsed_to_a_generic_phone(self):
-        unknown = SimpleNamespace(words=[SimpleNamespace(phonemes=['unk'], word='固有名詞', mora_count=0)])
-        engine = SimpleNamespace(
-            g2p_candidates_detailed=lambda _: SimpleNamespace(candidates=[unknown]))
-        got = HaqumeiG2P(engine).candidates('固有名詞')
-        self.assertEqual(got, (PronunciationCandidate(('unk:固有名詞',), 0, 4),))
-
-    def test_usable_pronunciation_is_kept_even_if_engine_marks_word_unknown(self):
-        word = SimpleNamespace(phonemes=['k', 'y', 'o', 'o'], word='京', is_unknown=True, mora_count=2)
-        engine = SimpleNamespace(
-            g2p_candidates_detailed=lambda _: SimpleNamespace(
-                candidates=[SimpleNamespace(words=[word])]))
-        self.assertEqual(
-            HaqumeiG2P(engine).candidates('京'),
-            (PronunciationCandidate(('k', 'y', 'o', 'o'), 0, 2),),
+    def test_unknown_marking_preserves_usable_phones_or_surface_identity(self):
+        cases = (
+            ('固有名詞', ['unk'], 0, None, PronunciationCandidate(('unk:固有名詞',), 0, 4)),
+            ('京', ['k', 'y', 'o', 'o'], 2, True, PronunciationCandidate(('k', 'y', 'o', 'o'), 0, 2)),
         )
+        for text, phones, mora_count, is_unknown, expected in cases:
+            with self.subTest(text=text):
+                word = SimpleNamespace(phonemes=phones, word=text, mora_count=mora_count)
+                if is_unknown is not None:
+                    word.is_unknown = is_unknown
+                engine = SimpleNamespace(g2p_candidates_detailed=lambda _text, word=word: SimpleNamespace(
+                    candidates=[SimpleNamespace(words=[word])]))
+                self.assertEqual(HaqumeiG2P(engine).candidates(text), (expected,))
 
     def test_punctuation_pause_is_not_a_required_target_phone(self):
         candidate = SimpleNamespace(words=[
@@ -48,7 +45,7 @@ class HaqumeiAdapterTests(unittest.TestCase):
             g2p_candidates_detailed=lambda _: SimpleNamespace(candidates=[candidate]))
         self.assertEqual(HaqumeiG2P(engine).candidates('え。')[0].phonemes, ('e',))
 
-    def test_word_spans_use_verified_g2p_canonical_coordinates(self):
+    def test_word_span_projection_uses_canonical_coordinates_and_fails_closed(self):
         seen = []
         words = [
             SimpleNamespace(word='パ', char_span=(0, 1)),
@@ -60,25 +57,23 @@ class HaqumeiAdapterTests(unittest.TestCase):
         self.assertEqual([(span.start, span.end, span.surface) for span in spans],
                          [(0, 1, 'パ'), (1, 2, '京')])
 
-    def test_word_span_projection_fails_closed_when_haqumei_coordinates_do_not_match(self):
-        engine = SimpleNamespace(g2p_mapping_detailed=lambda _: [
+        mismatched = SimpleNamespace(g2p_mapping_detailed=lambda _: [
             SimpleNamespace(word='京', char_span=(0, 1)),
         ])
         with self.assertRaisesRegex(ValueError, 'cannot be projected'):
-            HaqumeiG2P(engine).word_spans('東京')
+            HaqumeiG2P(mismatched).word_spans('東京')
 
-
-    def test_mora_like_timing_units_count_nuclei_nasal_and_geminate(self):
-        self.assertEqual(
-            count_reading_units(('g', 'a', 'cl', 'k', 'o', 'o', 'N')),
-            5,
+    def test_reading_unit_count_is_defined_by_mora_bearing_or_unknown_surface_units(self):
+        cases = (
+            (('g', 'a', 'cl', 'k', 'o', 'o', 'N'), 5),
+            (('ky', 'o', 'o'), 2),
+            (('pau', 'sil', 'k'), 0),
+            (('unk:固有名詞',), 4),
+            (('unk:abc12',), 5),
         )
-        self.assertEqual(count_reading_units(('ky', 'o', 'o')), 2)
-        self.assertEqual(count_reading_units(('pau', 'sil', 'k')), 0)
-
-    def test_unknown_surface_remains_a_timing_quantity(self):
-        self.assertEqual(count_reading_units(('unk:固有名詞',)), 4)
-        self.assertEqual(count_reading_units(('unk:abc12',)), 5)
+        for phones, expected in cases:
+            with self.subTest(phones=phones):
+                self.assertEqual(count_reading_units(phones), expected)
 
     def test_readable_text_without_primary_pronunciation_fails_closed(self):
         class EmptyBackend:
@@ -114,22 +109,17 @@ if __name__ == '__main__':
     unittest.main()
 
 class DetailedMoraContract(unittest.TestCase):
-    def test_known_mora_count_is_used_instead_of_phone_recount(self):
-        detail = SimpleNamespace(phonemes=['a', 'i', 'u'], word='音', mora_count=2,
-                                 is_unknown=False)
-        engine = SimpleNamespace(g2p_candidates_detailed=lambda _: SimpleNamespace(
-            candidates=[SimpleNamespace(words=[detail])]))
-        backend = HaqumeiG2P(engine)
-        candidates = backend.candidates('音', max_candidates=1)
-        assert candidates[0].phonemes == ('a', 'i', 'u')
-        assert reading_units_from_candidates('音', candidates) == 2
-
-    def test_unknown_is_not_silently_counted_as_zero(self):
-        detail = SimpleNamespace(phonemes=['unk'], word='未知語', mora_count=0,
-                                 is_unknown=True)
-        engine = SimpleNamespace(g2p_candidates_detailed=lambda _: SimpleNamespace(
-            candidates=[SimpleNamespace(words=[detail])]))
-        backend = HaqumeiG2P(engine)
-        candidates = backend.candidates('未知語', max_candidates=1)
-        assert candidates[0].phonemes == ('unk:未知語',)
-        assert reading_units_from_candidates('未知語', candidates) == 3
+    def test_detailed_mora_metadata_and_unknown_surface_both_produce_nonzero_timing(self):
+        cases = (
+            ('音', ['a', 'i', 'u'], 2, False, ('a', 'i', 'u'), 2),
+            ('未知語', ['unk'], 0, True, ('unk:未知語',), 3),
+        )
+        for text, phones, mora_count, is_unknown, expected_phones, expected_units in cases:
+            with self.subTest(text=text):
+                detail = SimpleNamespace(phonemes=phones, word=text, mora_count=mora_count,
+                                         is_unknown=is_unknown)
+                engine = SimpleNamespace(g2p_candidates_detailed=lambda _text, detail=detail: SimpleNamespace(
+                    candidates=[SimpleNamespace(words=[detail])]))
+                candidates = HaqumeiG2P(engine).candidates(text, max_candidates=1)
+                self.assertEqual(candidates[0].phonemes, expected_phones)
+                self.assertEqual(reading_units_from_candidates(text, candidates), expected_units)
