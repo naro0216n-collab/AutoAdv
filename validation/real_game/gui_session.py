@@ -83,6 +83,7 @@ class SessionDriver:
         self.state = 'select_target'
         self.audio_deadline = None
         self.recovery_pending = None
+        self.recovery_sent = set()
         self.collection_target_emitted = False
         self.collection_done_at = None
 
@@ -147,6 +148,13 @@ class SessionDriver:
         reason = runtime.pause_reason or ''
         if not self.options.get('continue_collection') or not reason:
             return False
+        if key in self.recovery_sent:
+            # Recovery is a one-shot escape hatch for one measured utterance.
+            # The product may keep reporting the same paused token until the
+            # game's next Hook reaches us; never reinterpret that delay (or a
+            # changed pause reason on the same token) as permission to send a
+            # second validation input.
+            return True
         # Give queued product diagnostics (handoff/capture summary) one GUI
         # turn to reach the trace before the validation-only recovery input.
         now = self.clock()
@@ -163,6 +171,7 @@ class SessionDriver:
         self.trace.emit(
             'validation_recovery_input', session=token.session, line=token.line,
             reason=reason)
+        self.recovery_sent.add(key)
         self.recovery_pending = None
         return True
 

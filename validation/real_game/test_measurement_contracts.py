@@ -274,9 +274,24 @@ def test_validation_recovery_continues_collection_without_becoming_product_succe
     assert recoveries == [1]
     assert traces[-1][0] == 'validation_recovery_input'
     assert actions == []
+
+    # The game may keep the same paused token visible while the recovery
+    # input is being consumed and before the next Hook arrives. Recovery is
+    # owned by the utterance identity, not by timer ticks or pause reasons.
+    for now, reason in ((1.6, 'target_unavailable'), (2.0, 'input_not_observed')):
+        clock[0] = now
+        runtime.pause_reason = reason
+        driver.tick()
+    assert recoveries == [1]
+    assert len([name for name, _ in traces if name == 'validation_recovery_input']) == 1
+
     runtime.token = SimpleNamespace(session=1, line=2)
-    clock[0] = 2.0
+    runtime.pause_reason = 'target_unavailable'
+    clock[0] = 2.3
     driver.tick()
+    clock[0] = 2.6
+    driver.tick()
+    assert recoveries == [1, 2]
     assert actions == []
 
 
