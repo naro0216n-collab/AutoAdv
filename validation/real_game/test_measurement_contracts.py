@@ -21,7 +21,7 @@ from autoadv.g2p import PronunciationCandidate
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from autoadv.application import CaptureHostEventOutcome, HookEventOutcome
 from autoadv.conversation import Token
-from validation.real_game import issue_reporting, prepare_accuracy_assets as media
+from validation.real_game import fixture_runtime, issue_reporting, prepare_accuracy_assets as media
 from validation.real_game._synthetic_checker_oracle import synthetic_game_observations
 from validation.real_game.benchmark_alignment import contract_failures, run as run_alignment_benchmark
 from validation.real_game.gui_session import CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source, load_session
@@ -112,6 +112,26 @@ def validate(records, *, phase='mixed', **kwargs):
 
 def accuracy_pos(case_id):
     return next(i for i, line in enumerate(ACCURACY_SCENARIO) if line['id'] == case_id)
+
+
+def test_fixture_source_identity_is_independent_of_checkout_line_endings():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        contents = {
+            'builder.py': 'print("fixture")\n',
+            'game/script.rpy': 'label start:\n    return\n',
+            'CREDITS.txt': 'fixture credits\n',
+        }
+        for relative, content in contents.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding='utf-8', newline='\n')
+        lf_digest = fixture_runtime.source_digest(root)
+        for relative in contents:
+            path = root / relative
+            data = path.read_bytes().replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+            path.write_bytes(data.replace(b'\n', b'\r\n'))
+        assert fixture_runtime.source_digest(root) == lf_digest
 
 
 def test_accuracy_fixture_and_manifest_form_one_continuous_sequence_with_deterministic_derived_audio():

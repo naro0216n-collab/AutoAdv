@@ -31,7 +31,7 @@ POLL_SECONDS = 10
 
 _IGNORED_SOURCE_PARTS = {'cache', 'saves', '__pycache__'}
 _IGNORED_SOURCE_SUFFIXES = {'.rpyc', '.pyc', '.log'}
-_NORMALIZED_TEXT_SUFFIXES = {'.rpy', '.txt'}
+_NORMALIZED_TEXT_SUFFIXES = {'.py', '.rpy', '.txt'}
 
 
 def _iter_source_files(root: Path):
