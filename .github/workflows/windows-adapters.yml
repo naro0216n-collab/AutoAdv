@@ -32,7 +32,7 @@ jobs:
           tests.test_native_runtime -v
       - name: Validate installed Windows adapter imports
         run: |
-          python -c "import cv2, mss, numpy, onnxruntime, sounddevice; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().candidates('えっ嘘でしょ。'); print('Windows adapters available')"
+          python -c "import cv2, mss, numpy, onnxruntime, sounddevice; from ten_vad import TenVad; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().candidates('えっ嘘でしょ。'); TenVad(256, 0.5); print('Windows adapters available')"
       - name: Validate pinned alignment artifact inference
         run: |
           python -c "import os, numpy as np; from pathlib import Path; from autoadv.audio_buffer import PCMChunk; from autoadv.native_runtime import managed_paths, prepare_alignment_model, verify_g2p; from autoadv.forced_alignment import OnnxPhoneCTCModel; root=Path(os.environ['RUNNER_TEMP']) / 'autoadv-native'; prepare_alignment_model(runtime_root=root); paths=managed_paths(runtime_root=root); model=OnnxPhoneCTCModel(Path(paths.alignment_model), Path(paths.alignment_vocab)); chunk=PCMChunk(1000, np.zeros((48000, 2), dtype=np.float32).tobytes(), 48000, 2, 4); logits=model.infer((chunk,)); assert logits.ndim == 2 and logits.shape[0] > 0 and logits.shape[1] == len(model.vocab); assert verify_g2p()['ready']; print('Pinned alignment artifact inference ready')"

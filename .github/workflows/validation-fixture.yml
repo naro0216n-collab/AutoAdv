@@ -51,6 +51,7 @@ jobs:
           source="$GITHUB_WORKSPACE/validation/real_game/renpy"
           project="$RUNNER_TEMP/renpy-project"
           cp -a "$source" "$project"
+          python "$project/prepare_derived_audio.py" "$project/game/audio/voice"
           (cd "$RENPY_SDK" && ./renpy.sh launcher distribute \
             "$project" \
             --destination "$RUNNER_TEMP/dists" --package win --no-update)
