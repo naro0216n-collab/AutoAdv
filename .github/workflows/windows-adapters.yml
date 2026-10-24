@@ -33,6 +33,9 @@ jobs:
       - name: Validate installed Windows adapter imports
         run: |
           python -c "import cv2, mss, numpy, onnxruntime, sounddevice; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().candidates('えっ嘘でしょ。'); print('Windows adapters available')"
+      - name: Validate pinned alignment artifact loads
+        run: |
+          python -c "import os; from pathlib import Path; from autoadv.native_runtime import managed_paths, prepare_alignment_model, verify_g2p; from autoadv.forced_alignment import OnnxPhoneCTCModel; root=Path(os.environ['RUNNER_TEMP']) / 'autoadv-native'; prepare_alignment_model(runtime_root=root); paths=managed_paths(runtime_root=root); OnnxPhoneCTCModel(Path(paths.alignment_model), Path(paths.alignment_vocab)); assert verify_g2p()['ready']; print('Pinned alignment artifact loaded')"
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
