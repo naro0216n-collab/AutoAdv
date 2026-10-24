@@ -17,17 +17,17 @@ class IdentityG2P:
 IDENTITY_G2P = IdentityG2P()
 
 
-def evidence(alignment, *, observation_kind='asr', previous_alignment=None,
-             capture_end_ms=1000, previous_capture_end_ms=0,
+def evidence(alignment, *, observation_kind='asr', frontier_alignment=None,
+             capture_end_ms=1000, frontier_capture_end_ms=0,
              target_last_token_ms=None, target_boundary_ms=None,
              render_end_ms=None, render_quiet_at_ms=None,
              vad_tail_ms=0, vad_end_ms=None):
     return VoiceEvidence(
         observation_kind=observation_kind,
         alignment=alignment,
-        previous_alignment=previous_alignment or TargetAlignment(),
+        frontier_alignment=frontier_alignment or TargetAlignment(),
         capture_end_ms=capture_end_ms,
-        previous_capture_end_ms=previous_capture_end_ms,
+        frontier_capture_end_ms=frontier_capture_end_ms,
         target_last_token_ms=target_last_token_ms,
         target_boundary_ms=target_boundary_ms,
         render_end_ms=render_end_ms,
@@ -79,7 +79,7 @@ class ASRCues(unittest.TestCase):
         previous = matcher.align('おはよう')
         alignment = matcher.align('おはようござ')
         assessed = assess_voice(evidence(
-            alignment, previous_alignment=previous, previous_capture_end_ms=700,
+            alignment, frontier_alignment=previous, frontier_capture_end_ms=700,
             target_last_token_ms=800))
         self.assertEqual(assessed.state, VoiceState.PLAYING)
 
@@ -104,12 +104,20 @@ class ASRCues(unittest.TestCase):
             alignment, target_last_token_ms=700, target_boundary_ms=900))
         self.assertNotEqual(assessed.state, VoiceState.ENDED)
 
-    def test_partial_target_boundary_too_early_for_missing_tail_does_not_end(self):
+    def test_early_prefix_plus_acoustic_boundary_does_not_prove_completion(self):
+        alignment = TargetMatcher('abcdefghij', g2p=IDENTITY_G2P).align('abcd')
+        assessed = assess_voice(evidence(
+            alignment, observation_kind='transport', target_last_token_ms=700,
+            render_end_ms=1000, render_quiet_at_ms=1300))
+        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+
+    def test_same_error_budget_allows_small_tail_loss_at_render_boundary(self):
         alignment = TargetMatcher('abcdefgh', g2p=IDENTITY_G2P).align('abcdef')
         assessed = assess_voice(evidence(
-            alignment, target_last_token_ms=890, vad_tail_ms=220, vad_end_ms=900))
-        self.assertEqual(assessed.state, VoiceState.PLAYING)
-        self.assertNotEqual(assessed.state, VoiceState.ENDED)
+            alignment, observation_kind='transport', target_last_token_ms=800,
+            render_end_ms=1000, render_quiet_at_ms=1300))
+        self.assertEqual(assessed.state, VoiceState.ENDED)
+        self.assertEqual(assessed.endpoint_source, 'render_quiescence')
 
     def test_unconfigured_reading_does_not_match_by_surface_fallback(self):
         matcher = TargetMatcher('東京へ行く', g2p=IDENTITY_G2P)

@@ -38,7 +38,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
             observer.install()
             token = Token(4, 2)
             app.observer('asr_inference', token, {
-                'phonetic_coverage': .75, 'previous_matched_phonemes': 3,
+                'phonetic_coverage': .75, 'frontier_matched_phonemes': 3,
                 'vad_tail_ms': 0,
             })
             app.observer('voice_assessment', token, {

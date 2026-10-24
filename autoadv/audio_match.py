@@ -56,6 +56,15 @@ class TargetAlignment:
         return self.phonetic_matches / max(1, self.phonetic_target_units, self.phonetic_observed_units)
 
 
+def alignment_support_rank(alignment: TargetAlignment) -> tuple[int, int, int]:
+    """Order raw target support without assigning voice semantics."""
+    return (
+        alignment.phonetic_matches,
+        -alignment.phonetic_edits,
+        alignment.phonetic_prefix_units,
+    )
+
+
 class TargetMatcher:
     """Pure bounded G2P alignment for one configured utterance.
 
@@ -76,9 +85,7 @@ class TargetMatcher:
     def _alignment_rank(alignment: TargetAlignment) -> tuple:
         """Choose by raw alignment facts; primary reading only breaks ties."""
         return (
-            alignment.phonetic_matches,
-            -alignment.phonetic_edits,
-            alignment.phonetic_prefix_units,
+            *alignment_support_rank(alignment),
             -(alignment.reading_rank + alignment.observed_reading_rank),
             -alignment.reading_rank,
             -alignment.observed_reading_rank,

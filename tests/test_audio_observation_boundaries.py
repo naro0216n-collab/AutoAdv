@@ -392,16 +392,16 @@ class PacketVadBoundaryTests(unittest.TestCase):
             audio.close()
 
 class VoiceEvidenceArchitectureTests(unittest.TestCase):
-    def _evidence(self, alignment, *, kind='asr', previous=None,
-                  capture_end=2000, previous_capture_end=0, target_last=None,
+    def _evidence(self, alignment, *, kind='asr', frontier=None,
+                  capture_end=2000, frontier_capture_end=0, target_last=None,
                   boundary=None, render_end=None, render_quiet_at=None,
                   vad_tail=0, vad_end=None):
         return VoiceEvidence(
             observation_kind=kind,
             alignment=alignment,
-            previous_alignment=previous or TargetAlignment(),
+            frontier_alignment=frontier or TargetAlignment(),
             capture_end_ms=capture_end,
-            previous_capture_end_ms=previous_capture_end,
+            frontier_capture_end_ms=frontier_capture_end,
             target_last_token_ms=target_last, target_boundary_ms=boundary,
             render_end_ms=render_end, render_quiet_at_ms=render_quiet_at,
             vad_onset_ms=None, vad_tail_ms=vad_tail, vad_end_ms=vad_end)
@@ -412,7 +412,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         previous = matcher.align('おはよう')
         alignment = matcher.align('おはようござ')
         assessed = assess_voice(self._evidence(
-            alignment, previous=previous, previous_capture_end=1800, target_last=1900))
+            alignment, frontier=previous, frontier_capture_end=1800, target_last=1900))
         self.assertEqual(assessed.state, VoiceState.PLAYING)
 
     def test_redecode_progress_confined_to_old_pcm_is_inconclusive(self):
@@ -420,7 +420,15 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         previous = matcher.align('おはよう')
         alignment = matcher.align('おはようござ')
         assessed = assess_voice(self._evidence(
-            alignment, previous=previous, previous_capture_end=1950, target_last=1900))
+            alignment, frontier=previous, frontier_capture_end=1950, target_last=1900))
+        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+
+    def test_asr_regression_then_recovery_to_frontier_is_not_new_progress(self):
+        matcher = TargetMatcher('abcdefgh', g2p=TEST_G2P)
+        frontier = matcher.align('abcdef')
+        recovered = matcher.align('abcdef')
+        assessed = assess_voice(self._evidence(
+            recovered, frontier=frontier, frontier_capture_end=1800, target_last=1900))
         self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
 
     def test_following_token_boundary_ends_completed_target_without_vad_silence(self):
@@ -464,7 +472,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         previous = matcher.align('おはよう')
         alignment = matcher.align('おはようござ')
         initial = self._evidence(
-            alignment, previous=previous, previous_capture_end=900, target_last=950)
+            alignment, frontier=previous, frontier_capture_end=900, target_last=950)
         self.assertEqual(assess_voice(initial).state, VoiceState.PLAYING)
 
         observed = []
@@ -497,6 +505,20 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
         self.assertEqual(assessed.estimated_end_ms, 1000)
         self.assertEqual(assessed.endpoint_source, 'render_quiescence')
 
+    def test_internal_render_pause_after_early_prefix_is_not_endpoint(self):
+        alignment = TargetMatcher('abcdefghij', g2p=TEST_G2P).align('abcd')
+        assessed = assess_voice(self._evidence(
+            alignment, kind='transport', target_last=700,
+            render_end=1000, render_quiet_at=1300))
+        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+
+    def test_internal_vad_pause_after_early_prefix_is_not_endpoint(self):
+        alignment = TargetMatcher('abcdefghij', g2p=TEST_G2P).align('abcd')
+        assessed = assess_voice(self._evidence(
+            alignment, kind='transport', target_last=700,
+            vad_tail=400, vad_end=1000))
+        self.assertEqual(assessed.state, VoiceState.INCONCLUSIVE)
+
     def test_native_audio_reports_raw_evidence_not_completion_state(self):
         assessments = []
         metrics = []
@@ -525,7 +547,7 @@ class VoiceEvidenceArchitectureTests(unittest.TestCase):
             self.assertTrue(ready.wait(2))
             self.assertEqual(assessments[-1][1].state, VoiceState.ENDED)
             self.assertFalse(hasattr(native, 'completed'))
-            self.assertIn('previous_matched_phonemes', metrics[-1])
+            self.assertIn('frontier_matched_phonemes', metrics[-1])
             self.assertNotIn('target_progressed', metrics[-1])
             self.assertNotIn('voice_state', metrics[-1])
             self.assertNotIn('evidence_score', metrics[-1])

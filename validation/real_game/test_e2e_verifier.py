@@ -661,15 +661,21 @@ class RealGameVerifierContract(unittest.TestCase):
         self.assertTrue(metric['ok'], metric['errors'])
         self.assertLess(metric['performance']['hook_to_native_onset_ms']['p50'], 0)
 
-    def test_timestamp_endpoint_is_valid_product_evidence_but_not_game_oracle(self):
+    def test_all_product_endpoint_paths_are_valid_but_not_game_oracles(self):
+        for evidence in ('asr_timestamp', 'asr_vad', 'render_quiescence'):
+            with self.subTest(evidence=evidence):
+                records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
+                endpoint = next(r for r in records
+                                if r['event'] == 'native_voice_end_estimate' and r['line'] == 1)
+                endpoint['evidence'] = evidence
+                if evidence != 'asr_vad':
+                    endpoint['onset_estimated_at_ns'] = None
+                result = validate(records, phase='accuracy')
+                self.assertTrue(result['collection_valid'], result['errors'])
+
         records = contract_records(0, 3, lines=ACCURACY_SCENARIO)
         endpoint = next(r for r in records
                         if r['event'] == 'native_voice_end_estimate' and r['line'] == 1)
-        endpoint['evidence'] = 'asr_timestamp'
-        endpoint['onset_estimated_at_ns'] = None
-        result = validate(records, phase='accuracy')
-        self.assertTrue(result['collection_valid'], result['errors'])
-
         endpoint['evidence'] = 'invented_endpoint'
         invalid = validate(records, phase='accuracy')
         self.assertFalse(invalid['collection_valid'])

@@ -71,7 +71,7 @@ class PerformanceObservationTests(unittest.TestCase):
             self.assertEqual(measured['audio_ms'], 20)
             self.assertGreaterEqual(measured['decode_ms'], 0)
             self.assertGreaterEqual(measured['queue_ms'], 0)
-            self.assertIn('previous_matched_phonemes', measured)
+            self.assertIn('frontier_matched_phonemes', measured)
             self.assertNotIn('target_progressed', measured)
             self.assertNotIn('recognized', measured)
         finally:

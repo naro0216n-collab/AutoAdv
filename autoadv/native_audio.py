@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Callable
 import time
 from .audio_buffer import AudioHistory, PCMChunk
-from .audio_match import TargetAlignment, TargetMatcher, VoiceActivity
+from .audio_match import TargetAlignment, TargetMatcher, VoiceActivity, alignment_support_rank
 from .audio_evidence import VoiceEvidence
 from .conversation import Token
 from .process_audio import ProcessCapture, CaptureHealth
@@ -127,8 +127,8 @@ class NativeAudio:
         self._vad_contains_speech = False
         self._pcm_reported = False
         self._latest_evidence: VoiceEvidence | None = None
-        self._previous_alignment = TargetAlignment()
-        self._previous_capture_end_ms: int | None = None
+        self._frontier_alignment = TargetAlignment()
+        self._frontier_capture_end_ms: int | None = None
         self._last_pcm_end_ms = -1
 
     def start(self):
@@ -172,8 +172,8 @@ class NativeAudio:
         self.vad_end_ms = -1
         self.vad_tail_ms = 0
         self._latest_evidence = None
-        self._previous_alignment = TargetAlignment()
-        self._previous_capture_end_ms = None
+        self._frontier_alignment = TargetAlignment()
+        self._frontier_capture_end_ms = None
         self._last_pcm_end_ms = -1
         self._vad_positive_packets = 0
         self._vad_input_peak = 0.0
@@ -214,7 +214,7 @@ class NativeAudio:
             # Pre-HOOK replay may help endpoint attribution, but target support
             # wholly before the accepted HOOK is not current PLAYING evidence.
             # The first ASR snapshot therefore compares against the HOOK time.
-            self._previous_capture_end_ms = self.start_ms
+            self._frontier_capture_end_ms = self.start_ms
             # ProcessCapture pushes a packet before calling feed(). Replaying
             # under this lock makes an in-flight packet idempotent.
             buffered = self.history.since(self.window_start_ms)
@@ -505,9 +505,9 @@ class NativeAudio:
                 evidence = VoiceEvidence(
                     observation_kind='asr',
                     alignment=alignment,
-                    previous_alignment=self._previous_alignment,
+                    frontier_alignment=self._frontier_alignment,
                     capture_end_ms=capture_end_ms,
-                    previous_capture_end_ms=self._previous_capture_end_ms,
+                    frontier_capture_end_ms=self._frontier_capture_end_ms,
                     target_last_token_ms=target_last_ms,
                     target_boundary_ms=target_boundary_ms,
                     render_end_ms=None,
@@ -517,10 +517,14 @@ class NativeAudio:
                     vad_end_ms=(int(vad_end) if vad_end is not None and vad_end >= 0 else None),
                 )
                 self._latest_evidence = evidence
-                self._previous_alignment = alignment
-                if capture_end_ms is not None:
-                    self._previous_capture_end_ms = max(
-                        capture_end_ms, self._previous_capture_end_ms or capture_end_ms)
+                # Preserve one coherent ASR frontier. Do not combine a match
+                # maximum from one hypothesis with a timestamp/capture boundary
+                # from another, and do not move the frontier backward on ASR
+                # regression.
+                if (alignment_support_rank(alignment)
+                        > alignment_support_rank(self._frontier_alignment)):
+                    self._frontier_alignment = alignment
+                    self._frontier_capture_end_ms = capture_end_ms
 
             if self.on_inference and evidence is not None:
                 a = evidence.alignment
@@ -538,8 +542,8 @@ class NativeAudio:
                     'target_last_token_ms': evidence.target_last_token_ms,
                     'target_boundary_ms': evidence.target_boundary_ms,
                     'capture_end_ms': evidence.capture_end_ms,
-                    'previous_capture_end_ms': evidence.previous_capture_end_ms,
-                    'previous_matched_phonemes': evidence.previous_alignment.phonetic_matches,
+                    'frontier_capture_end_ms': evidence.frontier_capture_end_ms,
+                    'frontier_matched_phonemes': evidence.frontier_alignment.phonetic_matches,
                     'vad_active': bool(submitted_vad_active),
                     'vad_contains_speech': bool(submitted_contains_speech),
                     'vad_onset_ms': evidence.vad_onset_ms,

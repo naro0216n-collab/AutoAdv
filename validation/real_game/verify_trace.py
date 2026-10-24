@@ -535,14 +535,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')
             # These are product-side process-loopback estimates, not known game
-            # source playback endpoints. ASR token timing and VAD are distinct
-            # product-side endpoint estimates; neither is the independent game
-            # oracle. Bounds are checked, and acoustic onset remains optional
-            # because VAD can miss whispers.
+            # source playback endpoints. ASR token timing, VAD boundaries and
+            # process-render quiescence are distinct product endpoint paths;
+            # none is the independent game oracle. Bounds are checked, and
+            # acoustic onset remains optional because VAD can miss whispers.
             if (key not in utterances or type(estimate) is not int or
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
-                    evidence not in ('asr_timestamp', 'asr_vad')):
+                    evidence not in ('asr_timestamp', 'asr_vad', 'render_quiescence')):
                 product_issue(f'invalid native endpoint evidence: {key}')
             elif key in native_end_estimates:
                 product_issue(f'duplicate native endpoint: {key}')
