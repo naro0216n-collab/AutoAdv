@@ -424,10 +424,10 @@ def test_play_view_hides_normal_internal_state_and_surfaces_only_actionable_hold
     view = app.play_view()
     assert view.advance_authorized
     assert view.issue is None
-    app.controller.hold_reason = 'native_end_unconfirmed_hold'
+    app.controller.hold_reason = 'native_acoustic_unconfirmed_hold'
     view = app.play_view()
     assert view.issue is not None
-    assert '原音の終了' in view.issue.message
+    assert '対象台詞の音響完了' in view.issue.message
     assert view.issue.action == 'open_audio_policy'
     app.controller.hold_reason = 'ocr_failure'
     view = app.play_view()
@@ -1227,7 +1227,7 @@ def test_application_owns_uncertain_audio_fallback_policy():
 
     app._native_audio = RetainedNative()
     deadline()
-    assert app.runtime_state().pause_reason == 'native_end_unconfirmed_hold'
+    assert app.runtime_state().pause_reason == 'native_acoustic_unconfirmed_hold'
     assert not app.runtime_state().sent
 
 def test_application_auto_advance_can_complete_without_gui_runtime_policy():

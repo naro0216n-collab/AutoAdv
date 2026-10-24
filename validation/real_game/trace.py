@@ -109,8 +109,8 @@ class ProductTraceObserver:
             self.trace.emit(
                 'native_voice_knowledge', session=token.session, line=token.line,
                 target_associated=bool(detail.get('target_associated')),
-                target_end_confirmed=bool(detail.get('target_end_confirmed')),
-                end_source=detail.get('end_source', ''))
+                target_acoustic_completed=bool(detail.get('target_acoustic_completed')),
+                completion_source=detail.get('completion_source', ''))
             return
 
         fields = dict(detail)
@@ -127,7 +127,7 @@ class ProductTraceObserver:
             'presentation_complete', 'next_line_timeout', 'advance_attempt',
             'advance_input', 'audio_observation_boundary', 'audio_deadline_elapsed',
             'native_capture_summary', 'native_audio_error',
-            'native_pcm', 'alignment_inference', 'native_audio_observation', 'native_voice_end_estimate',
+            'native_pcm', 'alignment_inference', 'native_audio_observation', 'native_target_acoustic_completion_estimate',
             'tts_timing', 'tts_result', 'controller_handoff',
         }:
             self.trace.emit(event, **fields)

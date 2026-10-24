@@ -99,7 +99,7 @@ class RecordedAudioFixtureContracts(unittest.TestCase):
             self.assertEqual(observations[0][0], token)
             knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observations[0][1])
             self.assertFalse(knowledge.target_associated)
-            self.assertFalse(knowledge.target_end_confirmed)
+            self.assertFalse(knowledge.target_acoustic_completed)
             self.assertNotIn('vad_positive_packets', native.capture_status())
         finally:
             native.close()

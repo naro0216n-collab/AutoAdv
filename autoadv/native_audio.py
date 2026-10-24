@@ -320,19 +320,19 @@ class NativeAudio:
             audio_ms = sum(chunk.duration_ms for chunk in samples)
             capture_start_ms = int(round(samples[0].at_ms - samples[0].duration_ms)) if samples else None
             capture_end_ms = int(samples[-1].at_ms) if samples else None
-            target_end_ms = None
+            target_completion_ms = None
             if alignment.target_end_frame is not None:
                 end_offset = alignment.target_end_frame * alignment.frame_ms
                 wall = self._audio_offset_to_wall_ms(samples, end_offset)
                 if wall is not None:
-                    target_end_ms = int(round(wall))
+                    target_completion_ms = int(round(wall))
 
             observation = NativeAudioObservation(
                 kind="alignment",
                 alignment=alignment,
                 capture_start_ms=capture_start_ms,
                 capture_end_ms=capture_end_ms,
-                target_acoustic_end_ms=target_end_ms,
+                target_acoustic_completion_ms=target_completion_ms,
                 pcm_last_frame_ms=capture_end_ms,
             )
             with self._lock:
@@ -352,7 +352,7 @@ class NativeAudio:
                     "target_coverage": round(alignment.coverage, 4),
                     "target_associated": alignment.target_associated,
                     "complete_alignment": alignment.complete_alignment,
-                    "committed_end": alignment.committed_end,
+                    "committed_target_end": alignment.committed_target_end,
                     "target_end_frame": alignment.target_end_frame,
                     "post_target_free_frames": alignment.post_target_free_frames,
                     "reading_rank": alignment.reading_rank,
@@ -362,7 +362,7 @@ class NativeAudio:
                     "weak_units": fit.weak_units,
                     "boundary_margin": round(fit.boundary_margin, 4),
                     "capture_end_ms": capture_end_ms,
-                    "target_acoustic_end_ms": target_end_ms,
+                    "target_acoustic_completion_ms": target_completion_ms,
                     "rejection": alignment.rejection,
                 }
                 try:

@@ -28,7 +28,8 @@ def synthetic_game_observations(records, *, phase='mixed', start_line=None):
     if len(indexes) != 1:
         return []  # verifier must reject ambiguous selection, not select one
     product_pid = next((r.get('hook_pid') for r in records if r['event'] == 'monitor_started'), 41)
-    events = [dict(event='oracle_started', version=1, pid=product_pid, at_ns=1)]
+    events = [dict(event='oracle_started', version=2, pid=product_pid, at_ns=1,
+                   endpoint_contract='clean_source_pcm_rms_v1')]
     def add(event, at, **values):
         events.append(dict(event=event, at_ns=at, pid=product_pid, **values))
     for i, u in enumerate(utterances):
@@ -49,8 +50,13 @@ def synthetic_game_observations(records, *, phase='mixed', start_line=None):
                for channel in case.get('expected_mix_channels', ())}
         add('mix_snapshot', start + 1, line=i+1, channels=mix)
         if case['foreground_voice']:
-            add('voice_started', start+2, line=i+1, file=case.get('foreground_file', 'unknown'))
             end_at = ((sent['at_ns'] - 100) if sent else (u['at_ns'] + 1000))
-            add('voice_ended', end_at, line=i+1, file=case.get('foreground_file', 'unknown'),
-                last_active_at_ns=end_at-2)
+            add('voice_started', start+2, line=i+1, file=case.get('foreground_file', 'unknown'),
+                channel_position_ms=0.0, source_acoustic_end_at_ns=end_at,
+                source_file_end_at_ns=end_at + 100, source_acoustic_end_ms=1.0,
+                source_duration_ms=1.1, source_acoustic_uncertainty_ms=0.0,
+                source_endpoint_basis='clean_source_pcm_rms_10ms_0.002fs')
+            add('voice_channel_inactive', end_at+50, line=i+1,
+                file=case.get('foreground_file', 'unknown'),
+                last_channel_active_at_ns=end_at+49)
     return sorted(events, key=lambda r: r['at_ns'])

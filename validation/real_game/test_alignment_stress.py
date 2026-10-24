@@ -57,7 +57,7 @@ class AlignmentStressScenarios(unittest.TestCase):
         observation = next(o for o in report['observations']
                            if o['case'] == 'background_only_same_text')
         self.assertTrue(observation['target_associated'])
-        self.assertTrue(observation['committed_end'])
+        self.assertTrue(observation['committed_target_end'])
         self.assertNotIn('false_attribution_risk', observation)
         self.assertFalse(report['real_game_verified'])
 

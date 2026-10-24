@@ -43,16 +43,16 @@ class EvidenceIntegrityTests(unittest.TestCase):
                 'phonetic_edit_count': 0, 'vad_tail_ms': 0,
             })
             app.observer('native_voice_knowledge', token, {
-                'target_associated': True, 'target_end_confirmed': False,
-                'end_source': '',
+                'target_associated': True, 'target_acoustic_completed': False,
+                'completion_source': '',
             })
             records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
             raw = next(record for record in records if record['event'] == 'native_audio_observation')
             knowledge = next(record for record in records if record['event'] == 'native_voice_knowledge')
             self.assertEqual(raw['matched_phonemes'], 3)
-            self.assertNotIn('target_end_confirmed', raw)
+            self.assertNotIn('target_acoustic_completed', raw)
             self.assertTrue(knowledge['target_associated'])
-            self.assertFalse(knowledge['target_end_confirmed'])
+            self.assertFalse(knowledge['target_acoustic_completed'])
             self.assertNotIn('matched_phonemes', knowledge)
 
     def test_no_actual_autoadv_events_is_always_unverified(self):

@@ -186,7 +186,7 @@ class ControllerModes(unittest.TestCase):
         return self.ctrl.presentation_event(self.token, event, success=success)
 
     def native_end(self):
-        return self.ctrl.native_voice_ended(self.token)
+        return self.ctrl.native_acoustic_completed(self.token)
 
     def test_staged_speaker_voice_change_applies_only_to_the_next_utterance(self):
         profile = make_profile(AdvanceMode.TEXT, True)
@@ -266,22 +266,22 @@ class ControllerModes(unittest.TestCase):
     def test_uncertain_audio_without_opt_in_hands_control_back_at_reading_deadline(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
         self.assertTrue(self.ctrl.authorized)
         self.assertIsNone(self.ctrl.presentation_reason)
         self.assertFalse(self.ctrl.try_advance())
 
     def test_audio_deadline_uses_fallback_without_inventing_a_negative_voice_state(self):
         self.begin(AdvanceMode.AUDIO, False, True)
-        self.assertFalse(self.ctrl.native_end_confirmed)
+        self.assertFalse(self.ctrl.native_acoustic_complete)
         self.assertTrue(self.done('audio_deadline_elapsed'))
         self.assertEqual(self.ctrl.presentation_reason, 'uncertain_text_fallback')
-        self.assertFalse(self.ctrl.native_end_confirmed)
+        self.assertFalse(self.ctrl.native_acoustic_complete)
 
     def test_late_native_finish_resolves_only_the_inconclusive_native_hold(self):
         self.begin(AdvanceMode.AUDIO, False, False)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
 
         self.assertTrue(self.native_end())
         self.assertIsNone(self.ctrl.pause_reason)
@@ -320,11 +320,11 @@ class ControllerModes(unittest.TestCase):
         self.ctrl.permit(False)
         self.assertFalse(self.ctrl.authorized)
         self.assertFalse(self.done('audio_deadline_elapsed'))
-        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
 
         self.ctrl.permit(True)
         self.assertTrue(self.ctrl.authorized)
-        self.assertEqual(self.ctrl.pause_reason, 'native_end_unconfirmed_hold')
+        self.assertEqual(self.ctrl.pause_reason, 'native_acoustic_unconfirmed_hold')
         self.assertFalse(self.ctrl.try_advance())
 
     def test_tts_failure_remains_actionable_while_auto_is_off(self):
@@ -443,7 +443,7 @@ class ControllerModes(unittest.TestCase):
         self.assertTrue(self.ctrl.authorized)
         self.assertEqual(self.ctrl.take_external_transition(second), 2_500)
         self.assertEqual(self.ctrl.take_external_transition(second), 0)
-        self.assertFalse(self.ctrl.native_voice_ended(first))
+        self.assertFalse(self.ctrl.native_acoustic_completed(first))
 
     def test_unsent_identical_hook_is_not_guessed_as_external_transition(self):
         p = make_profile(AdvanceMode.TEXT, tts=False)

@@ -64,7 +64,7 @@ class DialogueContractTests(unittest.TestCase):
         self.controller.begin(p, Target(101, 202), 'host-a', 1)
         self.controller.permit(True)
         first = self.output('同じ台詞', 1)
-        self.controller.pause('native_end_unconfirmed_hold')
+        self.controller.pause('native_acoustic_unconfirmed_hold')
         second = self.output('同じ台詞', 2)
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
@@ -93,7 +93,7 @@ class DialogueContractTests(unittest.TestCase):
     def test_runtime_hold_preserves_auto_mode_and_next_line_resumes(self):
         token = self.output('まだ読む', 1)
         self.controller.permit(True)
-        self.controller.pause('native_end_unconfirmed_hold')
+        self.controller.pause('native_acoustic_unconfirmed_hold')
         self.controller.presentation_event(token, 'text_elapsed')
         self.assertFalse(self.controller.try_advance())
         self.assertTrue(self.controller.authorized)

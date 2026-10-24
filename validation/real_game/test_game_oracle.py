@@ -9,7 +9,7 @@ from validation.real_game._synthetic_checker_oracle import synthetic_game_observ
 class IndependentGameOracleContract(unittest.TestCase):
     def setUp(self):
         # Use audio-judgment lines; even a perfect ASR transcript must never
-        # outweigh evidence of an unfinished game voice.
+        # outweigh an independent clean-source endpoint that has not been reached.
         self.product = contract_records(0, 3, lines=ACCURACY_SCENARIO)
         self.game = synthetic_game_observations(self.product, phase='accuracy', start_line=1)
 
@@ -37,7 +37,7 @@ class IndependentGameOracleContract(unittest.TestCase):
                             for d in observed['diagnostics']))
         # The second line still has a confirmed send; the first is unverified.
         self.assertNotEqual(observed['game_evidence']['lines'][0]['outcome'],
-                            'voice_end_confirmed_then_input')
+                            'source_acoustic_end_then_input')
 
     def test_voice_timing_uses_confirmed_send_not_attempt(self):
         product = [dict(x) for x in self.product]
@@ -50,7 +50,7 @@ class IndependentGameOracleContract(unittest.TestCase):
                 rec['at_ns'] = min(rec['at_ns'], attempt['at_ns'])
         result = self.verify(product=product)
         self.assertTrue(result['collection_valid'], result['errors'])
-        self.assertGreaterEqual(result['performance']['game_voice_end_to_input_ms']['p50'], 0)
+        self.assertGreaterEqual(result['performance']['source_acoustic_end_to_input_ms']['p50'], 0)
         self.assertEqual(result['game_evidence']['early_inputs'], 0)
 
     def test_line_without_autoadv_input_is_not_an_advance_success(self):
@@ -61,23 +61,29 @@ class IndependentGameOracleContract(unittest.TestCase):
         self.assertEqual(result['game_evidence']['lines'][-1]['outcome'],
                          'no_autoadv_input')
 
-    def test_input_before_voice_end_fails_despite_production_asr_completion(self):
+    def test_input_before_source_acoustic_end_fails_even_if_input_stops_channel(self):
         game = [dict(x) for x in self.game]
-        voice_end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
+        onset = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
         input_at = next(x['at_ns'] for x in self.product
                         if x['event'] == 'advance_input' and x['line'] == 1)
-        voice_end['at_ns'] = input_at + 5000000
-        voice_end['last_active_at_ns'] = input_at + 1000000
+        onset['source_acoustic_end_at_ns'] = input_at + 5_000_000
+        onset['source_file_end_at_ns'] = input_at + 10_000_000
+        onset['source_acoustic_uncertainty_ms'] = 0.0
+        # Channel inactivity may be caused by the input itself and cannot erase
+        # the clean source's independently fixed acoustic endpoint.
+        inactive = next(x for x in game if x['event'] == 'voice_channel_inactive' and x['line'] == 1)
+        inactive['at_ns'] = input_at + 1_000_000
+        inactive['last_channel_active_at_ns'] = input_at
         game.sort(key=lambda x: x['at_ns'])
         result = self.verify(game=game)
         self.assertFalse(result['ok'])
         self.assertEqual(result['game_evidence']['early_inputs'], 1)
-        self.assertLess(result['performance']['game_voice_end_to_input_ms']['p50'], 0)
+        self.assertLess(result['performance']['source_acoustic_end_to_input_ms']['p50'], 0)
 
     def test_fixture_audio_filename_is_not_an_autoadv_acceptance_condition(self):
         game = [dict(x) for x in self.game]
         for record in game:
-            if record.get('line') == 1 and record['event'] in ('voice_started', 'voice_ended'):
+            if record.get('line') == 1 and record['event'] in ('voice_started', 'voice_channel_inactive'):
                 record['file'] = 'audio/voice/other.wav'
         result = self.verify(game=game)
         self.assertTrue(result['ok'], result['errors'])
@@ -85,49 +91,44 @@ class IndependentGameOracleContract(unittest.TestCase):
     def test_mixed_voice_lifecycles_on_one_line_are_never_certified_safe(self):
         game = [dict(x) for x in self.game]
         first_start = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
-        first_end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
-        # A previous line's channel may still be active when the next line starts;
-        # spuriously started/ended under the current line before the current
-        # foreground voice lifecycle. The verifier must not select the first
-        # convenient end and certify the input as safe.
-        game.extend((
-            dict(first_start, at_ns=first_start['at_ns'] + 1,
-                 file='audio/voice/previous.wav'),
-            dict(first_end, at_ns=first_start['at_ns'] + 2,
-                 last_active_at_ns=first_start['at_ns'] + 1,
-                 file='audio/voice/previous.wav'),
-        ))
+        # Two independent foreground source starts on one game line are
+        # ambiguous even when both carry clean-source endpoint metadata.
+        game.append(dict(first_start, at_ns=first_start['at_ns'] + 1,
+                         file='audio/voice/previous.wav'))
         game.sort(key=lambda x: x['at_ns'])
         result = self.verify(game=game)
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertFalse(result['voice_safety_verified'])
-        self.assertEqual(result['game_evidence']['unverified_voice_ends'], 1)
-        self.assertEqual(result['game_evidence']['lines'][0]['outcome'], 'voice_end_unverified')
-        self.assertTrue(any('ambiguous independent game voice lifecycle' in item
+        self.assertEqual(result['game_evidence']['unverified_source_acoustic_ends'], 1)
+        self.assertEqual(result['game_evidence']['lines'][0]['outcome'], 'source_acoustic_end_unverified')
+        self.assertTrue(any('ambiguous independent foreground source' in item
                             for item in result['diagnostics']))
 
-    def test_input_within_observer_poll_interval_is_indeterminate_not_early_or_safe(self):
+    def test_input_within_source_endpoint_uncertainty_is_indeterminate_not_early_or_safe(self):
         game = [dict(x) for x in self.game]
-        end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
+        onset = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
         input_at = next(x['at_ns'] for x in self.product
                         if x['event'] == 'advance_input' and x['line'] == 1)
-        end['last_active_at_ns'] = input_at - 20_000_000
-        end['at_ns'] = input_at + 30_000_000
-        game.sort(key=lambda x: x['at_ns'])
+        onset['source_acoustic_end_at_ns'] = input_at + 5_000_000
+        onset['source_file_end_at_ns'] = input_at + 20_000_000
+        onset['source_acoustic_uncertainty_ms'] = 10.0
         result = self.verify(game=game)
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertFalse(result['voice_safety_verified'])
-        self.assertEqual(result['game_evidence']['indeterminate_voice_end'], 1)
+        self.assertEqual(result['game_evidence']['indeterminate_source_acoustic_end'], 1)
         self.assertEqual(result['game_evidence']['early_inputs'], 0)
-        self.assertEqual(result['game_evidence']['confirmed_voice_safe_inputs'], 1)
-        self.assertEqual(result['game_evidence']['lines'][0]['outcome'], 'voice_end_indeterminate')
+        self.assertEqual(result['game_evidence']['confirmed_source_acoustic_safe_inputs'], 1)
+        self.assertEqual(result['game_evidence']['lines'][0]['outcome'], 'source_acoustic_end_indeterminate')
 
-    def test_silence_never_observed_is_not_positive_voice_end(self):
-        game = [x for x in self.game if not (x['event'] == 'voice_ended' and x['line'] == 1)]
+    def test_missing_clean_source_endpoint_is_not_positive_completion(self):
+        game = [dict(x) for x in self.game]
+        onset = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
+        for field in ('source_acoustic_end_at_ns', 'source_acoustic_uncertainty_ms'):
+            onset.pop(field, None)
         result = self.verify(game=game)
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertFalse(result['voice_safety_verified'])
-        self.assertEqual(result['game_evidence']['unverified_voice_ends'], 1)
+        self.assertEqual(result['game_evidence']['unverified_source_acoustic_ends'], 1)
 
     def test_separate_audio_process_is_not_arbitrarily_prohibited(self):
         product = [dict(x) for x in self.product]
@@ -166,24 +167,24 @@ class IndependentGameOracleContract(unittest.TestCase):
         self.assertEqual(observation['game_evidence']['lines'][0]['outcome'],
                          'game_playback_unaligned')
         self.assertEqual(observation['game_evidence']['lines'][1]['game_line'], 2)
-        self.assertGreater(observation['game_evidence']['confirmed_voice_safe_inputs'], 0)
+        self.assertGreater(observation['game_evidence']['confirmed_source_acoustic_safe_inputs'], 0)
 
     def test_delay_is_measured_without_default_overhold_judgement(self):
         observed = self.verify()
         self.assertTrue(observed['collection_valid'], observed['errors'])
         self.assertEqual(observed['game_evidence']['overholds'], 0)
-        self.assertIn('game_voice_end_to_input_ms', observed['performance'])
+        self.assertIn('source_acoustic_end_to_input_ms', observed['performance'])
 
-    def test_overhold_is_measured_from_independent_playback_not_vad_guess(self):
+    def test_overhold_is_measured_from_clean_source_endpoint_not_channel_state(self):
         game = [dict(x) for x in self.game]
-        end = next(x for x in game if x['event'] == 'voice_ended' and x['line'] == 1)
-        end['at_ns'] -= 200_000_000
-        end['last_active_at_ns'] = end['at_ns'] - 1_000_000
-        game.sort(key=lambda x: x['at_ns'])
+        onset = next(x for x in game if x['event'] == 'voice_started' and x['line'] == 1)
+        onset['source_acoustic_end_at_ns'] -= 200_000_000
+        onset['source_file_end_at_ns'] = max(onset['source_file_end_at_ns'],
+                                              onset['source_acoustic_end_at_ns'])
         result = self.verify(game=game, max_voice_hold_ms=100)
         self.assertTrue(result['collection_valid'], result['errors'])
         self.assertGreater(result['game_evidence']['overholds'], 0)
-        self.assertIn('game_voice_end_to_input_ms', result['performance'])
+        self.assertIn('source_acoustic_end_to_input_ms', result['performance'])
 
     def test_no_foreground_native_attribution_rejected_even_with_asr_completion(self):
         # Author-specified absence is NOT used as the only evidence: observer
@@ -199,7 +200,7 @@ class IndependentGameOracleContract(unittest.TestCase):
             temp = Path(directory) / 'scenario.json'
             temp.write_text(json.dumps(schema, ensure_ascii=False), 'utf-8')
             game = [x for x in self.game if not (x.get('line') == 1 and
-                     x['event'] in ('voice_started', 'voice_ended'))]
+                     x['event'] in ('voice_started', 'voice_channel_inactive'))]
             result = validate(product, phase='accuracy', start_line=1,
                               oracle_records=game, scenario_path=temp)
             self.assertTrue(result['collection_valid'], result['errors'])

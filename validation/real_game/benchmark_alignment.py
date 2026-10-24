@@ -177,7 +177,7 @@ def _result_row(sample: dict, condition: str, repetition: int,
         first_association = next((item for item in snapshots
                                   if item['alignment'].target_associated), None)
         first_commit = next((item for item in snapshots
-                             if item['alignment'].committed_end), None)
+                             if item['alignment'].committed_target_end), None)
     else:
         final_snapshot = None
         final_alignment = None
@@ -232,7 +232,7 @@ def _result_row(sample: dict, condition: str, repetition: int,
         'association_observed_at_ms': (round(association_at_ms, 3)
                                        if association_at_ms is not None else None),
         'complete_alignment': bool(final_alignment and final_alignment.complete_alignment),
-        'committed_end': first_commit is not None,
+        'committed_target_end': first_commit is not None,
         'commit_capture_end_ms': (round(commit_capture_ms, 3)
                                   if commit_capture_ms is not None else None),
         'commit_trigger_at_ms': (round(commit_trigger_ms, 3)
@@ -348,8 +348,8 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
             'target_coverage': _summary([row['target_coverage'] for row in rows]),
             'associated': sum(row['target_associated'] for row in rows),
             'complete': sum(row['complete_alignment'] for row in rows),
-            'committed': sum(row['committed_end'] for row in rows),
-            'unconfirmed': sum(not row['committed_end'] for row in rows),
+            'committed': sum(row['committed_target_end'] for row in rows),
+            'unconfirmed': sum(not row['committed_target_end'] for row in rows),
             'early_commits': sum(row['early_commit'] for row in rows),
             'early_decisions': sum(row['early_decision'] for row in rows),
             'late_commits': sum(row['late_commit'] for row in rows),
@@ -357,7 +357,7 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
             'late_boundaries': sum(row['late_boundary'] for row in rows),
             'endpoint_within_oracle': sum(row['endpoint_within_oracle'] for row in rows),
             'endpoint_error_ms': _summary([row['endpoint_error_ms'] for row in rows
-                                           if row['committed_end'] and row['endpoint_error_ms'] is not None]),
+                                           if row['committed_target_end'] and row['endpoint_error_ms'] is not None]),
             'commit_delay_ms': _summary([row['commit_delay_ms'] for row in rows
                                          if row['commit_delay_ms'] is not None]),
             'capture_commit_delay_ms': _summary([row['capture_commit_delay_ms'] for row in rows

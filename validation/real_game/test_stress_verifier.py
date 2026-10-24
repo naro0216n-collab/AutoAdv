@@ -41,15 +41,15 @@ def checker_only_records():
         if case['advance_mode'] == 'audio':
             add('native_pcm', **key, audio_pid=41, frames=960)
             add('native_audio_observation', **key, kind='alignment', target_units=5, aligned_target_units=5,
-                target_associated=True, complete_alignment=True, committed_end=True)
+                target_associated=True, complete_alignment=True, committed_target_end=True)
             add('alignment_inference', **key, audio_ms=1200, align_ms=121, queue_ms=6)
             if case['id'] == 'clean_control':
                 add('native_voice_knowledge', **key, target_associated=True,
-                    target_end_confirmed=False, end_source='')
+                    target_acoustic_completed=False, completion_source='')
                 add('native_voice_knowledge', **key, target_associated=True,
-                    target_end_confirmed=True, end_source='target_conditioned_alignment')
+                    target_acoustic_completed=True, completion_source='target_conditioned_alignment')
                 observed_time = len(records) * 1_000_000_000
-                add('native_voice_end_estimate', **key,
+                add('native_target_acoustic_completion_estimate', **key,
                     estimated_at_ns=observed_time - 300_000_000,
                     onset_estimated_at_ns=observed_time - 1_000_000_000,
                     evidence='target_conditioned_alignment')

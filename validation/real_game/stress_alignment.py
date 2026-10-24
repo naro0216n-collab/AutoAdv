@@ -104,7 +104,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                     'snapshot_count': 0, 'cumulative_alignment_ms': 0.0,
                     'max_alignment_ms': 0.0, 'cumulative_compute_ratio': 0.0,
                     'target_associated': False, 'association_observed_at_ms': None,
-                    'complete_alignment': False, 'committed_end': False,
+                    'complete_alignment': False, 'committed_target_end': False,
                     'commit_observed_at_ms': None, 'target_coverage': 0.0,
                     'target_units': 0, 'aligned_target_units': 0, 'reading_rank': -1,
                     'path_margin': None, 'boundary_margin': None,
@@ -118,7 +118,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                 associated = next((item for item in snapshots
                                    if item['alignment'].target_associated), None)
                 committed = next((item for item in snapshots
-                                  if item['alignment'].committed_end), None)
+                                  if item['alignment'].committed_target_end), None)
                 evidence = committed['alignment'] if committed is not None else final
                 cumulative_ms = sum(item['alignment_ms'] for item in snapshots)
                 max_ms = max(item['alignment_ms'] for item in snapshots)
@@ -143,7 +143,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                 'association_observed_at_ms': (round(associated['completed_at_ms'], 3)
                                                if associated is not None else None),
                 'complete_alignment': bool(final and final.complete_alignment),
-                'committed_end': committed is not None,
+                'committed_target_end': committed is not None,
                 'commit_capture_end_ms': (round(committed['capture_end_ms'], 3)
                                             if committed is not None else None),
                 'commit_observed_at_ms': (round(committed['completed_at_ms'], 3)
@@ -179,7 +179,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                                                    if o['case'] == case['id']
                                                    and o['cumulative_compute_ratio'] is not None]),
              'associated': sum(bool(o['target_associated']) for o in observations if o['case'] == case['id']),
-             'committed': sum(bool(o['committed_end']) for o in observations if o['case'] == case['id'])}
+             'committed': sum(bool(o['committed_target_end']) for o in observations if o['case'] == case['id'])}
             for case in cases
         ],
         'observations': observations,

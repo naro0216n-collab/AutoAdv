@@ -113,9 +113,9 @@ class NativeAlignmentLifecycleTests(unittest.TestCase):
             alignment = observations[0][1].alignment
             self.assertTrue(alignment.target_associated)
             self.assertTrue(alignment.complete_alignment)
-            self.assertTrue(alignment.committed_end)
+            self.assertTrue(alignment.committed_target_end)
             knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observations[0][1])
-            self.assertTrue(knowledge.target_end_confirmed)
+            self.assertTrue(knowledge.target_acoustic_completed)
             self.assertEqual(reports[0][1]['target_units'], 3)
             self.assertIn('align_ms', reports[0][1])
             self.assertNotIn('transcript', reports[0][1])
@@ -145,7 +145,7 @@ class NativeAlignmentLifecycleTests(unittest.TestCase):
             observation = observations[-1][1]
             self.assertEqual(observation.alignment.frame_ms, 20.0)
             self.assertEqual(observation.alignment.target_end_frame, 31)
-            self.assertEqual(observation.target_acoustic_end_ms, 1620)
+            self.assertEqual(observation.target_acoustic_completion_ms, 1620)
         finally:
             native.close()
 
@@ -163,9 +163,9 @@ class NativeAlignmentLifecycleTests(unittest.TestCase):
             wait_idle(native)
             alignment = observations[-1][1].alignment
             self.assertTrue(alignment.complete_alignment)
-            self.assertFalse(alignment.committed_end)
+            self.assertFalse(alignment.committed_target_end)
             knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observations[-1][1])
-            self.assertFalse(knowledge.target_end_confirmed)
+            self.assertFalse(knowledge.target_acoustic_completed)
         finally:
             native.close()
 
@@ -279,7 +279,7 @@ class NativeAlignmentLifecycleTests(unittest.TestCase):
             self.assertEqual(observations[-1][1].kind, 'transport')
             knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observations[-1][1])
             self.assertFalse(knowledge.target_associated)
-            self.assertFalse(knowledge.target_end_confirmed)
+            self.assertFalse(knowledge.target_acoustic_completed)
         finally:
             native.close()
 

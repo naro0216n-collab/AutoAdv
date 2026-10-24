@@ -15,8 +15,8 @@ from validation.real_game.trace import text_digest
 
 HERE = Path(__file__).resolve().parent
 PHASES = ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')
-# The independent voice-channel observer is needed to judge *native* early
-# advances, not to prove that LunaHook received text or TTS drained.
+# The independent clean-source oracle is needed to judge *native* early
+# advances; voice-channel lifecycle remains diagnostic only.
 VOICE_ORACLE_PHASES = frozenset(('accuracy', 'mixed', 'stress'))
 
 
@@ -81,29 +81,32 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                       attempts: dict, sent: dict, reasons: dict,
                       reference_start: int | None, scenario: Sequence[dict], *,
                       game_pid_by_session: dict, presentation_at: dict,
-                      native_end_estimates: dict, source_outputs: dict,
+                      native_acoustic_completion_estimates: dict, source_outputs: dict,
                       recovery_inputs: dict,
                       max_voice_hold_ms: int | None = None,
                       measurement_only: bool = False) -> dict:
     """Compare independent game playback with actual AutoAdv inputs.
 
-    The Ren'Py callback/polling stream is independent of the product. It is
-    observational, not an alternate source of audio or input for AutoAdv.
-    Game audio polling provides an *interval* for playback end, not sample-
-    precise Windows device-drain ground truth; uncertainty must remain visible.
+    The Ren'Py observer is independent of the product. It records channel
+    lifecycle only as diagnostics and derives a clean-source acoustic endpoint
+    from the isolated foreground WAV. That source endpoint remains evaluable
+    even when AutoAdv input itself stops the voice channel. It is a test oracle,
+    never product audio evidence or physical-speaker audibility ground truth.
     """
     errors: list[str] = []
     diagnostics: list[str] = []
     quality_issues: list[str] = []
     result = {'errors': errors, 'quality_issues': quality_issues,
               'diagnostics': diagnostics, 'latencies': {}, 'lines': [], 'early_inputs': 0,
-              'unverified_voice_ends': 0, 'indeterminate_voice_end': 0,
+              'unverified_source_acoustic_ends': 0, 'indeterminate_source_acoustic_end': 0,
               'overholds': 0, 'misattributions': 0,
-              'confirmed_voice_safe_inputs': 0, 'unaligned_lines': 0}
+              'confirmed_source_acoustic_safe_inputs': 0, 'unaligned_lines': 0}
     if not oracle_records:
         diagnostics.append('independent game playback evidence unavailable; voice safety unverified')
         return result
-    if oracle_records[0].get('event') != 'oracle_started' or oracle_records[0].get('version') != 1:
+    if (oracle_records[0].get('event') != 'oracle_started' or
+            oracle_records[0].get('version') != 2 or
+            oracle_records[0].get('endpoint_contract') != 'clean_source_pcm_rms_v1'):
         errors.append('invalid independent game playback observation header')
         return result
     pid = oracle_records[0].get('pid')
@@ -125,7 +128,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             if type(number) is not int or number <= 0 or number in lines:
                 errors.append('invalid independent game line sequence')
                 return result
-            lines[number] = {'start': record, 'voice_onsets': [], 'voice_ends': [],
+            lines[number] = {'start': record, 'voice_onsets': [], 'channel_inactive': [],
                              'interruptions': [], 'mix_channels': set()}
             ordered.append(number)
         elif event == 'mix_snapshot':
@@ -151,7 +154,7 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
                 lines[number]['mix_channels'].add(channel)
         elif event == 'mix_stopped':
             pass
-        elif event in ('voice_started', 'voice_ended', 'voice_interrupted'):
+        elif event in ('voice_started', 'voice_channel_inactive', 'voice_interrupted'):
             if number not in lines:
                 errors.append(f'game event without a line: {number}')
                 return result
@@ -159,12 +162,23 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             if at < line['start']['at_ns']:
                 errors.append(f'game event predates line: {number}')
             if event == 'voice_started':
+                endpoint = record.get('source_acoustic_end_at_ns')
+                uncertainty = record.get('source_acoustic_uncertainty_ms')
+                file_end = record.get('source_file_end_at_ns')
+                if endpoint is not None and (type(endpoint) is not int or endpoint <= 0):
+                    errors.append(f'invalid source acoustic endpoint: {number}')
+                if uncertainty is not None and (type(uncertainty) not in (int, float) or uncertainty < 0):
+                    errors.append(f'invalid source endpoint uncertainty: {number}')
+                if file_end is not None and (type(file_end) is not int or file_end <= 0):
+                    errors.append(f'invalid source file endpoint: {number}')
+                if type(endpoint) is int and type(file_end) is int and endpoint > file_end:
+                    errors.append(f'source acoustic endpoint exceeds file endpoint: {number}')
                 line['voice_onsets'].append(record)
-            elif event == 'voice_ended':
-                if (type(record.get('last_active_at_ns')) is not int or
-                        record['last_active_at_ns'] > at):
-                    errors.append(f'bad game playback endpoint interval: {number}')
-                line['voice_ends'].append(record)
+            elif event == 'voice_channel_inactive':
+                last_active = record.get('last_channel_active_at_ns')
+                if type(last_active) is not int or last_active > at:
+                    errors.append(f'bad game voice-channel inactivity interval: {number}')
+                line['channel_inactive'].append(record)
             elif event == 'voice_interrupted':
                 line['interruptions'].append(record)
     # Align *each* game dialogue using only independently observed source text
@@ -200,21 +214,25 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
         strict_native = (utterances[key].get('advance_mode') == 'audio' and
                          not utterances[key].get('use_tts'))
         voice_onsets = line['voice_onsets']
-        voice_ends = line['voice_ends']
+        channel_inactive = line['channel_inactive']
         interruptions = line['interruptions']
-        # A voice lifecycle belongs to one game line from start until observed
-        # end/replacement.  Multiple starts, interruptions, or an end for a
-        # different file make the endpoint ambiguous; never pick the first end
-        # and silently certify it as the current line's voice.
-        lifecycle_end = None
-        lifecycle_ambiguous = bool(interruptions) or len(voice_onsets) > 1 or len(voice_ends) > 1
-        if len(voice_onsets) == 1 and len(voice_ends) == 1 and not lifecycle_ambiguous:
-            if voice_onsets[0].get('file') == voice_ends[0].get('file'):
-                lifecycle_end = voice_ends[0]
-            else:
-                lifecycle_ambiguous = True
-        elif voice_ends and not voice_onsets:
-            lifecycle_ambiguous = True
+        # Source acoustic timing is fixed when one foreground WAV begins and
+        # therefore survives channel interruption/inactivity caused by the very
+        # AutoAdv input being evaluated. Multiple foreground starts on one game
+        # line remain ambiguous; do not select a convenient source.
+        source_onset = voice_onsets[0] if len(voice_onsets) == 1 else None
+        source_ambiguous = len(voice_onsets) > 1
+        if source_onset is not None and actual_input is not None:
+            # A replacement strictly before AutoAdv input means the game/source
+            # lifecycle changed independently, so the planned source endpoint is
+            # no longer a valid safety oracle for that input. Replacements at or
+            # after the input do not erase the counterfactual natural endpoint.
+            if any(item['at_ns'] < actual_input for item in interruptions):
+                source_ambiguous = True
+        source_end_at = (source_onset.get('source_acoustic_end_at_ns')
+                         if source_onset is not None else None)
+        source_uncertainty_ms = (source_onset.get('source_acoustic_uncertainty_ms')
+                                 if source_onset is not None else None)
         origin = (key[0], utterances[key].get('source'),
                   utterances[key].get('hook_sequence'), utterances[key].get('raw_hash'))
         if len(voice_onsets) == 1:
@@ -270,52 +288,56 @@ def audit_game_oracle(oracle_records: Sequence[dict] | None,
             detail['outcome'] = ('validation_recovery_input'
                                  if key in recovery_inputs else 'no_autoadv_input')
         elif strict_native:
-            # Each sampled end is an interval (last audible sample, first
-            # inactive sample], not an exact source-audio termination timestamp.
-            # Preserve the signed latency to the first inactive observation as
-            # a diagnostic; do not use it to classify overlap as success/failure.
-            end = lifecycle_end
-            if end is not None:
-                ms = _signed_elapsed_ms(end['at_ns'], actual_input)
-                result['latencies'].setdefault('game_voice_end_to_input_ms', []).append(ms)
-                detail['game_end_to_input_ms'] = ms
-                if (decision := presentation_at.get(key)) is not None:
-                    result['latencies'].setdefault('game_voice_end_to_decision_ms', []).append(
-                        _signed_elapsed_ms(end['at_ns'], decision))
-                if (estimated := native_end_estimates.get(key)) is not None:
-                    result['latencies'].setdefault('game_voice_end_to_native_estimate_ms', []).append(
-                        _signed_elapsed_ms(end['at_ns'], estimated))
-            if end and actual_input < end['last_active_at_ns']:
-                result['early_inputs'] += 1
-                detail['outcome'] = 'early_input'
-                issue = f'input while the game voice was still playing: {key}'
-                quality_issues.append(issue)
-                if not measurement_only:
-                    errors.append(issue)
-            elif lifecycle_ambiguous:
-                result['unverified_voice_ends'] += 1
-                detail['outcome'] = 'voice_end_unverified'
-                diagnostics.append(f'ambiguous independent game voice lifecycle for input: {key}')
-            elif not end:
-                result['unverified_voice_ends'] += 1
-                detail['outcome'] = 'voice_end_unverified'
-                diagnostics.append(f'voice-end not independently observed for input: {key}')
-            elif actual_input < end['at_ns']:
-                result['indeterminate_voice_end'] += 1
-                detail['outcome'] = 'voice_end_indeterminate'
-                # An ambiguous interval cannot count as a safe advance, but it
-                # must not be called a demonstrated early input either.
-                diagnostics.append(f'input within voice-end observer uncertainty interval: {key}')
+            # Safety is judged against the isolated foreground source's acoustic
+            # endpoint, not against Ren'Py channel inactivity. The latter can be
+            # caused by this same input and is retained only as a diagnostic.
+            if len(channel_inactive) == 1:
+                channel_ms = _signed_elapsed_ms(channel_inactive[0]['at_ns'], actual_input)
+                result['latencies'].setdefault('game_voice_channel_inactive_to_input_ms', []).append(channel_ms)
+                detail['game_voice_channel_inactive_to_input_ms'] = channel_ms
+            if source_ambiguous:
+                result['unverified_source_acoustic_ends'] += 1
+                detail['outcome'] = 'source_acoustic_end_unverified'
+                diagnostics.append(f'ambiguous independent foreground source for input: {key}')
+            elif (source_onset is None or type(source_end_at) is not int or
+                  type(source_uncertainty_ms) not in (int, float)):
+                result['unverified_source_acoustic_ends'] += 1
+                detail['outcome'] = 'source_acoustic_end_unverified'
+                diagnostics.append(f'clean-source acoustic endpoint unavailable for input: {key}')
             else:
-                ms = detail['game_end_to_input_ms']
-                if (ms is not None and max_voice_hold_ms is not None
-                        and ms > max_voice_hold_ms):
-                    result['overholds'] += 1
-                    detail['outcome'] = 'overheld'
-                    diagnostics.append(f'observed voice-end-to-input latency {ms:.0f}ms exceeds diagnostic reference: {key}')
+                uncertainty_ns = int(source_uncertainty_ms * 1_000_000)
+                lower = source_end_at - uncertainty_ns
+                upper = source_end_at + uncertainty_ns
+                ms = _signed_elapsed_ms(source_end_at, actual_input)
+                result['latencies'].setdefault('source_acoustic_end_to_input_ms', []).append(ms)
+                detail['source_acoustic_end_to_input_ms'] = ms
+                detail['source_acoustic_uncertainty_ms'] = source_uncertainty_ms
+                if (decision := presentation_at.get(key)) is not None:
+                    result['latencies'].setdefault('source_acoustic_end_to_decision_ms', []).append(
+                        _signed_elapsed_ms(source_end_at, decision))
+                if (estimated := native_acoustic_completion_estimates.get(key)) is not None:
+                    result['latencies'].setdefault('source_acoustic_end_to_product_completion_ms', []).append(
+                        _signed_elapsed_ms(source_end_at, estimated))
+                if actual_input < lower:
+                    result['early_inputs'] += 1
+                    detail['outcome'] = 'early_input'
+                    issue = f'input before independent source acoustic endpoint: {key}'
+                    quality_issues.append(issue)
+                    if not measurement_only:
+                        errors.append(issue)
+                elif actual_input <= upper:
+                    result['indeterminate_source_acoustic_end'] += 1
+                    detail['outcome'] = 'source_acoustic_end_indeterminate'
+                    diagnostics.append(f'input within source acoustic endpoint uncertainty: {key}')
                 else:
-                    detail['outcome'] = 'voice_end_confirmed_then_input'
-                    result['confirmed_voice_safe_inputs'] += 1
+                    if (ms is not None and max_voice_hold_ms is not None and ms > max_voice_hold_ms):
+                        result['overholds'] += 1
+                        detail['outcome'] = 'overheld'
+                        diagnostics.append(
+                            f'source-acoustic-end-to-input latency {ms:.0f}ms exceeds diagnostic reference: {key}')
+                    else:
+                        detail['outcome'] = 'source_acoustic_end_then_input'
+                        result['confirmed_source_acoustic_safe_inputs'] += 1
         else:
             detail['outcome'] = ('native_voice_not_required_by_text_or_tts_policy'
                                  if want_voice else 'input_without_foreground_voice')
@@ -410,10 +432,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     presentation_at: dict[tuple, int] = {}
     audio_started_at: dict[tuple, int] = {}
     audio_completed_at: dict[tuple, int] = {}
-    native_end_estimates: dict[tuple, int] = {}
-    native_onset_estimates: dict[tuple, int] = {}
-    native_end_sources: dict[tuple, str] = {}
-    native_end_estimate_sources: dict[tuple, str] = {}
+    native_acoustic_completion_estimates: dict[tuple, int] = {}
+    native_acoustic_onset_estimates: dict[tuple, int] = {}
+    native_acoustic_completion_sources: dict[tuple, str] = {}
+    native_acoustic_completion_estimate_sources: dict[tuple, str] = {}
     alignment_counts: dict[tuple, int] = {}
     out_of_scope_utterances: set[tuple] = set()
     post_collection_utterance: dict | None = None
@@ -521,23 +543,23 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                         measured['tts_playback_ms'].append(duration)
         elif event == 'native_voice_knowledge':
             associated = record.get('target_associated')
-            ended = record.get('target_end_confirmed')
-            source = record.get('end_source', '')
+            ended = record.get('target_acoustic_completed')
+            source = record.get('completion_source', '')
             if type(associated) is not bool or type(ended) is not bool:
                 product_issue(f'invalid native voice knowledge: {key}')
             elif ended and not associated:
-                product_issue(f'native end knowledge without target association: {key}')
+                product_issue(f'native acoustic completion knowledge without target association: {key}')
             else:
                 if associated:
                     audio_started_at.setdefault(key, at)
                 if ended:
                     if not isinstance(source, str) or not source:
-                        product_issue(f'native end knowledge lacks provenance: {key}')
+                        product_issue(f'native acoustic completion knowledge lacks provenance: {key}')
                     audio_completed_at[key] = at
                     methods[key] = audio_methods.get(session, '')
-                    native_end_sources[key] = source
+                    native_acoustic_completion_sources[key] = source
                     native.add(key)
-        elif event == 'native_voice_end_estimate':
+        elif event == 'native_target_acoustic_completion_estimate':
             estimate, onset = record.get('estimated_at_ns'), record.get('onset_estimated_at_ns')
             evidence = record.get('evidence')
             # This is the product-side endpoint estimated by the same
@@ -547,14 +569,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                     estimate > at or estimate < 0 or
                     (onset is not None and (type(onset) is not int or onset < 0 or onset > estimate)) or
                     evidence != 'target_conditioned_alignment'):
-                product_issue(f'invalid native endpoint evidence: {key}')
-            elif key in native_end_estimates:
-                product_issue(f'duplicate native endpoint: {key}')
+                product_issue(f'invalid native acoustic completion evidence: {key}')
+            elif key in native_acoustic_completion_estimates:
+                product_issue(f'duplicate native acoustic completion estimate: {key}')
             else:
-                native_end_estimates[key] = estimate
-                native_end_estimate_sources[key] = evidence
+                native_acoustic_completion_estimates[key] = estimate
+                native_acoustic_completion_estimate_sources[key] = evidence
                 if onset is not None:
-                    native_onset_estimates[key] = onset
+                    native_acoustic_onset_estimates[key] = onset
         elif event == 'tts_result':
             if record.get('success') is True:
                 tts.add(key)
@@ -677,7 +699,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 product_issue(f'audio-judgment TTS requires playback drain: {key}')
         elif completion_reason == 'native':
             if key not in native:
-                product_issue(f'native completion lacks observed audio judgement end: {key}')
+                product_issue(f'native completion lacks observed target acoustic completion: {key}')
         elif completion_reason == 'uncertain_text_fallback':
             wait = u.get('text_wait_ms')
             if (u.get('uncertain_text_fallback') is not True or
@@ -691,8 +713,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if (key[0] not in readiness or key not in pcm or alignment_counts.get(key, 0) <= 0 or
                 methods.get(key) != audio_methods.get(key[0])):
             product_issue(f'native completion lacks matching real PCM and alignment evidence: {key}')
-        if native_end_sources.get(key) != native_end_estimate_sources.get(key):
-            product_issue(f'native endpoint provenance disagrees with knowledge: {key}')
+        if native_acoustic_completion_sources.get(key) != native_acoustic_completion_estimate_sources.get(key):
+            product_issue(f'native acoustic completion provenance disagrees with knowledge: {key}')
 
     hashes = [utterances[key].get('body_hash') for key in utterance_order]
     # A run may start from a known line in a larger game. It must not skip
@@ -766,12 +788,12 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         origin = (key[0], u.get('source'), u.get('hook_sequence'), u.get('raw_hash'))
         if (ms := _elapsed_ms(source_outputs.get(origin), timestamps.get(key))) is not None:
             durations.setdefault('hook_to_utterance_ms', []).append(ms)
-        if key in native_end_estimates:
-            if (ms := _signed_elapsed_ms(native_end_estimates[key], presentation_at.get(key))) is not None:
-                durations.setdefault('native_estimated_end_to_decision_ms', []).append(ms)
-            if (ms := _signed_elapsed_ms(native_end_estimates[key], attempts.get(key))) is not None:
-                durations.setdefault('native_estimated_end_to_input_ms', []).append(ms)
-            if (onset := native_onset_estimates.get(key)) is not None:
+        if key in native_acoustic_completion_estimates:
+            if (ms := _signed_elapsed_ms(native_acoustic_completion_estimates[key], presentation_at.get(key))) is not None:
+                durations.setdefault('native_acoustic_completion_to_decision_ms', []).append(ms)
+            if (ms := _signed_elapsed_ms(native_acoustic_completion_estimates[key], attempts.get(key))) is not None:
+                durations.setdefault('native_acoustic_completion_to_input_ms', []).append(ms)
+            if (onset := native_acoustic_onset_estimates.get(key)) is not None:
                 # Signed delta: negative means observed voice began before the HOOK.
                 source_time = source_outputs.get(origin)
                 if source_time is not None:
@@ -813,7 +835,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         game_evidence = audit_game_oracle(
             scoped_oracle, utterance_order, utterances, attempts, sent, reasons,
             start, scenario, game_pid_by_session=game_pid_by_session,
-            presentation_at=presentation_at, native_end_estimates=native_end_estimates,
+            presentation_at=presentation_at, native_acoustic_completion_estimates=native_acoustic_completion_estimates,
             source_outputs=source_outputs, recovery_inputs=recovery_inputs,
             max_voice_hold_ms=max_voice_hold_ms, measurement_only=measurement_only,
         )
@@ -869,8 +891,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
             'alignment_inference_count': alignment_counts.get(key, 0),
             'capture_transport': capture_summaries.get(key),
             'native_association_observed': key in audio_started_at,
-            'native_end_confirmed': key in native,
-            'native_end_estimate_ns': native_end_estimates.get(key),
+            'native_acoustic_complete': key in native,
+            'native_acoustic_completion_estimate_ns': native_acoustic_completion_estimates.get(key),
             'input_attempted': key in attempts,
             'input_sent': key in sent,
             'next_hook_observed': key in links,
@@ -884,8 +906,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
                 'mix_channels_observed', [])
             line_result['mix_environment_verified'] = game_evidence['lines'][offset].get(
                 'mix_environment_verified')
-            if 'game_end_to_input_ms' in game_evidence['lines'][offset]:
-                line_result['game_end_to_input_ms'] = game_evidence['lines'][offset]['game_end_to_input_ms']
+            if 'source_acoustic_end_to_input_ms' in game_evidence['lines'][offset]:
+                line_result['source_acoustic_end_to_input_ms'] = game_evidence['lines'][offset]['source_acoustic_end_to_input_ms']
         line_results.append(line_result)
 
     # Accuracy is a product-path measurement, not merely a progression count.
@@ -904,10 +926,10 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     collection_valid = not errors
     advancement_observed = bool(links)
     voice_safety_verified = (game_evidence is not None and
-        game_evidence['confirmed_voice_safe_inputs'] > 0 and
+        game_evidence['confirmed_source_acoustic_safe_inputs'] > 0 and
         not game_evidence['early_inputs'] and
-        not game_evidence['unverified_voice_ends'] and
-        not game_evidence['indeterminate_voice_end'] and
+        not game_evidence['unverified_source_acoustic_ends'] and
+        not game_evidence['indeterminate_source_acoustic_end'] and
         not game_evidence['misattributions'] and
         not game_evidence['unaligned_lines'] and
         len(game_evidence['lines']) == len(utterance_order)) if needs_oracle else None
@@ -926,7 +948,7 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         if line['advance_mode'] != 'audio' or line['use_tts']:
             safe_automatic_advances += 1
             continue
-        if line.get('game_outcome') in ('voice_end_confirmed_then_input', 'overheld',
+        if line.get('game_outcome') in ('source_acoustic_end_then_input', 'overheld',
                                               'no_foreground_voice_fallback'):
             safe_automatic_advances += 1
     def fraction(count: int, total: int) -> float | None:

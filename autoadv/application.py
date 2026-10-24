@@ -203,7 +203,7 @@ _PLAY_ISSUES = {
     'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ocr_unverified_change': ('OCRの変化を次の台詞と確認できないため自動送りを保留しています。', 'open_capture'),
     'ocr_failure': ('OCRで台詞を取得できないため、自動送りを保留しています。', 'open_capture'),
-    'native_end_unconfirmed_hold': ('原音の終了を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
+    'native_acoustic_unconfirmed_hold': ('対象台詞の音響完了を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_failure': ('ゲーム音声を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_unavailable_hold': ('音声判断を利用できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'tts_playback_failed': ('TTS再生に失敗したため、この台詞の自動送りを保留しています。', 'open_voice'),
@@ -791,7 +791,7 @@ class AutoAdvApplication:
         completed = self.controller.presentation_event(token, 'audio_deadline_elapsed')
         self._finish_presentation_transition(token, completed)
         if (not completed and
-                self.runtime_state().pause_reason == 'native_end_unconfirmed_hold'):
+                self.runtime_state().pause_reason == 'native_acoustic_unconfirmed_hold'):
             self._emit_native_capture_summary(token)
 
     @staticmethod
@@ -1213,34 +1213,34 @@ class AutoAdvApplication:
                 aligned_target_units=(a.aligned_target_units if a is not None else 0),
                 target_associated=(a.target_associated if a is not None else False),
                 complete_alignment=(a.complete_alignment if a is not None else False),
-                committed_end=(a.committed_end if a is not None else False),
+                committed_target_end=(a.committed_target_end if a is not None else False),
                 reading_rank=(a.reading_rank if a is not None else -1),
                 path_margin=(fit.path_margin if fit is not None else None),
                 boundary_margin=(fit.boundary_margin if fit is not None else None),
                 capture_start_ms=observation.capture_start_ms,
                 capture_end_ms=observation.capture_end_ms,
-                target_acoustic_end_ms=observation.target_acoustic_end_ms,
+                target_acoustic_completion_ms=observation.target_acoustic_completion_ms,
                 pcm_last_frame_ms=observation.pcm_last_frame_ms,
                 heartbeat_at_ms=observation.heartbeat_at_ms,
             )
 
             association_changed = (
                 previous.association is None and knowledge.association is not None)
-            end_changed = previous.end is None and knowledge.end is not None
-            if association_changed or end_changed:
+            completion_changed = previous.completion is None and knowledge.completion is not None
+            if association_changed or completion_changed:
                 self._emit_runtime_event(
                     'native_voice_knowledge', token,
                     target_associated=knowledge.target_associated,
-                    target_end_confirmed=knowledge.target_end_confirmed,
-                    end_source=(knowledge.end.source if knowledge.end is not None else ''))
-            if not end_changed or knowledge.end is None:
+                    target_acoustic_completed=knowledge.target_acoustic_completed,
+                    completion_source=(knowledge.completion.source if knowledge.completion is not None else ''))
+            if not completion_changed or knowledge.completion is None:
                 return
-            endpoint = knowledge.end
+            completion = knowledge.completion
             self._emit_telemetry(
-                'native_voice_end_estimate', token,
-                estimated_at_ns=endpoint.estimated_end_ms * 1_000_000,
-                evidence=endpoint.source)
-            completed = self.controller.native_voice_ended(token)
+                'native_target_acoustic_completion_estimate', token,
+                estimated_at_ns=completion.estimated_completion_ms * 1_000_000,
+                evidence=completion.source)
+            completed = self.controller.native_acoustic_completed(token)
             self._finish_presentation_transition(token, completed)
 
         def publish_observation(token: Token, observation: NativeAudioObservation) -> None:

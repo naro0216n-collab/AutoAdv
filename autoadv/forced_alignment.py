@@ -6,8 +6,9 @@ free speech and it does not decide whether AutoAdv should advance the game.
 
 Frames not assigned to target phones are *unaligned* frames.  They are not
 classified as silence, BGM, SE, or background speech.  Target identity and a
-committed acoustic tail are derived only from evidence inside the same CTC
-posterior/path provenance.
+committed *target-pronunciation* boundary are derived only from evidence inside
+the same CTC posterior/path provenance.  That boundary is not a voice-file or
+playback-channel EOF.
 """
 from __future__ import annotations
 
@@ -61,7 +62,7 @@ class TargetTimeAlignment:
     aligned_target_units: int = 0
     target_associated: bool = False
     complete_alignment: bool = False
-    committed_end: bool = False
+    committed_target_end: bool = False
     target_end_frame: int | None = None
     post_target_free_frames: int = 0
     fit: AlignmentFit = AlignmentFit()
@@ -94,7 +95,7 @@ class AlignmentPolicy:
     # from unrelated moments spread across a very long scene.
     max_internal_free_ms: float = 2000.0
     # A terminal path needs right context and must remain better than any later
-    # completion candidate in the same posterior before its end is committed.
+    # completion candidate in the same posterior before the target end is committed.
     right_context_ms: float = 140.0
     min_boundary_margin: float = 0.35
     reading_switch_margin: float = 0.50
@@ -338,7 +339,7 @@ def _candidate_alignment(log_probs: np.ndarray, phonemes: tuple[str, ...],
         aligned_target_units=supported_units,
         target_associated=associated,
         complete_alignment=complete,
-        committed_end=committed,
+        committed_target_end=committed,
         target_end_frame=target_end_frame,
         post_target_free_frames=trailing,
         fit=fit,

@@ -48,7 +48,7 @@ class Controller:
         self.presentation_reason: str | None = None
         self.text_elapsed = False
         self.tts_finished = False
-        self.native_end_confirmed = False
+        self.native_acoustic_complete = False
         self.audio_deadline_elapsed = False
         self.sent = False
         self.hold_reason: str | None = None
@@ -87,7 +87,7 @@ class Controller:
         self.external_transition_ns = 0
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
-        self.native_end_confirmed = False
+        self.native_acoustic_complete = False
         self.audio_deadline_elapsed = False
         self.hold_reason = reason
 
@@ -254,7 +254,7 @@ class Controller:
         self.completed = False
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
-        self.native_end_confirmed = False
+        self.native_acoustic_complete = False
         self.audio_deadline_elapsed = False
         self.sent = False
         self.awaiting_next = False
@@ -306,12 +306,12 @@ class Controller:
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
             self.audio_deadline_elapsed = True
-            if self.native_end_confirmed:
-                self._resolve_pause('native_end_unconfirmed_hold')
+            if self.native_acoustic_complete:
+                self._resolve_pause('native_acoustic_unconfirmed_hold')
                 return self._presentation_done('native')
             if u.uncertain_text_fallback:
                 return self._presentation_done('uncertain_text_fallback')
-            self.pause('native_end_unconfirmed_hold')
+            self.pause('native_acoustic_unconfirmed_hold')
             return False
         if event in ('native_unavailable', 'native_failed'):
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
@@ -323,21 +323,21 @@ class Controller:
         raise ValueError(f'unknown presentation event: {event}')
 
 
-    def native_voice_ended(self, token: Token) -> bool:
-        """Apply confirmed target-acoustic end knowledge to presentation.
+    def native_acoustic_completed(self, token: Token) -> bool:
+        """Apply confirmed target-correlated acoustic completion to presentation.
 
-        The Controller does not infer this fact from acoustic/transport observations. It
-        only consumes the positive knowledge supplied by the audio-knowledge
-        reducer and combines it with the active Utterance policy.
+        The Controller consumes the positive completion supplied by the audio
+        knowledge reducer; it does not reinterpret that evidence as physical
+        voice-file/channel EOF.
         """
         if token != self.token or self.sent or self.completed or not self.utterance:
             return False
         u = self.utterance
         if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
             return False
-        self.native_end_confirmed = True
+        self.native_acoustic_complete = True
         if self.hold_reason in {
-                'native_end_unconfirmed_hold',
+                'native_acoustic_unconfirmed_hold',
                 'native_audio_unavailable_hold',
                 'native_audio_failure'}:
             self.hold_reason = None

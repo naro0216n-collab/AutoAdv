@@ -54,7 +54,7 @@ def test_target_absent_cannot_become_associated_or_complete():
     result = aligner.align(chunks(30))
     assert not result.target_associated
     assert not result.complete_alignment
-    assert not result.committed_end
+    assert not result.committed_target_end
     assert result.rejection == 'insufficient_model_support'
 
 
@@ -67,7 +67,7 @@ def test_supported_prefix_associates_without_claiming_end():
     assert result.target_associated
     assert result.aligned_target_units == 3
     assert not result.complete_alignment
-    assert not result.committed_end
+    assert not result.committed_target_end
 
 
 def test_model_frame_stride_is_fixed_and_not_stretched_to_capture_duration():
@@ -93,7 +93,7 @@ def test_complete_target_at_capture_edge_does_not_commit_end():
     assert result.complete_alignment
     assert result.target_end_frame == 16
     assert result.post_target_free_frames == 0
-    assert not result.committed_end
+    assert not result.committed_target_end
 
 
 def test_complete_target_commits_only_after_same_path_has_right_context():
@@ -103,7 +103,7 @@ def test_complete_target_commits_only_after_same_path_has_right_context():
     result = aligner.align(chunks(30))
     assert result.target_associated
     assert result.complete_alignment
-    assert result.committed_end
+    assert result.committed_target_end
     assert result.target_end_frame == 16
     assert result.post_target_free_frames >= 7
     # Free spans are path ownership only; the type carries no silence/BGM label.
@@ -122,7 +122,7 @@ def test_later_terminal_phone_evidence_keeps_earlier_boundary_uncommitted():
     assert result.complete_alignment
     assert result.target_end_frame == 16
     assert result.fit.boundary_margin == 0.0
-    assert not result.committed_end  # later equally good completion leaves the boundary ambiguous
+    assert not result.committed_target_end  # later equally good completion leaves the boundary ambiguous
 
 
 def test_reading_candidate_can_win_only_on_model_evidence():
@@ -133,7 +133,7 @@ def test_reading_candidate_can_win_only_on_model_evidence():
     result = aligner.align(chunks(30))
     assert result.reading_rank == 1
     assert result.target_phonemes == ('a', 'd', 'c')
-    assert result.committed_end
+    assert result.committed_target_end
 
 
 def test_knowledge_accepts_only_committed_alignment_end_and_is_monotonic():
@@ -143,11 +143,11 @@ def test_knowledge_accepts_only_committed_alignment_end_and_is_monotonic():
     complete = aligner.align(chunks(30))
     observation = NativeAudioObservation(
         kind='alignment', alignment=complete, capture_start_ms=1000,
-        capture_end_ms=1600, target_acoustic_end_ms=1320)
+        capture_end_ms=1600, target_acoustic_completion_ms=1320)
     knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observation)
     assert knowledge.target_associated
-    assert knowledge.target_end_confirmed
-    assert knowledge.end.estimated_end_ms == 1320
+    assert knowledge.target_acoustic_completed
+    assert knowledge.completion.estimated_completion_ms == 1320
 
     absent_logits, _ = logits_with_phones((), frames=30)
     later = TargetConditionedAligner(Posterior(absent_logits, vocab), g2p=StaticG2P(('a', 'b', 'c')))
@@ -162,7 +162,7 @@ def test_transport_observation_never_manufactures_association_or_end():
                                          heartbeat_at_ms=1250)
     knowledge = reduce_native_voice_knowledge(NativeVoiceKnowledge(), observation)
     assert not knowledge.target_associated
-    assert not knowledge.target_end_confirmed
+    assert not knowledge.target_acoustic_completed
 
 
 class _FakeOnnxSession:
