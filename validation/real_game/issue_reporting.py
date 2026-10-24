@@ -195,8 +195,8 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         f"Requested: `{summary.get('phase_requested', '-')}` · "
         f"{summary.get('started_utc', '-')} → {summary.get('ended_utc', '-')}",
         "",
-        "| phase | observed/requested | collection | measurement | auto | safe | PCM | alignment | mix | native fg | recovery | early | overhold | misattr | error |",
-        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| phase | observed/requested | collection | measurement | auto | safe | PCM | alignment | mix | native fg | native early | fallback fg | fallback early | recovery | early | overhold | misattr | error |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for phase in summary.get("phases", ()):
         quality = phase.get("quality") if isinstance(phase.get("quality"), dict) else {}
@@ -210,6 +210,9 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
             f"{_metric(quality.get('alignment_observation_rate'))} | "
             f"{_metric(quality.get('mix_environment_observation_rate'))} | "
             f"{_metric(quality.get('foreground_native_completion_rate'))} | "
+            f"{_metric(quality.get('native_early_input_rate'))} | "
+            f"{_metric(quality.get('foreground_fallback_rate'))} | "
+            f"{_metric(quality.get('fallback_early_input_rate'))} | "
             f"{_metric(quality.get('recovery_rate'))} | {_metric(quality.get('early_input_rate'))} | "
             f"{_metric(quality.get('overhold_rate'))} | {_metric(quality.get('misattribution_rate'))} | "
             f"{_cell(phase.get('runner_error'))} |"
@@ -238,7 +241,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         if phase_name == "accuracy" and isinstance(report.get("line_results"), list):
             lines.extend((
                 "",
-                "| case | scene | speaker | environment | mix | outcome | completion | PCM | alignment | game | end→input ms |",
+                "| case | scene | speaker | environment | mix | outcome | completion | PCM | alignment | game | source end→input ms |",
                 "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- | ---: |",
             ))
             for line in report["line_results"]:
@@ -250,7 +253,7 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
                     f"{_cell(','.join(line.get('mix_channels_observed') or []))} | {_cell(line.get('outcome'))} | "
                     f"{_cell(line.get('completion_reason'))} | {_metric(line.get('pcm_observed'))} | "
                     f"{_metric(line.get('alignment_inference_count'))} | "
-                    f"{_cell(line.get('game_outcome'))} | {_metric(line.get('game_end_to_input_ms'))} |"
+                    f"{_cell(line.get('game_outcome'))} | {_metric(line.get('source_acoustic_end_to_input_ms'))} |"
                 )
         _limited_items(lines, "Quality issues", report.get("quality_issues"))
         _limited_items(lines, "Errors", report.get("errors"))

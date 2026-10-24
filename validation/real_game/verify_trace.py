@@ -959,6 +959,14 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
     foreground_native = sum(line.get('completion_reason') == 'native' for line in foreground_lines)
     foreground_fallback = sum(
         line.get('completion_reason') == 'uncertain_text_fallback' for line in foreground_lines)
+    native_completion_lines = [line for line in line_results
+                               if line.get('completion_reason') == 'native']
+    fallback_completion_lines = [line for line in line_results
+                                 if line.get('completion_reason') == 'uncertain_text_fallback']
+    native_early_inputs = sum(line.get('game_outcome') == 'early_input'
+                              for line in native_completion_lines)
+    fallback_early_inputs = sum(line.get('game_outcome') == 'early_input'
+                                for line in fallback_completion_lines)
     unvoiced_lines = [line for line in line_results if line.get('foreground_voice') is False]
     unvoiced_fallback = sum(
         line.get('completion_reason') == 'uncertain_text_fallback' for line in unvoiced_lines)
@@ -988,6 +996,8 @@ def validate(records: Sequence[dict], *, phase: str = 'mixed',
         'foreground_voice_cases': len(foreground_lines),
         'foreground_native_completion_rate': fraction(foreground_native, len(foreground_lines)),
         'foreground_fallback_rate': fraction(foreground_fallback, len(foreground_lines)),
+        'native_early_input_rate': fraction(native_early_inputs, len(native_completion_lines)),
+        'fallback_early_input_rate': fraction(fallback_early_inputs, len(fallback_completion_lines)),
         'unvoiced_cases': len(unvoiced_lines),
         'unvoiced_fallback_rate': fraction(unvoiced_fallback, len(unvoiced_lines)),
         'early_input_rate': rate(game_evidence['early_inputs']) if game_evidence is not None else None,

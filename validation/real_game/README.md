@@ -6,19 +6,25 @@ AutoAdv実経路で確認する対象は、LunaHookが受信した取得元と�
 
 ## 検証層
 
-### 1. 実録音NativeAudio契約
+### 1. NativeAudio局所契約
 
-実録音をProcess Loopback互換PCMへ変換し、AutoAdvの既存NativeAudioへ投入する局所契約である。ゲーム、Ren'Py、LunaHook、Windows入力を起動しない。
+NativeAudioのPCM provenance、世代失効、target-conditioned alignmentへの引き渡し、transport観測と音響完了の分離を局所契約として確認する。ゲーム、Ren'Py、LunaHook、Windows入力は起動しない。
 
 ```powershell
-python -m unittest validation.real_game.test_native_alignment_fixture -v
+python -m pytest -q tests/test_audio_lifecycle_contracts.py tests/test_domain_contracts.py
 ```
 
-これは音声判定の不変条件を確認するもので、実Process Loopback捕捉や実ゲーム自動送りの成立を証明しない。
+これは音声判断のDomain契約を確認するもので、実Process Loopback捕捉や実ゲーム自動送りの成立を証明しない。実録音はalignment benchmarkとWindows実機計測で扱う。
 
 ### 2. 検証基盤の契約
 
-fixture manifest、ゲームoracle、trace verifier、live-session adapter等は通常の単体契約として検証する。`validation/real_game` 全体への一括 `unittest discover` を自動進行精度実機計測として使用しない。検証器の単体契約が通ってもWindows実ゲーム計測済みとは扱わない。
+fixture manifest、ゲームoracle、trace verifier、live-session adapter等は計測システムの契約としてまとめて検証する。
+
+```powershell
+python -m pytest -q validation/real_game/test_measurement_contracts.py
+```
+
+この契約が通ってもWindows実ゲーム計測済みとは扱わない。
 
 ### 3. Hosted WindowsのHOOK・文字送り経路
 
