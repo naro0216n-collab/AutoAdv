@@ -2,6 +2,8 @@
 import os
 import unittest
 from unittest.mock import patch, Mock
+
+from tests.g2p_support import TEST_G2P
 from autoadv.game_windows import ProcessCandidate, WindowCandidate, find_game_windows, find_game_processes
 from autoadv.running_target_dialog import available_targets
 
@@ -94,7 +96,8 @@ class RunningTargetGuiTests(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
     def test_saved_window_is_auto_attached_without_detect_buttons(self):
@@ -131,7 +134,8 @@ class RunningTargetGuiTests(unittest.TestCase):
                 window.application.hook_host = None
                 window.close()
             return 0
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 

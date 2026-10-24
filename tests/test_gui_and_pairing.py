@@ -94,7 +94,8 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
@@ -147,7 +148,8 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
@@ -181,7 +183,8 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
@@ -213,7 +216,8 @@ class WindowsGuiInitialization(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
@@ -222,7 +226,8 @@ class WindowsGuiInitialization(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         from autoadv.gui import run_gui
         from autoadv.storage import Catalog
-        with patch('autoadv.gui.load', return_value=Catalog()):
+        with patch('autoadv.gui.load', return_value=Catalog()), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', return_value=0):
                 self.assertEqual(run_gui(), 0)
 
@@ -267,7 +272,8 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)
 
@@ -294,6 +300,7 @@ class TaskOrientedGuiContracts(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', inspect):
                 self.assertEqual(run_gui(), 0)

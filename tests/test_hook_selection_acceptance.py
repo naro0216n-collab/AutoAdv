@@ -139,7 +139,8 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
 
@@ -184,7 +185,8 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
 
@@ -245,7 +247,8 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
 
@@ -289,7 +292,8 @@ class HookCandidateGuiAcceptance(unittest.TestCase):
                 window.close()
             return 0
 
-        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'):
+        with patch('autoadv.gui.load', return_value=catalog), patch('autoadv.gui.save'), \
+             patch('autoadv.application.default_g2p', return_value=TEST_G2P):
             with patch.object(QApplication, 'exec', check_widgets):
                 self.assertEqual(run_gui(), 0)
 
