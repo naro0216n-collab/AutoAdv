@@ -11,9 +11,7 @@ from autoadv.utterance_progress import (
     VocalEvidenceSeries, VocalRecurrenceEvidence, VocalScoreSample, UtteranceProgressState,
     evaluate_audio_snapshot,
 )
-from autoadv.forced_alignment import (
-    OnnxPhoneCTCModel, TargetConditionedAligner, _BoundedContextPosteriorCache,
-)
+from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import HaqumeiG2P, PronunciationCandidate, count_reading_units, reading_units_from_candidates
 from autoadv.model import (ReplacementRule, SpeakerStyle, SPEAKER_NEWLINE_BODY_RULE, StructureRule,
                           build_speaker_caption, interpret, matching_structure_rule,
@@ -245,7 +243,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             series=(VocalEvidenceSeries(
                 source=source, frame_count=max(1, len(intervals) * 4),
                 active_count=len(intervals) * 4,
-                peak_probability=.9 if intervals else 0.0,
+                peak_score=.9 if intervals else 0.0,
                 active_intervals=tuple(intervals)),))
 
     def observation(*, lex=None, voc=None, rec=None, end=1600, lower=1000,
@@ -323,7 +321,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         start_ms=900, end_ms=2100,
         series=(VocalEvidenceSeries(
             source='speech', frame_count=20, active_count=0,
-            peak_probability=.08, active_threshold=.45, active_intervals=(),
+            peak_score=.08, active_score_threshold=.45, active_intervals=(),
             samples=tuple(
                 VocalScoreSample(900 + index * 60, .08, 900 + index * 60)
                 for index in range(20)
@@ -341,14 +339,14 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400))
     assert nonlex_active.state == UtteranceProgressState.ACTIVE
 
-    # Observer scores remain useful below the strong-positive threshold when
-    # they rise relative to that observer's own pre-boundary baseline.  This is
-    # a cut-risk measurement, not a source/ownership classification.
-    relative_vocal = HumanVocalEvidence(
+    # Integration does not create a second adaptive vocal detector from
+    # sub-threshold observer scores.  Coverage failures stay UNKNOWN until an
+    # observer actually supplies human-vocal support.
+    subthreshold_vocal = HumanVocalEvidence(
         start_ms=800, end_ms=1520,
         series=(VocalEvidenceSeries(
             source='nonlexical', frame_count=5, active_count=0,
-            peak_probability=.22, active_threshold=.45, active_intervals=(),
+            peak_score=.22, active_score_threshold=.45, active_intervals=(),
             samples=(
                 VocalScoreSample(900, .04, 700),
                 VocalScoreSample(980, .05, 780),
@@ -358,9 +356,8 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             ),
         ),),
     )
-    relative_active = evaluate_audio_snapshot(observation(
-        voc=relative_vocal, end=1520))
-    assert relative_active.state == UtteranceProgressState.ACTIVE
+    assert evaluate_audio_snapshot(observation(
+        voc=subthreshold_vocal, end=1520)).state == UtteranceProgressState.UNKNOWN
 
     # Receptive-field overlap across the causal boundary is not itself a new
     # event.  A steady inherited score remains UNKNOWN, while a post-boundary
@@ -370,7 +367,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         start_ms=800, end_ms=1200,
         series=(VocalEvidenceSeries(
             source='nonlexical', frame_count=4, active_count=0,
-            peak_probability=.30, active_threshold=.45, active_intervals=(),
+            peak_score=.30, active_score_threshold=.45, active_intervals=(),
             samples=(
                 VocalScoreSample(900, .30, 700),
                 VocalScoreSample(980, .30, 780),
@@ -386,7 +383,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         start_ms=800, end_ms=1200,
         series=(VocalEvidenceSeries(
             source='nonlexical', frame_count=4, active_count=1,
-            peak_probability=.55, active_threshold=.45, active_intervals=((1120, 1120),),
+            peak_score=.55, active_score_threshold=.45, active_intervals=((1120, 1120),),
             samples=(
                 VocalScoreSample(900, .30, 700),
                 VocalScoreSample(980, .30, 780),
@@ -466,54 +463,3 @@ def test_onnx_boundary_accepts_only_single_batch_posterior_shape():
     assert adapter(np.zeros((1, 4, 3), dtype=np.float32))._infer_waveform(waveform).shape == (4, 3)
     with pytest.raises(ValueError, match='unsupported logits shape'):
         adapter(np.zeros((2, 4, 3), dtype=np.float32))._infer_waveform(waveform)
-
-
-def test_target_independent_posterior_cache_reuses_stable_audio_cores():
-    calls = []
-
-    def infer_window(values):
-        calls.append(len(values))
-        # Match the pinned HuBERT frontend's fixed-stride shape: its first frame
-        # needs a small receptive field, then output advances every 320 samples.
-        frames = max(0, (len(values) - 400) // 320 + 1)
-        return np.zeros((frames, 3), dtype=np.float32)
-
-    cache = _BoundedContextPosteriorCache(
-        infer_window, labels=3, frame_stride_ms=20.0)
-    nine_seconds = np.zeros(9 * 16000, dtype=np.float32)
-    first = cache.infer(nine_seconds)
-    assert first.shape == (449, 3)
-    assert calls == [5 * 16000, 6 * 16000]
-
-    # Extending the same PCM does not rerun either stable prefix window.  Only
-    # the bounded provisional suffix is measured again.
-    extended = np.zeros(int(9.5 * 16000), dtype=np.float32)
-    second = cache.infer(extended)
-    assert second.shape == (474, 3)
-    assert calls == [5 * 16000, 6 * 16000, int(2.5 * 16000)]
-
-    # One immutable snapshot is reproducible entirely from measurement cache.
-    again = cache.infer(extended)
-    assert np.array_equal(second, again)
-    assert calls == [5 * 16000, 6 * 16000, int(2.5 * 16000)]
-
-    # Across broad snapshot lengths the stitched timeline has the same number
-    # of fixed-stride frames as one whole-window HuBERT frontend evaluation.
-    for half_seconds in range(1, 41):
-        samples = half_seconds * 8000
-        measured = cache.infer(np.zeros(samples, dtype=np.float32))
-        expected_frames = max(0, (samples - 400) // 320 + 1)
-        assert measured.shape == (expected_frames, 3)
-
-    # Core extraction also preserves the global fixed-stride frame order rather
-    # than merely producing the right shape.
-    def positional_window(values):
-        frames = max(0, (len(values) - 400) // 320 + 1)
-        positions = np.arange(frames, dtype=np.int64) * 320
-        column = values[positions] if frames else np.empty(0, dtype=np.float32)
-        return np.column_stack((column, column + 1, column + 2)).astype(np.float32)
-
-    positional = _BoundedContextPosteriorCache(
-        positional_window, labels=3, frame_stride_ms=20.0)
-    waveform = np.arange(13 * 16000, dtype=np.float32)
-    assert np.array_equal(positional.infer(waveform), positional_window(waveform))

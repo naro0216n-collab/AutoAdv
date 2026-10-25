@@ -172,7 +172,8 @@ try {
     $managedHelper = [string]$runtimeInfo.native.paths.helper_dll
     $managedAlignmentModel = [string]$runtimeInfo.native.paths.alignment_model
     $managedAlignmentVocab = [string]$runtimeInfo.native.paths.alignment_vocab
-    foreach ($required in @($python, $managedHelper, $managedAlignmentModel, $managedAlignmentVocab)) {
+    $managedHumanVocalModel = [string]$runtimeInfo.native.paths.human_vocal_model
+    foreach ($required in @($python, $managedHelper, $managedAlignmentModel, $managedAlignmentVocab, $managedHumanVocalModel)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "Standard AutoAdv runtime asset missing: $required"
         }
@@ -200,6 +201,17 @@ try {
                 $mediaRoot = Join-Path $cache 'media'
                 Invoke-Checked 'python' @('-m','validation.real_game.prepare_accuracy_assets',
                     '--cache',$mediaRoot,'--runtime',$runtime)
+                # Observer capacity is diagnostic evidence, not an accuracy gate. Run the
+                # same managed YAMNet/TEN-VAD stack on isolated fixture WAVs so a
+                # model-coverage failure can be distinguished from mix/fusion errors.
+                $vocalReport = Join-Path $session 'autoadv-human-vocal.result.json'
+                try {
+                    Invoke-Checked 'python' @('-m','validation.real_game.benchmark_human_vocal',
+                        '--voice-root',(Join-Path $runtime 'game\audio\voice'),
+                        '--model',$managedHumanVocalModel,'--output',$vocalReport)
+                } catch {
+                    Write-Warning "Human-vocal observer diagnostic failed: $($_.Exception.Message)"
+                }
             } catch {
                 $phaseError = "Accuracy setup failed: $($_.Exception.Message)"
                 Write-Warning $phaseError

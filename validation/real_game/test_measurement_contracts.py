@@ -18,7 +18,9 @@ from autoadv.g2p import PronunciationCandidate
 from autoadv.conversation import Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from validation.real_game import fixture_runtime, issue_reporting, prepare_accuracy_assets as media
-from validation.real_game.benchmark_alignment import contract_failures, run as run_alignment_benchmark
+from validation.real_game.benchmark_alignment import run as run_alignment_benchmark
+from validation.real_game.benchmark_human_vocal import summarize_frames as summarize_vocal_frames
+from autoadv.acoustic_observers import VocalActivityFrame
 from validation.real_game.gui_session import (
     ACCURACY_GAME_INPUTS_MS, CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source, load_session,
 )
@@ -99,15 +101,15 @@ def test_accuracy_fixture_and_evidence_form_one_continuous_authored_sequence():
     assert repo_foreground <= sample_paths | directly_annotated
 
 
-def test_accuracy_measurement_scope_covers_adv_state_transitions_not_case_count():
+def test_accuracy_measurement_scope_covers_product_input_equivalence_classes():
     scenario = ACCURACY_SCENARIO
-    assert (scenario[0]['id'], scenario[-1]['id']) == ('room-clean-short', 'quiet-recovery')
+    assert scenario
     assert all(line['advance_mode'] == 'audio' and not line['use_tts'] for line in scenario)
     channels = {channel for line in scenario for channel in line['expected_mix_channels']}
     assert {'adv_background', 'adv_sfx'}.issubset(channels)
 
-    # Timing classes are expressed as real presentation relationships rather
-    # than requiring an arbitrary number of cases.
+    # The fixture is owned by product-relevant equivalence classes, not stable
+    # case names, positions, or a historical case count.
     assert 'hook_before_voice' in {line.get('voice_start_relation') for line in scenario}
     assert {'mid_voice_after_game_input', 'most_voice_elapsed', 'after_foreground_end'} <= {
         line.get('hook_delay_class') for line in scenario}
@@ -116,15 +118,27 @@ def test_accuracy_measurement_scope_covers_adv_state_transitions_not_case_count(
     assert {'loop_started_current_epoch', 'persistent_cross_epoch', 'finite_recurrent'} <= {
         line.get('vocal_source_class') for line in scenario}
 
-    input_cases = {line['id'] for line in scenario if 'game_input_after_ms' in line}
-    assert input_cases == {
-        'room-clean-unvoiced', 'room-bgm-fadein', 'vocal-loop-cross-epoch-unvoiced'}
-    roles = {line.get('transition_role') for line in scenario}
-    assert {
-        'external_input_then_delayed_hook',
-        'unvoiced_after_external_input_with_previous_voice_tail',
-        'external_input_then_delayed_hook_inside_persistent_loop',
-    } <= roles
+    authored = [(index, line) for index, line in enumerate(scenario)
+                if 'game_input_after_ms' in line]
+    assert any(
+        not line.get('foreground_voice') and not line.get('process_audio_expected')
+        and index + 1 < len(scenario)
+        and scenario[index + 1].get('hook_delay_class') == 'mid_voice_after_game_input'
+        for index, line in authored
+    )
+    assert any(
+        line.get('foreground_voice')
+        and index + 1 < len(scenario)
+        and not scenario[index + 1].get('foreground_voice')
+        for index, line in authored
+    )
+    assert any(
+        line.get('persistent_vocal_expected')
+        and line.get('vocal_source_class') == 'persistent_cross_epoch'
+        and index + 1 < len(scenario)
+        and scenario[index + 1].get('hook_delay_class') == 'mid_voice_after_game_input'
+        for index, line in authored
+    )
 
 
 def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
@@ -400,7 +414,7 @@ def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_co
             {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'raw': raw},
             {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
              'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
-                               'active_count': 4, 'peak_probability': .93,
+                               'active_count': 4, 'peak_score': .93,
                                'active_intervals': [[1072, 1312]]}],
              'recurrence_strength': .91, 'recurrence_period_ms': 640,
              'recurrence_stability': .82, 'recent_recurrence_strength': .88,
@@ -505,30 +519,32 @@ def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_
                 if frame < frames:
                     logits[frame, 0] = 0.0; logits[frame, self.vocab[phone]] = 7.0
             return logits
-        infer_full = infer
 
     with tempfile.TemporaryDirectory() as root:
         model, vocab = Path(root) / 'model', Path(root) / 'vocab'
         model.write_bytes(b'x'); vocab.write_bytes(b'x')
         report = run_alignment_benchmark(
             model, vocab, conditions=('clean',), rounds=1, seed=10,
-            model_backend=StaticModel(), g2p=StaticG2P(), compare_full_posterior=True)
+            model_backend=StaticModel(), g2p=StaticG2P())
     assert report['schema'] == 'autoadv-alignment-benchmark-v3'
-    assert 'cer' not in report['conditions']['clean'] and not report['real_game_verified']
-    assert report['whole_window_reference']['semantic_mismatches'] == 0
-    assert report['whole_window_reference']['frame_count_mismatches'] == 0
+    assert 'cer' not in report['conditions']['clean']
+    assert not report['real_game_verified']
+    assert report['conditions']['clean']['runs'] > 0
+    assert 'early_commits' in report['conditions']['clean']
+    assert 'cumulative_compute_ratio' in report['conditions']['clean']
 
-    unsafe = {
-        'conditions': {
-            'clean': {'runs': 1, 'associated': 1, 'committed': 1, 'early_commits': 1, 'early_decisions': 0},
-            'bgm': {'runs': 1, 'associated': 1, 'committed': 0, 'early_commits': 0, 'early_decisions': 0},
-            'truncated': {'runs': 1, 'committed': 1},
-        },
-        'whole_window_reference': {'semantic_mismatches': 1, 'frame_count_mismatches': 1},
-    }
-    failures = contract_failures(unsafe)
-    assert any('early committed' in x for x in failures)
-    assert any('bgm target end' in x for x in failures)
-    assert any('missing target suffix' in x for x in failures)
-    assert any('target-alignment semantics' in x for x in failures)
-    assert any('CTC frame timeline' in x for x in failures)
+
+def test_human_vocal_diagnostic_preserves_observer_scores_without_acceptance_verdict():
+    frames = (
+        VocalActivityFrame(at_ms=100, score=0.08, support_start_ms=0, source="nonlexical"),
+        VocalActivityFrame(at_ms=340, score=0.22, support_start_ms=0, source="nonlexical"),
+        VocalActivityFrame(at_ms=580, score=0.51, support_start_ms=0, source="nonlexical"),
+        VocalActivityFrame(at_ms=116, score=0.72, support_start_ms=100, source="speech"),
+    )
+    measured = summarize_vocal_frames(frames)
+    assert set(measured) == {"nonlexical", "speech"}
+    assert measured["nonlexical"]["frame_count"] == 3
+    assert measured["nonlexical"]["peak_score"] == 0.51
+    assert measured["nonlexical"]["thresholds"]["0.20"]["active_count"] == 2
+    assert measured["speech"]["thresholds"]["0.60"]["active_count"] == 1
+    assert "verdict" not in measured

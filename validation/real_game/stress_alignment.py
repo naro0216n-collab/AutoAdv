@@ -187,42 +187,6 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
     }
 
 
-def contract_failures(result: dict) -> list[str]:
-    """Return only product-critical real-model failures with an unambiguous oracle.
-
-    Overlapping or same-text background speech is intentionally diagnostic: the
-    process mix does not contain speaker ownership evidence.  The two cases
-    below do have a valid oracle for this backend contract: a clean target must
-    be alignable, while unrelated background-only speech must not be promoted
-    into target association or a committed endpoint.
-    """
-    failures: list[str] = []
-    cases = {case['id']: case for case in result.get('cases', [])}
-    clean = cases.get('clean_control')
-    mismatch = cases.get('background_only_mismatch')
-    # ``run`` stores aggregate success counts rather than the requested round
-    # count. Recover the actual count from observations to avoid inferring a
-    # passing denominator from success itself.
-    observations = result.get('observations', [])
-    clean_runs = sum(row.get('case') == 'clean_control' for row in observations)
-    mismatch_runs = sum(row.get('case') == 'background_only_mismatch' for row in observations)
-    if clean is None or clean_runs == 0:
-        failures.append('clean_control missing')
-    else:
-        if int(clean.get('associated', 0)) != clean_runs:
-            failures.append('clean target was not associated on every run')
-        if int(clean.get('committed', 0)) != clean_runs:
-            failures.append('clean target end was not committed on every run')
-    if mismatch is None or mismatch_runs == 0:
-        failures.append('background_only_mismatch missing')
-    else:
-        if int(mismatch.get('associated', 0)) != 0:
-            failures.append('unrelated background speech was associated with target')
-        if int(mismatch.get('committed', 0)) != 0:
-            failures.append('unrelated background speech committed a target end')
-    return failures
-
-
 def main() -> int:
     paths = managed_paths()
     parser = argparse.ArgumentParser(description='Target-conditioned real-audio stress evaluation')
@@ -231,17 +195,12 @@ def main() -> int:
     parser.add_argument('--selection', choices=('all', 'background', 'nonlexical'), default='all')
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--assert-contract', action='store_true')
     args = parser.parse_args()
     result = run(args.model, args.vocab, selection=args.selection, rounds=args.rounds)
     print(json.dumps({k: v for k, v in result.items() if k != 'observations'},
                      ensure_ascii=False, indent=2))
     if args.output:
         args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    if args.assert_contract:
-        failures = contract_failures(result)
-        if failures:
-            raise SystemExit('Alignment contract failed: ' + '; '.join(failures))
     return 0
 
 

@@ -12,9 +12,7 @@ playback-channel EOF.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -440,113 +438,15 @@ def _downsample_48k_to_16k(mono_48k: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(filtered[::3], dtype=np.float32)
 
 
-class _BoundedContextPosteriorCache:
-    """Cache target-independent CTC measurements on stable audio cores.
-
-    HuBERT is bidirectional, so logits from a growing whole-window query cannot
-    be appended exactly: adding future PCM may change earlier outputs.  Instead
-    this measurement defines fixed cores with bounded left/right acoustic
-    context.  A core becomes immutable only after its right context exists; the
-    newest suffix remains provisional and is recomputed as PCM grows.  The
-    resulting frame timeline is deterministic for one PCM snapshot and old
-    stable cores never require another model invocation.
-    """
-
-    SAMPLE_RATE = 16_000
-    CORE_MS = 4_000
-    CONTEXT_MS = 1_000
-    MAX_WINDOWS = 256
-
-    def __init__(self, infer_window, *, labels: int, frame_stride_ms: float):
-        self._infer_window = infer_window
-        self.labels = int(labels)
-        self.frame_stride_ms = float(frame_stride_ms)
-        self._windows: OrderedDict[tuple[int, bytes], np.ndarray] = OrderedDict()
-        stride = int(round(self.frame_stride_ms * self.SAMPLE_RATE / 1000.0))
-        if stride <= 0:
-            raise ValueError("posterior frame stride must map to positive samples")
-        self.frame_stride_samples = stride
-        self.core_samples = self._aligned_samples(self.CORE_MS)
-        self.context_samples = self._aligned_samples(self.CONTEXT_MS)
-
-    def _aligned_samples(self, milliseconds: int) -> int:
-        raw = int(round(milliseconds * self.SAMPLE_RATE / 1000.0))
-        frames = max(1, int(round(raw / self.frame_stride_samples)))
-        return frames * self.frame_stride_samples
-
-    @staticmethod
-    def _digest(values: np.ndarray) -> bytes:
-        contiguous = np.ascontiguousarray(values, dtype=np.float32)
-        return hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).digest()
-
-    def _window(self, values: np.ndarray) -> np.ndarray:
-        if not values.size:
-            return np.empty((0, self.labels), dtype=np.float32)
-        key = (int(values.size), self._digest(values))
-        cached = self._windows.get(key)
-        if cached is not None:
-            self._windows.move_to_end(key)
-            return cached
-        logits = np.asarray(self._infer_window(values), dtype=np.float32)
-        if logits.ndim != 2 or logits.shape[1] != self.labels:
-            raise ValueError("alignment model returned unsupported logits shape")
-        self._windows[key] = logits
-        self._windows.move_to_end(key)
-        while len(self._windows) > self.MAX_WINDOWS:
-            self._windows.popitem(last=False)
-        return logits
-
-    def _slice(self, logits: np.ndarray, *, input_start: int,
-               output_start: int, output_end: int) -> np.ndarray:
-        relative_start = max(0, int(output_start) - int(input_start))
-        relative_end = max(relative_start, int(output_end) - int(input_start))
-        stride = self.frame_stride_samples
-        first = (relative_start + stride - 1) // stride
-        last = (relative_end + stride - 1) // stride
-        return logits[first:min(last, logits.shape[0])]
-
-    def infer(self, waveform: np.ndarray) -> np.ndarray:
-        values = np.ascontiguousarray(waveform, dtype=np.float32)
-        total = int(values.size)
-        if not total:
-            return np.empty((0, self.labels), dtype=np.float32)
-
-        pieces: list[np.ndarray] = []
-        core_start = 0
-        last_window: tuple[int, int, np.ndarray] | None = None
-        while core_start + self.core_samples + self.context_samples <= total:
-            core_end = core_start + self.core_samples
-            input_start = max(0, core_start - self.context_samples)
-            input_end = core_end + self.context_samples
-            logits = self._window(values[input_start:input_end])
-            pieces.append(self._slice(
-                logits, input_start=input_start,
-                output_start=core_start, output_end=core_end))
-            last_window = (input_start, input_end, logits)
-            core_start = core_end
-
-        if core_start < total:
-            # If a core became stable exactly at this frontier, its model window
-            # already reaches ``total`` and can also provide the provisional
-            # suffix without a duplicate invocation.  Otherwise only the
-            # bounded newest suffix is recomputed.
-            if last_window is not None and last_window[1] == total:
-                input_start, _input_end, logits = last_window
-            else:
-                input_start = max(0, core_start - self.context_samples)
-                logits = self._window(values[input_start:total])
-            pieces.append(self._slice(
-                logits, input_start=input_start,
-                output_start=core_start, output_end=total))
-
-        nonempty = [piece for piece in pieces if piece.size]
-        if not nonempty:
-            return np.empty((0, self.labels), dtype=np.float32)
-        return np.ascontiguousarray(np.concatenate(nonempty, axis=0), dtype=np.float32)
-
 
 class OnnxPhoneCTCModel:
-    """Phone-CTC adapter with a bounded-context target-independent posterior cache."""
+    """Phone-CTC adapter over one explicit PCM snapshot.
+
+    The pinned HuBERT backend is bidirectional rather than streaming.  Each
+    distinct snapshot is therefore evaluated as a whole; scheduler backpressure
+    is handled by NativeAudio instead of changing posterior semantics to make
+    incremental tests cheaper.
+    """
 
     frame_stride_ms = 20.0
 
@@ -575,9 +475,6 @@ class OnnxPhoneCTCModel:
             raise ValueError(
                 f"alignment vocabulary/model label mismatch: {expected_labels} != {output_shape[-1]}"
             )
-        self._posterior_cache = _BoundedContextPosteriorCache(
-            self._infer_waveform, labels=expected_labels,
-            frame_stride_ms=self.frame_stride_ms)
 
     @staticmethod
     def _waveform(chunks: tuple[PCMChunk, ...]) -> np.ndarray:
@@ -610,10 +507,5 @@ class OnnxPhoneCTCModel:
             raise ValueError("alignment model returned unsupported logits shape")
         return output
 
-    def infer_full(self, chunks: tuple[PCMChunk, ...]) -> np.ndarray:
-        """Reference whole-window posterior used by explicit model benchmarks."""
-        return self._infer_waveform(self._waveform(chunks))
-
     def infer(self, chunks: tuple[PCMChunk, ...]) -> np.ndarray:
-        waveform = self._waveform(chunks)
-        return self._posterior_cache.infer(waveform)
+        return self._infer_waveform(self._waveform(chunks))

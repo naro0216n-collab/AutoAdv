@@ -283,7 +283,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
             start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
                 source='speech', frame_count=20, active_count=16,
-                peak_probability=.95, active_intervals=((1050, 1490),)),)),
+                peak_score=.95, active_intervals=((1050, 1490),)),)),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000,
         target_attached_ms=1100))
     # Query callbacks may complete out of order. An older snapshot is telemetry,
@@ -345,7 +345,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
             start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
                 source='speech', frame_count=20, active_count=0,
-                peak_probability=0.0, active_intervals=()),)),
+                peak_score=0.0, active_intervals=()),)),
         recurrence=VocalRecurrenceEvidence()))
     assert fenced_app.runtime_state().completed
     assert fenced_app.runtime_state().presentation_reason == 'uncertain_text_fallback'

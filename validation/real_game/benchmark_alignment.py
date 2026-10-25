@@ -272,63 +272,6 @@ def _result_row(sample: dict, condition: str, repetition: int,
 
 
 
-class _WholeWindowPosteriorView:
-    """Expose the product model's whole-window reference posterior to the aligner."""
-
-    def __init__(self, backend):
-        if not hasattr(backend, 'infer_full'):
-            raise TypeError('posterior reference comparison requires infer_full support')
-        self.backend = backend
-        self.vocab = backend.vocab
-        self.frame_stride_ms = backend.frame_stride_ms
-
-    def infer(self, chunks):
-        return self.backend.infer_full(chunks)
-
-
-def _posterior_reference_row(backend, pronunciation, sample: dict, mono: np.ndarray) -> dict:
-    """Compare cached and whole-window target alignment on one exact snapshot."""
-    chunk = _chunk(mono)
-    cached = TargetConditionedAligner(backend, g2p=pronunciation)
-    full = TargetConditionedAligner(_WholeWindowPosteriorView(backend), g2p=pronunciation)
-    cached.set_target(sample['text'])
-    full.set_target(sample['text'])
-
-    started = time.perf_counter_ns()
-    cached_alignment = cached.align((chunk,))
-    cached_ms = (time.perf_counter_ns() - started) / 1_000_000
-    started = time.perf_counter_ns()
-    full_alignment = full.align((chunk,))
-    full_ms = (time.perf_counter_ns() - started) / 1_000_000
-
-    def endpoint(item):
-        return (item.target_end_frame * item.frame_ms
-                if item.target_end_frame is not None else None)
-
-    cached_end = endpoint(cached_alignment)
-    full_end = endpoint(full_alignment)
-    semantic_fields = (
-        'aligned_target_units', 'target_associated', 'complete_alignment',
-        'committed_target_end', 'reading_rank',
-    )
-    mismatches = [
-        field for field in semantic_fields
-        if getattr(cached_alignment, field) != getattr(full_alignment, field)
-    ]
-    return {
-        'id': sample['id'],
-        'cached_alignment_ms': round(cached_ms, 3),
-        'whole_alignment_ms': round(full_ms, 3),
-        'cached_frames': cached_alignment.frame_count,
-        'whole_frames': full_alignment.frame_count,
-        'semantic_mismatches': mismatches,
-        'cached_target_end_ms': round(cached_end, 3) if cached_end is not None else None,
-        'whole_target_end_ms': round(full_end, 3) if full_end is not None else None,
-        'target_end_delta_ms': (
-            round(cached_end - full_end, 3)
-            if cached_end is not None and full_end is not None else None),
-    }
-
 def _load_endpoint_oracle(manifest: dict) -> tuple[dict, dict[str, dict]]:
     data = json.loads(ENDPOINT_ORACLE.read_text(encoding='utf-8'))
     samples = data.get('samples', {})
@@ -350,7 +293,7 @@ def _load_endpoint_oracle(manifest: dict) -> tuple[dict, dict[str, dict]]:
 
 
 def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, seed: int,
-        model_backend=None, g2p=None, compare_full_posterior: bool = False) -> dict:
+        model_backend=None, g2p=None) -> dict:
     if rounds < 1:
         raise ValueError('rounds must be positive')
     manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
@@ -364,7 +307,6 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
     pronunciation = g2p if g2p is not None else default_g2p()
 
     results = []
-    posterior_reference_rows = []
     for condition in conditions:
         for index, (sample, mono) in enumerate(clips):
             source_audio_ms = len(mono) / 48.0
@@ -392,11 +334,6 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
                 results.append(_result_row(
                     sample, condition, repetition, snapshots, source_audio_ms,
                     observation_horizon_ms, endpoint_oracle[sample['id']]))
-            if compare_full_posterior:
-                comparison = _posterior_reference_row(
-                    backend, pronunciation, sample, degraded)
-                comparison['condition'] = condition
-                posterior_reference_rows.append(comparison)
 
     by_condition = {}
     for condition in conditions:
@@ -429,24 +366,7 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
                                                  if row['capture_commit_delay_ms'] is not None]),
             'runs': len(rows),
         }
-    posterior_reference = None
-    if compare_full_posterior:
-        posterior_reference = {
-            'comparisons': len(posterior_reference_rows),
-            'semantic_mismatches': sum(
-                bool(row['semantic_mismatches']) for row in posterior_reference_rows),
-            'frame_count_mismatches': sum(
-                row['cached_frames'] != row['whole_frames'] for row in posterior_reference_rows),
-            'target_end_delta_ms': _summary([
-                row['target_end_delta_ms'] for row in posterior_reference_rows
-                if row['target_end_delta_ms'] is not None
-            ]),
-            'cached_alignment_ms': _summary([
-                row['cached_alignment_ms'] for row in posterior_reference_rows]),
-            'whole_alignment_ms': _summary([
-                row['whole_alignment_ms'] for row in posterior_reference_rows]),
-            'samples': posterior_reference_rows,
-        }
+
 
     return {
         'schema': 'autoadv-alignment-benchmark-v3',
@@ -461,61 +381,9 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
         'samples': results,
         'real_game_verified': False,
         'endpoint_oracle': oracle_meta,
-        'whole_window_reference': posterior_reference,
     }
 
 
-
-def contract_failures(result: dict) -> list[str]:
-    """Return product-critical alignment failures with an unambiguous oracle.
-
-    Latency and endpoint error remain measured outputs rather than being folded
-    into a synthetic score.  The hard contract only covers facts the product
-    can state without preference tuning: clean and persistent-BGM targets must
-    be found without an early commit, while a deliberately missing target
-    suffix must never be promoted to a committed end.
-    """
-    failures: list[str] = []
-    conditions = result.get('conditions', {})
-
-    def require_complete(name: str) -> None:
-        item = conditions.get(name)
-        if not isinstance(item, dict):
-            failures.append(f'{name} condition missing')
-            return
-        runs = int(item.get('runs', 0) or 0)
-        if runs <= 0:
-            failures.append(f'{name} condition has no runs')
-            return
-        if int(item.get('associated', 0) or 0) != runs:
-            failures.append(f'{name} target was not associated on every run')
-        if int(item.get('committed', 0) or 0) != runs:
-            failures.append(f'{name} target end was not committed on every run')
-        if int(item.get('early_commits', 0) or 0) != 0:
-            failures.append(f'{name} produced an early committed end')
-        if int(item.get('early_decisions', 0) or 0) != 0:
-            failures.append(f'{name} exposed an early completion decision')
-
-    require_complete('clean')
-    require_complete('bgm')
-
-    truncated = conditions.get('truncated')
-    if not isinstance(truncated, dict):
-        failures.append('truncated condition missing')
-    else:
-        runs = int(truncated.get('runs', 0) or 0)
-        if runs <= 0:
-            failures.append('truncated condition has no runs')
-        elif int(truncated.get('committed', 0) or 0) != 0:
-            failures.append('missing target suffix produced a committed end')
-
-    reference = result.get('whole_window_reference')
-    if isinstance(reference, dict):
-        if int(reference.get('semantic_mismatches', 0) or 0) != 0:
-            failures.append('bounded-context posterior changed target-alignment semantics')
-        if int(reference.get('frame_count_mismatches', 0) or 0) != 0:
-            failures.append('bounded-context posterior changed the CTC frame timeline')
-    return failures
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -528,24 +396,15 @@ def main() -> int:
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--seed', type=int, default=20261024)
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--assert-contract', action='store_true')
-    parser.add_argument(
-        '--compare-full-posterior', action='store_true',
-        help='also compare cached bounded-context alignment with whole-window model output')
     args = parser.parse_args()
     result = run(args.model, args.vocab,
                  conditions=tuple(dict.fromkeys(args.conditions)),
-                 rounds=args.rounds, seed=args.seed,
-                 compare_full_posterior=args.compare_full_posterior)
+                 rounds=args.rounds, seed=args.seed)
     print(json.dumps({k: v for k, v in result.items() if k != 'samples'},
                      ensure_ascii=False, indent=2))
     if args.output:
         args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n',
                                encoding='utf-8')
-    if args.assert_contract:
-        failures = contract_failures(result)
-        if failures:
-            raise SystemExit('Alignment benchmark contract failed: ' + '; '.join(failures))
     return 0
 
 

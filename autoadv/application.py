@@ -1294,8 +1294,8 @@ class AutoAdvApplication:
                 'source': item.source,
                 'frame_count': item.frame_count,
                 'active_count': item.active_count,
-                'peak_probability': item.peak_probability,
-                'active_threshold': item.active_threshold,
+                'peak_score': item.peak_score,
+                'active_score_threshold': item.active_score_threshold,
                 'measurement_support_start_ms': (
                     min((sample.support_start_ms for sample in item.samples), default=None)),
                 'measurement_support_end_ms': (

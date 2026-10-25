@@ -80,10 +80,6 @@ class NativeAudio:
         self._inflight = False
         self._inflight_generation: int | None = None
         self._pending_inference: tuple[Token, int, int, TargetConditionedAligner, int] | None = None
-        # Target-specific measurement cache. This is provenance from a concrete
-        # PCM snapshot, not an utterance/event state. It is invalidated whenever
-        # the target changes.
-        self._lexical_measurement: LexicalProgressEvidence | None = None
         self._generation = 0
         self._closed = False
         self._capture_pcm_packets = 0
@@ -136,7 +132,6 @@ class NativeAudio:
         # to the newest target. Generation advances exactly once when ``begin``
         # attaches the next target.
         self._pending_inference = None
-        self._lexical_measurement = None
         self.token = None
         self.aligner = None
         self.causal_lower_bound_ms = None
@@ -186,7 +181,6 @@ class NativeAudio:
             self._generation += 1
             generation = self._generation
             self._pending_inference = None
-            self._lexical_measurement = None
             self.token = token
             self.aligner = aligner
             self.causal_lower_bound_ms = self._next_causal_lower_bound_ms
@@ -267,7 +261,7 @@ class NativeAudio:
         """Use a heartbeat only to request the newest already-captured snapshot."""
         if self._closed or self.token is None or self._last_pcm_end_ms < 0:
             return None
-        if self.aligner is not None and self._lexical_measurement is None:
+        if self.aligner is not None:
             if self._last_pcm_end_ms <= self._inference_at:
                 return None
             return self._request_alignment_locked(self._last_pcm_end_ms, queue_if_busy=True)
@@ -297,7 +291,7 @@ class NativeAudio:
             boundary = min(int(through_ms), self._last_pcm_end_ms)
             if boundary < 0:
                 return False
-            if (self.aligner is not None and self._lexical_measurement is None
+            if (self.aligner is not None
                     and boundary - self.window_start_ms >= self.MIN_AUDIO_MS):
                 item = self._request_alignment_locked(boundary, queue_if_busy=True)
             else:
@@ -384,7 +378,7 @@ class NativeAudio:
             kind="snapshot",
             capture_start_ms=self.window_start_ms,
             capture_end_ms=boundary,
-            lexical=self._lexical_measurement,
+            lexical=None,
             history_truncated=(
                 history_truncated or self._history_truncated_locked(self.window_start_ms)
             ),
@@ -402,14 +396,6 @@ class NativeAudio:
         if (self._closed or token != self.token or generation != self._generation
                 or aligner is not self.aligner):
             return None
-        # A completed target-conditioned measurement is a cache of one concrete
-        # PCM snapshot, not semantic state.  If newer PCM arrived while that
-        # measurement was in flight, assess the newer frontier from the cached
-        # lexical measurement plus fresh target-independent measurements rather
-        # than scheduling redundant CTC work.
-        if self._lexical_measurement is not None:
-            return self._feature_observation_locked(
-                token, generation, boundary, history_truncated=False)
         return self._start_alignment_locked(
             token, generation, boundary, aligner, requested_ns)
 
@@ -440,7 +426,7 @@ class NativeAudio:
         if not enough_pcm:
             return tuple(items)
 
-        if self.aligner is not None and self._lexical_measurement is None:
+        if self.aligner is not None:
             inference_due = (self._inference_at < 0
                              or chunk.at_ms - self._inference_at >= self.INFERENCE_INTERVAL_MS)
             if inference_due:
@@ -630,9 +616,6 @@ class NativeAudio:
                     # to rewrite this result's time frontier.
                     observation_end_ms = capture_end_ms
                     history_truncated = self._history_truncated_locked(capture_start_ms)
-                    if (lexical is not None and lexical.complete_alignment
-                            and lexical.committed_target_end):
-                        self._lexical_measurement = lexical
                     observation = self._build_observation_locked(
                         kind="snapshot", capture_start_ms=capture_start_ms,
                         capture_end_ms=observation_end_ms, lexical=lexical,
@@ -658,8 +641,8 @@ class NativeAudio:
                         "source": item.source,
                         "frame_count": item.frame_count,
                         "active_count": item.active_count,
-                        "peak_probability": round(item.peak_probability, 4),
-                        "active_threshold": item.active_threshold,
+                        "peak_score": round(item.peak_score, 4),
+                        "active_score_threshold": item.active_score_threshold,
                         "measurement_support_start_ms": min(
                             (sample.support_start_ms for sample in item.samples), default=None),
                         "measurement_support_end_ms": max(

@@ -23,7 +23,7 @@ from .utterance_progress import (
 
 @dataclass(frozen=True)
 class VocalActivityFrame:
-    """Probability that one observed time span contains human vocal activity.
+    """One observer score for human-vocal support over an input time span.
 
     ``support_start_ms`` is optional because low-latency VAD backends naturally
     report narrow frames, while event classifiers use a wider receptive field.
@@ -32,9 +32,10 @@ class VocalActivityFrame:
     """
 
     at_ms: int
-    probability: float
+    score: float
     support_start_ms: int | None = None
     source: str = "speech"
+    component_scores: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,7 @@ class AudioEventModel(Protocol):
 class TenVadActivityObserver:
     """Streaming TEN-VAD adapter for 48 kHz stereo Process Loopback PCM.
 
-    TEN-VAD is deliberately used only as a probability observer.  Its binary
+    TEN-VAD is deliberately used only as a score observer.  Its binary
     flag is not exposed as an utterance endpoint.
     """
 
@@ -110,7 +111,7 @@ class TenVadActivityObserver:
             frame_start = int(round(start_ms + index * hop_ms))
             frames.append(VocalActivityFrame(
                 at_ms=int(round(start_ms + (index + 1) * hop_ms)),
-                probability=max(0.0, min(1.0, float(probability))),
+                score=max(0.0, min(1.0, float(probability))),
                 support_start_ms=frame_start, source="speech",
             ))
 
@@ -217,13 +218,17 @@ class AudioSetHumanVocalObserver:
             scores = np.asarray(self.model.infer(self._waveform[start:end]), dtype=np.float32)
             if scores.ndim != 1 or scores.size < 521:
                 raise ValueError("human-vocal event model must return one 521-class score vector")
-            probability = max(float(scores[index]) for index in AUDIOSET_HUMAN_VOCAL_CLASSES)
+            human_scores = tuple(
+                max(0.0, min(1.0, float(scores[index])))
+                for index in AUDIOSET_HUMAN_VOCAL_CLASSES
+            )
             at_ms = int(round(self._start_ms + end * 1000.0 / self.SAMPLE_RATE))
             support_start = int(round(self._start_ms + start * 1000.0 / self.SAMPLE_RATE))
             frames.append(VocalActivityFrame(
                 at_ms=at_ms,
-                probability=max(0.0, min(1.0, probability)),
+                score=max(human_scores, default=0.0),
                 support_start_ms=support_start, source="nonlexical",
+                component_scores=human_scores,
             ))
             self._next_emit += self.HOP_SAMPLES
 
@@ -260,7 +265,7 @@ class AcousticObservationHistory:
     the requested time range.
     """
 
-    ACTIVE_PROBABILITY = {
+    ACTIVE_SCORE_THRESHOLD = {
         "speech": 0.45,
         "nonlexical": 0.45,
     }
@@ -392,12 +397,12 @@ class AcousticObservationHistory:
 
     @classmethod
     def _threshold(cls, source: str) -> float:
-        return float(cls.ACTIVE_PROBABILITY.get(source, 0.45))
+        return float(cls.ACTIVE_SCORE_THRESHOLD.get(source, 0.45))
 
     @staticmethod
     def _series_intervals(frames: list[VocalActivityFrame], *, start_ms: int,
                           end_ms: int, threshold: float) -> tuple[tuple[int, int], ...]:
-        active = [frame for frame in frames if frame.probability >= threshold]
+        active = [frame for frame in frames if frame.score >= threshold]
         if not active:
             return ()
         gaps = [b.at_ms - a.at_ms for a, b in zip(frames, frames[1:]) if b.at_ms > a.at_ms]
@@ -420,22 +425,23 @@ class AcousticObservationHistory:
         series: list[VocalEvidenceSeries] = []
         for source, frames in sorted(by_source.items()):
             threshold = self._threshold(source)
-            active_count = sum(frame.probability >= threshold for frame in frames)
+            active_count = sum(frame.score >= threshold for frame in frames)
             series.append(VocalEvidenceSeries(
                 source=source,
                 frame_count=len(frames),
                 active_count=active_count,
-                peak_probability=max((frame.probability for frame in frames), default=0.0),
-                active_threshold=threshold,
+                peak_score=max((frame.score for frame in frames), default=0.0),
+                active_score_threshold=threshold,
                 active_intervals=self._series_intervals(
                     frames, start_ms=start_ms, end_ms=end_ms, threshold=threshold),
                 samples=tuple(
                     VocalScoreSample(
                         at_ms=int(frame.at_ms),
-                        probability=float(frame.probability),
+                        score=float(frame.score),
                         support_start_ms=int(
                             frame.support_start_ms
                             if frame.support_start_ms is not None else frame.at_ms),
+                        component_scores=tuple(float(value) for value in frame.component_scores),
                     )
                     for frame in frames
                 ),
@@ -450,7 +456,7 @@ class AcousticObservationHistory:
         # every fingerprint.
         active_times = sorted(
             frame.at_ms for frame in self._vocal
-            if frame.probability >= self._threshold(frame.source)
+            if frame.score >= self._threshold(frame.source)
             and start_ms - self.LOW_VOCAL_REFERENCE_MS - 320 <= frame.at_ms <= end_ms + 320
         )
 

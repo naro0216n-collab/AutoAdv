@@ -20,8 +20,9 @@ class VocalScoreSample:
     """One observer score with the exact input support that produced it."""
 
     at_ms: int
-    probability: float
+    score: float
     support_start_ms: int
+    component_scores: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -30,15 +31,15 @@ class VocalEvidenceSeries:
 
     ``active_intervals`` is the observer's strong-positive view only.  ``samples``
     preserves the continuous scores and receptive-field provenance so the
-    snapshot reducer can reason about weaker relative changes without pretending
-    that different observers share one probability scale or one time resolution.
+    snapshot reducer can preserve model-local evidence without pretending that
+    different observers share one probability scale or one time resolution.
     """
 
     source: str
     frame_count: int
     active_count: int
-    peak_probability: float
-    active_threshold: float = 0.45
+    peak_score: float
+    active_score_threshold: float = 0.45
     active_intervals: tuple[tuple[int, int], ...] = ()
     samples: tuple[VocalScoreSample, ...] = ()
 
@@ -168,8 +169,6 @@ RECENT_LOOP_STRENGTH = 0.72
 LOOP_LEVEL_CONSISTENCY = 0.55
 MIN_LOOP_OBSERVATION_MS = 1200
 LOOP_REFERENCE_MARGIN = 0.06
-RELATIVE_VOCAL_MIN_RISE = 0.05
-RELATIVE_VOCAL_MAD_MULTIPLIER = 3.0
 
 
 def _vocal_chains(
@@ -198,29 +197,20 @@ class _VocalRiskChain:
 
 
 def _selected_risk_samples(
-    series: VocalEvidenceSeries, *, reference_before_ms: int | None,
+    series: VocalEvidenceSeries, *, observed_after_ms: int | None,
 ) -> tuple[VocalScoreSample, ...]:
-    """Select score rises inside one observer without inventing a shared scale."""
-    if not series.samples:
-        return ()
-    threshold = float(series.active_threshold)
-    if reference_before_ms is not None:
-        reference = [
-            sample.probability for sample in series.samples
-            if sample.at_ms < reference_before_ms
-        ][-128:]
-        if reference:
-            ordered = sorted(float(value) for value in reference)
-            median = ordered[len(ordered) // 2]
-            deviations = sorted(abs(value - median) for value in ordered)
-            mad = deviations[len(deviations) // 2] if deviations else 0.0
-            relative_threshold = median + max(
-                RELATIVE_VOCAL_MIN_RISE, RELATIVE_VOCAL_MAD_MULTIPLIER * mad)
-            threshold = min(threshold, relative_threshold)
+    """Return this observer's own strong-positive measurements.
+
+    Score scales stay observer-local.  Sub-threshold values remain factual
+    telemetry but are not promoted into human-vocal evidence by the reducer;
+    observer coverage problems must be solved at measurement/model level rather
+    than by a second adaptive detector hidden in integration logic.
+    """
+    threshold = float(series.active_score_threshold)
     return tuple(
         sample for sample in series.samples
-        if (reference_before_ms is None or sample.at_ms >= reference_before_ms)
-        and sample.probability >= threshold
+        if (observed_after_ms is None or sample.at_ms >= observed_after_ms)
+        and sample.score >= threshold
     )
 
 
@@ -232,15 +222,18 @@ def _series_risk_chains(
     chains: list[_VocalRiskChain] = []
     for series in vocal.series:
         selected = _selected_risk_samples(
-            series, reference_before_ms=reference_before_ms)
-        if not selected:
-            # Synthetic/domain tests and legacy observations may expose only the
-            # strong-positive intervals. Preserve their meaning without
-            # fabricating receptive-field provenance.
+            series, observed_after_ms=reference_before_ms)
+        if not series.samples:
+            # Synthetic/domain observations may expose only strong-positive
+            # intervals. Preserve that measurement form while applying the same
+            # temporal lower bound used for score samples.
             chains.extend(
                 _VocalRiskChain(series.source, start_ms, start_ms, end_ms)
                 for start_ms, end_ms in _vocal_chains(series.active_intervals)
+                if reference_before_ms is None or end_ms >= reference_before_ms
             )
+            continue
+        if not selected:
             continue
         all_times = [sample.at_ms for sample in series.samples]
         gaps = [b - a for a, b in zip(all_times, all_times[1:]) if b > a]
@@ -325,10 +318,9 @@ def _open_post_boundary_risk(
     candidates = [
         (chain.first_observed_ms, chain.last_observed_ms)
         for chain in _series_risk_chains(vocal, reference_before_ms=boundary_ms)
-        # A wide receptive field may cross the boundary, but a score rise is
-        # selected only relative to measurements from before that boundary.
-        # The rise can therefore protect against a new finite change without
-        # pretending the classifier pinpoints its physical onset.
+        # A wide receptive field may cross the boundary.  Treating a positive
+        # sample as cut-risk is conservative and does not assign source
+        # ownership; its exact support remains available on the measurement.
         if chain.first_observed_ms >= boundary_ms
         and capture_end_ms - chain.last_observed_ms < END_CONTEXT_MS
     ]
@@ -407,10 +399,10 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
                 state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end)
 
         # Physical endpoint confirmation is the conjunction of an independently
-        # established lexical end and the return of the target-connected,
-        # observer-relative vocal risk to its measured baseline.  A strong
-        # positive disappearing by itself is therefore insufficient: sub-threshold
-        # but elevated continuation remains ACTIVE above.
+        # established lexical end and closure of target-connected human-vocal
+        # support.  This path is valid only when the observer actually covered
+        # the event; a detector miss above returned UNKNOWN rather than being
+        # repaired here with an adaptive score threshold.
         return UtteranceProgress(
             state=UtteranceProgressState.ENDED,
             ended_at_ms=physical_risk_end,

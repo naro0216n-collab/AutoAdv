@@ -80,10 +80,12 @@ Windows実機計測のGitHub Issueは、チャット環境から解析できる�
 
 ## Alignment品質・stress計測
 
-既知本文のassociation率、固定clean-source annotationに対するlexical境界誤差、alignment未確認率、推論費用を測り、自動進行精度とは分離して扱う。full fileを一度だけalignせず、製品と同じ累積snapshot、単一workerの推論backpressure、PCM idle時の未解析tail drainを再生し、既知本文へどの範囲を対応付けたかを評価する。forced alignmentの`committed target end`はlexical/phonetic evidenceの品質値であり、human vocal event終了や`UtteranceProgress`成功とは扱わない。tail drainはheartbeatを音声終了証拠へ使わず、既に捕捉済みのPCMをforced alignmentへ渡すscheduler動作だけを再現する。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
+既知本文のassociation率、固定clean-source annotationに対するlexical境界誤差、alignment未確認率、推論費用を測り、自動進行精度とは分離して扱う。これらはmodel/backendの品質診断であり、association率やcommit率そのものを製品合格条件にはしない。full fileを一度だけalignせず、製品と同じ累積snapshot、単一workerの推論backpressure、PCM idle時の未解析tail drainを再生し、既知本文へどの範囲を対応付けたかを評価する。forced alignmentの`committed target end`はlexical/phonetic evidenceの品質値であり、human vocal event終了や`UtteranceProgress`成功とは扱わない。tail drainはheartbeatを音声終了証拠へ使わず、既に捕捉済みのPCMをforced alignmentへ渡すscheduler動作だけを再現する。`ALIGNMENT_ENDPOINT_ORACLE.json`は製品aligner出力を使わずclean source波形から固定した独立annotationであり、音声file端とは区別する。必要時にmanaged alignment runtimeを使ってWindows実機で明示実行する。
 
 ```powershell
-python -m validation.real_game.benchmark_alignment --conditions clean quiet noise clipped truncated bgm --rounds 2 --compare-full-posterior --output .\alignment-performance.json
+python -m validation.real_game.benchmark_alignment --conditions clean quiet noise clipped truncated bgm --rounds 2 --output .\alignment-performance.json
+
+`accuracy`実機runでは、同じmanaged YAMNet/TEN-VADをstaged fixtureの孤立WAVへ直接適用した`autoadv-human-vocal.result.json`も診断証拠として保存する。これはprocess mixやPresentation帰属を含まないobserver能力の測定であり、閾値や製品合否をfixtureから自動決定しない。実ゲームmixでの`native_audio_observation`と比較し、「observer自体が情報を出していない」のか「mix・統合・帰属で失われた」のかを分離するために使う。
 python -m validation.real_game.stress_alignment --selection all --rounds 2 --output .\alignment-stress.json
 ```
 
