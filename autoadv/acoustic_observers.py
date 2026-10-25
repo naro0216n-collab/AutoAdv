@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 import math
 
@@ -19,10 +20,16 @@ from .utterance_progress import HumanVocalEvidence, VocalRecurrenceEvidence
 
 @dataclass(frozen=True)
 class VocalActivityFrame:
-    """Frame-level probability that the process mix contains human vocal activity."""
+    """Probability that one observed time span contains human vocal activity.
+
+    ``support_start_ms`` is optional because low-latency VAD backends naturally
+    report point-like frames, while event classifiers report a wider receptive
+    field.  The span is observation provenance, not an inferred utterance span.
+    """
 
     at_ms: int
     probability: float
+    support_start_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -36,11 +43,16 @@ class AcousticFingerprint:
     at_ms: int
     values: tuple[float, ...]
     vocal_relevance: float
+    rms: float
     background_relevance: float = 0.0
 
 
 class VocalActivityObserver(Protocol):
     def observe(self, chunk: PCMChunk) -> tuple[VocalActivityFrame, ...]: ...
+
+
+class AudioEventModel(Protocol):
+    def infer(self, waveform: np.ndarray) -> np.ndarray: ...
 
 
 class TenVadActivityObserver:
@@ -86,15 +98,147 @@ class TenVadActivityObserver:
             pcm16 = np.ascontiguousarray(
                 np.clip(raw, -1.0, 1.0) * 32767.0, dtype=np.int16)
             probability, _flag = self.backend.process(pcm16)
+            frame_start = int(round(start_ms + index * hop_ms))
             frames.append(VocalActivityFrame(
                 at_ms=int(round(start_ms + (index + 1) * hop_ms)),
                 probability=max(0.0, min(1.0, float(probability))),
+                support_start_ms=frame_start,
             ))
 
         consumed = full * self.HOP_SIZE
         self._tail = np.ascontiguousarray(waveform[consumed:], dtype=np.float32)
         self._tail_start_ms = start_ms + consumed * 1000.0 / self.SAMPLE_RATE
         return tuple(frames)
+
+
+# YAMNet / AudioSet classes that directly describe a human vocal or respiratory
+# sound.  Crowd/hubbub classes are intentionally excluded: a process mix can
+# contain them as background, and current-event ownership remains a separate
+# temporal/lexical inference problem.
+AUDIOSET_HUMAN_VOCAL_CLASSES = tuple(range(0, 35)) + tuple(range(36, 46))
+
+
+class OnnxAudioSetModel:
+    """Small ONNX adapter for the pinned raw-waveform YAMNet conversion."""
+
+    def __init__(self, model: str | Path, *, num_threads: int = 1):
+        path = Path(model)
+        if not path.is_file():
+            raise FileNotFoundError(f"configured human-vocal model required: {path}")
+        import onnxruntime as ort
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = max(1, int(num_threads))
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            str(path), sess_options=options, providers=['CPUExecutionProvider'])
+        inputs = self.session.get_inputs()
+        outputs = self.session.get_outputs()
+        if len(inputs) != 1 or not outputs:
+            raise ValueError("unsupported human-vocal ONNX signature")
+        self.input_name = inputs[0].name
+        self.output_name = outputs[0].name
+
+    def infer(self, waveform: np.ndarray) -> np.ndarray:
+        values = np.ascontiguousarray(waveform, dtype=np.float32)
+        if values.ndim != 1 or not values.size:
+            raise ValueError("human-vocal model requires one non-empty mono waveform")
+        scores = np.asarray(
+            self.session.run([self.output_name], {self.input_name: values})[0],
+            dtype=np.float32)
+        if scores.ndim != 2 or scores.shape[1] != 521 or not scores.shape[0]:
+            raise ValueError("human-vocal model returned unsupported AudioSet scores")
+        return scores[-1]
+
+
+class AudioSetHumanVocalObserver:
+    """Streaming non-lexical human-vocal observation from AudioSet scores.
+
+    YAMNet's receptive field is wider than TEN-VAD's speech frames.  Each output
+    therefore carries its factual input span instead of pretending to provide a
+    precise voice onset/endpoint.  Short inputs are intentionally allowed; the
+    pinned model zero-pads them and this keeps cries/pants observable before a
+    full 0.96 s patch has accumulated.
+    """
+
+    SAMPLE_RATE = 16000
+    WINDOW_SAMPLES = 15_360  # 0.96 s, YAMNet's native receptive field.
+    HOP_SAMPLES = 3_840      # 0.24 s product observation cadence.
+    GAP_TOLERANCE_MS = 40.0
+
+    def __init__(self, model: AudioEventModel):
+        self.model = model
+        self._waveform = np.empty(0, dtype=np.float32)
+        self._start_ms: float | None = None
+        self._next_emit = self.HOP_SAMPLES
+
+    @staticmethod
+    def _waveform_16k(chunk: PCMChunk) -> np.ndarray:
+        if (chunk.sample_rate, chunk.channels, chunk.sample_width_bytes) != (48000, 2, 4):
+            raise ValueError("AudioSet observer requires 48 kHz stereo float32 PCM")
+        stereo = np.frombuffer(chunk.frames, dtype="<f4").reshape(-1, 2)
+        mono = stereo.mean(axis=1, dtype=np.float32)
+        return _downsample_48k_to_16k(mono)
+
+    def _reset(self, waveform: np.ndarray, start_ms: float) -> None:
+        self._waveform = np.ascontiguousarray(waveform, dtype=np.float32)
+        self._start_ms = float(start_ms)
+        self._next_emit = self.HOP_SAMPLES
+
+    def observe(self, chunk: PCMChunk) -> tuple[VocalActivityFrame, ...]:
+        waveform = self._waveform_16k(chunk)
+        if not waveform.size:
+            return ()
+        chunk_start = float(chunk.at_ms) - chunk.duration_ms
+        if self._start_ms is None or not self._waveform.size:
+            self._reset(waveform, chunk_start)
+        else:
+            expected = self._start_ms + self._waveform.size * 1000.0 / self.SAMPLE_RATE
+            if abs(chunk_start - expected) > self.GAP_TOLERANCE_MS:
+                # Absence of process-loopback PCM is not fabricated as silence.
+                # Start a new contiguous observation span instead.
+                self._reset(waveform, chunk_start)
+            else:
+                self._waveform = np.concatenate((self._waveform, waveform))
+
+        assert self._start_ms is not None
+        frames: list[VocalActivityFrame] = []
+        while self._next_emit <= self._waveform.size:
+            end = self._next_emit
+            start = max(0, end - self.WINDOW_SAMPLES)
+            scores = np.asarray(self.model.infer(self._waveform[start:end]), dtype=np.float32)
+            if scores.ndim != 1 or scores.size < 521:
+                raise ValueError("human-vocal event model must return one 521-class score vector")
+            probability = max(float(scores[index]) for index in AUDIOSET_HUMAN_VOCAL_CLASSES)
+            at_ms = int(round(self._start_ms + end * 1000.0 / self.SAMPLE_RATE))
+            support_start = int(round(self._start_ms + start * 1000.0 / self.SAMPLE_RATE))
+            frames.append(VocalActivityFrame(
+                at_ms=at_ms,
+                probability=max(0.0, min(1.0, probability)),
+                support_start_ms=support_start,
+            ))
+            self._next_emit += self.HOP_SAMPLES
+
+        # Keep only what the next receptive field can still consume. This is a
+        # streaming resource bound, not a semantic time boundary.
+        removable = max(0, self._next_emit - self.WINDOW_SAMPLES - self.HOP_SAMPLES)
+        if removable:
+            self._waveform = np.ascontiguousarray(self._waveform[removable:], dtype=np.float32)
+            self._start_ms += removable * 1000.0 / self.SAMPLE_RATE
+            self._next_emit -= removable
+        return tuple(frames)
+
+
+class HumanVocalActivityObserver:
+    """One product observer combining speech and non-lexical vocal evidence."""
+
+    def __init__(self, event_model, *, speech_observer: VocalActivityObserver | None = None):
+        self.speech_observer = speech_observer or TenVadActivityObserver()
+        model = event_model if hasattr(event_model, 'infer') else OnnxAudioSetModel(event_model)
+        self.event_observer = AudioSetHumanVocalObserver(model)
+
+    def observe(self, chunk: PCMChunk) -> tuple[VocalActivityFrame, ...]:
+        frames = self.speech_observer.observe(chunk) + self.event_observer.observe(chunk)
+        return tuple(sorted(frames, key=lambda frame: (frame.at_ms, frame.support_start_ms or frame.at_ms)))
 
 
 class AcousticObservationHistory:
@@ -142,6 +286,9 @@ class AcousticObservationHistory:
         values = self._spectral_fingerprint(chunk)
         if values is None:
             return
+        raw = np.frombuffer(chunk.frames, dtype="<f4").reshape(-1, 2)
+        mono = raw.mean(axis=1, dtype=np.float32)
+        rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)))) if mono.size else 0.0
         relevance = max(0.0, min(1.0, float(vocal_relevance)))
         at_ms = int(chunk.at_ms)
         background = [
@@ -155,6 +302,7 @@ class AcousticObservationHistory:
         )
         self._fingerprints.append(AcousticFingerprint(
             at_ms=at_ms, values=values, vocal_relevance=relevance,
+            rms=rms,
             background_relevance=background_relevance,
         ))
         self._trim(at_ms)
@@ -208,43 +356,53 @@ class AcousticObservationHistory:
         join_gap = max(32.0, nominal_gap * 2.0)
         intervals: list[tuple[int, int]] = []
         for frame in active:
-            if intervals and frame.at_ms - intervals[-1][1] <= join_gap:
-                intervals[-1] = (intervals[-1][0], frame.at_ms)
+            observed_start = max(start_ms, int(
+                frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms))
+            observed_end = min(end_ms, frame.at_ms)
+            if intervals and observed_start - intervals[-1][1] <= join_gap:
+                intervals[-1] = (intervals[-1][0], max(intervals[-1][1], observed_end))
             else:
-                intervals.append((frame.at_ms, frame.at_ms))
+                intervals.append((observed_start, observed_end))
 
         active_across_boundary = False
-        post_causal_onset_ms = active[0].at_ms if active else None
+        post_causal_onset_ms = intervals[0][0] if intervals else None
         if causal_boundary_ms is not None:
-            pre_start = max(0, causal_boundary_ms - 1500)
-            pre = [f for f in self._vocal if pre_start <= f.at_ms < causal_boundary_ms]
-            before = pre[-1] if pre else None
-            after = next((f for f in frames if f.at_ms >= causal_boundary_ms), None)
-            if before is not None and after is not None:
-                active_across_boundary = bool(
-                    before.probability >= self.ACTIVE_PROBABILITY
-                    and after.probability >= self.ACTIVE_PROBABILITY
-                    and after.at_ms - before.at_ms <= join_gap
-                )
-
-            previous_active = active_across_boundary
             post_causal_onset_ms = None
-            for frame in frames:
-                if frame.at_ms < causal_boundary_ms:
+            active_across_boundary = any(
+                left < causal_boundary_ms <= right for left, right in intervals)
+
+            # The requested summary window can start exactly at the causal
+            # boundary. Preserve one factual frame of preceding continuity so a
+            # speech stream already active before that boundary is not relabeled
+            # as a new onset merely because the reporting window was clipped.
+            if not active_across_boundary and intervals:
+                previous = next((
+                    frame for frame in reversed(self._vocal)
+                    if frame.at_ms < start_ms and frame.probability >= self.ACTIVE_PROBABILITY
+                ), None)
+                first_left, first_right = intervals[0]
+                if (previous is not None and previous.at_ms < causal_boundary_ms <= first_right
+                        and first_left - previous.at_ms <= join_gap):
+                    active_across_boundary = True
+
+            for left, right in intervals:
+                if right < causal_boundary_ms:
                     continue
-                current_active = frame.probability >= self.ACTIVE_PROBABILITY
-                if current_active and not previous_active:
-                    post_causal_onset_ms = frame.at_ms
-                    break
-                previous_active = current_active
+                if left < causal_boundary_ms <= right:
+                    continue
+                if (active_across_boundary and intervals and
+                        (left, right) == intervals[0]):
+                    continue
+                post_causal_onset_ms = max(left, causal_boundary_ms)
+                break
 
         return HumanVocalEvidence(
             start_ms=int(start_ms), end_ms=int(end_ms), frame_count=len(frames),
             mean_probability=float(np.mean(probabilities)) if probabilities else 0.0,
             peak_probability=max(probabilities, default=0.0),
             active_fraction=(len(active) / len(frames)) if frames else 0.0,
-            first_active_ms=(active[0].at_ms if active else None),
-            last_active_ms=(active[-1].at_ms if active else None),
+            first_active_ms=(intervals[0][0] if intervals else None),
+            last_active_ms=(intervals[-1][1] if intervals else None),
             active_intervals=tuple(intervals),
             active_across_causal_boundary=active_across_boundary,
             post_causal_onset_ms=post_causal_onset_ms,
@@ -265,11 +423,15 @@ class AcousticObservationHistory:
         spectral = cls._spectral_similarity(a.values, b.values)
         vocal = min(a.vocal_relevance, b.vocal_relevance)
         background = max(a.background_relevance, b.background_relevance)
+        if max(a.rms, b.rms) <= 1e-12:
+            level = 1.0
+        else:
+            level = min(a.rms, b.rms) / max(a.rms, b.rms)
         # A moderate overlap is expected whenever the foreground is mixed over
         # BGM. Only a spectrum that is strongly explained by low-vocal audio
         # should collapse recurrence evidence.
         foreground = 1.0 - background ** 3
-        return spectral * vocal * max(0.0, foreground)
+        return spectral * vocal * max(0.0, foreground) * level
 
     def recurrence(self, *, start_ms: int, end_ms: int) -> VocalRecurrenceEvidence:
         current = [f for f in self._fingerprints

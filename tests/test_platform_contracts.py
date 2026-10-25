@@ -281,6 +281,19 @@ def test_managed_native_alignment_asset_is_verified_before_use():
         assert Path(result['notice']).is_file()
         assert json.loads(Path(paths.alignment_vocab).read_text()) == native_runtime.ALIGNMENT_VOCAB
 
+        vocal_model = Path(paths.human_vocal_model)
+        vocal_model.parent.mkdir(parents=True)
+        vocal_payload = b'human-vocal-model'
+        vocal_model.write_bytes(vocal_payload)
+        vocal_sha = native_runtime.hashlib.sha256(vocal_payload).hexdigest()
+        with patch.object(native_runtime, 'HUMAN_VOCAL_MODEL_SHA256', vocal_sha), \
+             patch.object(native_runtime, 'HUMAN_VOCAL_MODEL_BYTES', len(vocal_payload)):
+            vocal = native_runtime.prepare_human_vocal_model(
+                runtime_root=root, allow_download=False)
+        assert vocal['model']['source'] == 'existing'
+        assert vocal['license'] == 'Apache-2.0'
+        assert Path(vocal['notice']).is_file()
+
 
 @pytest.mark.skipif(importlib.util.find_spec('PySide6') is None, reason='Qt runtime required')
 def test_gui_can_construct_without_game_or_external_server():

@@ -9,7 +9,9 @@ import numpy as np
 import pytest
 
 from autoadv.audio_buffer import PCMChunk
-from autoadv.acoustic_observers import AcousticObservationHistory, VocalActivityFrame
+from autoadv.acoustic_observers import (
+    AcousticObservationHistory, HumanVocalActivityObserver, VocalActivityFrame,
+)
 from autoadv.conversation import Token
 from autoadv.g2p import PronunciationCandidate
 from autoadv.native_audio import NativeAudio
@@ -58,6 +60,24 @@ class BlockingPosterior(StaticPosterior):
         self.started.set()
         self.release.wait(2)
         return self.logits
+
+
+class StaticAudioEventModel:
+    def __init__(self, *, class_index=19, probability=.9):
+        self.class_index = class_index
+        self.probability = probability
+
+    def infer(self, _waveform):
+        scores = np.zeros(521, dtype=np.float32)
+        scores[self.class_index] = self.probability
+        return scores
+
+
+class SilentSpeechObserver:
+    def observe(self, chunk):
+        return (VocalActivityFrame(
+            at_ms=int(chunk.at_ms), probability=0.0,
+            support_start_ms=int(round(chunk.at_ms - chunk.duration_ms))),)
 
 
 def stereo_chunk(end_ms: int, duration_ms: int = 600, value: float = 0.0) -> PCMChunk:
@@ -230,6 +250,15 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         native.history.push(short, target_pid=42)
         native.feed(short)
         assert not any(item.kind == 'acoustic' for _, item in observations)
+
+        # A policy boundary can fence PCM that is already captured without
+        # interpreting a transport heartbeat as acoustic evidence.
+        assert native.observation_fence(token) == 1200
+        assert native.request_observation_through(token, 1200)
+        wait_idle(native)
+        acoustic = [item for _, item in observations if item.kind == 'acoustic']
+        assert len(acoustic) == 1 and acoustic[0].capture_end_ms == 1200
+
         native.health(CaptureHealth(1300, True, '', pcm_frames=0))
         wait_idle(native)
         assert len([item for _, item in observations if item.kind == 'acoustic']) == 1
@@ -240,6 +269,26 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
     finally:
         native.close()
+
+
+def test_human_vocal_observer_preserves_nonlexical_event_support_beside_speech_vad():
+    observer = HumanVocalActivityObserver(
+        StaticAudioEventModel(class_index=19, probability=.9),
+        speech_observer=SilentSpeechObserver())
+    history = AcousticObservationHistory()
+    frames = observer.observe(stereo_chunk(1240, 480, value=.05))
+    history.add_vocal(frames)
+
+    # Crying is observable even though the independent speech VAD contributes
+    # no activity.  The wider classifier reports its factual receptive-field
+    # span so downstream logic does not invent a point-like onset.
+    event_frames = [frame for frame in frames if frame.probability >= .45]
+    assert event_frames
+    assert event_frames[0].support_start_ms == 760
+    vocal = history.summarize_vocal(start_ms=760, end_ms=1240, causal_boundary_ms=900)
+    assert vocal.peak_probability == pytest.approx(.9)
+    assert vocal.active_across_causal_boundary
+    assert vocal.post_causal_onset_ms is None
 
 
 def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
@@ -297,3 +346,16 @@ def test_vocal_recurrence_discounts_periodicity_already_explained_by_background_
     assert background_only.strength == 0.0
     assert vocal_over_background.strength > background_only.strength
     assert vocal_over_background.period_ms is not None
+
+    # Recurrence is evidence for a stable continuing structure, not merely for
+    # repeated spectral shape.  A decaying finite event must therefore carry
+    # weaker recurrence evidence than level-stable repetition of the same sound.
+    stable = AcousticObservationHistory()
+    decaying = AcousticObservationHistory()
+    for at_ms, amplitude in zip((1800, 2200, 2600, 3000), (0.5, 0.5, 0.5, 0.5)):
+        stable.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)), vocal_relevance=.9)
+    for at_ms, amplitude in zip((1800, 2200, 2600, 3000), (0.5, 0.41, 0.32, 0.24)):
+        decaying.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)), vocal_relevance=.9)
+    stable_recurrence = stable.recurrence(start_ms=1500, end_ms=3000)
+    decaying_recurrence = decaying.recurrence(start_ms=1500, end_ms=3000)
+    assert stable_recurrence.strength > decaying_recurrence.strength

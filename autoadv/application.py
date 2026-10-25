@@ -569,6 +569,11 @@ class AutoAdvApplication:
         self._native_audio_epoch = 0
         self._progress_token: Token | None = None
         self._progress_estimator = UtteranceProgressEstimator()
+        # Application-only synchronization fence: when the text-derived fallback
+        # boundary arrives, Controller must see acoustic evidence through PCM
+        # that was already captured at that instant.  This does not extend the
+        # policy deadline or create another conversation state.
+        self._audio_deadline_fence: tuple[Token, int] | None = None
         self._ocr_worker: OCRWorker | None = None
         self._ocr_epoch = 0
         self._voice_jobs: VoiceJobs | None = None
@@ -786,13 +791,14 @@ class AutoAdvApplication:
         else:
             self._notify_runtime()
 
-    def _audio_deadline_due(self, token: Token) -> None:
-        """Apply the one text-derived fallback boundary to current voice state."""
+    def _apply_audio_deadline(self, token: Token) -> bool:
+        """Apply the existing fallback policy after captured audio is current."""
         state = self.runtime_state()
         utterance = state.utterance
         if (token != state.token or utterance is None or utterance.use_tts or
                 utterance.advance_mode.value != 'audio' or state.completed or state.sent):
-            return
+            return False
+        self._audio_deadline_fence = None
         self._emit_runtime_event('audio_deadline_elapsed', token,
                                  text_wait_ms=utterance.text_wait_ms)
         completed = self.controller.presentation_event(token, 'audio_deadline_elapsed')
@@ -800,6 +806,30 @@ class AutoAdvApplication:
         if (not completed and self.runtime_state().pause_reason in {
                 'audio_judgment_unknown_hold', 'audio_judgment_active_hold'}):
             self._emit_native_capture_summary(token)
+        return completed
+
+    def _audio_deadline_due(self, token: Token) -> None:
+        """Fence fallback against PCM already captured at the policy boundary.
+
+        The text-derived deadline remains unchanged.  If native capture already
+        contains newer PCM than the integrated progress evidence, defer only
+        until that factual PCM snapshot has been analyzed.  No future audio is
+        awaited and no silence/voice fact is inferred from transport state.
+        """
+        state = self.runtime_state()
+        utterance = state.utterance
+        if (token != state.token or utterance is None or utterance.use_tts or
+                utterance.advance_mode.value != 'audio' or state.completed or state.sent):
+            return
+        native = self._native_audio
+        fence_ms = native.observation_fence(token) if native is not None else None
+        progress = self._progress_estimator.progress
+        if (fence_ms is not None and
+                (progress.evidence_at_ms is None or progress.evidence_at_ms < fence_ms)):
+            self._audio_deadline_fence = (token, fence_ms)
+            native.request_observation_through(token, fence_ms)
+            return
+        self._apply_audio_deadline(token)
 
     def _start_presentation(self, token: Token) -> int:
         """Start every presentation effect for the current immutable Utterance.
@@ -815,6 +845,7 @@ class AutoAdvApplication:
         self._cancel_native_audio()
         self._progress_token = token
         self._progress_estimator = UtteranceProgressEstimator()
+        self._audio_deadline_fence = None
         external_ns = self.controller.take_external_transition(token)
         if external_ns:
             if self._native_audio is not None:
@@ -842,6 +873,7 @@ class AutoAdvApplication:
         self._hook_output_group.clear()
         self._progress_token = None
         self._progress_estimator = UtteranceProgressEstimator()
+        self._audio_deadline_fence = None
         self.controller.close(reason)
         self._notify_runtime()
 
@@ -1224,8 +1256,19 @@ class AutoAdvApplication:
         # judgment and never reinterprets individual acoustic evidence.
         completed = self.controller.apply_utterance_progress(token, progress)
         if completed:
+            self._audio_deadline_fence = None
             self._finish_presentation_transition(token, True)
-        return completed
+            return True
+
+        pending = self._audio_deadline_fence
+        if pending is not None and pending[0] == token:
+            fence_ms = pending[1]
+            if progress.evidence_at_ms is not None and progress.evidence_at_ms >= fence_ms:
+                return self._apply_audio_deadline(token)
+            native = self._native_audio
+            if native is not None:
+                native.request_observation_through(token, fence_ms)
+        return False
 
     def _start_native_audio(self, profile: Profile) -> bool:
         """Own process audio capture and publish only semantic/telemetry events."""
@@ -1237,6 +1280,7 @@ class AutoAdvApplication:
         native_helper = profile.native_helper or managed.helper_dll
         alignment_model = profile.alignment_model or managed.alignment_model
         alignment_vocab = profile.alignment_vocab or managed.alignment_vocab
+        human_vocal_model = managed.human_vocal_model
         state = self.runtime_state()
         if state.target is None:
             return False
@@ -1305,6 +1349,7 @@ class AutoAdvApplication:
                 native = NativeAudio(
                     pid, Path(native_helper), Path(alignment_model), Path(alignment_vocab),
                     publish_error,
+                    human_vocal_model=Path(human_vocal_model),
                     on_pcm=publish_pcm,
                     on_inference=publish_inference,
                     on_observation=publish_observation)
@@ -1355,7 +1400,13 @@ class AutoAdvApplication:
         utterance = state.utterance
         if utterance.advance_mode.value != 'audio' or utterance.use_tts:
             return False
+        pending_deadline = (self._audio_deadline_fence is not None and
+                            self._audio_deadline_fence[0] == token)
         completed = self._runtime_presentation_event(token, 'native_failed')
+        if pending_deadline and not completed:
+            # The capture/inference path can no longer satisfy the fence.  Apply
+            # the same configured fallback policy rather than stranding the line.
+            completed = self._apply_audio_deadline(token)
         if not utterance.uncertain_text_fallback:
             self._emit_native_capture_summary(token)
         return completed

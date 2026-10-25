@@ -15,7 +15,7 @@ import time
 
 import numpy as np
 
-from .acoustic_observers import AcousticObservationHistory, TenVadActivityObserver, VocalActivityObserver
+from .acoustic_observers import AcousticObservationHistory, HumanVocalActivityObserver, VocalActivityObserver
 from .audio_buffer import AudioHistory, PCMChunk
 from .conversation import Token
 from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
@@ -35,6 +35,7 @@ class NativeAudio:
     def __init__(self, pid: int, helper: Path, model: Path, vocab: Path,
                  on_error: Callable[[Token | None, str], None],
                  *, model_backend=None, g2p=None, clock=None,
+                 human_vocal_model: Path | None = None,
                  vocal_observer: VocalActivityObserver | None = None,
                  on_pcm: Callable[[Token, int], None] | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None,
@@ -47,7 +48,12 @@ class NativeAudio:
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=self.RAW_HISTORY_MS)
         self.features = AcousticObservationHistory()
-        self.vocal_observer = vocal_observer if vocal_observer is not None else TenVadActivityObserver()
+        if vocal_observer is not None:
+            self.vocal_observer = vocal_observer
+        else:
+            if human_vocal_model is None:
+                raise FileNotFoundError("managed human-vocal model required")
+            self.vocal_observer = HumanVocalActivityObserver(human_vocal_model)
         self.model = model_backend if model_backend is not None else OnnxPhoneCTCModel(model, vocab)
         if g2p is None:
             from .g2p import default_g2p
@@ -81,17 +87,16 @@ class NativeAudio:
     def start(self) -> None:
         # Capture starts before the first HOOK, but monitoring start is not a
         # causal boundary for a game line: the current voice may already be in
-        # progress. A lower bound exists only after an observed game input is
-        # tied to a later presentation transition; monitoring start is never one.
+        # progress. A lower bound exists after AutoAdv itself successfully sends
+        # progression input; monitoring start is never one.
         self._capture.start()
 
     def set_causal_lower_bound(self, at_ms: int | None = None) -> None:
         """Record an observed input lower bound for the next target's audio.
 
         The bound limits retained-audio identification; it does not assert the
-        exact voice start time. AutoAdv-owned input can install it immediately,
-        while an externally observed game input is installed only after a later
-        HOOK confirms that the previous unsent line was replaced.
+        exact voice start time. AutoAdv-owned input installs it only after the
+        targeted Windows input call succeeds.
         """
         lower_bound_ms = self.clock() if at_ms is None else int(at_ms)
         if lower_bound_ms <= 0:
@@ -254,6 +259,48 @@ class NativeAudio:
         self._inference_at = self._last_pcm_end_ms
         return token, generation, None, samples, aligner
 
+    def observation_fence(self, token: Token) -> int | None:
+        """Snapshot the newest captured PCM timestamp for one current target.
+
+        The value is only a synchronization fence. It does not mean that the
+        PCM contains speech, silence, or an utterance endpoint.
+        """
+        with self._lock:
+            if self._closed or token != self.token or self._last_pcm_end_ms < 0:
+                return None
+            return int(self._last_pcm_end_ms)
+
+    def request_observation_through(self, token: Token, through_ms: int) -> bool:
+        """Ensure captured PCM through ``through_ms`` is scheduled for analysis.
+
+        Returns True when an inference is already in flight or a new one was
+        scheduled.  False means no additional inference work is required (or
+        the target is no longer current). The caller still uses the emitted
+        observation timestamp to know when its fence has actually been consumed.
+        """
+        item = None
+        with self._lock:
+            if self._closed or token != self.token:
+                return False
+            boundary = int(through_ms)
+            if self._inflight:
+                return True
+            if self._inference_at >= boundary:
+                return False
+            start, _ = self._raw_analysis_start_locked(boundary)
+            samples = self.history.since(start)
+            samples = tuple(chunk for chunk in samples if chunk.at_ms <= boundary)
+            if not samples:
+                return False
+            generation, aligner = self._generation, self.aligner
+            self.window_start_ms = start
+            self._inflight = True
+            self._inflight_generation = generation
+            self._inference_at = samples[-1].at_ms
+            item = (token, generation, None, samples, aligner)
+        self._dispatch(item)
+        return True
+
     def capture_status(self) -> dict:
         with self._lock:
             return dict(
@@ -275,7 +322,12 @@ class NativeAudio:
 
     def _observe_continuous(self, chunk: PCMChunk) -> None:
         frames = self.vocal_observer.observe(chunk)
-        relevance = float(np.mean([frame.probability for frame in frames])) if frames else 0.0
+        # A spectral fingerprint spans the entire process-audio packet. One
+        # strong human-vocal observation inside that packet is enough to make
+        # it relevant to recurrence; averaging sparse AudioSet evidence into
+        # dense VAD frames would erase exactly the non-lexical evidence added
+        # by the second acoustic measurement.
+        relevance = max((frame.probability for frame in frames), default=0.0)
         with self._lock:
             self.features.add_vocal(frames)
             self.features.add_fingerprint(chunk, vocal_relevance=relevance)
@@ -418,6 +470,7 @@ class NativeAudio:
         started_ns = time.perf_counter_ns() if self.on_inference else 0
         if not submitted_ns:
             submitted_ns = started_ns
+        released_inflight = False
         try:
             capture_start_ms = int(round(samples[0].at_ms - samples[0].duration_ms)) if samples else None
             capture_end_ms = int(samples[-1].at_ms) if samples else None
@@ -460,6 +513,16 @@ class NativeAudio:
                     capture_end_ms=capture_end_ms, lexical=lexical,
                     history_truncated=history_truncated,
                     pcm_last_frame_ms=capture_end_ms)
+
+            # Release this inference slot before publishing its observation.
+            # Application may synchronously request a follow-up through a newer
+            # deadline fence from the observation callback.  Keeping the slot
+            # marked in-flight until after that callback would lose the request.
+            with self._lock:
+                if self._inflight_generation == generation:
+                    self._inflight = False
+                    self._inflight_generation = None
+                    released_inflight = True
 
             if self.on_inference is not None:
                 metrics = {
@@ -511,10 +574,11 @@ class NativeAudio:
         except Exception as exc:
             self.on_error(token, "acoustic inference failure: " + str(exc))
         finally:
-            with self._lock:
-                if self._inflight_generation == generation:
-                    self._inflight = False
-                    self._inflight_generation = None
+            if not released_inflight:
+                with self._lock:
+                    if self._inflight_generation == generation:
+                        self._inflight = False
+                        self._inflight_generation = None
 
     def close(self) -> None:
         self.cancel()

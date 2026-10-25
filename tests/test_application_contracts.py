@@ -187,6 +187,8 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     class RetainedNative:
         pid = 101
         def capture_status(self): return {}
+        def observation_fence(self, _token): return None
+        def request_observation_through(self, _token, _through_ms): return False
         def finish_line(self, _token): raise AssertionError('inconclusive audio must remain active')
     app._native_audio = RetainedNative()
     deadline()
@@ -234,6 +236,53 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     active_state = active_app.runtime_state()
     assert active_state.pause_reason == 'audio_judgment_active_hold'
     assert active_state.authorized and not active_state.sent and not active_state.completed
+
+    # The policy boundary is not permission to decide from stale acoustic state.
+    # Application snapshots PCM that already exists at the deadline and applies
+    # the unchanged fallback policy only after integrated evidence reaches it.
+    fenced_app, _ = app_with_game()
+    fp = fenced_app.current_profile()
+    fenced_source = source('FENCED', 4)
+    fp.hooks = [HookSelection('FENCED', 4, 5)]
+    fp.body_source = fenced_source.identity
+    fenced_app.select_profile(fenced_app.game_id, fenced_app.profile_id)
+    fenced_app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    fenced_app.set_profile_setting('uncertain_text_fallback', True)
+    fenced_scheduled = []
+    fenced_app.configure_runtime_loop(
+        schedule=lambda delay, callback: fenced_scheduled.append((delay, callback)))
+    connect_hook(fenced_app)
+    fenced_token = runtime_hook(fenced_app, fenced_source, '本文', 2)
+
+    class FencedNative:
+        pid = 101
+        requested = []
+        def observation_fence(self, token):
+            assert token == fenced_token
+            return 1500
+        def request_observation_through(self, token, through_ms):
+            self.requested.append((token, through_ms))
+            return True
+        def capture_status(self): return {}
+        def finish_line(self, _token): pass
+
+    fenced_native = FencedNative()
+    fenced_app._native_audio = fenced_native
+    fenced_deadline = next(
+        callback for delay, callback in fenced_scheduled
+        if delay == fenced_app.runtime_state().utterance.text_wait_ms)
+    fenced_deadline()
+    assert not fenced_app.runtime_state().completed
+    assert fenced_native.requested == [(fenced_token, 1500)]
+    fenced_app._consume_native_observation(fenced_token, NativeAudioObservation(
+        kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
+        vocal=HumanVocalEvidence(
+            start_ms=1000, end_ms=1500, frame_count=20, mean_probability=0.0,
+            peak_probability=0.0, active_fraction=0.0, first_active_ms=None,
+            last_active_ms=None),
+        recurrence=VocalRecurrenceEvidence()))
+    assert fenced_app.runtime_state().completed
+    assert fenced_app.runtime_state().presentation_reason == 'uncertain_text_fallback'
 
     text_app, _ = app_with_game()
     text_source = source('TEXT', 3)
@@ -409,6 +458,7 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
         helper_dll='C:/runtime/helper.dll',
         alignment_model='C:/runtime/model.onnx',
         alignment_vocab='C:/runtime/vocab.json',
+        human_vocal_model='C:/runtime/yamnet.onnx',
     )
     monkeypatch.setattr(application_module.threading, 'Thread', ImmediateThread)
     monkeypatch.setattr(application_module, 'NativeAudio', FakeNative)
@@ -426,6 +476,7 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
     assert (str(native.helper), str(native.model), str(native.vocab)) == (
         managed.helper_dll, managed.alignment_model, managed.alignment_vocab)
     assert {'on_pcm', 'on_inference', 'on_observation'} <= set(native.callbacks)
+    assert str(native.callbacks['human_vocal_model']) == managed.human_vocal_model
     app.stop_monitoring('session_changed')
     assert native.closed and not app.native_audio_available
 
