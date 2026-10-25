@@ -84,6 +84,19 @@ def test_accuracy_fixture_and_evidence_form_one_continuous_authored_sequence():
                 assert (reader.getframerate(), reader.getnchannels(), reader.getsampwidth()) == (48_000, 1, 2)
                 assert reader.getnframes() > 0
 
+    manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
+    oracle = json.loads((HERE / 'ALIGNMENT_ENDPOINT_ORACLE.json').read_text(encoding='utf-8'))
+    sample_paths = {
+        sample['path'] for sample in manifest['samples']
+        if sample['id'] in oracle.get('samples', {})
+    }
+    directly_annotated = set(oracle.get('paths', {}))
+    repo_foreground = {
+        line['foreground_file'] for line in ACCURACY_SCENARIO
+        if line.get('foreground_voice') and str(line.get('foreground_file', '')).startswith('audio/voice/')
+    }
+    assert repo_foreground <= sample_paths | directly_annotated
+
 
 def test_accuracy_measurement_scope_remains_realistic_and_continuous():
     scenario = ACCURACY_SCENARIO
@@ -140,6 +153,18 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
     early_result = validate(early, phase='accuracy', fixture_records=fixture)
     assert early_result['case_results'][0]['outcome'] == 'early_input'
     assert early_result['verdict'] == 'failure_observed'
+
+    # A voiced case without an independent clean-source endpoint is measured as
+    # incomplete rather than being promoted to a safe advancement by absence of
+    # contrary evidence.
+    unmeasured_fixture = [dict(row) for row in fixture]
+    unmeasured_path = 'audio/runtime/voice/not-annotated.wav'
+    unmeasured_fixture[1]['voice_file'] = unmeasured_path
+    unmeasured_fixture[2]['voice_file'] = unmeasured_path
+    unmeasured = validate(records, phase='accuracy', fixture_records=unmeasured_fixture)
+    assert unmeasured['case_results'][0]['outcome'] == 'unmeasured_endpoint'
+    assert unmeasured['case_results'][0]['foreground_endpoint_status'] == 'unmeasured'
+    assert unmeasured['verdict'] == 'incomplete'
 
 
 def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpretation():

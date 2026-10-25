@@ -261,10 +261,31 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert active.state == UtteranceProgressState.ACTIVE
     assert active.target_audio_associated and active.lexical_target_ended
 
-    ended = estimator.observe(observation(
+    ending = estimator.observe(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=1800), end=1800))
+    assert ending.state == UtteranceProgressState.ACTIVE
+    ended = estimator.observe(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2000), end=2000))
     assert ended.state == UtteranceProgressState.ENDED
     assert ended.ended_at_ms == 1580
+
+    # A terminal quiet observation is provisional. Human-vocal activity that
+    # resumes while the owned lexical event is still open extends that event
+    # without a fixed inter-segment gap threshold.
+    resumed = UtteranceProgressEstimator()
+    assert resumed.observe(observation(lex=lexical(), voc=vocal())).active
+    assert resumed.observe(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=1800), end=1800)).active
+    resumed_tail = resumed.observe(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580), (1900, 2080)), end=2100), end=2100))
+    assert resumed_tail.state == UtteranceProgressState.ACTIVE
+    assert resumed_tail.target_vocal_observed
+    assert resumed.observe(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580), (1900, 2080)), end=2300), end=2300)).active
+    resumed_end = resumed.observe(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580), (1900, 2080)), end=2500), end=2500))
+    assert resumed_end.state == UtteranceProgressState.ENDED
+    assert resumed_end.ended_at_ms == 2080
 
     # Recurrence has one purpose: once target ownership and an end candidate are
     # established, a stable repeated continuation can stop holding the finite
@@ -299,19 +320,18 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert unrelated_background.lexical_target_ended
     assert not unrelated_background.target_vocal_observed
 
-    # With a known causal lower bound, a genuinely new non-lexical onset may be
-    # owned without lexical alignment. Activity already crossing the bound may not.
+    # Causal timing constrains evidence but does not identify the source. A new
+    # process-mix vocal onset after the bound is therefore insufficient, just as
+    # activity already crossing the bound is insufficient.
     crossing = UtteranceProgressEstimator().observe(observation(
         voc=vocal(intervals=((1000, 1390),), crossing=True, onset=None), end=1400))
     assert crossing.state == UtteranceProgressState.UNKNOWN
 
     nonlexical = UtteranceProgressEstimator()
-    nonlex_active = nonlexical.observe(observation(
+    nonlex_onset = nonlexical.observe(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400, crossing=False, onset=1120), end=1400))
-    assert nonlex_active.state == UtteranceProgressState.ACTIVE
-    nonlex_end = nonlexical.observe(observation(
-        voc=vocal(intervals=((1120, 1250),), end=1600, crossing=False, onset=1120), end=1600))
-    assert nonlex_end.state == UtteranceProgressState.ENDED
+    assert nonlex_onset.state == UtteranceProgressState.UNKNOWN
+    assert not nonlex_onset.target_audio_associated
 
     # An unknown external transition does not turn retained old alignment into
     # current-target ownership.  If alignment actually reaches audio at/after

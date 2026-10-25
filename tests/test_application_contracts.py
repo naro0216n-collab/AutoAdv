@@ -6,7 +6,9 @@ from copy import deepcopy
 import pytest
 
 from autoadv.application import AutoAdvApplication
-from autoadv.utterance_progress import HumanVocalEvidence, VocalRecurrenceEvidence
+from autoadv.utterance_progress import (
+    HumanVocalEvidence, LexicalProgressEvidence, VocalRecurrenceEvidence,
+)
 from autoadv.conversation import Target
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection
@@ -210,6 +212,11 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     active_app._native_audio = RetainedNative()
     active_app._consume_native_observation(active_token, NativeAudioObservation(
         kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
+        lexical=LexicalProgressEvidence(
+            target_units=5, aligned_target_units=3, target_associated=True,
+            complete_alignment=False, committed_target_end=False,
+            target_start_ms=1050, aligned_end_ms=1300, target_end_ms=None,
+            reading_rank=0, path_margin=3.0, boundary_margin=0.0),
         vocal=HumanVocalEvidence(
             start_ms=1000, end_ms=1500, frame_count=20, mean_probability=.8,
             peak_probability=.95, active_fraction=.8, first_active_ms=1050,

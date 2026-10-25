@@ -106,7 +106,7 @@ def _core_timeline(records: Sequence[dict], fixture_records: Sequence[dict] | No
 
 
 def _endpoint_oracle_by_path() -> dict[str, dict]:
-    """Map Git-owned fixture voice paths to independent source-tail facts."""
+    """Map clean foreground fixture paths to independent source-tail facts."""
     manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
     oracle = json.loads((HERE / 'ALIGNMENT_ENDPOINT_ORACLE.json').read_text(encoding='utf-8'))
     samples = oracle.get('samples', {})
@@ -115,6 +115,9 @@ def _endpoint_oracle_by_path() -> dict[str, dict]:
         sample_id = sample.get('id')
         path = sample.get('path')
         endpoint = samples.get(sample_id)
+        if isinstance(path, str) and isinstance(endpoint, dict):
+            result[path] = endpoint
+    for path, endpoint in oracle.get('paths', {}).items():
         if isinstance(path, str) and isinstance(endpoint, dict):
             result[path] = endpoint
     return result
@@ -173,6 +176,8 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
     results: list[dict] = []
     for index, case in enumerate(first_pass):
         case_id = str(case.get('case') or '')
+        authored = expected[index] if index < len(expected) else {}
+        foreground_expected = bool(authored.get('foreground_voice'))
         start_ns = case.get('at_ns')
         if type(start_ns) is not int:
             issues.append(f'fixture case without timestamp: {case_id}')
@@ -222,11 +227,13 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
         endpoint = oracle.get(str(case.get('voice_file') or ''))
         earliest_end_ns = latest_end_ns = None
         early_input = None
+        endpoint_status = 'not_applicable' if not foreground_expected else 'unmeasured'
         if voice is not None and endpoint is not None and type(voice.get('at_ns')) is int:
             speech_end_ms = float(endpoint['speech_end_ms'])
             uncertainty_ms = float(endpoint['uncertainty_ms'])
             earliest_end_ns = int(voice['at_ns'] + max(0.0, speech_end_ms - uncertainty_ms) * 1_000_000)
             latest_end_ns = int(voice['at_ns'] + (speech_end_ms + uncertainty_ms) * 1_000_000)
+            endpoint_status = 'measured'
             if advance_ns is not None:
                 early_input = advance_ns < earliest_end_ns
 
@@ -241,6 +248,8 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             outcome = 'multiple_inputs'
         elif early_input is True:
             outcome = 'early_input'
+        elif advance_ns is not None and endpoint_status == 'unmeasured':
+            outcome = 'unmeasured_endpoint'
         elif advance_ns is not None:
             outcome = 'advanced'
         elif next_ns is not None:
@@ -257,6 +266,7 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             'product_input_confirmed_at_ns': case_inputs[0].get('confirmed_at_ns') if case_inputs else None,
             'product_input_count': len(case_inputs),
             'recovery_input_at_ns': case_recoveries[0].get('at_ns') if case_recoveries else None,
+            'foreground_endpoint_status': endpoint_status,
             'known_foreground_end_earliest_ns': earliest_end_ns,
             'known_foreground_end_latest_ns': latest_end_ns,
             'early_input': early_input,
@@ -308,7 +318,13 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
 
     failures = [row for row in case_results
                 if row.get('outcome') in {'early_input', 'stopped', 'multiple_inputs', 'unattributed_advance'}]
-    unresolved = [row for row in case_results if row.get('outcome') == 'unresolved']
+    unresolved = [row for row in case_results
+                  if row.get('outcome') in {'unresolved', 'unmeasured_endpoint'}]
+    if phase == 'accuracy':
+        facts['foreground_endpoint_measured'] = sum(
+            row.get('foreground_endpoint_status') == 'measured' for row in case_results)
+        facts['foreground_endpoint_unmeasured'] = sum(
+            row.get('foreground_endpoint_status') == 'unmeasured' for row in case_results)
     verdict = 'failure_observed' if failures else ('incomplete' if unresolved or issues else 'no_failure_observed')
 
     return {
