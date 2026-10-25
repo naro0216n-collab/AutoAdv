@@ -87,6 +87,10 @@
     "audio/voice/derived_finite_repetition.wav": {
       "speech_end_ms": 5420,
       "uncertainty_ms": 50
+    },
+    "audio/voice/derived_leading_silence_001.wav": {
+      "speech_end_ms": 2750,
+      "uncertainty_ms": 50
     }
   }
 }

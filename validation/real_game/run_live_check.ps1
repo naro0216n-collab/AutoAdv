@@ -123,7 +123,7 @@ try {
     $env:AUTOADV_VALIDATION_TRACE = $Trace
     Push-Location $repo
     try {
-        # Normal advancement remains in the production GUI Controller. Accuracy collection uses one fixed-time watchdog recovery only when the authored fixture case does not change.
+        # Normal advancement remains in the production GUI Controller. Accuracy may add fixed-time authored Windows game inputs; watchdog recovery remains a separate escape hatch only when the fixture case does not change.
         if ($Automated) {
             $gameExe = $resolvedGameExe
             $config = @{

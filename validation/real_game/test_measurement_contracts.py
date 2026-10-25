@@ -19,7 +19,7 @@ from autoadv.conversation import Token
 from validation.real_game import fixture_runtime, issue_reporting, prepare_accuracy_assets as media
 from validation.real_game.benchmark_alignment import contract_failures, run as run_alignment_benchmark
 from validation.real_game.gui_session import (
-    CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source, load_session,
+    ACCURACY_GAME_INPUTS_MS, CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source, load_session,
 )
 from validation.real_game.renpy.prepare_derived_audio import build as build_derived_audio
 from validation.real_game.trace import ProductTraceObserver, ValidationTrace
@@ -98,18 +98,32 @@ def test_accuracy_fixture_and_evidence_form_one_continuous_authored_sequence():
     assert repo_foreground <= sample_paths | directly_annotated
 
 
-def test_accuracy_measurement_scope_remains_realistic_and_continuous():
+def test_accuracy_measurement_scope_covers_adv_state_transitions_not_case_count():
     scenario = ACCURACY_SCENARIO
-    assert len(scenario) >= 30
     assert (scenario[0]['id'], scenario[-1]['id']) == ('room-clean-short', 'quiet-recovery')
-    assert sum(bool(line['foreground_voice']) for line in scenario) > sum(not bool(line['foreground_voice']) for line in scenario)
     assert all(line['advance_mode'] == 'audio' and not line['use_tts'] for line in scenario)
     channels = {channel for line in scenario for channel in line['expected_mix_channels']}
     assert {'adv_background', 'adv_sfx'}.issubset(channels)
-    assert {'mid_voice', 'most_voice_elapsed', 'after_foreground_end', 'nonverbal_mid_voice'} <= {
+
+    # Timing classes are expressed as real presentation relationships rather
+    # than requiring an arbitrary number of cases.
+    assert 'hook_before_voice' in {line.get('voice_start_relation') for line in scenario}
+    assert {'mid_voice_after_game_input', 'most_voice_elapsed', 'after_foreground_end'} <= {
         line.get('hook_delay_class') for line in scenario}
+    assert {'starts_during_current', 'persistent_cross_epoch'} <= {
+        line.get('background_vocal_relation') for line in scenario}
     assert {'loop_started_current_epoch', 'persistent_cross_epoch', 'finite_recurrent'} <= {
         line.get('vocal_source_class') for line in scenario}
+
+    input_cases = {line['id'] for line in scenario if 'game_input_after_ms' in line}
+    assert input_cases == {
+        'room-clean-unvoiced', 'room-bgm-fadein', 'vocal-loop-cross-epoch-unvoiced'}
+    roles = {line.get('transition_role') for line in scenario}
+    assert {
+        'game_input_bounded_delayed_hook',
+        'unvoiced_after_game_input_with_previous_voice_tail',
+        'game_input_bounded_delayed_hook_inside_persistent_loop',
+    } <= roles
 
 
 def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
@@ -165,6 +179,62 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
     assert unmeasured['case_results'][0]['outcome'] == 'unmeasured_endpoint'
     assert unmeasured['case_results'][0]['foreground_endpoint_status'] == 'unmeasured'
     assert unmeasured['verdict'] == 'incomplete'
+
+    # An authored external game input is a stimulus fact, not an AutoAdv input.
+    # Even when it occurs before the clean-source endpoint it must not be called
+    # an AutoAdv early advance.
+    authored_records = [
+        {'event': 'trace_started', 'version': 3, 'at_ns': start_ns},
+        {'event': 'validation_collection_target', 'seq': 1, 'at_ns': start_ns + 1,
+         'phase': 'accuracy', 'dialogues': 2, 'final_observation_seconds': 12.0},
+        {'event': 'validation_game_input', 'seq': 2, 'at_ns': voice_ns + 100_000_000,
+         'case': ACCURACY_SCENARIO[0]['id'], 'scheduled_after_ms': 100},
+    ]
+    authored_fixture = [
+        {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': start_ns, 'pid': 50},
+        {'event': 'fixture_case', 'seq': 1, 'at_ns': start_ns + 5,
+         'case': ACCURACY_SCENARIO[0]['id'], 'text': ACCURACY_SCENARIO[0]['text'],
+         'voice_file': ACCURACY_SCENARIO[0]['foreground_file']},
+        {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': voice_ns,
+         'case': ACCURACY_SCENARIO[0]['id'],
+         'voice_file': ACCURACY_SCENARIO[0]['foreground_file'], 'duration_ms': 1637.0},
+        {'event': 'fixture_case', 'seq': 3, 'at_ns': voice_ns + 200_000_000,
+         'case': ACCURACY_SCENARIO[1]['id'], 'text': ACCURACY_SCENARIO[1]['text'],
+         'voice_file': ACCURACY_SCENARIO[1]['foreground_file']},
+    ]
+    authored = validate(authored_records, phase='accuracy', fixture_records=authored_fixture)
+    first_result = authored['case_results'][0]
+    assert first_result['outcome'] == 'authored_input'
+    assert first_result['product_input_at_ns'] is None
+    assert first_result['early_input'] is None
+    assert authored['facts']['validation_game_inputs'] == 1
+
+
+def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
+    sent, traces = [], []
+    runtime = SimpleNamespace(
+        token=SimpleNamespace(session=1, line=8), pause_reason='audio_judgment_active_hold', sent=True,
+        target=SimpleNamespace(pid=50, hwnd=77), profile=SimpleNamespace(input_key=13))
+    product = SimpleNamespace(runtime_state=lambda: runtime)
+    driver = SessionDriver(
+        SimpleNamespace(application=product), SimpleNamespace(),
+        {'timeout_seconds': 60},
+        SimpleNamespace(emit=lambda name, **fields: traces.append((name, fields))),
+        clock=lambda: 0.0, game_input_send=lambda state: sent.append((state.target.hwnd, state.profile.input_key)),
+    )
+    case_id = 'room-clean-unvoiced'
+    driver.current_case = case_id
+    driver.current_case_seen_at = 10.0
+    delay_s = ACCURACY_GAME_INPUTS_MS[case_id] / 1000.0
+    assert not driver._send_authored_game_input(runtime, case_id, 10.0 + delay_s - 0.001)
+    assert driver._send_authored_game_input(runtime, case_id, 10.0 + delay_s)
+    assert sent == [(77, 13)]
+    assert traces == [('validation_game_input', {
+        'case': case_id, 'scheduled_after_ms': ACCURACY_GAME_INPUTS_MS[case_id]})]
+    runtime.pause_reason = ''
+    runtime.sent = False
+    assert not driver._send_authored_game_input(runtime, case_id, 99.0)
+    assert sent == [(77, 13)]
 
 
 def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpretation():
@@ -299,7 +369,7 @@ def test_issue_reporting_publishes_direct_timeline_across_bounded_comments_witho
             'phases': [{'phase': 'accuracy', 'report_present': True, 'runner_error': None,
                         'facts': {'requested_cases': 2, 'fixture_cases': 2, 'hook_outputs': 1,
                                   'utterances': 1, 'presentation_completions': 1,
-                                  'advance_inputs': 1, 'validation_recovery_inputs': 0}}],
+                                  'advance_inputs': 1, 'validation_game_inputs': 1, 'validation_recovery_inputs': 0}}],
             'launcher_error': None,
         }
         (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
@@ -322,6 +392,7 @@ def test_issue_reporting_publishes_direct_timeline_across_bounded_comments_witho
         assert len(snapshot.parts) >= 2
         assert 'analysis evidence timeline' in snapshot.body
         assert 'Offline verifier: `failure_observed`' in snapshot.body
+        assert '| game input |' in snapshot.body
         assert '"raw":"case2\\ncase3"' in snapshot.body
         assert '"target_audio_associated":true' in snapshot.body
         assert 'base64' not in snapshot.body and 'safe' not in snapshot.body

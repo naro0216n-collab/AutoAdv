@@ -16,6 +16,7 @@ RATE = 48_000
 CHANNELS = 1
 WIDTH = 2
 DERIVED_FILES = (
+    "derived_leading_silence_001.wav",
     "derived_same_text_long_tail.wav",
     "derived_normal_030_fast.wav",
     "derived_panting_temporal.wav",
@@ -64,6 +65,13 @@ def build(voice_dir: Path) -> None:
     cry = _read(voice_dir / "stress_cry.wav")
     whisper = _read(voice_dir / "whisper_001.wav")
 
+    # Ordinary voiced line with a deliberate acting pause before speech. This
+    # reproduces dialogue that is already displayed/HOOKed while the voice has
+    # not started yet; the silence is part of the foreground source itself.
+    _write(voice_dir / "derived_leading_silence_001.wav", [
+        _silence(1400), normal_001,
+    ])
+
     # Same displayed lexical text as normal_001, but with a long human-vocal
     # tail.  One WAV keeps the independent acoustic endpoint knowable even if
     # AutoAdv advances before the tail would have started.
@@ -97,7 +105,7 @@ def build(voice_dir: Path) -> None:
     ])
 
     # High self-similarity but finite and non-periodic in amplitude/gaps.  A
-    # recurrence detector must not turn this natural finite repetition into a
+    # recurrence detector must not turn this finite repetition stressor into a
     # persistent loop source.
     _write(voice_dir / "derived_finite_repetition.wav", [
         _slice(normal_020, 0, len(normal_020) / RATE), _silence(110),

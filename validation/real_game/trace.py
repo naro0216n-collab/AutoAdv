@@ -38,7 +38,8 @@ class ProductTraceObserver:
     _PASSTHROUGH = frozenset({
         'monitor_started', 'monitor_ended', 'external_hook_transition',
         'presentation_complete', 'next_line_timeout', 'advance_attempt',
-        'advance_input', 'audio_causal_lower_bound', 'audio_deadline_elapsed',
+        'advance_input', 'audio_causal_lower_bound', 'audio_input_lower_bound',
+        'game_input_observed', 'game_input_observer_error', 'audio_deadline_elapsed',
         'native_capture_summary', 'native_audio_error', 'native_pcm',
         'alignment_inference', 'native_audio_observation', 'utterance_progress',
         'tts_timing', 'tts_result', 'controller_handoff',

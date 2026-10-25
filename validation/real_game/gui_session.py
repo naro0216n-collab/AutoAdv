@@ -14,6 +14,12 @@ from pathlib import Path
 import time
 
 CALIBRATION = 'AutoAdvフック校正専用'
+ACCURACY_SCENARIO = json.loads(
+    (Path(__file__).with_name('ADVANCEMENT_ACCURACY_SCENARIO.json')).read_text(encoding='utf-8'))['lines']
+ACCURACY_GAME_INPUTS_MS = {
+    str(line['id']): int(line['game_input_after_ms'])
+    for line in ACCURACY_SCENARIO if 'game_input_after_ms' in line
+}
 def calibration_candidates(candidates):
     """Use the product's extraction preview, not raw substring matching.
 
@@ -74,11 +80,12 @@ def select_game_window(windows, class_name):
 
 class SessionDriver:
     def __init__(self, window, qt_app, options, trace, *, clock=time.monotonic,
-                 recovery_send=None):
+                 recovery_send=None, game_input_send=None):
         self.w, self.qt_app, self.options, self.trace = window, qt_app, options, trace
         self.product = window.application
         self.clock = clock
         self.recovery_send = recovery_send or self._send_validation_recovery
+        self.game_input_send = game_input_send or self._send_validation_game_input
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.audio_deadline = None
@@ -90,6 +97,7 @@ class SessionDriver:
         self.current_case_seen_at = None
         self.collection_target_seen_at = None
         self.recovered_cases = set()
+        self.game_input_cases = set()
         self.collection_target_emitted = False
         self.non_evidence_done_at = None
 
@@ -117,6 +125,44 @@ class SessionDriver:
 
     def _release(self, suffix):
         Path(self.options['gate'] + suffix).write_text('ready', encoding='ascii')
+
+    @staticmethod
+    def _send_validation_game_input(runtime):
+        """Issue one ordinary foreground key input for an authored game action.
+
+        Unlike recovery, this deliberately travels through the Windows input
+        stream so the product's input observer can measure it. It is a fixture
+        stimulus, not a product completion or success signal.
+        """
+        import ctypes
+        if runtime.target is None or runtime.profile is None:
+            raise RuntimeError('validation game input has no bound game target')
+        user32 = ctypes.windll.user32
+        hwnd = ctypes.c_void_p(runtime.target.hwnd)
+        user32.SetForegroundWindow.argtypes = (ctypes.c_void_p,)
+        user32.SetForegroundWindow.restype = ctypes.c_int
+        if not user32.SetForegroundWindow(hwnd):
+            raise RuntimeError('validation could not foreground the game for authored input')
+        key = int(runtime.profile.input_key)
+        user32.MapVirtualKeyW.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+        user32.MapVirtualKeyW.restype = ctypes.c_uint32
+        scan = int(user32.MapVirtualKeyW(key, 0))
+        if not scan or scan > 0xff:
+            raise RuntimeError('validation input key has no Windows scancode')
+        user32.keybd_event.argtypes = (ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_uint32, ctypes.c_size_t)
+        user32.keybd_event(key, scan, 0, 0)
+        user32.keybd_event(key, scan, 0x0002, 0)
+
+    def _send_authored_game_input(self, runtime, case_id, now):
+        delay_ms = ACCURACY_GAME_INPUTS_MS.get(case_id)
+        if delay_ms is None or case_id in self.game_input_cases or self.current_case_seen_at is None:
+            return False
+        if (now - self.current_case_seen_at) * 1000.0 < delay_ms:
+            return False
+        self.game_input_send(runtime)
+        self.trace.emit('validation_game_input', case=case_id, scheduled_after_ms=delay_ms)
+        self.game_input_cases.add(case_id)
+        return True
 
     @staticmethod
     def _send_validation_recovery(runtime):
@@ -303,6 +349,8 @@ class SessionDriver:
                 if case_id != self.current_case:
                     self.current_case = case_id
                     self.current_case_seen_at = now
+                runtime = self.product.runtime_state()
+                self._send_authored_game_input(runtime, case_id, now)
                 target_count = int(self.options.get('dialogues', 0))
                 if target_count > 0 and len(cases) > target_count:
                     raise RuntimeError(
@@ -317,7 +365,6 @@ class SessionDriver:
                         self.w.close()
                         self.qt_app.quit()
                     return
-                runtime = self.product.runtime_state()
                 self._continue_collection_by_watchdog(runtime, latest, now)
         except Exception as error:
             self.fail(str(error))

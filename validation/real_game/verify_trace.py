@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 PHASES = ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')
 CORE_PRODUCT_EVENTS = frozenset({
     'hook_output', 'utterance', 'utterance_progress', 'presentation_complete',
-    'advance_attempt', 'advance_input', 'validation_recovery_input',
+    'advance_attempt', 'advance_input', 'validation_game_input', 'validation_recovery_input',
     'controller_handoff', 'native_audio_error', 'validation_driver_failure',
 })
 
@@ -164,6 +164,7 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
 
     voice_rows = [r for r in fixture_records if r.get('event') == 'fixture_voice_commanded']
     product_inputs = _successful_product_inputs(records, issues)
+    authored_inputs = [r for r in records if r.get('event') == 'validation_game_input' and type(r.get('at_ns')) is int]
     recoveries = [r for r in records if r.get('event') == 'validation_recovery_input' and type(r.get('at_ns')) is int]
     oracle = _endpoint_oracle_by_path()
     trace_times = [r.get('at_ns') for r in records if type(r.get('at_ns')) is int]
@@ -209,21 +210,19 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
                 row['_assigned'] = True
                 case_inputs.append(row)
 
-        next_same_case_ns = None
-        for later in cases[index + 1:]:
-            if str(later.get('case') or '') == case_id and type(later.get('at_ns')) is int:
-                next_same_case_ns = later['at_ns']
-                break
+        case_authored_inputs = [
+            row for row in authored_inputs
+            if row.get('case') == case_id and in_case_window(row)
+        ]
         case_recoveries = [
             row for row in recoveries
-            if row.get('case') == case_id
-            and row.get('at_ns') >= start_ns
-            and (next_same_case_ns is None or row.get('at_ns') < next_same_case_ns)
+            if row.get('case') == case_id and in_case_window(row)
         ]
         voice = next((row for row in voice_rows
                       if row.get('case') == case_id and in_case_window(row)), None)
 
         advance_ns = case_inputs[0].get('at_ns') if case_inputs else None
+        authored_input_ns = case_authored_inputs[0].get('at_ns') if case_authored_inputs else None
         endpoint = oracle.get(str(case.get('voice_file') or ''))
         earliest_end_ns = latest_end_ns = None
         early_input = None
@@ -246,12 +245,17 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             outcome = 'stopped'
         elif len(case_inputs) > 1:
             outcome = 'multiple_inputs'
+        elif (advance_ns is not None and authored_input_ns is not None
+              and advance_ns >= authored_input_ns):
+            outcome = 'competing_product_input'
         elif early_input is True:
             outcome = 'early_input'
         elif advance_ns is not None and endpoint_status == 'unmeasured':
             outcome = 'unmeasured_endpoint'
         elif advance_ns is not None:
             outcome = 'advanced'
+        elif authored_input_ns is not None and next_ns is not None:
+            outcome = 'authored_input'
         elif next_ns is not None:
             outcome = 'unattributed_advance'
         else:
@@ -265,6 +269,8 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             'product_input_at_ns': advance_ns,
             'product_input_confirmed_at_ns': case_inputs[0].get('confirmed_at_ns') if case_inputs else None,
             'product_input_count': len(case_inputs),
+            'authored_game_input_at_ns': authored_input_ns,
+            'authored_game_input_count': len(case_authored_inputs),
             'recovery_input_at_ns': case_recoveries[0].get('at_ns') if case_recoveries else None,
             'foreground_endpoint_status': endpoint_status,
             'known_foreground_end_earliest_ns': earliest_end_ns,
@@ -301,6 +307,7 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
         'utterances': sum(r.get('event') == 'utterance' for r in records),
         'presentation_completions': sum(r.get('event') == 'presentation_complete' for r in records),
         'advance_inputs': sum(r.get('event') == 'advance_input' for r in records),
+        'validation_game_inputs': sum(r.get('event') == 'validation_game_input' for r in records),
         'validation_recovery_inputs': sum(r.get('event') == 'validation_recovery_input' for r in records),
         'driver_failures': sum(r.get('event') == 'validation_driver_failure' for r in records),
     }
@@ -317,7 +324,9 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
             case_results = _accuracy_case_results(records, fixture_records, expected, issues)
 
     failures = [row for row in case_results
-                if row.get('outcome') in {'early_input', 'stopped', 'multiple_inputs', 'unattributed_advance'}]
+                if row.get('outcome') in {
+                    'early_input', 'stopped', 'multiple_inputs',
+                    'competing_product_input', 'unattributed_advance'}]
     unresolved = [row for row in case_results
                   if row.get('outcome') in {'unresolved', 'unmeasured_endpoint'}]
     if phase == 'accuracy':

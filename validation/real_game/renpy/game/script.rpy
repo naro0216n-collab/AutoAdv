@@ -30,6 +30,9 @@ image bg adv_quiet = Solid("#101418")
 screen adv_delayed_sfx(delay, filename, volume=1.0):
     timer delay action Play("adv_sfx", filename, relative_volume=volume)
 
+screen adv_delayed_background(delay, filename, volume=1.0):
+    timer delay action Play("adv_background", filename, loop=True, relative_volume=volume)
+
 label start:
     scene black
     # Optional fixture readiness barrier. Only the first unmeasured calibration
@@ -83,10 +86,12 @@ label advancement_accuracy:
     voice "audio/voice/normal_001.wav"
     $ _adv_evidence_voice_commanded()
     a "えっ嘘でしょ。"
-    $ _adv_evidence_case("room-clean-jvs001", "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。", "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav")
-    voice "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav"
+    # Dialogue is already displayed/HOOKed while the foreground source remains
+    # silent for an acting pause. This is not a delayed-HOOK case.
+    $ _adv_evidence_case("room-leading-silence", "えっ嘘でしょ。", "audio/voice/derived_leading_silence_001.wav")
+    voice "audio/voice/derived_leading_silence_001.wav"
     $ _adv_evidence_voice_commanded()
-    a "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    a "えっ嘘でしょ。"
     $ _adv_evidence_case("room-clean-unvoiced", "これは音声のない台詞です。", None)
     p "これは音声のない台詞です。"
 
@@ -108,12 +113,6 @@ label advancement_accuracy:
     $ _adv_evidence_voice_commanded()
     $ renpy.pause(2.10, hard=True)
     a "えっ嘘でしょ。"
-    $ _adv_evidence_case("hook-delay-nonverbal", "うっ……うう……", "audio/voice/stress_cry.wav")
-    play voice "audio/voice/stress_cry.wav"
-    $ _adv_evidence_voice_commanded()
-    $ renpy.pause(1.25, hard=True)
-    a "うっ……うう……"
-
     # Text amount is deliberately decoupled from source duration. Derived WAVs
     # are deterministic fixture-only single sources built from the licensed
     # human-vocal clips before Ren'Py distribution.
@@ -137,10 +136,14 @@ label advancement_accuracy:
     # Scene 2: the same conversation continues while BGM fades in and remains
     # across voiced, unvoiced and whispered lines.
     play music "audio/runtime/music/Heavenly Loop_0.ogg" loop fadein 0.8 volume 0.24
+    # The validation driver gives one ordinary Windows key input during this
+    # voiced line. Ren'Py sustains the previous foreground voice into the next
+    # unvoiced protagonist line, reproducing the practical voiced→unvoiced tail.
     $ _adv_evidence_case("room-bgm-fadein", "あっベルが鳴ってる。", "audio/voice/normal_017.wav")
     voice "audio/voice/normal_017.wav"
     $ _adv_evidence_voice_commanded()
     a "あっベルが鳴ってる。"
+    voice sustain
     $ _adv_evidence_case("room-bgm-unvoiced", "返事をする前に、少し考えた。", None)
     p "返事をする前に、少し考えた。"
     $ _adv_evidence_case("room-bgm-whisper", "えっ嘘でしょ。", "audio/voice/whisper_001.wav")
@@ -161,12 +164,15 @@ label advancement_accuracy:
     voice "audio/voice/normal_028.wav"
     $ _adv_evidence_voice_commanded()
     a "彼女はスタッフをまとめていけると思いますか？"
-    $ _adv_evidence_case("cafe-crowd-jvs002", "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。", "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav")
-    voice "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
-    $ _adv_evidence_voice_commanded()
-    b "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    $ _adv_evidence_case("cafe-crowd-unvoiced", "人の多い店内で、主人公は黙って頷いた。", None)
-    p "人の多い店内で、主人公は黙って頷いた。"
+    # Unrelated Japanese background speech starts only after the unvoiced line
+    # is already visible, then persists across the following unvoiced boundary.
+    $ _adv_evidence_case("cafe-background-starts-unvoiced", "店内放送を聞き流しながら、主人公は黙っていた。", None)
+    show screen adv_delayed_background(0.7, "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav", 0.18)
+    p "店内放送を聞き流しながら、主人公は黙っていた。"
+    hide screen adv_delayed_background
+    $ _adv_evidence_case("cafe-background-cross-epoch-unvoiced", "人の声が続く店内で、主人公は黙って頷いた。", None)
+    p "人の声が続く店内で、主人公は黙って頷いた。"
+    stop adv_background fadeout 0.2
 
     # Scene 4: leave the crowd and change BGM as a normal scene transition.
     # A Japanese voice then persists on an independent game channel, first
@@ -213,8 +219,16 @@ label advancement_accuracy:
     a "あっベルが鳴ってる。"
     $ _adv_evidence_case("vocal-loop-cross-epoch-unvoiced", "繰り返す声は背景のままで、主人公には音声がない。", None)
     p "繰り返す声は背景のままで、主人公には音声がない。"
+    # The driver advances the unvoiced line before AutoAdv. The background loop
+    # already crosses that input boundary, while the new finite target starts
+    # afterwards and its real HOOK is deliberately delayed.
+    $ _adv_evidence_case("vocal-loop-game-input-delayed-target", "あっベルが鳴ってる。", "audio/voice/normal_017.wav")
+    play voice "audio/voice/normal_017.wav"
+    $ _adv_evidence_voice_commanded()
+    $ renpy.pause(.80, hard=True)
+    a "あっベルが鳴ってる。"
     stop adv_background fadeout 0.1
-    $ _adv_evidence_case("finite-vocal-natural-repetition", "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。", "audio/voice/derived_finite_repetition.wav")
+    $ _adv_evidence_case("finite-vocal-repetition-stress", "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。", "audio/voice/derived_finite_repetition.wav")
     voice "audio/voice/derived_finite_repetition.wav"
     $ _adv_evidence_voice_commanded()
     a "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。"

@@ -35,7 +35,7 @@ from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .storage import Catalog
 from .voice import VoiceJobs
-from .windows_input import WindowsAdvancementInput
+from .windows_input import WindowsAdvancementInput, WindowsGameInputObserver
 
 
 @dataclass(frozen=True)
@@ -567,6 +567,9 @@ class AutoAdvApplication:
         self._irodori_epoch = 0
         self._native_audio: NativeAudio | None = None
         self._native_audio_epoch = 0
+        self._game_input_observer: WindowsGameInputObserver | None = None
+        self._game_input_lock = threading.Lock()
+        self._game_input_candidate: tuple[Token, int] | None = None
         self._progress_token: Token | None = None
         self._progress_estimator = UtteranceProgressEstimator()
         self._ocr_worker: OCRWorker | None = None
@@ -666,6 +669,57 @@ class AutoAdvApplication:
             callback()
         else:
             self._schedule_runtime(0, callback)
+
+    def _record_game_input(self, at_ms: int) -> None:
+        """Remember the first observed game input while the current line is active.
+
+        The timestamp is an external fact only. It does not complete, cancel or
+        otherwise reinterpret the current presentation. If a later HOOK replaces
+        this unsent line, that earlier timestamp can bound retained-audio search.
+        """
+        token = self.controller.token
+        if token is None or at_ms <= 0:
+            return
+        with self._game_input_lock:
+            current = self._game_input_candidate
+            if current is not None and current[0] == token:
+                return
+            self._game_input_candidate = (token, int(at_ms))
+        self._dispatch_runtime(
+            lambda t=token, ms=int(at_ms): self._emit_telemetry(
+                'game_input_observed', t, at_ms=ms))
+
+    def _take_game_input_lower_bound(self, token: Token, hook_received_ns: int) -> int | None:
+        """Return one prior-line input timestamp usable by this replacement HOOK."""
+        with self._game_input_lock:
+            candidate = self._game_input_candidate
+            self._game_input_candidate = None
+        if candidate is None or hook_received_ns <= 0:
+            return None
+        prior_token, at_ms = candidate
+        if (prior_token.session != token.session or prior_token.line + 1 != token.line or
+                at_ms * 1_000_000 > hook_received_ns):
+            return None
+        return at_ms
+
+    def _start_game_input_observer(self, target: Target, profile: Profile) -> None:
+        self._close_game_input_observer()
+        if profile.advance_mode.value != 'audio' or sys.platform != 'win32':
+            return
+        try:
+            observer = WindowsGameInputObserver(target.pid, profile.input_key, self._record_game_input)
+            observer.start()
+        except Exception as exc:
+            self._emit_runtime_event('game_input_observer_error', None, reason=str(exc))
+            return
+        self._game_input_observer = observer
+
+    def _close_game_input_observer(self) -> None:
+        observer, self._game_input_observer = self._game_input_observer, None
+        with self._game_input_lock:
+            self._game_input_candidate = None
+        if observer is not None:
+            observer.close()
 
     def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
         token = self.controller.token
@@ -816,10 +870,19 @@ class AutoAdvApplication:
         self._progress_token = token
         self._progress_estimator = UtteranceProgressEstimator()
         external_ns = self.controller.take_external_transition(token)
+        input_lower_bound_ms = self._take_game_input_lower_bound(token, external_ns)
         if external_ns:
             if self._native_audio is not None:
-                self._native_audio.external_transition()
-            self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns)
+                if input_lower_bound_ms is not None:
+                    self._native_audio.set_causal_lower_bound(at_ms=input_lower_bound_ms)
+                else:
+                    self._native_audio.external_transition()
+            self._emit_runtime_event(
+                'external_hook_transition', token, received_ns=external_ns,
+                input_lower_bound_ms=input_lower_bound_ms)
+            if input_lower_bound_ms is not None:
+                self._emit_runtime_event(
+                    'audio_input_lower_bound', token, at_ms=input_lower_bound_ms)
         if utterance.advance_mode.value == 'text':
             self._schedule(utterance.text_wait_ms,
                            lambda t=token: self._runtime_presentation_event(t, 'text_elapsed'))
@@ -867,6 +930,7 @@ class AutoAdvApplication:
                                connection.connection_generation)
             self._reconcile_hook_sync()
         self._start_native_audio(effective)
+        self._start_game_input_observer(target, effective)
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(
@@ -885,6 +949,7 @@ class AutoAdvApplication:
         target = self._runtime_target
         if target.selected:
             self._sync_hook_threads(target.hook_pid, clear=True)
+        self._close_game_input_observer()
         self._close_native_audio()
         self._close_ocr()
         self._cancel_voice()

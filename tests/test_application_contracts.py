@@ -9,7 +9,7 @@ from autoadv.application import AutoAdvApplication
 from autoadv.utterance_progress import (
     HumanVocalEvidence, LexicalProgressEvidence, VocalRecurrenceEvidence,
 )
-from autoadv.conversation import Target
+from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection
 from autoadv.storage import Catalog
@@ -162,6 +162,47 @@ def test_runtime_publishes_selected_provenance_and_utterance_before_presentation
     utterance_index = next(i for i, x in enumerate(timeline) if x[0] == 'event' and x[1] == 'utterance')
     schedule_index = next(i for i, x in enumerate(timeline) if x[0] == 'schedule')
     assert utterance_index < schedule_index
+
+
+
+def test_game_input_timestamp_only_bounds_a_later_replacement_hook():
+    app, _ = app_with_game()
+    p = app.current_profile()
+    src = source('INPUTBOUND', 4)
+    p.hooks = [HookSelection('INPUTBOUND', 4, 5)]
+    p.body_source = src.identity
+    app.select_profile(app.game_id, app.profile_id)
+    app.configure_runtime_loop(schedule=lambda _delay, callback: callback())
+    connect_hook(app)
+
+    first = runtime_hook(app, src, '一つ目', 2, received_ns=1_000_000_000)
+    assert first is not None
+    before = app.runtime_state()
+    app._record_game_input(1200)
+    app._record_game_input(1350)
+    # Observation is a timestamp fact only; it does not mutate current line state.
+    after = app.runtime_state()
+    assert (after.token, after.completed, after.sent) == (before.token, before.completed, before.sent)
+
+    class Native:
+        def __init__(self):
+            self.bounds = []
+            self.external = 0
+        def cancel(self): pass
+        def set_causal_lower_bound(self, at_ms=None): self.bounds.append(at_ms)
+        def external_transition(self): self.external += 1
+        def finish_line(self, _token): pass
+    native = Native()
+    app._native_audio = native
+    second = runtime_hook(app, src, '二つ目', 3, received_ns=1_500_000_000)
+    assert second == Token(first.session, first.line + 1)
+    assert native.bounds == [1200]
+    assert native.external == 0
+    assert app._take_game_input_lower_bound(second, 1_500_000_000) is None
+
+    # An input observed after the replacing HOOK cannot cut retained audio for it.
+    app._game_input_candidate = (first, 1700)
+    assert app._take_game_input_lower_bound(second, 1_500_000_000) is None
 
 
 def test_application_owns_audio_fallback_deadline_without_gui_policy():

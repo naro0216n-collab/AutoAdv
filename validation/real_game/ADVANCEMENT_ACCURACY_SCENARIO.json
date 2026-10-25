@@ -1,5 +1,5 @@
 {
-  "description": "Independent expectations for one continuous runtime-hydrated Windows auto-advance accuracy playthrough. The sequence covers ordinary mix conditions plus delayed HOOK, text-duration decoupling, finite nonverbal voice, and persistent/looping human-vocal sources. Case count is not a product invariant; scene labels and expectations are never read by AutoAdv.",
+  "description": "Independent expectations for one continuous Windows auto-advance accuracy playthrough. The sequence models ADV/novel-game presentation transitions rather than a catalogue of isolated sounds: ordinary voiced/unvoiced dialogue, leading voice delay, delayed HOOK, text-duration decoupling, persistent/looping human-vocal sources, foreground voice sustained into an unvoiced line, and authored game inputs that occur before AutoAdv advances. Case count is not a product invariant; scene labels and expectations are never read by AutoAdv.",
   "lines": [
     {
       "id": "room-clean-short",
@@ -23,17 +23,20 @@
       "duration_variant": "short"
     },
     {
-      "id": "room-clean-jvs001",
-      "text": "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。",
+      "id": "room-leading-silence",
+      "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
       "foreground_voice": true,
-      "speaker_family": "jvs001",
+      "speaker_family": "amitaro",
       "scene": "quiet_room",
-      "environment": "clean_room_long_speaker",
+      "environment": "clean_voice_leading_silence",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
+      "foreground_file": "audio/voice/derived_leading_silence_001.wav",
+      "vocal_structure": "leading_silence",
+      "voice_start_relation": "hook_before_voice",
+      "vocal_source_class": "finite",
       "forbidden_mix_channels": [
         "music",
         "adv_ambient",
@@ -57,7 +60,9 @@
         "adv_ambient",
         "adv_background",
         "adv_sfx"
-      ]
+      ],
+      "game_input_after_ms": 500,
+      "transition_role": "game_input_before_delayed_hook"
     },
     {
       "id": "hook-delay-moderate",
@@ -71,9 +76,10 @@
       "process_audio_expected": true,
       "expected_mix_channels": [],
       "foreground_file": "audio/voice/normal_022.wav",
-      "hook_delay_class": "mid_voice",
+      "hook_delay_class": "mid_voice_after_game_input",
       "hook_delay_ms": 550,
-      "vocal_source_class": "finite"
+      "vocal_source_class": "finite",
+      "transition_role": "game_input_bounded_delayed_hook"
     },
     {
       "id": "hook-delay-late",
@@ -105,23 +111,6 @@
       "foreground_file": "audio/voice/normal_001.wav",
       "hook_delay_class": "after_foreground_end",
       "hook_delay_ms": 2100,
-      "vocal_source_class": "finite"
-    },
-    {
-      "id": "hook-delay-nonverbal",
-      "text": "うっ……うう……",
-      "advance_mode": "audio",
-      "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "nonlexical",
-      "scene": "quiet_room",
-      "environment": "clean_nonverbal_hook_delay",
-      "process_audio_expected": true,
-      "expected_mix_channels": [],
-      "foreground_file": "audio/voice/stress_cry.wav",
-      "hook_delay_class": "nonverbal_mid_voice",
-      "hook_delay_ms": 1250,
-      "vocal_class": "cry",
       "vocal_source_class": "finite"
     },
     {
@@ -201,7 +190,9 @@
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/normal_017.wav"
+      "foreground_file": "audio/voice/normal_017.wav",
+      "game_input_after_ms": 650,
+      "transition_role": "voiced_to_unvoiced_sustained_tail"
     },
     {
       "id": "room-bgm-unvoiced",
@@ -215,7 +206,9 @@
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
-      ]
+      ],
+      "previous_voice_sustained": true,
+      "transition_role": "unvoiced_after_game_input_with_previous_voice_tail"
     },
     {
       "id": "room-bgm-whisper",
@@ -266,35 +259,39 @@
       "foreground_file": "audio/voice/normal_028.wav"
     },
     {
-      "id": "cafe-crowd-jvs002",
-      "text": "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。",
-      "advance_mode": "audio",
-      "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "jvs002",
-      "scene": "cafe",
-      "environment": "bgm_crowd_long_speaker",
-      "process_audio_expected": true,
-      "expected_mix_channels": [
-        "music",
-        "adv_ambient"
-      ],
-      "foreground_file": "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav"
-    },
-    {
-      "id": "cafe-crowd-unvoiced",
-      "text": "人の多い店内で、主人公は黙って頷いた。",
+      "id": "cafe-background-starts-unvoiced",
+      "text": "店内放送を聞き流しながら、主人公は黙っていた。",
       "advance_mode": "audio",
       "use_tts": false,
       "foreground_voice": false,
       "speaker_family": "unvoiced",
       "scene": "cafe",
-      "environment": "bgm_crowd_unvoiced",
+      "environment": "bgm_crowd_background_voice_starts_during_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_ambient"
-      ]
+        "adv_ambient",
+        "adv_background"
+      ],
+      "background_vocal_relation": "starts_during_current",
+      "background_vocal_start_after_ms": 700
+    },
+    {
+      "id": "cafe-background-cross-epoch-unvoiced",
+      "text": "人の声が続く店内で、主人公は黙って頷いた。",
+      "advance_mode": "audio",
+      "use_tts": false,
+      "foreground_voice": false,
+      "speaker_family": "unvoiced",
+      "scene": "cafe",
+      "environment": "bgm_crowd_background_voice_cross_epoch_unvoiced",
+      "process_audio_expected": true,
+      "expected_mix_channels": [
+        "music",
+        "adv_ambient",
+        "adv_background"
+      ],
+      "background_vocal_relation": "persistent_cross_epoch"
     },
     {
       "id": "street-bgm-transition",
@@ -423,23 +420,46 @@
         "adv_background"
       ],
       "vocal_source_class": "persistent_cross_epoch",
-      "persistent_vocal_expected": true
+      "persistent_vocal_expected": true,
+      "game_input_after_ms": 500,
+      "transition_role": "game_input_inside_persistent_vocal_loop"
     },
     {
-      "id": "finite-vocal-natural-repetition",
+      "id": "vocal-loop-game-input-delayed-target",
+      "text": "あっベルが鳴ってる。",
+      "advance_mode": "audio",
+      "use_tts": false,
+      "foreground_voice": true,
+      "speaker_family": "amitaro",
+      "scene": "street",
+      "environment": "bgm_vocal_loop_game_input_delayed_hook_target",
+      "process_audio_expected": true,
+      "expected_mix_channels": [
+        "music",
+        "adv_background"
+      ],
+      "foreground_file": "audio/voice/normal_017.wav",
+      "hook_delay_class": "mid_voice_after_game_input",
+      "hook_delay_ms": 800,
+      "vocal_source_class": "finite",
+      "persistent_vocal_expected": true,
+      "transition_role": "game_input_bounded_delayed_hook_inside_persistent_loop"
+    },
+    {
+      "id": "finite-vocal-repetition-stress",
       "text": "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。",
       "advance_mode": "audio",
       "use_tts": false,
       "foreground_voice": true,
       "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_finite_recurrent_voice",
+      "environment": "bgm_finite_repetition_stress",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
       "foreground_file": "audio/voice/derived_finite_repetition.wav",
-      "vocal_class": "natural_repetition",
+      "vocal_class": "finite_repetition_stress",
       "vocal_source_class": "finite_recurrent",
       "persistent_vocal_expected": false
     },

@@ -81,11 +81,18 @@ class NativeAudio:
     def start(self) -> None:
         # Capture starts before the first HOOK, but monitoring start is not a
         # causal boundary for a game line: the current voice may already be in
-        # progress.  Only an AutoAdv-owned advance can establish that bound.
+        # progress. A lower bound exists only after an observed game input is
+        # tied to a later presentation transition; monitoring start is never one.
         self._capture.start()
 
     def set_causal_lower_bound(self, at_ms: int | None = None) -> None:
-        """Record a known lower bound for the next target's audio."""
+        """Record an observed input lower bound for the next target's audio.
+
+        The bound limits retained-audio identification; it does not assert the
+        exact voice start time. AutoAdv-owned input can install it immediately,
+        while an externally observed game input is installed only after a later
+        HOOK confirms that the previous unsent line was replaced.
+        """
         lower_bound_ms = self.clock() if at_ms is None else int(at_ms)
         if lower_bound_ms <= 0:
             raise ValueError("audio causal lower bound must be a positive monotonic timestamp")
@@ -96,10 +103,10 @@ class NativeAudio:
             self._reset_observation()
 
     def external_transition(self) -> None:
-        """Record that the new target's causal start time is unobserved.
+        """Record that the new target has no observed input lower bound.
 
         HOOK arrival remains a separate factual timestamp and is never promoted
-        to the missing lower bound. Retained audio stays available for known-text
+        to the missing bound. Retained audio stays available for known-text
         association where that association can be established independently.
         """
         with self._lock:

@@ -27,7 +27,10 @@ from autoadv.model import HookSelection, ReplacementRule, SpeakerStyle
 from autoadv.running_target_dialog import available_targets
 from autoadv.storage import Catalog, CommonSettings, load, save
 from autoadv.voice import synthesize
-from autoadv.windows_input import WindowsAdvancementInput, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters
+from autoadv.windows_input import (
+    WindowsAdvancementInput, WindowsGameInputObserver, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters,
+)
 from scripts import adopt_luna_release
 from tests.g2p_support import TEST_G2P
 
@@ -80,6 +83,7 @@ class _User32:
 class _TargetUser32:
     def __init__(self, *, hwnd_valid=True, pid=101):
         self.IsWindow = _Win32Function(lambda hwnd: int(hwnd_valid))
+        self.GetAncestor = _Win32Function(lambda hwnd, _kind: hwnd.value if hwnd_valid else 0)
         def get_pid(hwnd, out):
             out._obj.value = pid
             return 1 if hwnd_valid else 0
@@ -194,6 +198,9 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         dll.user32 = fake
         assert AutoAdvApplication._windows_target_ready(Target(101, 77))
         assert not AutoAdvApplication._windows_target_ready(Target(202, 77))
+
+    assert WindowsGameInputObserver._window_pid(_TargetUser32(pid=101), 77) == 101
+    assert WindowsGameInputObserver._window_pid(_TargetUser32(hwnd_valid=False), 77) == 0
 
     for results, expected_calls, raises in (((1, 1), 2, False), ((0,), 1, True), ((1, 0), 2, True)):
         fake = _User32(results=results)
