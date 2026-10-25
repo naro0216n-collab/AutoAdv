@@ -62,7 +62,7 @@
         "adv_sfx"
       ],
       "game_input_after_ms": 500,
-      "transition_role": "game_input_before_delayed_hook"
+      "transition_role": "external_input_before_delayed_hook"
     },
     {
       "id": "hook-delay-moderate",
@@ -79,7 +79,7 @@
       "hook_delay_class": "mid_voice_after_game_input",
       "hook_delay_ms": 550,
       "vocal_source_class": "finite",
-      "transition_role": "game_input_bounded_delayed_hook"
+      "transition_role": "external_input_then_delayed_hook"
     },
     {
       "id": "hook-delay-late",
@@ -192,7 +192,7 @@
       ],
       "foreground_file": "audio/voice/normal_017.wav",
       "game_input_after_ms": 650,
-      "transition_role": "voiced_to_unvoiced_sustained_tail"
+      "transition_role": "external_input_voiced_to_unvoiced_sustained_tail"
     },
     {
       "id": "room-bgm-unvoiced",
@@ -208,7 +208,7 @@
         "music"
       ],
       "previous_voice_sustained": true,
-      "transition_role": "unvoiced_after_game_input_with_previous_voice_tail"
+      "transition_role": "unvoiced_after_external_input_with_previous_voice_tail"
     },
     {
       "id": "room-bgm-whisper",
@@ -422,7 +422,7 @@
       "vocal_source_class": "persistent_cross_epoch",
       "persistent_vocal_expected": true,
       "game_input_after_ms": 500,
-      "transition_role": "game_input_inside_persistent_vocal_loop"
+      "transition_role": "external_input_inside_persistent_vocal_loop"
     },
     {
       "id": "vocal-loop-game-input-delayed-target",
@@ -443,7 +443,7 @@
       "hook_delay_ms": 800,
       "vocal_source_class": "finite",
       "persistent_vocal_expected": true,
-      "transition_role": "game_input_bounded_delayed_hook_inside_persistent_loop"
+      "transition_role": "external_input_then_delayed_hook_inside_persistent_loop"
     },
     {
       "id": "finite-vocal-repetition-stress",

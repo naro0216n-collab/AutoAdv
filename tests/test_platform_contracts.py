@@ -28,7 +28,7 @@ from autoadv.running_target_dialog import available_targets
 from autoadv.storage import Catalog, CommonSettings, load, save
 from autoadv.voice import synthesize
 from autoadv.windows_input import (
-    WindowsAdvancementInput, WindowsGameInputObserver, WM_KEYDOWN, WM_KEYUP,
+    WindowsAdvancementInput, WM_KEYDOWN, WM_KEYUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters,
 )
 from scripts import adopt_luna_release
@@ -199,8 +199,6 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         assert AutoAdvApplication._windows_target_ready(Target(101, 77))
         assert not AutoAdvApplication._windows_target_ready(Target(202, 77))
 
-    assert WindowsGameInputObserver._window_pid(_TargetUser32(pid=101), 77) == 101
-    assert WindowsGameInputObserver._window_pid(_TargetUser32(hwnd_valid=False), 77) == 0
 
     for results, expected_calls, raises in (((1, 1), 2, False), ((0,), 1, True), ((1, 0), 2, True)):
         fake = _User32(results=results)

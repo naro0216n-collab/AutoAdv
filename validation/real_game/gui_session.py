@@ -128,89 +128,17 @@ class SessionDriver:
 
     @staticmethod
     def _send_validation_game_input(runtime):
-        """Issue one ordinary left click directly through the Windows input stream.
+        """Post one configured advance key directly to the inactive game HWND.
 
-        The authored stimulus uses a visible client point of the selected game
-        window. It therefore needs neither foreground activation nor a product
-        state interpretation, while still traversing the low-level mouse hook
-        used by the product input observer.
+        This is an authored external stimulus, not a Controller send. It uses
+        the same HWND-targeted Win32 message shape the game accepts without
+        requiring foreground activation, and does not inject product state.
         """
-        import ctypes
-        from ctypes import wintypes
-        if runtime.target is None:
+        from autoadv.windows_input import WindowsAdvancementInput
+        if runtime.target is None or runtime.profile is None:
             raise RuntimeError('validation game input has no bound game target')
-
-        class POINT(ctypes.Structure):
-            _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
-
-        user32 = ctypes.windll.user32
-        hwnd = ctypes.c_void_p(runtime.target.hwnd)
-        user32.GetClientRect.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.RECT))
-        user32.GetClientRect.restype = wintypes.BOOL
-        user32.ClientToScreen.argtypes = (ctypes.c_void_p, ctypes.POINTER(POINT))
-        user32.ClientToScreen.restype = wintypes.BOOL
-        user32.WindowFromPoint.argtypes = (POINT,)
-        user32.WindowFromPoint.restype = ctypes.c_void_p
-        user32.GetAncestor.argtypes = (ctypes.c_void_p, wintypes.UINT)
-        user32.GetAncestor.restype = ctypes.c_void_p
-        user32.GetCursorPos.argtypes = (ctypes.POINTER(POINT),)
-        user32.GetCursorPos.restype = wintypes.BOOL
-        user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
-        user32.SetCursorPos.restype = wintypes.BOOL
-
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [
-                ('dx', wintypes.LONG), ('dy', wintypes.LONG),
-                ('mouseData', wintypes.DWORD), ('dwFlags', wintypes.DWORD),
-                ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_size_t),
-            ]
-
-        class INPUTUNION(ctypes.Union):
-            _fields_ = [('mi', MOUSEINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [('type', wintypes.DWORD), ('union', INPUTUNION)]
-
-        user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
-        user32.SendInput.restype = wintypes.UINT
-
-        rect = wintypes.RECT()
-        if not user32.GetClientRect(hwnd, ctypes.byref(rect)) or rect.right <= rect.left or rect.bottom <= rect.top:
-            raise RuntimeError('validation game window has no usable client area')
-        target_root = int(user32.GetAncestor(hwnd, 2) or runtime.target.hwnd)
-        width, height = rect.right - rect.left, rect.bottom - rect.top
-        candidates = (
-            (width // 2, height // 2),
-            (width // 2, (height * 3) // 4),
-            (width // 3, height // 2),
-            ((width * 2) // 3, height // 2),
-        )
-        point = None
-        for client_x, client_y in candidates:
-            candidate = POINT(client_x, client_y)
-            if not user32.ClientToScreen(hwnd, ctypes.byref(candidate)):
-                continue
-            hit = int(user32.WindowFromPoint(candidate) or 0)
-            hit_root = int(user32.GetAncestor(ctypes.c_void_p(hit), 2) or hit) if hit else 0
-            if hit_root == target_root:
-                point = candidate
-                break
-        if point is None:
-            raise RuntimeError('validation game window has no visible client point for authored click')
-        previous = POINT()
-        restore_cursor = bool(user32.GetCursorPos(ctypes.byref(previous)))
-        if not user32.SetCursorPos(point.x, point.y):
-            raise RuntimeError('validation could not position authored click on game window')
-        inputs = (INPUT * 2)(
-            INPUT(0, INPUTUNION(MOUSEINPUT(0, 0, 0, 0x0002, 0, 0))),
-            INPUT(0, INPUTUNION(MOUSEINPUT(0, 0, 0, 0x0004, 0, 0))),
-        )
-        try:
-            if int(user32.SendInput(2, inputs, ctypes.sizeof(INPUT))) != 2:
-                raise RuntimeError('validation could not send authored click to Windows input stream')
-        finally:
-            if restore_cursor:
-                user32.SetCursorPos(previous.x, previous.y)
+        WindowsAdvancementInput(
+            runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
 
     def _send_authored_game_input(self, runtime, case_id, now):
         delay_ms = ACCURACY_GAME_INPUTS_MS.get(case_id)

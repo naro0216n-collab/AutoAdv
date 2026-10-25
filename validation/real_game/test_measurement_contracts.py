@@ -120,9 +120,9 @@ def test_accuracy_measurement_scope_covers_adv_state_transitions_not_case_count(
         'room-clean-unvoiced', 'room-bgm-fadein', 'vocal-loop-cross-epoch-unvoiced'}
     roles = {line.get('transition_role') for line in scenario}
     assert {
-        'game_input_bounded_delayed_hook',
-        'unvoiced_after_game_input_with_previous_voice_tail',
-        'game_input_bounded_delayed_hook_inside_persistent_loop',
+        'external_input_then_delayed_hook',
+        'unvoiced_after_external_input_with_previous_voice_tail',
+        'external_input_then_delayed_hook_inside_persistent_loop',
     } <= roles
 
 
