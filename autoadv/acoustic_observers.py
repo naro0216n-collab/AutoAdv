@@ -23,8 +23,9 @@ class VocalActivityFrame:
     """Probability that one observed time span contains human vocal activity.
 
     ``support_start_ms`` is optional because low-latency VAD backends naturally
-    report point-like frames, while event classifiers report a wider receptive
-    field.  The span is observation provenance, not an inferred utterance span.
+    report narrow frames, while event classifiers use a wider receptive field.
+    It records input provenance only: downstream code must not reinterpret the
+    whole support span as time during which the vocal event was active.
     """
 
     at_ms: int
@@ -238,7 +239,9 @@ class HumanVocalActivityObserver:
 
     def observe(self, chunk: PCMChunk) -> tuple[VocalActivityFrame, ...]:
         frames = self.speech_observer.observe(chunk) + self.event_observer.observe(chunk)
-        return tuple(sorted(frames, key=lambda frame: (frame.at_ms, frame.support_start_ms or frame.at_ms)))
+        return tuple(sorted(
+            frames, key=lambda frame: (
+                frame.at_ms, frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms)))
 
 
 class AcousticObservationHistory:
@@ -356,13 +359,15 @@ class AcousticObservationHistory:
         join_gap = max(32.0, nominal_gap * 2.0)
         intervals: list[tuple[int, int]] = []
         for frame in active:
-            observed_start = max(start_ms, int(
-                frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms))
-            observed_end = min(end_ms, frame.at_ms)
-            if intervals and observed_start - intervals[-1][1] <= join_gap:
-                intervals[-1] = (intervals[-1][0], max(intervals[-1][1], observed_end))
+            # ``at_ms`` is when this backend produced positive event evidence.
+            # A wider classifier's support_start_ms is only provenance for the
+            # samples used to produce that evidence and cannot establish that
+            # voice was active throughout the receptive field.
+            observed_at = min(end_ms, max(start_ms, int(frame.at_ms)))
+            if intervals and observed_at - intervals[-1][1] <= join_gap:
+                intervals[-1] = (intervals[-1][0], max(intervals[-1][1], observed_at))
             else:
-                intervals.append((observed_start, observed_end))
+                intervals.append((observed_at, observed_at))
 
         active_across_boundary = False
         post_causal_onset_ms = intervals[0][0] if intervals else None

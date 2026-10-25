@@ -287,8 +287,11 @@ def test_human_vocal_observer_preserves_nonlexical_event_support_beside_speech_v
     assert event_frames[0].support_start_ms == 760
     vocal = history.summarize_vocal(start_ms=760, end_ms=1240, causal_boundary_ms=900)
     assert vocal.peak_probability == pytest.approx(.9)
-    assert vocal.active_across_causal_boundary
-    assert vocal.post_causal_onset_ms is None
+    # The classifier consumed samples from before the causal boundary, but that
+    # receptive field is provenance rather than evidence that voice was active
+    # before the boundary. New positive evidence appears at the frame timestamp.
+    assert not vocal.active_across_causal_boundary
+    assert vocal.post_causal_onset_ms == 1000
 
 
 def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
