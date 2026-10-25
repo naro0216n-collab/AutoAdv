@@ -227,12 +227,29 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
     assert first_result['product_input_at_ns'] is None
     assert first_result['early_input'] is None
     assert authored['facts']['validation_game_inputs'] == 1
-    assert authored['facts']['validation_game_inputs_observed'] == 1
-    assert authored['facts']['validation_game_input_bounds'] == 1
+    # Posted keyboard messages are not low-level input. Even a coincident
+    # observation must not be attributed to this driver stimulus by time alone.
+    assert authored['facts']['game_input_observations'] == 1
+    assert authored['facts']['external_input_lower_bounds'] == 1
+    assert 'authored_input_observed_at_ns' not in first_result
+    assert 'authored_input_causal_bound_ms' not in first_result
+    assert not any('authored game input was not observed' in issue
+                   for issue in authored['evidence_issues'])
 
 
-def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
+def test_authored_game_input_uses_fixed_fixture_time_not_product_state(monkeypatch):
     sent, traces = [], []
+    from autoadv import windows_input
+
+    class TargetedKeyboard:
+        def __init__(self, hwnd, *, virtual_key):
+            sent.append(('bound', hwnd, virtual_key))
+
+        def advance(self):
+            sent.append(('sent',))
+
+    monkeypatch.setattr(windows_input, 'WindowsAdvancementInput', TargetedKeyboard)
+
     runtime = SimpleNamespace(
         token=SimpleNamespace(session=1, line=8), pause_reason='audio_judgment_active_hold', sent=True,
         target=SimpleNamespace(pid=50, hwnd=77), profile=SimpleNamespace(input_key=13))
@@ -241,7 +258,7 @@ def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
         SimpleNamespace(application=product), SimpleNamespace(),
         {'timeout_seconds': 60},
         SimpleNamespace(emit=lambda name, **fields: traces.append((name, fields))),
-        clock=lambda: 0.0, game_input_send=lambda state: sent.append((state.target.hwnd, state.profile.input_key)),
+        clock=lambda: 0.0,
     )
     case_id = 'room-clean-unvoiced'
     driver.current_case = case_id
@@ -249,13 +266,13 @@ def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
     delay_s = ACCURACY_GAME_INPUTS_MS[case_id] / 1000.0
     assert not driver._send_authored_game_input(runtime, case_id, 10.0 + delay_s - 0.001)
     assert driver._send_authored_game_input(runtime, case_id, 10.0 + delay_s)
-    assert sent == [(77, 13)]
+    assert sent == [('bound', 77, 13), ('sent',)]
     assert traces == [('validation_game_input', {
         'case': case_id, 'scheduled_after_ms': ACCURACY_GAME_INPUTS_MS[case_id]})]
     runtime.pause_reason = ''
     runtime.sent = False
     assert not driver._send_authored_game_input(runtime, case_id, 99.0)
-    assert sent == [(77, 13)]
+    assert sent == [('bound', 77, 13), ('sent',)]
 
 
 def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpretation():

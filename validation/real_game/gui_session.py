@@ -128,124 +128,20 @@ class SessionDriver:
 
     @staticmethod
     def _send_validation_game_input(runtime):
-        """Deliver one observable external click to the selected game window.
+        """Send the authored keyboard stimulus directly to the selected game.
 
-        The authored stimulus must traverse WindowsGameInputObserver; using the
-        product's PostMessage advancement adapter would advance the fixture while
-        remaining invisible to the very external-input contract being measured.
-        A low-level mouse click can target an inactive window by location without
-        calling SetForegroundWindow.  The cursor is restored immediately after
-        the click.
+        A desktop-level SendInput mouse event would instead hit an unrelated
+        window when the game is covered. Window-targeted keyboard messages work
+        without focusing or exposing the game. They are *not* low-level input
+        events and must not be reported as observed by WindowsGameInputObserver.
+        The independent fixture log records whether the game actually moves.
         """
-        import ctypes
-        from ctypes import wintypes
+        from autoadv.windows_input import WindowsAdvancementInput
 
-        if runtime.target is None:
-            raise RuntimeError('validation game input has no bound game target')
-        user32 = ctypes.windll.user32
-
-        class POINT(ctypes.Structure):
-            _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
-
-        class RECT(ctypes.Structure):
-            _fields_ = [
-                ('left', wintypes.LONG), ('top', wintypes.LONG),
-                ('right', wintypes.LONG), ('bottom', wintypes.LONG),
-            ]
-
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [
-                ('dx', wintypes.LONG), ('dy', wintypes.LONG),
-                ('mouseData', wintypes.DWORD), ('dwFlags', wintypes.DWORD),
-                ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_size_t),
-            ]
-
-        class INPUTUNION(ctypes.Union):
-            _fields_ = [('mi', MOUSEINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _anonymous_ = ('u',)
-            _fields_ = [('type', wintypes.DWORD), ('u', INPUTUNION)]
-
-        user32.GetClientRect.argtypes = (ctypes.c_void_p, ctypes.POINTER(RECT))
-        user32.GetClientRect.restype = wintypes.BOOL
-        user32.ClientToScreen.argtypes = (ctypes.c_void_p, ctypes.POINTER(POINT))
-        user32.ClientToScreen.restype = wintypes.BOOL
-        user32.WindowFromPoint.argtypes = (POINT,)
-        user32.WindowFromPoint.restype = ctypes.c_void_p
-        user32.GetAncestor.argtypes = (ctypes.c_void_p, wintypes.UINT)
-        user32.GetAncestor.restype = ctypes.c_void_p
-        user32.GetWindowThreadProcessId.argtypes = (
-            ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD))
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.GetCursorPos.argtypes = (ctypes.POINTER(POINT),)
-        user32.GetCursorPos.restype = wintypes.BOOL
-        user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
-        user32.SetCursorPos.restype = wintypes.BOOL
-        user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
-        user32.SendInput.restype = wintypes.UINT
-
-        hwnd = int(runtime.target.hwnd)
-        expected_pid = int(runtime.target.pid)
-        rect = RECT()
-        if not user32.GetClientRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
-            raise OSError('cannot read validation game client area')
-        width = int(rect.right - rect.left)
-        height = int(rect.bottom - rect.top)
-        if width <= 0 or height <= 0:
-            raise OSError('validation game client area is empty')
-
-        # SendInput follows the real pointer hit-test, so do not assume that a
-        # nominal client coordinate is actually exposed on the desktop.  Search
-        # a few interior points and accept only one whose top-level hit target
-        # belongs to the selected game process.  This keeps the authored input
-        # observable through the product's ordinary mouse hook without stealing
-        # focus or silently clicking another application.
-        GA_ROOT = 2
-        fractions = (0.5, 0.33, 0.67, 0.2, 0.8)
-        point = None
-        for y_fraction in fractions:
-            for x_fraction in fractions:
-                candidate = POINT(
-                    max(1, min(width - 1, int(round(width * x_fraction)))),
-                    max(1, min(height - 1, int(round(height * y_fraction)))),
-                )
-                if not user32.ClientToScreen(ctypes.c_void_p(hwnd), ctypes.byref(candidate)):
-                    continue
-                hit = int(user32.WindowFromPoint(candidate) or 0)
-                if not hit:
-                    continue
-                root = int(user32.GetAncestor(ctypes.c_void_p(hit), GA_ROOT) or hit)
-                pid = wintypes.DWORD()
-                if (user32.GetWindowThreadProcessId(
-                        ctypes.c_void_p(root), ctypes.byref(pid))
-                        and int(pid.value) == expected_pid):
-                    point = candidate
-                    break
-            if point is not None:
-                break
-        if point is None:
-            raise OSError(
-                'validation game has no visible client point for authored external input')
-
-        original = POINT()
-        if not user32.GetCursorPos(ctypes.byref(original)):
-            raise OSError('cannot read cursor position')
-        if not user32.SetCursorPos(point.x, point.y):
-            raise OSError('cannot position authored validation input')
-        INPUT_MOUSE = 0
-        MOUSEEVENTF_LEFTDOWN = 0x0002
-        MOUSEEVENTF_LEFTUP = 0x0004
-        events = (INPUT * 2)(
-            INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dwFlags=MOUSEEVENTF_LEFTDOWN)),
-            INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dwFlags=MOUSEEVENTF_LEFTUP)),
-        )
-        try:
-            sent = user32.SendInput(2, events, ctypes.sizeof(INPUT))
-            if sent != 2:
-                raise OSError('authored validation input was not delivered')
-        finally:
-            user32.SetCursorPos(original.x, original.y)
+        if runtime.target is None or runtime.profile is None:
+            raise RuntimeError('validation game input has no bound game target or key')
+        WindowsAdvancementInput(
+            runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
 
     def _send_authored_game_input(self, runtime, case_id, now):
         delay_ms = ACCURACY_GAME_INPUTS_MS.get(case_id)
