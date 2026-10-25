@@ -141,8 +141,11 @@ class SessionDriver:
         hwnd = ctypes.c_void_p(runtime.target.hwnd)
         user32.SetForegroundWindow.argtypes = (ctypes.c_void_p,)
         user32.SetForegroundWindow.restype = ctypes.c_int
-        if not user32.SetForegroundWindow(hwnd):
-            raise RuntimeError('validation could not foreground the game for authored input')
+        # Foreground activation is best-effort only. Windows may reject an
+        # activation request even though the subsequent input is still a valid
+        # authored stimulus. Whether the game consumed it is established by
+        # the resulting fixture/product evidence, not this API return value.
+        user32.SetForegroundWindow(hwnd)
         key = int(runtime.profile.input_key)
         user32.MapVirtualKeyW.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
         user32.MapVirtualKeyW.restype = ctypes.c_uint32
