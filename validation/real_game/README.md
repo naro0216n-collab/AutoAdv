@@ -48,7 +48,7 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
 
 原音ありでは通常短文・長文、複数話者、囁き、泣き・叫び・喘ぎ相当、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音に加え、本文量と原音durationが相関しない条件を提示する。原音なしも複数mixへ分散する。これらはfixture刺激の分類であり、検証側が「安全」「早送り」「誤帰属」「音声終了」を判定するためのoracleには使用しない。
 
-accuracy scenarioが`game_input_after_ms`を持つケースでは、validation driverはfixture case開始から固定時間後に通常のWindowsキー入力をゲームへ送り、`validation_game_input`として記録する。これは利用者操作を代表する外部刺激であり、製品の進行状態・音声判断・HOOK状態を参照して時刻を変えない。後続ケースを隠さないための`validation_recovery_input`とは別物である。回復入力は、同じfixture caseが12秒変化しない場合だけ一度送るwatchdogで、`pause_reason`、`UtteranceProgress`、Hook状態、voice channel等を参照しない。いずれも製品成功へ読み替えず、runnerが失敗とするのはtrace/evidence破損や要求fixture case未到達等の証拠収集不成立だけである。
+accuracy scenarioが`game_input_after_ms`を持つケースでは、validation driverはfixture case開始から固定時間後にゲームclient内の可視点へ通常のWindows左クリックを送り、`validation_game_input`として記録する。これは利用者操作を代表する外部刺激であり、製品の進行状態・音声判断・HOOK状態を参照して時刻を変えない。後続ケースを隠さないための`validation_recovery_input`とは別物である。回復入力は、同じfixture caseが12秒変化しない場合だけ一度送るwatchdogで、`pause_reason`、`UtteranceProgress`、Hook状態、voice channel等を参照しない。いずれも製品成功へ読み替えず、runnerが失敗とするのはtrace/evidence破損や要求fixture case未到達等の証拠収集不成立だけである。
 
 自動進行精度実機計測はFast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／Fullテストへ含めない。
 
