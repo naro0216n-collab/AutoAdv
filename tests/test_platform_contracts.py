@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import wave
 import zipfile
 
 import pytest
@@ -22,14 +23,42 @@ from autoadv.hook_host import HookHost, parse_host_event
 from autoadv.hook_host_worker import NativeHost, _full_string_hook_code, _luna_output_content, ipc_json
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.luna_abi import load_exports, validate_abi
-from autoadv.model import HookSelection, ReplacementRule
+from autoadv.model import HookSelection, ReplacementRule, SpeakerStyle
 from autoadv.running_target_dialog import available_targets
 from autoadv.storage import Catalog, CommonSettings, load, save
+from autoadv.voice import synthesize
 from autoadv.windows_input import WindowsAdvancementInput, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters
 from scripts import adopt_luna_release
 from tests.g2p_support import TEST_G2P
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_irodori_request_omits_unset_caption_and_sends_explicit_caption():
+    output = io.BytesIO()
+    with wave.open(output, 'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(24000)
+        wav.writeframes(b'\x00\x00' * 8)
+    audio = output.getvalue()
+    requests = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def read(self): return audio
+
+    def open_request(req, timeout):
+        requests.append((req, timeout))
+        return Response()
+
+    with patch('autoadv.voice.request.urlopen', side_effect=open_request):
+        synthesize('http://127.0.0.1:8088', '本文', 'voice-a')
+        synthesize('http://127.0.0.1:8088', '本文', 'voice-a', '柔らかい声。')
+
+    first = json.loads(requests[0][0].data)
+    second = json.loads(requests[1][0].data)
+    assert 'irodori' not in first
+    assert second['irodori'] == {'caption': '柔らかい声。'}
 
 
 class _Win32Function:
@@ -196,12 +225,14 @@ def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_stat
         p.insert_pc_hooks = True
         p.speaker_tts = {'大和': True}
         p.speaker_voices = {'大和': 'voice-m'}
+        p.speaker_styles = {'大和': SpeakerStyle(age='young', timbre='soft', pace='slightly_slow')}
         p.replacements = [ReplacementRule('東京', 'とうきょう')]
         game.default_profile = p.id
         save(c, path)
         q = load(path).games[game.id].profiles[p.id]
         assert (q.hooks, q.body_source, q.speaker_source) == (p.hooks, p.body_source, p.speaker_source)
-        assert q.speaker_tts == p.speaker_tts and q.speaker_voices == p.speaker_voices
+        assert (q.speaker_tts, q.speaker_voices, q.speaker_styles) == (
+            p.speaker_tts, p.speaker_voices, p.speaker_styles)
         assert q.replacements == p.replacements and q.unwrap_speaker_enclosed_body
         assert (q.hook_flush_ms, q.hook_codepage, q.hook_max_buffer,
                 q.hook_max_history, q.insert_pc_hooks) == (850, 932, 7500, 500000, True)

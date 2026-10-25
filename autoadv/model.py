@@ -194,6 +194,148 @@ COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
                  'next_line_timeout_ms')
 
 
+SPEAKER_STYLE_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    'age': (
+        ('', '未設定'), ('child', '幼い'), ('teen', '10代程度'), ('young', '若い'),
+        ('adult', '成人'), ('middle_aged', '中年'), ('senior', '年配'),
+    ),
+    'gender': (
+        ('', '未設定'), ('feminine', '女性的'), ('masculine', '男性的'),
+        ('androgynous', '中性的'),
+    ),
+    'pitch': (
+        ('', '未設定'), ('high', '高い'), ('slightly_high', 'やや高い'),
+        ('slightly_low', 'やや低い'), ('low', '低い'),
+    ),
+    'timbre': (
+        ('', '未設定'), ('soft', '柔らかい'), ('clear', '澄んだ'),
+        ('resonant', '深く響く'), ('husky', 'ハスキー'), ('breathy', '息混じり'),
+        ('delicate', '繊細'), ('firm', '芯がある'), ('powerful', '力強い'),
+    ),
+    'demeanor': (
+        ('', '未設定'), ('calm', '穏やか'), ('bright', '明るい'),
+        ('energetic', '元気'), ('reserved', '控えめ'), ('shy', '内気'),
+        ('cool', '冷静'), ('serious', '真面目'), ('confident', '自信がある'),
+        ('elegant', '上品'), ('lively', '活発'), ('mischievous', 'いたずらっぽい'),
+        ('aloof', '無愛想'), ('dignified', '威厳がある'),
+    ),
+    'delivery': (
+        ('', '未設定'), ('soft', '柔らかい'), ('articulate', 'はきはき'),
+        ('composed', '落ち着いた'), ('polite', '丁寧'), ('forceful', '力強い'),
+        ('flat', '淡々'), ('blunt', 'ぶっきらぼう'),
+    ),
+    'pace': (
+        ('', '未設定'), ('slow', '遅い'), ('slightly_slow', 'やや遅い'),
+        ('slightly_fast', 'やや速い'), ('fast', '速い'),
+    ),
+    'intonation': (
+        ('', '未設定'), ('restrained', '控えめ'), ('natural', '自然'),
+        ('expressive', '豊か'),
+    ),
+}
+SPEAKER_STYLE_FIELDS = tuple(SPEAKER_STYLE_OPTIONS)
+
+
+@dataclass(frozen=True)
+class SpeakerStyle:
+    """Per-speaker voice-design choices; empty means no instruction."""
+    age: str = ''
+    gender: str = ''
+    pitch: str = ''
+    timbre: str = ''
+    demeanor: str = ''
+    delivery: str = ''
+    pace: str = ''
+    intonation: str = ''
+
+    def validate(self) -> None:
+        for field_name in SPEAKER_STYLE_FIELDS:
+            allowed = {value for value, _label in SPEAKER_STYLE_OPTIONS[field_name]}
+            if getattr(self, field_name) not in allowed:
+                raise ValueError(f'invalid speaker style {field_name}')
+
+
+_AGE_PREFIX = {
+    'child': '幼い', 'teen': '10代くらいの', 'young': '若い', 'adult': '成人の',
+    'middle_aged': '中年の', 'senior': '年配の',
+}
+_GENDER_PREFIX = {
+    'feminine': '女性の', 'masculine': '男性の', 'androgynous': '中性的な',
+}
+_PITCH_SINGLE = {
+    'high': '高めの', 'slightly_high': 'やや高めの',
+    'slightly_low': 'やや低めの', 'low': '低めの',
+}
+_PITCH_CONNECT = {
+    'high': '高めで', 'slightly_high': 'やや高めで',
+    'slightly_low': 'やや低めで', 'low': '低めで',
+}
+_TIMBRE = {
+    'soft': '柔らかい', 'clear': '澄んだ', 'resonant': '深く響く',
+    'husky': 'ハスキーな', 'breathy': '息混じりの', 'delicate': '繊細な',
+    'firm': '芯のある', 'powerful': '力強い',
+}
+_DEMEANOR = {
+    'calm': '穏やかな雰囲気で', 'bright': '明るい雰囲気で', 'energetic': '元気よく',
+    'reserved': '控えめに', 'shy': '遠慮がちに', 'cool': '冷静に',
+    'serious': '真面目な調子で', 'confident': '自信のある調子で',
+    'elegant': '上品な調子で', 'lively': '快活に', 'mischievous': 'いたずらっぽく',
+    'aloof': 'そっけない調子で', 'dignified': '威厳のある調子で',
+}
+_DELIVERY = {
+    'soft': '柔らかく', 'articulate': 'はきはきと', 'composed': '落ち着いて',
+    'polite': '丁寧に', 'forceful': '力強く', 'flat': '淡々と',
+    'blunt': 'ぶっきらぼうに',
+}
+_PACE = {
+    'slow': 'ゆっくり', 'slightly_slow': 'ややゆっくり',
+    'slightly_fast': 'やや速めに', 'fast': '速いテンポで',
+}
+_INTONATION = {
+    'restrained': '抑揚を控えめにして', 'natural': '自然な抑揚で',
+    'expressive': '豊かな抑揚をつけて',
+}
+
+
+def build_speaker_caption(style: SpeakerStyle) -> str:
+    """Render only explicitly selected dimensions as natural Japanese prose."""
+    style.validate()
+    sentences: list[str] = []
+
+    identity = ''
+    if style.age:
+        identity += _AGE_PREFIX[style.age]
+    if style.gender:
+        identity += _GENDER_PREFIX[style.gender]
+
+    voice_modifier = ''
+    if style.pitch and style.timbre:
+        voice_modifier = _PITCH_CONNECT[style.pitch] + _TIMBRE[style.timbre]
+    elif style.pitch:
+        voice_modifier = _PITCH_SINGLE[style.pitch]
+    elif style.timbre:
+        voice_modifier = _TIMBRE[style.timbre]
+
+    if identity and voice_modifier:
+        sentences.append(f'{identity}、{voice_modifier}声。')
+    elif identity:
+        sentences.append(f'{identity}声。')
+    elif voice_modifier:
+        sentences.append(f'{voice_modifier}声。')
+
+    delivery_parts = [
+        mapping[value]
+        for value, mapping in (
+            (style.demeanor, _DEMEANOR), (style.delivery, _DELIVERY),
+            (style.pace, _PACE), (style.intonation, _INTONATION),
+        )
+        if value
+    ]
+    if delivery_parts:
+        sentences.append('、'.join(delivery_parts) + '話す。')
+    return ''.join(sentences)
+
+
 @dataclass
 class Profile:
     id: str
@@ -215,6 +357,7 @@ class Profile:
     default_voice: str = ''
     speaker_tts: dict[str, bool] = field(default_factory=dict)
     speaker_voices: dict[str, str] = field(default_factory=dict)
+    speaker_styles: dict[str, SpeakerStyle] = field(default_factory=dict)
     replacements: list[ReplacementRule] = field(default_factory=list)
     name_readings: dict[str, str] = field(default_factory=dict)
     reading_ms: int = 700
@@ -270,6 +413,11 @@ class Profile:
         if (type(self.uncertain_text_fallback) is not bool or type(self.default_tts) is not bool
                 or any(type(v) is not bool or not k for k, v in self.speaker_tts.items())):
             raise ValueError('invalid TTS and fallback settings')
+        if any(not name or not isinstance(style, SpeakerStyle)
+               for name, style in self.speaker_styles.items()):
+            raise ValueError('invalid speaker style settings')
+        for style in self.speaker_styles.values():
+            style.validate()
         AdvanceMode(self.advance_mode)
         if len(self.inherit_common) != len(set(self.inherit_common)) or any(
                 name not in COMMON_FIELDS for name in self.inherit_common):
@@ -316,6 +464,7 @@ class Utterance:
     speech: SpeechPlan
     use_tts: bool
     voice: str
+    tts_caption: str
     advance_mode: AdvanceMode
     uncertain_text_fallback: bool
     reading_unit_count: int
@@ -338,7 +487,7 @@ def _speaker_key(value: str) -> str:
 
 def configured_speaker_names(profile: Profile) -> tuple[str, ...]:
     """Return the profile's existing user-defined speaker names once."""
-    return tuple(dict.fromkeys((*profile.speaker_tts, *profile.speaker_voices)))
+    return tuple(dict.fromkeys((*profile.speaker_tts, *profile.speaker_voices, *profile.speaker_styles)))
 
 def resolve_speaker_enclosed_body(
         body: str, speaker: str, configured_speakers: Sequence[str] = ()) -> tuple[str, str]:
@@ -613,6 +762,7 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
 
     use_tts = profile.speaker_tts.get(speaker, profile.default_tts)
     voice = profile.speaker_voices.get(speaker, profile.default_voice)
+    tts_caption = build_speaker_caption(profile.speaker_styles.get(speaker, SpeakerStyle()))
     advance_mode = AdvanceMode(profile.advance_mode)
     use_alignment = advance_mode == AdvanceMode.AUDIO and not use_tts
     primary_candidates = g2p.candidates(resolved, max_candidates=4 if use_alignment else 1)
@@ -625,6 +775,7 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
     return Utterance(
         session=session, line=line, source=source, sequence=sequence, raw=raw,
         speaker=speaker, text=body, speech=speech, use_tts=use_tts, voice=voice,
+        tts_caption=tts_caption,
         advance_mode=advance_mode, uncertain_text_fallback=profile.uncertain_text_fallback,
         reading_unit_count=reading_units,
         text_wait_ms=max(profile.reading_ms, reading_units * profile.per_reading_unit_wait_ms),

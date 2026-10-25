@@ -10,7 +10,9 @@ import re
 
 from .conversation import Token
 from .hook_protocol import HookEvent, ThreadSource
-from .model import AdvanceMode, Profile, StructureRule, ReplacementRule, COMMON_FIELDS, interpret
+from .model import (AdvanceMode, Profile, SpeakerStyle, StructureRule, ReplacementRule,
+                    COMMON_FIELDS, SPEAKER_STYLE_OPTIONS, build_speaker_caption,
+                    configured_speaker_names, interpret)
 from .storage import load, save
 from .import_luna import inspect_luna, add_luna_games
 from .game_windows import find_game_windows, find_game_processes, WindowCandidate
@@ -359,6 +361,7 @@ def run_gui() -> int:
             self.speaker_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch)
             self.speaker_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
             self.speaker_table.itemChanged.connect(self.speaker_row_item_changed)
+            self.speaker_table.itemSelectionChanged.connect(self.refresh_selected_speaker_style)
             speech.addRow(self.speaker_table)
             add_speaker = QWidget(); add_speaker_layout = QHBoxLayout(add_speaker); add_speaker_layout.setContentsMargins(0,0,0,0)
             self.new_speaker_name = QLineEdit(); self.new_speaker_name.setPlaceholderText('話者')
@@ -367,6 +370,28 @@ def run_gui() -> int:
             self.btn_add_speaker = QPushButton('追加'); self.btn_add_speaker.clicked.connect(self.add_speaker_inline)
             for w, stretch in ((self.new_speaker_name,2),(self.new_speaker_tts,0),(self.new_speaker_voice,2),(self.btn_add_speaker,0)): add_speaker_layout.addWidget(w, stretch)
             speech.addRow(add_speaker)
+
+            speaker_style_box = QGroupBox('選択中の話者のIrodori表現')
+            speaker_style_form = QFormLayout(speaker_style_box)
+            self.speaker_style_controls = {}
+            style_labels = {
+                'age': '年齢感', 'gender': '声の性別感', 'pitch': '声の高さ',
+                'timbre': '声質', 'demeanor': '性格・雰囲気', 'delivery': '話し方',
+                'pace': '話速', 'intonation': '抑揚',
+            }
+            for field_name, label in style_labels.items():
+                control = QComboBox()
+                for value, display in SPEAKER_STYLE_OPTIONS[field_name]:
+                    control.addItem(display, value)
+                control.currentIndexChanged.connect(
+                    lambda _index, field=field_name, combo=control:
+                    self.speaker_style_changed(field, combo.currentData() or ''))
+                self.speaker_style_controls[field_name] = control
+                speaker_style_form.addRow(label, control)
+            self.speaker_caption_preview = QLabel('話者を選択すると、Irodoriへ送るCaptionを確認できます。')
+            self.speaker_caption_preview.setWordWrap(True)
+            speaker_style_form.addRow('Caption', self.speaker_caption_preview)
+            speech.addRow(speaker_style_box)
             self.audition_voice_choice = QComboBox(); self.audition_voice_choice.setEditable(True)
             speech.addRow('試聴Voice', self.audition_voice_choice)
             self.audition_text = QLineEdit('音声の試聴です。')
@@ -936,7 +961,7 @@ def run_gui() -> int:
             if getattr(self, '_refreshing_speakers', False):
                 return
             p = self.current_profile()
-            if not p or name not in set(p.speaker_tts) | set(p.speaker_voices):
+            if not p or name not in configured_speaker_names(p):
                 return
             if p.speaker_voices.get(name, '') == voice.strip():
                 return
@@ -950,12 +975,58 @@ def run_gui() -> int:
                 self.note('話者のVoiceを変更できません: ' + str(exc))
                 self.refresh_speaker_choices(name)
 
+        def selected_speaker_name(self) -> str:
+            row = self.speaker_table.currentRow()
+            if row < 0:
+                return ''
+            item = self.speaker_table.item(row, 0)
+            return item.text().strip() if item is not None else ''
+
+        def refresh_selected_speaker_style(self):
+            p = self.current_profile()
+            name = self.selected_speaker_name()
+            style = p.speaker_styles.get(name, SpeakerStyle()) if p and name else SpeakerStyle()
+            self._refreshing_speaker_style = True
+            try:
+                for field_name, control in self.speaker_style_controls.items():
+                    control.setEnabled(bool(p and name))
+                    index = control.findData(getattr(style, field_name))
+                    control.setCurrentIndex(index if index >= 0 else 0)
+            finally:
+                self._refreshing_speaker_style = False
+            if not p or not name:
+                self.speaker_caption_preview.setText(
+                    '話者を選択すると、Irodoriへ送るCaptionを確認できます。')
+                return
+            caption = build_speaker_caption(style)
+            self.speaker_caption_preview.setText(caption or '未設定（Captionは送信しません）')
+
+        def speaker_style_changed(self, field_name: str, value: str):
+            if getattr(self, '_refreshing_speaker_style', False):
+                return
+            p = self.current_profile()
+            name = self.selected_speaker_name()
+            if not p or not name or name not in configured_speaker_names(p):
+                self.refresh_selected_speaker_style()
+                return
+            current = p.speaker_styles.get(name, SpeakerStyle())
+            try:
+                style = SpeakerStyle(**{**vars(current), field_name: value})
+                self.application.set_speaker_style(name, style)
+                self.speaker_caption_preview.setText(
+                    build_speaker_caption(style) or '未設定（Captionは送信しません）')
+                self.refresh_rule_preview()
+            except Exception as exc:
+                self.note('話者のIrodori表現を変更できません: ' + str(exc))
+                self.refresh_selected_speaker_style()
+
         def audition_speaker_voice(self, name: str):
             p = self.current_profile()
             if p is None:
                 return
             effective = self.catalog.effective_profile(p)
-            self.audition_voice_id(p.speaker_voices.get(name, effective.default_voice))
+            caption = build_speaker_caption(p.speaker_styles.get(name, SpeakerStyle()))
+            self.audition_voice_id(p.speaker_voices.get(name, effective.default_voice), caption)
 
         def delete_speaker_name(self, name: str):
             if not self.current_profile():
@@ -968,7 +1039,7 @@ def run_gui() -> int:
             except Exception as exc:
                 self.note('話者を削除できません: ' + str(exc))
 
-        def audition_voice_id(self, voice: str):
+        def audition_voice_id(self, voice: str, caption: str = ''):
             voice = voice.strip() or self.default_voice.currentText().strip()
             try:
                 if not voice:
@@ -977,13 +1048,13 @@ def run_gui() -> int:
                 # never infers its source from whichever settings widget happened
                 # to be edited most recently.
                 self.audition_voice_choice.setEditText(voice)
-                self.application.start_voice_preview(self.audition_text.text(), voice)
+                self.application.start_voice_preview(self.audition_text.text(), voice, caption)
             except Exception as exc:
                 self.note('試聴できません: ' + str(exc))
 
         def refresh_speaker_choices(self, selected=None):
             p = self.current_profile()
-            names = sorted(set(p.speaker_tts) | set(p.speaker_voices)) if p else []
+            names = sorted(configured_speaker_names(p)) if p else []
             effective = self.catalog.effective_profile(p) if p else None
             self._refreshing_speakers = True
             self.speaker_table.blockSignals(True)
@@ -1020,6 +1091,7 @@ def run_gui() -> int:
             finally:
                 self.speaker_table.blockSignals(False)
                 self._refreshing_speakers = False
+            self.refresh_selected_speaker_style()
             self.refresh_rule_preview()
 
         def selected_capture_rule_source(self):
@@ -1293,7 +1365,12 @@ def run_gui() -> int:
                 trace = []
                 u = interpret(body, draft, session=0, line=0, source='preview', sequence=0, g2p=self.application.g2p,
                               speaker_override=speaker, body_override=body, trace=trace)
-                tts_result = (f'TTS: Voice {u.voice or "未設定"}' if u.use_tts else 'TTS: 使用しない')
+                if u.use_tts:
+                    tts_result = f'TTS: Voice {u.voice or "未設定"}'
+                    if u.tts_caption:
+                        tts_result += f' / Caption: {u.tts_caption}'
+                else:
+                    tts_result = 'TTS: 使用しない'
                 self.editor_preview.setPlainText(
                     f'{tts_result}\n'
                     f'共通読み: {u.speech.resolved_text}\n'

@@ -26,7 +26,7 @@ from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import (HookSelection, OCRSettings, Profile, ReplacementRule, StructureRule,
+from .model import (HookSelection, OCRSettings, Profile, SpeakerStyle, ReplacementRule, StructureRule,
                     Utterance, EXTRACTION_PRESETS, assemble_dialogue_fields,
                     configured_speaker_names, extract_fields, interpret,
                     resolve_speaker_enclosed_body)
@@ -832,7 +832,8 @@ class AutoAdvApplication:
             if not utterance.voice:
                 self._runtime_presentation_event(token, 'tts_finished', success=False)
             else:
-                self._start_voice(token, utterance.speech.tts_text, utterance.voice)
+                self._start_voice(token, utterance.speech.tts_text, utterance.voice,
+                                  utterance.tts_caption)
         self._notify_runtime()
         return external_ns
 
@@ -1431,19 +1432,19 @@ class AutoAdvApplication:
         self._voice_jobs = VoiceJobs(runtime_result, on_timing=runtime_timing)
         self._preview_jobs = VoiceJobs(lambda _token, done, reason: on_preview(done, reason))
 
-    def _start_voice(self, token: Token, reading: str, voice: str) -> None:
+    def _start_voice(self, token: Token, reading: str, voice: str, caption: str = '') -> None:
         if self._voice_jobs is None:
             raise RuntimeError('voice jobs are not configured')
-        self._voice_jobs.start(token, self.catalog.irodori_url, reading, voice)
+        self._voice_jobs.start(token, self.catalog.irodori_url, reading, voice, caption)
 
     def _cancel_voice(self) -> None:
         if self._voice_jobs is not None:
             self._voice_jobs.cancel()
 
-    def start_voice_preview(self, reading: str, voice: str) -> None:
+    def start_voice_preview(self, reading: str, voice: str, caption: str = '') -> None:
         if self._preview_jobs is None:
             raise RuntimeError('voice preview is not configured')
-        self._preview_jobs.start(Token(-1, -1), self.catalog.irodori_url, reading, voice)
+        self._preview_jobs.start(Token(-1, -1), self.catalog.irodori_url, reading, voice, caption)
 
     def cancel_voice_preview(self) -> None:
         if self._preview_jobs is not None:
@@ -2306,7 +2307,7 @@ class AutoAdvApplication:
         current = self.current_profile()
         if current is None:
             raise ValueError('作品を選択してください')
-        if name in set(current.speaker_tts) | set(current.speaker_voices):
+        if name in configured_speaker_names(current):
             raise ValueError('同名の話者が既にあります')
 
         def change(profile: Profile) -> None:
@@ -2322,7 +2323,7 @@ class AutoAdvApplication:
         current = self.current_profile()
         if current is None:
             raise ValueError('作品を選択してください')
-        existing = set(current.speaker_tts) | set(current.speaker_voices)
+        existing = set(configured_speaker_names(current))
         if old_name not in existing:
             raise ValueError('変更する話者がありません')
         if new_name != old_name and new_name in existing:
@@ -2333,22 +2334,37 @@ class AutoAdvApplication:
                 profile.speaker_tts[new_name] = profile.speaker_tts.pop(old_name)
             if old_name in profile.speaker_voices:
                 profile.speaker_voices[new_name] = profile.speaker_voices.pop(old_name)
+            if old_name in profile.speaker_styles:
+                profile.speaker_styles[new_name] = profile.speaker_styles.pop(old_name)
 
         return self._update_profile(change)
 
     def set_speaker_tts(self, name: str, enabled: bool) -> Profile:
         name = name.strip()
         current = self.current_profile()
-        if current is None or name not in set(current.speaker_tts) | set(current.speaker_voices):
+        if current is None or name not in configured_speaker_names(current):
             raise ValueError('変更する話者がありません')
         return self._update_profile(lambda profile: profile.speaker_tts.__setitem__(name, bool(enabled)))
 
     def set_speaker_voice(self, name: str, voice: str) -> Profile:
         name = name.strip()
         current = self.current_profile()
-        if current is None or name not in set(current.speaker_tts) | set(current.speaker_voices):
+        if current is None or name not in configured_speaker_names(current):
             raise ValueError('変更する話者がありません')
         return self._update_profile(lambda profile: profile.speaker_voices.__setitem__(name, voice.strip()))
+
+    def set_speaker_style(self, name: str, style: SpeakerStyle) -> Profile:
+        name = name.strip()
+        style.validate()
+        current = self.current_profile()
+        if current is None or name not in configured_speaker_names(current):
+            raise ValueError('変更する話者がありません')
+        def change(profile: Profile) -> None:
+            if any(getattr(style, field) for field in vars(style)):
+                profile.speaker_styles[name] = style
+            else:
+                profile.speaker_styles.pop(name, None)
+        return self._update_profile(change)
 
     def delete_speaker(self, name: str) -> Profile:
         name = name.strip()
@@ -2356,6 +2372,7 @@ class AutoAdvApplication:
         def change(profile: Profile) -> None:
             profile.speaker_tts.pop(name, None)
             profile.speaker_voices.pop(name, None)
+            profile.speaker_styles.pop(name, None)
 
         return self._update_profile(change)
 

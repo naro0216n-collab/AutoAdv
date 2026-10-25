@@ -459,8 +459,8 @@ def test_application_owns_runtime_and_preview_voice_jobs(monkeypatch):
             self.starts = []
             self.cancelled = 0
             self.__class__.instances.append(self)
-        def start(self, token, url, reading, voice):
-            self.starts.append((token, url, reading, voice))
+        def start(self, token, url, reading, voice, caption=''):
+            self.starts.append((token, url, reading, voice, caption))
         def cancel(self):
             self.cancelled += 1
 
@@ -472,6 +472,8 @@ def test_application_owns_runtime_and_preview_voice_jobs(monkeypatch):
     p.body_source = text.identity
     p.speaker_tts['大和'] = True
     p.speaker_voices['大和'] = 'voice-1'
+    from autoadv.model import SpeakerStyle
+    p.speaker_styles['大和'] = SpeakerStyle(age='young', gender='feminine', timbre='soft')
     app.select_profile(app.game_id, app.profile_id)
     connect_hook(app)
     app.configure_runtime_loop(schedule=lambda _delay, callback: callback())
@@ -482,9 +484,10 @@ def test_application_owns_runtime_and_preview_voice_jobs(monkeypatch):
 
     runtime_hook(app, text, '大和「読み」', 2)
     token = app.runtime_state().token
-    assert runtime_jobs.starts == [(token, app.catalog.irodori_url, '読み', 'voice-1')]
+    assert runtime_jobs.starts == [(
+        token, app.catalog.irodori_url, '読み', 'voice-1', '若い女性の、柔らかい声。')]
     app.start_voice_preview('試聴', 'voice-2')
-    assert preview_jobs.starts[0][1:] == (app.catalog.irodori_url, '試聴', 'voice-2')
+    assert preview_jobs.starts[0][1:] == (app.catalog.irodori_url, '試聴', 'voice-2', '')
 
     runtime_jobs.report(token, True, '')
     preview_jobs.report(preview_jobs.starts[0][0], False, 'cancelled')

@@ -13,8 +13,9 @@ from autoadv.utterance_progress import (
 )
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import HaqumeiG2P, PronunciationCandidate, count_reading_units, reading_units_from_candidates
-from autoadv.model import (ReplacementRule, SPEAKER_NEWLINE_BODY_RULE, StructureRule, interpret,
-                          matching_structure_rule, resolve_speaker_enclosed_body)
+from autoadv.model import (ReplacementRule, SpeakerStyle, SPEAKER_NEWLINE_BODY_RULE, StructureRule,
+                          build_speaker_caption, interpret, matching_structure_rule,
+                          resolve_speaker_enclosed_body)
 from tests.contracts_support import profile
 from tests.g2p_support import FakeG2P, TEST_G2P
 
@@ -93,6 +94,20 @@ def test_text_interpretation_keeps_display_content_separate_from_pronunciation_v
     structured = interpret('明日香\n本文', explicit_newline, session=1, line=3,
                            source='hook', sequence=3, g2p=TEST_G2P)
     assert (structured.speaker, structured.text) == ('明日香', '本文')
+
+
+def test_speaker_caption_contains_only_explicit_voice_design_dimensions():
+    cases = (
+        (SpeakerStyle(), ''),
+        (SpeakerStyle(timbre='soft'), '柔らかい声。'),
+        (SpeakerStyle(pace='slightly_slow'), 'ややゆっくり話す。'),
+        (SpeakerStyle(age='young', gender='feminine', pitch='slightly_high', timbre='soft',
+                      demeanor='calm', delivery='composed', pace='slightly_slow',
+                      intonation='natural'),
+         '若い女性の、やや高めで柔らかい声。穏やかな雰囲気で、落ち着いて、ややゆっくり、自然な抑揚で話す。'),
+    )
+    for style, expected in cases:
+        assert build_speaker_caption(style) == expected
 
 
 def test_registered_readings_apply_only_to_complete_unprotected_word_spans():

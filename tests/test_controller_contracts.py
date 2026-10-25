@@ -7,7 +7,8 @@ import pytest
 
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent
-from autoadv.model import AdvanceMode, HookSelection, ReplacementRule, BODY_ONLY_RULE, SPEAKER_ONLY_RULE
+from autoadv.model import (AdvanceMode, HookSelection, ReplacementRule, SpeakerStyle,
+                           BODY_ONLY_RULE, SPEAKER_ONLY_RULE)
 from autoadv.utterance_progress import UtteranceProgress, UtteranceProgressState
 from tests.contracts_support import SOURCE, controller, observe, profile, source
 from tests.g2p_support import TEST_G2P
@@ -164,19 +165,23 @@ def test_profile_changes_are_staged_at_utterance_boundaries_and_capture_ownershi
     p = profile(tts=True)
     p.speaker_tts['京'] = True
     p.speaker_voices['京'] = 'voice-1'
+    p.speaker_styles['京'] = SpeakerStyle(timbre='soft')
     ctrl = Controller(lambda *_: None, lambda _target: True, TEST_G2P)
     ctrl.begin(p, Target(101, 202), 'host', 1)
     first = ctrl.observe(generation='host', connection=1, sequence=1,
                          source=SOURCE, text='京「一つ目」', pid=101)
-    assert first is not None and ctrl.utterance.voice == 'voice-1'
+    assert first is not None and (ctrl.utterance.voice, ctrl.utterance.tts_caption) == (
+        'voice-1', '柔らかい声。')
 
     staged = deepcopy(p)
     staged.speaker_voices['京'] = 'voice-2'
+    staged.speaker_styles['京'] = SpeakerStyle(demeanor='calm', pace='slightly_slow')
     ctrl.stage_profile(staged)
-    assert ctrl.utterance.voice == 'voice-1'
+    assert (ctrl.utterance.voice, ctrl.utterance.tts_caption) == ('voice-1', '柔らかい声。')
     second = ctrl.observe(generation='host', connection=1, sequence=2,
                           source=SOURCE, text='京「二つ目」', pid=101)
-    assert second is not None and ctrl.utterance.voice == 'voice-2'
+    assert second is not None and (ctrl.utterance.voice, ctrl.utterance.tts_caption) == (
+        'voice-2', '穏やかな雰囲気で、ややゆっくり話す。')
 
     capture_change = deepcopy(staged)
     capture_change.hooks.append(HookSelection('OTHER', 3, 4))

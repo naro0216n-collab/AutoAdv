@@ -10,14 +10,18 @@ from urllib import parse, request
 from .conversation import Token
 
 
-def synthesize(base_url: str, reading: str, voice: str) -> bytes:
+def synthesize(base_url: str, reading: str, voice: str, caption: str = '') -> bytes:
     if not reading.strip() or not voice.strip():
         raise ValueError('nonempty reading and resolved Voice ID required')
     base = parse.urlsplit(base_url)
     if base.scheme not in ('http', 'https') or not base.netloc:
         raise ValueError('invalid TTS URL')
-    payload = json.dumps({'model': 'irodori-tts', 'input': reading, 'voice': voice,
-                          'speed': 1.0, 'response_format': 'wav'}).encode('utf-8')
+    payload = {'model': 'irodori-tts', 'input': reading, 'voice': voice,
+               'speed': 1.0, 'response_format': 'wav'}
+    caption = caption.strip()
+    if caption:
+        payload['irodori'] = {'caption': caption}
+    payload = json.dumps(payload).encode('utf-8')
     call = request.Request(base_url.rstrip('/') + '/v1/audio/speech', data=payload,
                            headers={'Content-Type': 'application/json', 'Accept': 'audio/wav'})
     with request.urlopen(call, timeout=90) as response:
@@ -75,7 +79,7 @@ class VoiceJobs:
         if event is not None:
             event.set()
 
-    def start(self, token: Token, url: str, reading: str, voice: str) -> None:
+    def start(self, token: Token, url: str, reading: str, voice: str, caption: str = '') -> None:
         event = Event()
         with self._lock:
             previous = self.cancelled
@@ -93,7 +97,7 @@ class VoiceJobs:
         def run():
             try:
                 started_ns = time.perf_counter_ns() if self.on_timing else 0
-                audio = synthesize(url, reading, voice)
+                audio = synthesize(url, reading, voice, caption)
                 if not self._is_current(generation, event):
                     return
                 audio_ms = 0.0

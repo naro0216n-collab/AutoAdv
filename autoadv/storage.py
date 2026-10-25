@@ -7,8 +7,8 @@ import os
 import tempfile
 import uuid
 import copy
-from .model import (AdvanceMode, Game, HookSelection, Profile, StructureRule, ReplacementRule, OCRSettings,
-                    COMMON_FIELDS)
+from .model import (AdvanceMode, Game, HookSelection, Profile, SpeakerStyle, StructureRule,
+                    ReplacementRule, OCRSettings, COMMON_FIELDS, SPEAKER_STYLE_FIELDS)
 
 
 
@@ -19,7 +19,7 @@ _GAME_KEYS = frozenset({'id', 'name', 'executable', 'audio_executable', 'input_e
 _PROFILE_KEYS = frozenset({
     'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules', 'unwrap_speaker_enclosed_body',
     'inserted_hooks', 'insert_pc_hooks', 'advance_mode', 'uncertain_text_fallback',
-    'default_tts', 'default_voice', 'speaker_tts', 'speaker_voices', 'replacements',
+    'default_tts', 'default_voice', 'speaker_tts', 'speaker_voices', 'speaker_styles', 'replacements',
     'name_readings', 'source', 'ocr', 'native_helper', 'alignment_model',
     'alignment_vocab', 'next_line_timeout_ms', 'inherit_common', 'reading_ms',
     'per_reading_unit_wait_ms', 'hook_flush_ms', 'hook_codepage', 'hook_max_buffer',
@@ -29,12 +29,26 @@ _HOOK_KEYS = frozenset({'code', 'context', 'context2'})
 _STRUCTURE_RULE_KEYS = frozenset({'pattern', 'condition', 'enabled'})
 _REPLACEMENT_KEYS = frozenset({'pattern', 'replacement', 'regex', 'target', 'enabled'})
 _OCR_KEYS = frozenset({'executable', 'language', 'region', 'interval_ms', 'stable_samples'})
+_SPEAKER_STYLE_KEYS = frozenset(SPEAKER_STYLE_FIELDS)
 
 
 def _require_object(value: object, expected: frozenset[str], label: str) -> dict:
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError(f'invalid current settings {label}')
     return value
+
+
+def _require_profile_object(value: object) -> dict:
+    """Accept an omitted new optional style map while keeping v4 structurally strict."""
+    if not isinstance(value, dict):
+        raise ValueError('invalid current settings profile')
+    keys = set(value)
+    if keys == _PROFILE_KEYS:
+        return value
+    profile_without_optional_styles = _PROFILE_KEYS - {'speaker_styles'}
+    if keys == profile_without_optional_styles:
+        return {**value, 'speaker_styles': {}}
+    raise ValueError('invalid current settings profile')
 
 @dataclass
 class CommonSettings:
@@ -131,6 +145,7 @@ def _profile_payload(p: Profile) -> dict:
         advance_mode=p.advance_mode.value, uncertain_text_fallback=p.uncertain_text_fallback,
         default_tts=p.default_tts, default_voice=p.default_voice,
         speaker_tts=p.speaker_tts, speaker_voices=p.speaker_voices,
+        speaker_styles={name: vars(style) for name, style in p.speaker_styles.items()},
         replacements=[vars(x) for x in p.replacements], name_readings=p.name_readings,
         source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
         alignment_model=p.alignment_model, alignment_vocab=p.alignment_vocab,
@@ -147,7 +162,7 @@ def _read_replacements(raw: object) -> list[ReplacementRule]:
 
 
 def _read_profile(raw: object) -> Profile:
-    raw = _require_object(raw, _PROFILE_KEYS, 'profile')
+    raw = _require_profile_object(raw)
     raw_hooks = raw['hooks']
     if not isinstance(raw_hooks, list):
         raise ValueError('invalid current settings hooks')
@@ -164,6 +179,16 @@ def _read_profile(raw: object) -> Profile:
             for rule in rules
         ]
     ocr_raw = _require_object(raw['ocr'], _OCR_KEYS, 'OCR')
+    speaker_styles_raw = raw['speaker_styles']
+    if not isinstance(speaker_styles_raw, dict):
+        raise ValueError('invalid current settings speaker styles')
+    speaker_styles = {
+        name: SpeakerStyle(**_require_object(style, _SPEAKER_STYLE_KEYS, 'speaker style'))
+        for name, style in speaker_styles_raw.items()
+        if isinstance(name, str) and name
+    }
+    if len(speaker_styles) != len(speaker_styles_raw):
+        raise ValueError('invalid current settings speaker styles')
     region = ocr_raw['region']
     if not isinstance(region, list) or len(region) != 4:
         raise ValueError('invalid current settings OCR region')
@@ -175,7 +200,8 @@ def _read_profile(raw: object) -> Profile:
         insert_pc_hooks=raw['insert_pc_hooks'], advance_mode=AdvanceMode(raw['advance_mode']),
         uncertain_text_fallback=raw['uncertain_text_fallback'], default_tts=raw['default_tts'],
         default_voice=raw['default_voice'], speaker_tts=dict(raw['speaker_tts']),
-        speaker_voices=dict(raw['speaker_voices']), replacements=_read_replacements(raw['replacements']),
+        speaker_voices=dict(raw['speaker_voices']), speaker_styles=speaker_styles,
+        replacements=_read_replacements(raw['replacements']),
         name_readings=dict(raw['name_readings']), source=raw['source'],
         ocr=OCRSettings(**{**ocr_raw, 'region': tuple(region)}), native_helper=raw['native_helper'],
         alignment_model=raw['alignment_model'], alignment_vocab=raw['alignment_vocab'],
