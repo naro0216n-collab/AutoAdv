@@ -26,7 +26,7 @@ def run_gui() -> int:
                                    QHBoxLayout, QFormLayout, QLineEdit, QPlainTextEdit,
                                    QLabel, QPushButton, QComboBox, QFileDialog,
                                    QSpinBox, QGroupBox, QMessageBox, QCheckBox, QScrollArea, QInputDialog,
-                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu, QButtonGroup)
+                                   QTableWidget, QTableWidgetItem, QAbstractItemView, QTabWidget, QHeaderView, QToolButton, QMenu, QButtonGroup, QFrame)
 
     class SignalBridge(QObject):
         voice = Signal(object, bool, str)
@@ -75,7 +75,8 @@ def run_gui() -> int:
                 QPushButton:checked, QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }
                 QTableWidget { gridline-color: palette(mid); selection-background-color: palette(highlight); }
                 QHeaderView::section { font-weight: 600; padding: 5px; }
-                QLabel[problem="true"] { padding: 8px; border: 1px solid palette(mid); border-radius: 6px; }
+                QFrame[feedbackPanel="true"] { border: 1px solid palette(mid); border-radius: 6px; }
+                QFrame[feedbackPanel="true"] QLabel { border: none; padding: 0; }
             ''')
 
             context = QHBoxLayout()
@@ -141,6 +142,27 @@ def run_gui() -> int:
                     self.ui_sections[section] = widget
                 return form
 
+            def fixed_feedback_panel(message_label, action_button=None):
+                """Reserve a stable status area even when no message is currently present."""
+                panel = QFrame()
+                panel.setProperty('feedbackPanel', True)
+                layout = QVBoxLayout(panel)
+                layout.setContentsMargins(8, 8, 8, 8)
+                layout.setSpacing(6)
+                message_label.setWordWrap(True)
+                message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                layout.addWidget(message_label, 1)
+                if action_button is not None:
+                    action_slot = QWidget()
+                    action_layout = QHBoxLayout(action_slot)
+                    action_layout.setContentsMargins(0, 0, 0, 0)
+                    action_layout.addWidget(action_button)
+                    action_layout.addStretch(1)
+                    action_slot.setMinimumHeight(34)
+                    layout.addWidget(action_slot)
+                panel.setMinimumHeight(92 if action_button is not None else 54)
+                return panel
+
             def setting_row(key, control):
                 """Put an effective value and the only relevant inheritance action together."""
                 wrapper = QWidget()
@@ -162,14 +184,11 @@ def run_gui() -> int:
             self.preview.setMinimumHeight(180)
             live_dialogue.addRow(self.preview)
             self.play_issue = QLabel('')
-            self.play_issue.setWordWrap(True)
-            self.play_issue.setProperty('problem', True)
-            self.play_issue.hide()
-            live_dialogue.addRow(self.play_issue)
             self.play_issue_action = QPushButton('')
             self.play_issue_action.clicked.connect(self.open_play_issue_action)
             self.play_issue_action.hide()
-            live_dialogue.addRow(self.play_issue_action)
+            self.play_issue_panel = fixed_feedback_panel(self.play_issue, self.play_issue_action)
+            live_dialogue.addRow(self.play_issue_panel)
             self._play_issue_action = None
             self.btn_edit_current = QPushButton('この会話の設定を調整')
             self.btn_edit_current.clicked.connect(self.edit_current_dialogue)
@@ -201,6 +220,7 @@ def run_gui() -> int:
             capture_outer = QVBoxLayout(capture_box)
             self.capture_hint = QLabel('ゲームで台詞を進めると、取得元と実サンプルが自動的に追加されます。')
             self.capture_hint.setWordWrap(True)
+            self.capture_hint.setMinimumHeight(24)
             capture_outer.addWidget(self.capture_hint)
             workspace = QHBoxLayout()
 
@@ -280,14 +300,12 @@ def run_gui() -> int:
             self.capture_result_table.setMinimumHeight(245)
             assembly_column.addWidget(self.capture_result_table, 1)
             self.capture_problem = QLabel('')
-            self.capture_problem.setWordWrap(True)
-            self.capture_problem.setProperty('problem', True)
-            self.capture_problem.hide()
-            assembly_column.addWidget(self.capture_problem)
             self.capture_recovery_action = QPushButton('取得の復旧を開く')
             self.capture_recovery_action.clicked.connect(lambda: self.reveal_section('hook_details', 'game'))
             self.capture_recovery_action.hide()
-            assembly_column.addWidget(self.capture_recovery_action)
+            self.capture_problem_panel = fixed_feedback_panel(
+                self.capture_problem, self.capture_recovery_action)
+            assembly_column.addWidget(self.capture_problem_panel)
             self.btn_commit_capture = QPushButton('この会話取得を使用')
             self.btn_commit_capture.setProperty('primary', True)
             self.btn_commit_capture.clicked.connect(self.commit_capture_workspace)
@@ -464,8 +482,12 @@ def run_gui() -> int:
             environment = group('Irodori', page='settings', section='irodori')
             self.irodori_path=QLineEdit(self.catalog.irodori_root); self.irodori_url=QLineEdit(self.catalog.irodori_url)
             environment.addRow('サーバーフォルダ',self.irodori_path); environment.addRow('接続先',self.irodori_url)
-            self.server_status=QLabel(''); self.server_status.setWordWrap(True); self.server_status.setProperty('problem', True); self.server_status.hide(); environment.addRow(self.server_status)
-            self.btn_server=QPushButton('接続を再試行'); self.btn_server.clicked.connect(self.start_server); self.btn_server.hide(); environment.addRow(self.btn_server)
+            self.server_status=QLabel('')
+            self.btn_server=QPushButton('接続を再試行')
+            self.btn_server.clicked.connect(self.start_server)
+            self.btn_server.hide()
+            self.server_status_panel = fixed_feedback_panel(self.server_status, self.btn_server)
+            environment.addRow(self.server_status_panel)
 
             common = group('共通の既定値', page='settings', section='common_advance')
             self.common_controls={}
@@ -1503,22 +1525,18 @@ def run_gui() -> int:
             try:
                 self.application.set_irodori_environment(self.irodori_path.text(), self.irodori_url.text())
                 self.server_status.clear()
-                self.server_status.hide()
                 self.btn_server.hide()
                 self.application.start_irodori(self.bridge.server.emit)
             except Exception as exc:
                 self.server_status.setText('Irodori設定を保存できません: ' + str(exc))
-                self.server_status.show()
                 self.btn_server.show()
 
         def on_server(self, view):
             if view.issue:
                 self.server_status.setText(view.issue)
-                self.server_status.show()
                 self.btn_server.show()
                 return
             self.server_status.clear()
-            self.server_status.hide()
             self.btn_server.hide()
             for control in (self.default_voice, self.new_speaker_voice, self.audition_voice_choice):
                 existing = control.currentText().strip()
@@ -1695,7 +1713,8 @@ def run_gui() -> int:
             self.source_table.setRowCount(0)
             self.capture_result_table.setRowCount(0)
             self.source_extraction_preview.setRowCount(0)
-            self.capture_problem.hide()
+            self.capture_problem.clear()
+            self.capture_recovery_action.hide()
             self.hook_preview.clear()
             self.hook_technical_info.clear()
             self.capture_format_source.setText('取得元を選択してください')
@@ -1724,9 +1743,8 @@ def run_gui() -> int:
         def refresh_capture_hint(self):
             view = self.application.capture_view()
             has_output = bool(view.candidates)
-            self.capture_hint.setVisible(not has_output)
-            if not has_output:
-                self.capture_hint.setText('ゲームで台詞を進めると、取得候補が自動的に追加されます。')
+            self.capture_hint.setText(
+                '' if has_output else 'ゲームで台詞を進めると、取得候補が自動的に追加されます。')
 
         def refresh_source_extraction_preview(self, candidate=None):
             if candidate is None:
@@ -1851,10 +1869,8 @@ def run_gui() -> int:
                 issue = self.application.play_view().issue
                 if issue and issue.action == 'open_capture':
                     self.capture_problem.setText(issue.message)
-                    self.capture_problem.show()
                 else:
                     self.capture_problem.clear()
-                    self.capture_problem.hide()
                 self.capture_recovery_action.hide()
                 self.refresh_source_workspace_mode('ocr')
                 return
@@ -1895,10 +1911,8 @@ def run_gui() -> int:
 
             if view.problem:
                 self.capture_problem.setText(view.problem.message)
-                self.capture_problem.show()
             else:
                 self.capture_problem.clear()
-                self.capture_problem.hide()
             self.capture_recovery_action.setVisible(
                 bool(view.problem and view.problem.action == 'open_capture_recovery'))
             self.btn_commit_capture.setEnabled(view.dirty and view.can_commit)
@@ -2024,7 +2038,6 @@ def run_gui() -> int:
             self.advance_authorization.blockSignals(previous)
             if view.issue:
                 self.play_issue.setText(view.issue.message)
-                self.play_issue.show()
                 self._play_issue_action = view.issue.action
                 labels = {
                     'open_capture': '会話取得を確認',
@@ -2040,7 +2053,6 @@ def run_gui() -> int:
             else:
                 self._play_issue_action = None
                 self.play_issue.clear()
-                self.play_issue.hide()
                 self.play_issue_action.hide()
             self.refresh_diagnostics()
 
