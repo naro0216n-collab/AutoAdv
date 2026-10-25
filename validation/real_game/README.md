@@ -74,9 +74,9 @@ JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifa
 
 Windows実機計測のGitHub Issueは、チャット環境から解析できるリモート証拠面として使う。4個の固定履歴slotをリングとして扱い、通常runは同一runのslotまたは最古slotの1件だけをPATCHする。検証器が推論した「known-good baseline」は維持しない。
 
-各履歴commentには、fixture case開始、raw Hook、生成Utterance、製品の進行完了理由、実advance input、scenarioで与えたgame input、validation recoveryを時系列JSONLとして直接掲載する。ZIP/base64 bundleやgame oracleの解釈表を介さず、チャット環境からそのまま事実関係を読めることを共有契約とする。完全なproduct traceとfixture evidenceはローカルrun directoryにも残す。
+各履歴commentには、run directoryに永続保存する解析証拠を選別せず掲載する。`validation-summary.json`、完全なproduct trace、完全なfixture evidence、offline verifier report、`validation.log`をファイル単位のsanitized SHA-256付きで直接掲載し、サイズ上限は複数commentへの分割だけで吸収する。ZIP/base64 bundleや検証器が作るcompact timelineを介さず、チャット環境から観測・推論telemetry・独立fixture/oracle照合結果までそのまま読めることを共有契約とする。
 
-完全な証拠はローカルrun directoryにも残す。Issue更新は計測後の共有処理であり、GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
+同じ完全な証拠はローカルrun directoryにも残す。ローカル保存はIssue送信失敗時の耐障害正本であり、Issue更新は計測後の共有処理とする。GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
 
 ## Alignment品質・stress計測
 

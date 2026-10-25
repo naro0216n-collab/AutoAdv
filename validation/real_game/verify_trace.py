@@ -15,12 +15,6 @@ from typing import Sequence
 
 HERE = Path(__file__).resolve().parent
 PHASES = ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress')
-CORE_PRODUCT_EVENTS = frozenset({
-    'hook_output', 'utterance', 'utterance_progress', 'presentation_complete',
-    'advance_attempt', 'advance_input', 'validation_game_input', 'validation_recovery_input',
-    'controller_handoff', 'native_audio_error', 'validation_driver_failure',
-})
-
 
 def _summary(values: list[float]) -> dict | None:
     """Small numeric summary shared by standalone alignment benchmarks."""
@@ -69,40 +63,6 @@ def _sequence_issues(records: Sequence[dict], *, started_event: str, version: in
             issues.append(f'{started_event} record without monotonic timestamp')
             break
     return issues
-
-
-def _core_timeline(records: Sequence[dict], fixture_records: Sequence[dict] | None) -> list[dict]:
-    """Compact factual timeline for remote diagnosis; no verdicts are added."""
-    timeline: list[dict] = []
-    for record in fixture_records or ():
-        if record.get('event') not in ('fixture_case', 'fixture_voice_commanded'):
-            continue
-        item = {'stream': 'fixture'}
-        item.update({key: value for key, value in record.items() if key != 'seq'})
-        timeline.append(item)
-    progress_state: dict[tuple[object, object], tuple[object, ...]] = {}
-    for record in records:
-        event = record.get('event')
-        if event not in CORE_PRODUCT_EVENTS:
-            continue
-        if event == 'utterance_progress':
-            key = (record.get('session'), record.get('line'))
-            signature = (
-                record.get('state'), record.get('ended_at_ms'),
-                record.get('target_audio_associated'), record.get('lexical_target_ended'),
-                record.get('target_vocal_observed'), record.get('recurrent_tail_observed'),
-            )
-            if progress_state.get(key) == signature:
-                continue
-            progress_state[key] = signature
-        item = {'stream': 'product'}
-        item.update({key: value for key, value in record.items() if key != 'seq'})
-        timeline.append(item)
-    timeline.sort(key=lambda item: (
-        item.get('at_ns') if type(item.get('at_ns')) is int else 0,
-        0 if item.get('stream') == 'fixture' else 1,
-    ))
-    return timeline
 
 
 def _endpoint_oracle_by_path() -> dict[str, dict]:
@@ -343,7 +303,6 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
         'facts': facts,
         'case_results': case_results,
         'evidence_issues': issues,
-        'timeline': _core_timeline(records, fixture_records),
     }
 
 

@@ -1,11 +1,13 @@
-"""Publish bounded GitHub Issue evidence for Windows validation.
+"""Publish complete persisted Windows-validation evidence to a GitHub Issue.
 
-The Issue surface intentionally carries raw, compact facts that a later chat can
-inspect directly. It does not publish validation-side safety/quality verdicts.
+The Issue surface is a remotely readable copy of the run's durable evidence. It
+does not replace local retention and does not turn transport success into a
+validation verdict.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -20,15 +22,13 @@ RUN_MARKER_RE = re.compile(
 )
 TOKEN_RE = re.compile(r"(?i)(gh[pousr]_[a-z0-9_]{12,}|github_pat_[a-z0-9_]{12,})")
 USER_PATH_RE = re.compile(r"(?i)[A-Z]:(?:\\){1,2}Users(?:\\){1,2}[^\\/\s\"']+")
-DIAGNOSTIC_RE = re.compile(
-    r"Advancement accuracy media|Accuracy setup failed|Traceback|RuntimeError|ValueError|Exception|警告|WARNING"
-)
-
 # GitHub does not document a stable issue-comment body limit in the REST API.
 # Keep each physical comment comfortably bounded, but never treat this as a
 # limit on one validation run: a run is split across as many comments as needed.
 COMMENT_BODY_TARGET_CHARS = 60_000
+COMMENT_BODY_TARGET_BYTES = 60_000
 COMMENT_METADATA_RESERVE_CHARS = 512
+COMMENT_METADATA_RESERVE_BYTES = 1_024
 ARCHIVED_MARKER = "<!-- autoadv-validation-archived -->"
 PART_MARKER_RE = re.compile(
     r"<!--\s*autoadv-validation-part:(?P<run>\d{8}T\d{6}Z-[A-Za-z0-9_-]+):(?P<part>\d+)\s*-->"
@@ -94,56 +94,143 @@ class Snapshot:
         return "\n\n".join(self.parts)
 
 
-def _render_timeline_part(prefix: list[str], rows: list[str]) -> str:
-    lines = list(prefix)
-    if rows:
-        if lines:
-            lines.append("")
-        lines.extend((
-            "<details open><summary>analysis evidence timeline</summary>", "", "```jsonl",
-            *rows,
-            "```", "</details>",
-        ))
-    return "\n".join(lines)
+def _evidence_paths(root: Path) -> tuple[Path, ...]:
+    """Return every persisted run-evidence file that can aid remote analysis.
 
-
-def _partition_snapshot(prefix: list[str], timeline_rows: list[str]) -> tuple[str, ...]:
-    """Partition one logical run without dropping or compacting factual rows."""
-    payload_limit = COMMENT_BODY_TARGET_CHARS - COMMENT_METADATA_RESERVE_CHARS
-    if payload_limit <= 0:
-        raise ValueError("invalid Issue comment payload budget")
-    if not timeline_rows:
-        body = "\n".join(prefix)
-        if len(body) > payload_limit:
-            raise ValueError(
-                "validation summary itself exceeds the Issue comment payload budget: "
-                f"{len(body)} > {payload_limit}"
-            )
-        return (body,)
-
-    parts: list[str] = []
-    current: list[str] = []
-    current_prefix = prefix
-    for row in timeline_rows:
-        candidate = _render_timeline_part(current_prefix, [*current, row])
-        if len(candidate) <= payload_limit:
-            current.append(row)
+    Upload transport status is deliberately excluded: it describes the copy to
+    GitHub, not the validation run itself. Runtime/fixture build outputs are not
+    persistent evidence and are cleaned by the launcher.
+    """
+    paths: list[Path] = []
+    for path in root.iterdir():
+        if not path.is_file():
             continue
-        if not current:
-            raise ValueError(
-                "one validation evidence record exceeds the Issue comment payload budget: "
-                f"{len(candidate)} > {payload_limit}"
-            )
-        parts.append(_render_timeline_part(current_prefix, current))
-        current_prefix = []
-        current = [row]
-        candidate = _render_timeline_part(current_prefix, current)
-        if len(candidate) > payload_limit:
-            raise ValueError(
-                "one validation evidence record exceeds the Issue comment payload budget: "
-                f"{len(candidate)} > {payload_limit}"
-            )
-    parts.append(_render_timeline_part(current_prefix, current))
+        name = path.name
+        if name in {"validation-summary.json", "validation.log"}:
+            paths.append(path)
+        elif name.startswith("autoadv-") and (
+            name.endswith(".jsonl") or name.endswith(".result.json")
+        ):
+            paths.append(path)
+    priority = {
+        "validation-summary.json": 0,
+        "validation.log": 4,
+    }
+    return tuple(sorted(paths, key=lambda path: (
+        priority.get(path.name, 2 if path.name.endswith(".jsonl") else 3),
+        path.name,
+    )))
+
+
+def _evidence_language(path: Path) -> str:
+    if path.name.endswith(".jsonl"):
+        return "jsonl"
+    if path.name.endswith(".json"):
+        return "json"
+    return "text"
+
+
+
+
+def _markdown_fence(content: str) -> str:
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", content)), default=0)
+    return "`" * max(3, longest + 1)
+
+def _split_text(content: str, char_limit: int, byte_limit: int) -> list[str]:
+    """Split text without dropping characters after sanitization.
+
+    GitHub's stable comment-body limit is not part of this contract, so each
+    chunk stays below both a character and UTF-8 byte budget.
+    """
+    if char_limit <= 0 or byte_limit <= 0:
+        raise ValueError("invalid evidence chunk limit")
+    if not content:
+        return [""]
+    chunks: list[str] = []
+    cursor = 0
+    while cursor < len(content):
+        high = min(len(content), cursor + char_limit)
+        low = cursor + 1
+        stop = cursor
+        while low <= high:
+            middle = (low + high) // 2
+            if len(content[cursor:middle].encode("utf-8")) <= byte_limit:
+                stop = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if stop <= cursor:
+            raise ValueError("one validation evidence character exceeds the Issue byte budget")
+        if stop < len(content):
+            newline = content.rfind("\n", cursor, stop)
+            if newline >= cursor:
+                stop = newline + 1
+        chunks.append(content[cursor:stop])
+        cursor = stop
+    return chunks
+
+
+def _fits_payload(content: str) -> bool:
+    return (
+        len(content) <= COMMENT_BODY_TARGET_CHARS - COMMENT_METADATA_RESERVE_CHARS
+        and len(content.encode("utf-8"))
+        <= COMMENT_BODY_TARGET_BYTES - COMMENT_METADATA_RESERVE_BYTES
+    )
+
+
+def _evidence_blocks(root: Path) -> tuple[list[str], list[str]]:
+    """Build a manifest plus lossless, sanitized text blocks for all evidence."""
+    manifest = [
+        "", "**Complete persisted evidence**",
+        "", "| file | chars | sha256 (sanitized UTF-8) |",
+        "| --- | ---: | --- |",
+    ]
+    blocks: list[str] = []
+    # Keep one block well below the physical comment budget so a file chunk can
+    # always be wrapped with its label and Markdown delimiters.
+    chunk_char_limit = COMMENT_BODY_TARGET_CHARS - COMMENT_METADATA_RESERVE_CHARS - 4_000
+    chunk_byte_limit = COMMENT_BODY_TARGET_BYTES - COMMENT_METADATA_RESERVE_BYTES - 4_000
+    for path in _evidence_paths(root):
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")
+        content = sanitize_public_issue(raw)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        manifest.append(f"| `{path.name}` | {len(content)} | `{digest}` |")
+        chunks = _split_text(content, chunk_char_limit, chunk_byte_limit)
+        for index, chunk in enumerate(chunks, 1):
+            label = path.name if len(chunks) == 1 else f"{path.name} · chunk {index}/{len(chunks)}"
+            # Validation evidence is generated by this repository and does not
+            # contain Markdown fences. Keep the raw textual payload directly
+            # readable instead of base64/ZIP encoding it.
+            fence = _markdown_fence(chunk)
+            blocks.append("\n".join((
+                f"<details open><summary>{label}</summary>", "",
+                f"{fence}{_evidence_language(path)}",
+                chunk,
+                fence, "</details>",
+            )))
+    return manifest, blocks
+
+
+def _partition_blocks(prefix: list[str], blocks: list[str]) -> tuple[str, ...]:
+    """Partition one logical run across comments without omitting evidence."""
+    if not _fits_payload(""):
+        raise ValueError("invalid Issue comment payload budget")
+    parts: list[str] = []
+    current = "\n".join(prefix)
+    if not _fits_payload(current):
+        raise ValueError("validation summary itself exceeds the Issue comment payload budget")
+    for block in blocks:
+        candidate = block if not current else current + "\n\n" + block
+        if _fits_payload(candidate):
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+        if not _fits_payload(block):
+            raise ValueError("one validation evidence block exceeds the Issue comment payload budget")
+        current = block
+    if current or not parts:
+        parts.append(current)
     return tuple(parts)
 
 
@@ -174,7 +261,6 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
     if summary.get("launcher_error"):
         lines.extend(("", f"Launcher error: `{_cell(summary.get('launcher_error'))}`"))
 
-    timeline_rows: list[str] = []
     report = _read_json(root / "autoadv-accuracy.result.json")
     if report is not None:
         verdict = report.get("verdict")
@@ -184,34 +270,14 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
         if issues:
             lines.extend(("", "**Evidence issues**"))
             lines.extend(f"- {sanitize_public_issue(item)}" for item in issues[:12])
-        timeline = report.get("timeline")
-        if isinstance(timeline, list):
-            timeline_rows = [
-                sanitize_public_issue(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
-                for item in timeline if isinstance(item, dict)
-            ]
 
-    accuracy_phase = next((p for p in summary.get("phases", ()) if p.get("phase") == "accuracy"), None)
-    if isinstance(accuracy_phase, dict) and not accuracy_phase.get("report_present"):
-        log_path = root / "validation.log"
-        if log_path.is_file():
-            diagnostic = [
-                line.rstrip("\r\n")
-                for line in log_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-                if DIAGNOSTIC_RE.search(line)
-            ][-80:]
-            if diagnostic:
-                lines.extend((
-                    "", "<details open><summary>setup diagnostics</summary>", "", "```text",
-                    sanitize_public_issue("\n".join(diagnostic)), "```", "</details>",
-                ))
-
+    manifest, blocks = _evidence_blocks(root)
+    lines.extend(manifest)
     return Snapshot(
         run=run,
-        parts=_partition_snapshot(lines, timeline_rows),
+        parts=_partition_blocks(lines, blocks),
         summary=summary,
     )
-
 
 def _run_from_body(body: str) -> str | None:
     match = RUN_MARKER_RE.search(body or "")
@@ -299,9 +365,11 @@ def _comment_body(marker: str, run: str, part: int, total: int, payload: str) ->
         lines.append(f"Continuation `{part}/{total}`")
     lines.extend(("", payload))
     body = "\n".join(lines)
-    if len(body) > COMMENT_BODY_TARGET_CHARS:
+    if (len(body) > COMMENT_BODY_TARGET_CHARS
+            or len(body.encode("utf-8")) > COMMENT_BODY_TARGET_BYTES):
         raise ValueError(
-            f"Issue comment partition exceeds target size: {len(body)} > {COMMENT_BODY_TARGET_CHARS}"
+            "Issue comment partition exceeds target size: "
+            f"chars={len(body)} bytes={len(body.encode('utf-8'))}"
         )
     return body
 
@@ -480,11 +548,13 @@ def _verify_operation(operation: dict[str, Any], run: str, comment: dict[str, An
     expected_id = int(operation["comment_id"])
     if int(comment.get("id", -1)) != expected_id:
         raise RuntimeError(f"GitHub verification returned the wrong comment for {operation['role']}")
-    body = str(comment.get("body") or "").lstrip()
+    body = str(comment.get("body") or "")
+    expected_body = str(operation["body"])
+    if body != expected_body:
+        raise RuntimeError(
+            f"GitHub verification changed or truncated the {operation['role']} comment body")
     role = operation["role"]
     if role == "archive":
-        if not body.startswith(ARCHIVED_MARKER):
-            raise RuntimeError("GitHub verification did not archive the continuation comment")
         return
     if role == "history":
         expected_marker = history_marker(int(operation["slot"]))

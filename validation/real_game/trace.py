@@ -1,13 +1,15 @@
 """Validation evidence writer.
 
-The validation layer records product facts; it does not turn those facts into a
-second success/failure state machine.  Raw selected Hook text and the actual
-Utterance produced from it are intentionally retained so a remote analysis can
-reconstruct framing/merging failures without access to the Windows run folder.
+The validation layer records product telemetry facts; it does not turn those
+facts into a second success/failure state machine. Raw selected Hook text, the
+actual Utterance, acoustic observations and service/runtime diagnostics are
+retained so remote analysis does not depend on the Windows run folder.
 """
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
 from threading import Lock
 import time
@@ -33,16 +35,7 @@ class ValidationTrace:
 
 
 class ProductTraceObserver:
-    """Persist selected product facts without validation-side interpretation."""
-
-    _PASSTHROUGH = frozenset({
-        'monitor_started', 'monitor_ended', 'external_hook_transition',
-        'presentation_complete', 'next_line_timeout', 'advance_attempt',
-        'advance_input', 'audio_causal_lower_bound', 'audio_deadline_elapsed',
-        'native_capture_summary', 'native_audio_error', 'native_pcm',
-        'alignment_inference', 'native_audio_observation', 'utterance_progress',
-        'tts_timing', 'tts_result', 'controller_handoff',
-    })
+    """Persist product telemetry facts without validation-side interpretation."""
 
     def __init__(self, trace: ValidationTrace, application):
         self.trace = trace
@@ -57,9 +50,35 @@ class ProductTraceObserver:
             return {}
         return {'session': token.session, 'line': token.line}
 
+    @classmethod
+    def _json_value(cls, value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, Enum):
+            return cls._json_value(value.value)
+        if isinstance(value, Path):
+            return str(value)
+        if is_dataclass(value):
+            return cls._json_value(asdict(value))
+        if isinstance(value, dict):
+            return {str(key): cls._json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [cls._json_value(item) for item in value]
+        return repr(value)
+
+    @classmethod
+    def _safe_fields(cls, detail: dict) -> dict:
+        fields = {str(key): cls._json_value(value) for key, value in detail.items()}
+        # Preserve producer data without allowing it to overwrite the trace
+        # envelope owned by ValidationTrace.
+        for key in ('event', 'seq', 'at_ns'):
+            if key in fields:
+                fields[f'detail_{key}'] = fields.pop(key)
+        return fields
+
     def on_event(self, event: str, token, detail: dict) -> None:
         if event == 'selected_hook_output':
-            fields = dict(detail)
+            fields = self._safe_fields(detail)
             self.trace.emit('hook_output', **fields)
             return
 
@@ -77,20 +96,10 @@ class ProductTraceObserver:
                 reading_units=utterance.reading_unit_count, text_wait_ms=utterance.text_wait_ms)
             return
 
-        if event == 'native_ready':
-            if detail.get('ready'):
-                self.trace.emit(
-                    'native_ready', session=detail.get('session', 0),
-                    audio_pid=detail.get('audio_pid', 0))
-            return
-
-        if event not in self._PASSTHROUGH:
-            return
-        fields = dict(detail)
+        fields = self._safe_fields(detail)
         fields.update(self._token_fields(token))
         if event == 'monitor_ended':
             fields.setdefault('session', detail.get('session', 0))
         if event == 'audio_causal_lower_bound' and token is not None:
-            fields.pop('line', None)
             fields['after_line'] = token.line
         self.trace.emit(event, **fields)

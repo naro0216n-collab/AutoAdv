@@ -271,19 +271,6 @@ $summaryPath = Join-Path $session 'validation-summary.json'
 Write-Host "Local results: $session"
 Write-Host (Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8)
 
-$hasProductRun = (-not [string]::IsNullOrEmpty($gitSha)) -and ($results.Count -gt 0)
-$uploadError = $null
-if (-not $NoUpload -and $hasProductRun) {
-    Write-Host "Uploading result to https://github.com/$repository/issues/$IssueNumber"
-    try { Upload-Result $session $gitSha $python }
-    catch {
-        $uploadError = [string]$_.Exception.Message
-        Write-Warning "GitHub upload failed: $uploadError"
-        Write-Warning "Local results are preserved at $session"
-    }
-} elseif (-not $NoUpload -and -not $hasProductRun) {
-    Write-Warning 'Upload skipped: product validation never started. The local summary remains available.'
-}
 $finalError = $null
 if ($errorText) {
     $finalError = "AutoAdv validation setup failed: $errorText"
@@ -301,9 +288,29 @@ if (-not $finalError) {
     Write-Warning $finalError
     Write-Warning "Persistent log: $transcriptPath"
 }
+
+# Freeze the durable run evidence before sharing it. The Issue reporter reads
+# validation.log as part of the complete snapshot, so publication must not race
+# a live PowerShell transcript or copy a file that is still changing.
 if ($transcriptStarted) {
-    try { Stop-Transcript | Out-Null }
-    catch { Write-Warning "Validation transcript could not be closed cleanly: $($_.Exception.Message)" }
+    try {
+        Stop-Transcript | Out-Null
+        $transcriptStarted = $false
+    } catch { Write-Warning "Validation transcript could not be closed cleanly: $($_.Exception.Message)" }
+}
+
+$hasProductRun = (-not [string]::IsNullOrEmpty($gitSha)) -and ($results.Count -gt 0)
+$uploadError = $null
+if (-not $NoUpload -and $hasProductRun) {
+    Write-Host "Uploading result to https://github.com/$repository/issues/$IssueNumber"
+    try { Upload-Result $session $gitSha $python }
+    catch {
+        $uploadError = [string]$_.Exception.Message
+        Write-Warning "GitHub upload failed: $uploadError"
+        Write-Warning "Local results are preserved at $session"
+    }
+} elseif (-not $NoUpload -and -not $hasProductRun) {
+    Write-Warning 'Upload skipped: product validation never started. The local summary remains available.'
 }
 # The staged game is reproducible from the shared fixture cache and is not
 # validation evidence. Keep logs/traces/reports only in the run directory.

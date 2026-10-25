@@ -16,6 +16,7 @@ import pytest
 
 from autoadv.g2p import PronunciationCandidate
 from autoadv.conversation import Token
+from autoadv.hook_protocol import HookEvent, ThreadSource
 from validation.real_game import fixture_runtime, issue_reporting, prepare_accuracy_assets as media
 from validation.real_game.benchmark_alignment import contract_failures, run as run_alignment_benchmark
 from validation.real_game.gui_session import (
@@ -324,11 +325,24 @@ def test_trace_keeps_raw_hook_and_utterance_instead_of_hash_only_evidence():
                 advance_mode=SimpleNamespace(value='audio'), use_tts=False,
                 uncertain_text_fallback=True, reading_unit_count=12, text_wait_ms=900))
         app.observer('utterance', token, {})
+        app.observer('hook_error', token, {'reason': 'native diagnostic'})
+        app.observer('native_ready', None, {'session': 1, 'ready': False, 'reason': 'capture unavailable', 'audio_pid': 9})
+        host_event = HookEvent(
+            kind='output', host_generation='g', connection_generation=1, sequence=3,
+            received_ns=10, process_id=5,
+            source=ThreadSource(5, 0x1234, 1, 2, 'H', 'name'), text='raw')
+        app.observer('hook_event', token, {'hook_event': host_event, 'outcome': 'observed'})
         records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
         hook = next(r for r in records if r['event'] == 'hook_output')
         utterance = next(r for r in records if r['event'] == 'utterance')
         assert hook['raw'] == raw and 'raw_hash' not in hook
         assert utterance['raw'] == raw and utterance['body'] == raw and 'body_hash' not in utterance
+        assert next(r for r in records if r['event'] == 'hook_error')['reason'] == 'native diagnostic'
+        unavailable = next(r for r in records if r['event'] == 'native_ready' and not r['ready'])
+        assert unavailable['reason'] == 'capture unavailable' and unavailable['audio_pid'] == 9
+        recorded_hook_event = next(r for r in records if r['event'] == 'hook_event')
+        assert recorded_hook_event['hook_event']['source']['address'] == 0x1234
+        assert recorded_hook_event['hook_event']['text'] == 'raw'
 
 
 def test_calibration_uses_product_preview_and_session_contract_is_finite_and_bound():
@@ -360,11 +374,11 @@ def _comments():
     return result
 
 
-def test_issue_reporting_publishes_direct_timeline_across_bounded_comments_without_data_loss():
+def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_comments_without_data_loss():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory) / '20261025T000000Z-runnew'; root.mkdir()
         summary = {
-            'schema': 'autoadv-local-validation-v3', 'phase_requested': 'accuracy',
+            'schema': 'autoadv-local-validation-v4', 'phase_requested': 'accuracy',
             'started_utc': '2026-10-25T00:00:00Z', 'ended_utc': '2026-10-25T00:01:00Z',
             'phases': [{'phase': 'accuracy', 'report_present': True, 'runner_error': None,
                         'facts': {'requested_cases': 2, 'fixture_cases': 2, 'hook_outputs': 1,
@@ -373,29 +387,59 @@ def test_issue_reporting_publishes_direct_timeline_across_bounded_comments_witho
             'launcher_error': None,
         }
         (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
+
         raw = 'case2\ncase3'
-        timeline = [
-            {'stream': 'fixture', 'event': 'fixture_case', 'at_ns': 10, 'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
-            {'stream': 'product', 'event': 'hook_output', 'at_ns': 11, 'raw': raw},
+        trace = [
+            {'event': 'trace_started', 'version': 3, 'at_ns': 1},
+            {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'raw': raw},
+            {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
+             'vocal_active_across_causal_boundary': True,
+             'vocal_post_causal_onset_ms': 1072, 'recurrence_strength': .91},
         ]
-        timeline.extend({
-            'stream': 'product', 'event': 'utterance_progress', 'at_ns': 20 + i,
-            'state': 'active', 'ended_at_ms': None, 'target_audio_associated': True,
-            'lexical_target_ended': False, 'target_vocal_observed': True,
-            'recurrent_tail_observed': False, 'session': 1, 'line': i + 1,
-            'padding': 'x' * 320,
+        trace.extend({
+            'event': 'alignment_inference', 'seq': i + 3, 'at_ns': 20 + i,
+            'target_associated': bool(i % 2), 'padding': '音' * 180,
         } for i in range(220))
-        report = {'verdict': 'failure_observed', 'evidence_issues': [], 'timeline': timeline}
-        (root / 'autoadv-accuracy.result.json').write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
+        (root / 'autoadv-accuracy.jsonl').write_text(
+            ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in trace),
+            encoding='utf-8')
+
+        fixture = [
+            {'event': 'fixture_started', 'version': 2, 'at_ns': 2},
+            {'event': 'fixture_case', 'seq': 1, 'at_ns': 10, 'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
+            {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': 10, 'case': 'case2', 'voice_file': 'jvs.wav'},
+        ]
+        (root / 'autoadv-fixture-evidence.jsonl').write_text(
+            ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in fixture),
+            encoding='utf-8')
+
+        report = {
+            'schema': 'autoadv-offline-verification-v1', 'phase': 'accuracy',
+            'verdict': 'failure_observed', 'facts': {'requested_cases': 2},
+            'case_results': [{'case': 'case2', 'outcome': 'early_input', 'source_endpoint_ms': 1234.5}],
+            'evidence_issues': [],
+        }
+        (root / 'autoadv-accuracy.result.json').write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        (root / 'validation.log').write_text(
+            'runtime C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl diagnostics\n',
+            encoding='utf-8')
 
         snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
         assert len(snapshot.parts) >= 2
-        assert 'analysis evidence timeline' in snapshot.body
-        assert 'Offline verifier: `failure_observed`' in snapshot.body
-        assert '| game input |' in snapshot.body
+        assert 'Complete persisted evidence' in snapshot.body
+        assert 'autoadv-accuracy.jsonl' in snapshot.body
+        assert 'autoadv-fixture-evidence.jsonl' in snapshot.body
+        assert 'autoadv-accuracy.result.json' in snapshot.body
+        assert 'validation-summary.json' in snapshot.body
+        assert 'validation.log' in snapshot.body
+        assert '"event":"native_audio_observation"' in snapshot.body
+        assert '"event":"alignment_inference"' in snapshot.body
+        assert '"source_endpoint_ms": 1234.5' in snapshot.body
         assert '"raw":"case2\\ncase3"' in snapshot.body
-        assert '"target_audio_associated":true' in snapshot.body
-        assert 'base64' not in snapshot.body and 'safe' not in snapshot.body
+        assert '<USERPROFILE>' in snapshot.body and '<REDACTED-TOKEN>' in snapshot.body
+        assert 'analysis evidence timeline' not in snapshot.body
+        assert 'base64' not in snapshot.body
 
         plan = issue_reporting.build_upload_plan(root, 'a' * 40, _comments())
         history = [op for op in plan['operations'] if op['role'] == 'history']
@@ -405,6 +449,8 @@ def test_issue_reporting_publishes_direct_timeline_across_bounded_comments_witho
         assert history[0]['slot'] == 4
         assert plan['operations'].index(history[0]) == len(continuations)
         assert all(len(op['body']) <= issue_reporting.COMMENT_BODY_TARGET_CHARS
+                   for op in history + continuations)
+        assert all(len(op['body'].encode('utf-8')) <= issue_reporting.COMMENT_BODY_TARGET_BYTES
                    for op in history + continuations)
         # Existing archived comments are recycled before any new comment is created.
         assert all(op['action'] == 'patch' for op in continuations[:2])
