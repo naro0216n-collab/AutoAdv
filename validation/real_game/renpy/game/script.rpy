@@ -74,7 +74,7 @@ label advancement_accuracy:
         _adv_missing_runtime_assets = [x for x in _adv_runtime_assets if not renpy.loadable(x)]
     if _adv_missing_runtime_assets:
         "自動進行精度計測用素材が不足しています。検証runnerから起動してください。"
-        return
+        jump advancement_accuracy_complete
 
     # Scene 1: quiet room. Establish clean voiced and unvoiced behavior before
     # any persistent mix exists.
@@ -272,7 +272,14 @@ label advancement_accuracy:
     voice "audio/voice/normal_035.wav"
     $ _adv_evidence_voice_commanded()
     a "彼女は息子に家で行儀よくするように言った。"
-    return
+    jump advancement_accuracy_complete
+
+# Accuracy is a single authored pass. Keep the fixture process alive for the
+# driver's final observation window, but never return to ``start`` or present a
+# second measured case. Any stray advance merely re-enters this terminal pause.
+label advancement_accuracy_complete:
+    pause
+    jump advancement_accuracy_complete
 
 label standard_tts:
     p "これは無音声の台詞です。"

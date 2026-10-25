@@ -88,6 +88,7 @@ class SessionDriver:
         self.final_observation_seconds = float(options.get('final_observation_seconds', 12.0))
         self.current_case = None
         self.current_case_seen_at = None
+        self.collection_target_seen_at = None
         self.recovered_cases = set()
         self.collection_target_emitted = False
         self.non_evidence_done_at = None
@@ -303,11 +304,16 @@ class SessionDriver:
                     self.current_case = case_id
                     self.current_case_seen_at = now
                 target_count = int(self.options.get('dialogues', 0))
-                if target_count > 0 and len(cases) >= target_count:
-                    # Do not infer whether the final line succeeded. Keep a fixed
-                    # evidence window, then close the measurement process.
-                    if (self.current_case_seen_at is not None and
-                            now - self.current_case_seen_at >= self.final_observation_seconds):
+                if target_count > 0 and len(cases) > target_count:
+                    raise RuntimeError(
+                        'fixture emitted additional case records after the requested single pass: '
+                        f'observed={len(cases)} requested={target_count}')
+                if target_count > 0 and len(cases) == target_count:
+                    # The requested authored pass is a one-shot collection boundary.
+                    # Later product/fixture activity must not move this boundary.
+                    if self.collection_target_seen_at is None:
+                        self.collection_target_seen_at = now
+                    if now - self.collection_target_seen_at >= self.final_observation_seconds:
                         self.w.close()
                         self.qt_app.quit()
                     return

@@ -56,6 +56,12 @@ def test_accuracy_fixture_and_evidence_form_one_continuous_authored_sequence():
     evidence_ids = re.findall(r'^\s+\$ _adv_evidence_case\("([^"]+)"', block, re.M)
     assert fixture_texts == [line['text'] for line in ACCURACY_SCENARIO]
     assert evidence_ids == [line['id'] for line in ACCURACY_SCENARIO]
+    assert re.search(r'^\s+return\s*$', block, re.M) is None
+    assert 'jump advancement_accuracy_complete' in block
+    assert re.search(
+        r'label advancement_accuracy_complete:\s+pause\s+jump advancement_accuracy_complete',
+        block,
+    )
 
     evidence_source = (HERE / 'renpy' / 'game' / 'autoadv_evidence.rpy').read_text(encoding='utf-8')
     forbidden = ('get_playing', 'get_pos', 'periodic_callbacks', 'all_character_callbacks',
@@ -155,7 +161,8 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
             evidence.write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
         write(['case-1'])
         driver = SessionDriver(
-            window, SimpleNamespace(quit=lambda: actions.append('quit')),
+            window, SimpleNamespace(quit=lambda: actions.append('quit'),
+                                    exit=lambda code: actions.append(('exit', code))),
             {'timeout_seconds': 60, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True, 'evidence': str(evidence),
              'case_watchdog_seconds': 12.0, 'final_observation_seconds': 12.0},
@@ -182,6 +189,21 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
         driver.tick()
         assert recoveries == [77, 77]
         assert [fields['case'] for name, fields in traces if name == 'validation_recovery_input'] == ['case-1', 'case-2']
+
+        write(['case-1', 'case-2', 'case-3'])
+        clock[0] = 44.0
+        driver.tick()
+        assert driver.collection_target_seen_at == 44.0
+        clock[0] = 56.1
+        driver.tick()
+        assert actions[-2:] == ['close', 'quit']
+
+        write(['case-1', 'case-2', 'case-3', 'case-1'])
+        clock[0] = 57.0
+        driver.tick()
+        assert actions[-2:] == ['close', ('exit', 3)]
+        assert traces[-1][0] == 'validation_driver_failure'
+        assert 'additional case records' in traces[-1][1]['reason']
 
 
 def test_trace_keeps_raw_hook_and_utterance_instead_of_hash_only_evidence():
@@ -236,12 +258,16 @@ def _comments():
             3: '20261023T095133Z-4fdc7015', 4: '20261023T014504Z-0b2c7d31'}
     result = [{'id': 1000 + slot, 'body': f'{issue_reporting.history_marker(slot)}\n<!-- autoadv-validation-run:{run} -->\nold'}
               for slot, run in runs.items()]
+    result.extend([
+        {'id': 2001, 'body': issue_reporting.ARCHIVED_MARKER},
+        {'id': 2002, 'body': issue_reporting.ARCHIVED_MARKER},
+    ])
     return result
 
 
-def test_issue_reporting_publishes_direct_timeline_and_never_updates_inferred_baseline():
+def test_issue_reporting_publishes_direct_timeline_across_bounded_comments_without_data_loss():
     with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory) / 'run-new'; root.mkdir()
+        root = Path(directory) / '20261025T000000Z-runnew'; root.mkdir()
         summary = {
             'schema': 'autoadv-local-validation-v3', 'phase_requested': 'accuracy',
             'started_utc': '2026-10-25T00:00:00Z', 'ended_utc': '2026-10-25T00:01:00Z',
@@ -253,19 +279,39 @@ def test_issue_reporting_publishes_direct_timeline_and_never_updates_inferred_ba
         }
         (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
         raw = 'case2\ncase3'
-        report = {'verdict': 'failure_observed', 'evidence_issues': [], 'timeline': [
+        timeline = [
             {'stream': 'fixture', 'event': 'fixture_case', 'at_ns': 10, 'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
             {'stream': 'product', 'event': 'hook_output', 'at_ns': 11, 'raw': raw},
-        ]}
+        ]
+        timeline.extend({
+            'stream': 'product', 'event': 'utterance_progress', 'at_ns': 20 + i,
+            'state': 'active', 'ended_at_ms': None, 'target_audio_associated': True,
+            'lexical_target_ended': False, 'target_vocal_observed': True,
+            'recurrent_tail_observed': False, 'session': 1, 'line': i + 1,
+            'padding': 'x' * 320,
+        } for i in range(220))
+        report = {'verdict': 'failure_observed', 'evidence_issues': [], 'timeline': timeline}
         (root / 'autoadv-accuracy.result.json').write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
+
         snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
+        assert len(snapshot.parts) >= 2
         assert 'analysis evidence timeline' in snapshot.body
         assert 'Offline verifier: `failure_observed`' in snapshot.body
         assert '"raw":"case2\\ncase3"' in snapshot.body
+        assert '"target_audio_associated":true' in snapshot.body
         assert 'base64' not in snapshot.body and 'safe' not in snapshot.body
+
         plan = issue_reporting.build_upload_plan(root, 'a' * 40, _comments())
-        assert [op['role'] for op in plan['operations']] == ['history']
-        assert plan['operations'][0]['slot'] == 4
+        history = [op for op in plan['operations'] if op['role'] == 'history']
+        continuations = [op for op in plan['operations'] if op['role'] == 'continuation']
+        assert len(history) == 1
+        assert len(continuations) == len(snapshot.parts) - 1
+        assert history[0]['slot'] == 4
+        assert plan['operations'].index(history[0]) == len(continuations)
+        assert all(len(op['body']) <= issue_reporting.COMMENT_BODY_TARGET_CHARS
+                   for op in history + continuations)
+        # Existing archived comments are recycled before any new comment is created.
+        assert all(op['action'] == 'patch' for op in continuations[:2])
 
 
 def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_acceptance_proxy():
