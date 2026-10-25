@@ -7,7 +7,7 @@ import pytest
 
 from autoadv.application import AutoAdvApplication
 from autoadv.utterance_progress import (
-    HumanVocalEvidence, LexicalProgressEvidence, VocalRecurrenceEvidence,
+    HumanVocalEvidence, LexicalProgressEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence,
 )
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent
@@ -166,6 +166,64 @@ def test_runtime_publishes_selected_provenance_and_utterance_before_presentation
 
 
 
+
+def test_unsent_hook_replacement_uses_only_nearby_observed_game_input_as_causal_bound():
+    app, _ = app_with_game()
+    p = app.current_profile()
+    src = source('INPUTBOUND', 4)
+    p.hooks = [HookSelection('INPUTBOUND', 4, 5)]
+    p.body_source = src.identity
+    app.select_profile(app.game_id, app.profile_id)
+    app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    scheduled = []
+    events = []
+    app.configure_runtime_loop(
+        schedule=lambda delay, callback: scheduled.append((delay, callback)),
+        on_event=lambda name, token, detail: events.append((name, token, detail)))
+    connect_hook(app)
+
+    first = runtime_hook(app, src, '一つ目', 2, received_ns=1_000_000_000)
+    assert first is not None
+
+    class Native:
+        def __init__(self):
+            self.bounds = []
+            self.external = 0
+            self.begun = []
+        def set_causal_lower_bound(self, at_ms=None): self.bounds.append(at_ms)
+        def external_transition(self): self.external += 1
+        def begin(self, token, text, candidates=()): self.begun.append((token, text))
+        def cancel(self): pass
+        def finish_line(self, _token): pass
+        def observation_fence(self, _token): return None
+        def request_assessment_through(self, _token, _through_ms): return False
+        def capture_status(self): return {}
+    native = Native()
+    app._native_audio = native
+
+    # Input observation itself is only timestamp history and does not mutate the
+    # current presentation. The latest nearby input is selected when a later
+    # HOOK actually replaces that unsent presentation.
+    before = app.runtime_state()
+    app._record_game_input(1200)
+    app._record_game_input(1400)
+    assert app.runtime_state() == before
+    second = runtime_hook(app, src, '二つ目', 3, received_ns=1_500_000_000)
+    assert second == Token(first.session, first.line + 1)
+    assert native.bounds == [1400]
+    assert native.external == 0
+    assert any(name == 'audio_input_lower_bound' and detail['at_ms'] == 1400
+               for name, _, detail in events)
+
+    # A stale user input is not stretched to explain a later HOOK. With no
+    # nearby observed input, the new target remains unbounded rather than using
+    # HOOK time as an invented start.
+    app._record_game_input(2000)
+    third = runtime_hook(app, src, '三つ目', 4, received_ns=4_500_000_000)
+    assert third == Token(second.session, second.line + 1)
+    assert native.bounds == [1400]
+    assert native.external == 1
+
 def test_application_owns_audio_fallback_deadline_without_gui_policy():
     app, _ = app_with_game()
     p = app.current_profile()
@@ -188,7 +246,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         pid = 101
         def capture_status(self): return {}
         def observation_fence(self, _token): return None
-        def request_observation_through(self, _token, _through_ms): return False
+        def request_assessment_through(self, _token, _through_ms): return False
         def finish_line(self, _token): raise AssertionError('inconclusive audio must remain active')
     app._native_audio = RetainedNative()
     deadline()
@@ -222,12 +280,19 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
             target_start_ms=1050, aligned_end_ms=1300, target_end_ms=None,
             reading_rank=0, path_margin=3.0, boundary_margin=0.0),
         vocal=HumanVocalEvidence(
-            start_ms=1000, end_ms=1500, frame_count=20, mean_probability=.8,
-            peak_probability=.95, active_fraction=.8, first_active_ms=1050,
-            last_active_ms=1490, active_intervals=((1050, 1490),),
-            post_causal_onset_ms=1050),
+            start_ms=1000, end_ms=1500,
+            series=(VocalEvidenceSeries(
+                source='speech', frame_count=20, active_count=16,
+                peak_probability=.95, active_intervals=((1050, 1490),)),)),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000,
         target_attached_ms=1100))
+    # Query callbacks may complete out of order. An older snapshot is telemetry,
+    # not permission to replace the newer integrated judgment.
+    active_app._consume_native_observation(active_token, NativeAudioObservation(
+        kind='snapshot', capture_start_ms=1000, capture_end_ms=1400,
+        vocal=HumanVocalEvidence(start_ms=1000, end_ms=1400),
+        recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000))
+    assert active_app.controller.native_progress.active
     active_app.set_auto_advance(True)
     active_deadline = next(
         callback for delay, callback in active_scheduled
@@ -260,7 +325,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         def observation_fence(self, token):
             assert token == fenced_token
             return 1500
-        def request_observation_through(self, token, through_ms):
+        def request_assessment_through(self, token, through_ms):
             self.requested.append((token, through_ms))
             return True
         def capture_status(self): return {}
@@ -277,9 +342,10 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     fenced_app._consume_native_observation(fenced_token, NativeAudioObservation(
         kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
         vocal=HumanVocalEvidence(
-            start_ms=1000, end_ms=1500, frame_count=20, mean_probability=0.0,
-            peak_probability=0.0, active_fraction=0.0, first_active_ms=None,
-            last_active_ms=None),
+            start_ms=1000, end_ms=1500,
+            series=(VocalEvidenceSeries(
+                source='speech', frame_count=20, active_count=0,
+                peak_probability=0.0, active_intervals=()),)),
         recurrence=VocalRecurrenceEvidence()))
     assert fenced_app.runtime_state().completed
     assert fenced_app.runtime_state().presentation_reason == 'uncertain_text_fallback'

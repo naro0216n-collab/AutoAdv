@@ -47,7 +47,7 @@ class NativeAudio:
         self.on_observation = on_observation
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=self.RAW_HISTORY_MS)
-        self.features = AcousticObservationHistory()
+        self.features = AcousticObservationHistory(horizon_ms=self.RAW_HISTORY_MS)
         if vocal_observer is not None:
             self.vocal_observer = vocal_observer
         else:
@@ -80,7 +80,10 @@ class NativeAudio:
         self._inflight = False
         self._inflight_generation: int | None = None
         self._pending_inference: tuple[Token, int, int, TargetConditionedAligner, int] | None = None
-        self._lexical_committed_generation: int | None = None
+        # Target-specific measurement cache. This is provenance from a concrete
+        # PCM snapshot, not an utterance/event state. It is invalidated whenever
+        # the target changes.
+        self._lexical_measurement: LexicalProgressEvidence | None = None
         self._generation = 0
         self._closed = False
         self._capture_pcm_packets = 0
@@ -133,7 +136,7 @@ class NativeAudio:
         # to the newest target. Generation advances exactly once when ``begin``
         # attaches the next target.
         self._pending_inference = None
-        self._lexical_committed_generation = None
+        self._lexical_measurement = None
         self.token = None
         self.aligner = None
         self.causal_lower_bound_ms = None
@@ -176,7 +179,7 @@ class NativeAudio:
             self._generation += 1
             generation = self._generation
             self._pending_inference = None
-            self._lexical_committed_generation = None
+            self._lexical_measurement = None
             self.token = token
             self.aligner = aligner
             self.causal_lower_bound_ms = self._next_causal_lower_bound_ms
@@ -206,13 +209,6 @@ class NativeAudio:
             elif buffered:
                 observation = self._feature_observation_locked(
                     token, generation, buffered[-1].at_ms, history_truncated=False)
-                if observation is not None:
-                    pending.append(observation)
-            elif feature_end is not None:
-                # Raw history may have expired while compact evidence remains.
-                # Emit the evidence without fabricating lexical alignment.
-                observation = self._feature_observation_locked(
-                    token, generation, feature_end, history_truncated=True)
                 if observation is not None:
                     pending.append(observation)
         for item in pending:
@@ -261,11 +257,10 @@ class NativeAudio:
             self.on_error(token, status.reason)
 
     def _idle_drain_locked(self):
-        """Use a heartbeat only to schedule analysis of already captured PCM."""
+        """Use a heartbeat only to request the newest already-captured snapshot."""
         if self._closed or self.token is None or self._last_pcm_end_ms < 0:
             return None
-        if (self.aligner is not None
-                and self._lexical_committed_generation != self._generation):
+        if self.aligner is not None and self._lexical_measurement is None:
             if self._last_pcm_end_ms <= self._inference_at:
                 return None
             return self._request_alignment_locked(self._last_pcm_end_ms)
@@ -286,22 +281,21 @@ class NativeAudio:
                 return None
             return int(self._last_pcm_end_ms)
 
-    def request_observation_through(self, token: Token, through_ms: int) -> bool:
-        """Publish continuous evidence through an already captured PCM fence.
-
-        This synchronization request never starts target-conditioned alignment.
-        A fallback deadline must account for human-vocal evidence that was
-        already captured, but it is not a second lexical-analysis scheduler.
-        """
+    def request_assessment_through(self, token: Token, through_ms: int) -> bool:
+        """Request one assessment of the retained PCM snapshot through a fence."""
         item = None
         with self._lock:
             if self._closed or token != self.token:
                 return False
             boundary = min(int(through_ms), self._last_pcm_end_ms)
-            if boundary < 0 or self._observation_at >= boundary:
+            if boundary < 0:
                 return False
-            item = self._feature_observation_locked(
-                token, self._generation, boundary, history_truncated=False)
+            if (self.aligner is not None and self._lexical_measurement is None
+                    and boundary - self.window_start_ms >= self.MIN_AUDIO_MS):
+                item = self._request_alignment_locked(boundary)
+            else:
+                item = self._feature_observation_locked(
+                    token, self._generation, boundary, history_truncated=False)
         self._dispatch(item)
         return item is not None
 
@@ -326,22 +320,15 @@ class NativeAudio:
 
     def _observe_continuous(self, chunk: PCMChunk) -> None:
         frames = self.vocal_observer.observe(chunk)
-        # A spectral fingerprint spans the entire process-audio packet. One
-        # strong human-vocal observation inside that packet is enough to make
-        # it relevant to recurrence; averaging sparse AudioSet evidence into
-        # dense VAD frames would erase exactly the non-lexical evidence added
-        # by the second acoustic measurement.
-        relevance = max((frame.probability for frame in frames), default=0.0)
         with self._lock:
             self.features.add_vocal(frames)
-            self.features.add_fingerprint(chunk, vocal_relevance=relevance)
+            self.features.add_fingerprint(chunk)
 
     def _start_alignment_locked(self, token: Token, generation: int, boundary: int,
                                 aligner: TargetConditionedAligner,
                                 requested_ns: int = 0):
         if (self._closed or token != self.token or generation != self._generation
-                or aligner is not self.aligner
-                or self._lexical_committed_generation == generation):
+                or aligner is not self.aligner):
             return None
         start, _ = self._raw_analysis_start_locked(boundary)
         samples = tuple(
@@ -355,8 +342,7 @@ class NativeAudio:
         return ("infer", token, generation, samples, aligner, requested_ns)
 
     def _request_alignment_locked(self, boundary: int):
-        if (self._closed or self.token is None or self.aligner is None
-                or self._lexical_committed_generation == self._generation):
+        if (self._closed or self.token is None or self.aligner is None):
             return None
         boundary = int(boundary)
         if boundary <= self._inference_at:
@@ -381,13 +367,13 @@ class NativeAudio:
         if boundary <= self._observation_at:
             return None
         observation = self._build_observation_locked(
-            kind="acoustic_features",
+            kind="snapshot",
             capture_start_ms=self.window_start_ms,
             capture_end_ms=boundary,
-            lexical=None,
+            lexical=self._lexical_measurement,
             history_truncated=history_truncated,
             pcm_last_frame_ms=boundary,
-            include_recurrence=(self._lexical_committed_generation == generation),
+            include_recurrence=True,
         )
         self._observation_at = boundary
         return ("observe", token, generation, observation)
@@ -400,7 +386,12 @@ class NativeAudio:
         if (self._closed or token != self.token or generation != self._generation
                 or aligner is not self.aligner):
             return None
-        if self._lexical_committed_generation == generation:
+        # A completed target-conditioned measurement is a cache of one concrete
+        # PCM snapshot, not semantic state.  If newer PCM arrived while that
+        # measurement was in flight, assess the newer frontier from the cached
+        # lexical measurement plus fresh target-independent measurements rather
+        # than scheduling redundant CTC work.
+        if self._lexical_measurement is not None:
             return self._feature_observation_locked(
                 token, generation, boundary, history_truncated=False)
         return self._start_alignment_locked(
@@ -433,8 +424,7 @@ class NativeAudio:
         if not enough_pcm:
             return tuple(items)
 
-        if (self.aligner is not None
-                and self._lexical_committed_generation != generation):
+        if self.aligner is not None and self._lexical_measurement is None:
             inference_due = (self._inference_at < 0
                              or chunk.at_ms - self._inference_at >= self.INFERENCE_INTERVAL_MS)
             if inference_due:
@@ -539,20 +529,16 @@ class NativeAudio:
         recurrence = None
         if feature_end is not None:
             if lexical is not None and lexical.target_associated and lexical.target_start_ms is not None:
-                feature_start = lexical.target_start_ms
+                feature_start = max(0, lexical.target_start_ms - 8_000)
             elif self.causal_lower_bound_ms is not None:
-                feature_start = self.causal_lower_bound_ms
-            elif self.target_attached_ms is not None:
-                # Target attachment is not a presentation boundary.  It is only
-                # a factual floor for new non-lexical observations when no
-                # independent causal lower bound exists.
-                feature_start = self.target_attached_ms
+                # Keep pre-boundary reference context so recurrence and continuity
+                # can be measured without labelling it as background/old audio.
+                feature_start = max(0, self.causal_lower_bound_ms - 8_000)
             else:
                 feature_start = self.features.earliest_ms or max(0, feature_end - self.features.horizon_ms)
             feature_start = min(int(feature_start), int(feature_end))
             vocal = self.features.summarize_vocal(
-                start_ms=feature_start, end_ms=feature_end,
-                causal_boundary_ms=self.causal_lower_bound_ms)
+                start_ms=feature_start, end_ms=feature_end)
 
             if include_recurrence:
                 if lexical is not None and lexical.target_end_ms is not None:
@@ -620,29 +606,24 @@ class NativeAudio:
                     current_for_metrics = False
                 else:
                     current_for_metrics = True
-                    if (alignment is not None and alignment.complete_alignment
-                            and alignment.committed_target_end):
-                        self._lexical_committed_generation = generation
+                    # Keep every published assessment tied to the exact PCM
+                    # snapshot used by its target-conditioned measurement. A
+                    # newer feature snapshot is a separate query, not a reason
+                    # to rewrite this result's time frontier.
                     observation_end_ms = capture_end_ms
-                    if observation_end_ms is not None and self._observation_at >= 0:
-                        # A lightweight deadline/feature snapshot may already
-                        # have advanced continuous evidence beyond the PCM used
-                        # by this lexical inference. Publish the late lexical
-                        # fact on that newer acoustic frontier instead of
-                        # regressing UtteranceProgress in time.
-                        observation_end_ms = max(observation_end_ms, self._observation_at)
                     semantic_start = self.causal_lower_bound_ms
                     history_truncated = bool(
                         semantic_start is not None and capture_start_ms is not None and
                         capture_start_ms > semantic_start + 1)
+                    if (lexical is not None and lexical.complete_alignment
+                            and lexical.committed_target_end):
+                        self._lexical_measurement = lexical
                     observation = self._build_observation_locked(
-                        kind="acoustic", capture_start_ms=capture_start_ms,
+                        kind="snapshot", capture_start_ms=capture_start_ms,
                         capture_end_ms=observation_end_ms, lexical=lexical,
                         history_truncated=history_truncated,
                         pcm_last_frame_ms=observation_end_ms,
-                        include_recurrence=bool(
-                            alignment is not None and alignment.complete_alignment
-                            and alignment.committed_target_end),
+                        include_recurrence=True,
                     )
                     if observation_end_ms is not None:
                         self._observation_at = max(self._observation_at, observation_end_ms)
@@ -658,19 +639,21 @@ class NativeAudio:
                     "causal_lower_bound_ms": self.causal_lower_bound_ms,
                     "target_attached_ms": self.target_attached_ms,
                     "history_truncated": observation.history_truncated,
-                    "vocal_mean_probability": round(observation.vocal.mean_probability, 4) if observation.vocal else 0.0,
-                    "vocal_active_fraction": round(observation.vocal.active_fraction, 4) if observation.vocal else 0.0,
-                    "vocal_last_active_ms": observation.vocal.last_active_ms if observation.vocal else None,
-                    "vocal_active_across_causal_boundary": (
-                        observation.vocal.active_across_causal_boundary if observation.vocal else False),
-                    "vocal_post_causal_onset_ms": (
-                        observation.vocal.post_causal_onset_ms if observation.vocal else None),
+                    "vocal_series": ([{
+                        "source": item.source,
+                        "frame_count": item.frame_count,
+                        "active_count": item.active_count,
+                        "peak_probability": round(item.peak_probability, 4),
+                        "active_intervals": list(item.active_intervals),
+                    } for item in observation.vocal.series] if observation.vocal else []),
                     "vocal_active_intervals": (
                         list(observation.vocal.active_intervals) if observation.vocal else []),
                     "recurrence_strength": round(observation.recurrence.strength, 4) if observation.recurrence else 0.0,
                     "recurrence_period_ms": observation.recurrence.period_ms if observation.recurrence else None,
                     "recurrence_stability": round(observation.recurrence.period_stability, 4) if observation.recurrence else 0.0,
                     "recent_recurrence_strength": round(observation.recurrence.recent_strength, 4) if observation.recurrence else 0.0,
+                    "recurrence_level_consistency": round(observation.recurrence.level_consistency, 4) if observation.recurrence else 0.0,
+                    "recurrence_low_vocal_reference_similarity": round(observation.recurrence.low_vocal_reference_similarity, 4) if observation.recurrence else 0.0,
                 }
                 if alignment is not None:
                     fit = alignment.fit

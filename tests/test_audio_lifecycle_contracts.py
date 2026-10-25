@@ -276,12 +276,13 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         native.feed(short)
         assert not any(item.kind == 'acoustic' for _, item in observations)
 
-        # A policy boundary snapshots continuous evidence already captured. It
-        # must not start a second target-conditioned inference path.
+        # A policy boundary requests exactly the already-captured snapshot. With
+        # less than the alignment minimum it can still publish feature evidence
+        # without inventing a lexical result.
         assert native.observation_fence(token) == 1200
-        assert native.request_observation_through(token, 1200)
+        assert native.request_assessment_through(token, 1200)
         assert model.calls == 0
-        snapshots = [item for _, item in observations if item.kind == 'acoustic_features']
+        snapshots = [item for _, item in observations if item.kind == 'snapshot']
         assert len(snapshots) == 1 and snapshots[0].capture_end_ms == 1200
 
         # Heartbeat retains its original purpose: if no more PCM arrives, flush
@@ -290,7 +291,7 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         native.health(CaptureHealth(1300, True, '', pcm_frames=0))
         wait_idle(native)
         assert model.calls == 1
-        assert len([item for _, item in observations if item.kind == 'acoustic']) == 1
+        assert len([item for _, item in observations if item.kind == 'snapshot' and item.lexical is not None]) == 1
         assert not any(item.kind == 'transport' for _, item in observations)
         status = native.capture_status()
         assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
@@ -298,7 +299,7 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         native.close()
 
 
-def test_committed_lexical_end_stops_ctc_reanalysis_but_keeps_acoustic_tail_observation():
+def test_committed_lexical_measurement_is_cached_but_new_pcm_snapshot_is_reassessed():
     observations = []
     model = CountingPosterior(frames=49, starts=(10, 20, 30))
     native = make_native(model, observations)
@@ -312,16 +313,22 @@ def test_committed_lexical_end_stops_ctc_reanalysis_but_keeps_acoustic_tail_obse
         native.feed(first)
         wait_idle(native)
         assert model.calls == 1
-        assert observations[-1][1].lexical is not None
-        assert observations[-1][1].lexical.committed_target_end
+        first_snapshot = observations[-1][1]
+        assert first_snapshot.lexical is not None
+        assert first_snapshot.lexical.committed_target_end
 
         tail = stereo_chunk(2600, 600)
         native.history.push(tail, target_pid=42)
         native.feed(tail)
         wait_idle(native)
+        # The expensive lexical measurement is cached as provenance from the
+        # earlier PCM snapshot, while the newer raw-audio frontier is assessed
+        # again for vocal/recurrence evidence. No event-state label is reused.
         assert model.calls == 1
-        assert observations[-1][1].kind == 'acoustic_features'
-        assert observations[-1][1].capture_end_ms == 2600
+        second_snapshot = observations[-1][1]
+        assert second_snapshot.kind == 'snapshot'
+        assert second_snapshot.capture_end_ms == 2600
+        assert second_snapshot.lexical is not None
     finally:
         native.close()
 
@@ -346,7 +353,7 @@ def test_causal_lower_bound_is_consumed_by_next_target_and_external_replacement_
         native.close()
 
 
-def test_human_vocal_observer_preserves_nonlexical_event_support_beside_speech_vad():
+def test_human_vocal_observers_keep_independent_score_series_and_time_support():
     observer = HumanVocalActivityObserver(
         StaticAudioEventModel(class_index=19, probability=.9),
         speech_observer=SilentSpeechObserver())
@@ -354,86 +361,71 @@ def test_human_vocal_observer_preserves_nonlexical_event_support_beside_speech_v
     frames = observer.observe(stereo_chunk(1240, 480, value=.05))
     history.add_vocal(frames)
 
-    # Crying is observable even though the independent speech VAD contributes
-    # no activity.  The wider classifier reports its factual receptive-field
-    # span so downstream logic does not invent a point-like onset.
-    event_frames = [frame for frame in frames if frame.probability >= .45]
-    assert event_frames
+    event_frames = [frame for frame in frames if frame.source == 'nonlexical']
+    speech_frames = [frame for frame in frames if frame.source == 'speech']
+    assert event_frames and speech_frames
     assert event_frames[0].support_start_ms == 760
-    vocal = history.summarize_vocal(start_ms=760, end_ms=1240, causal_boundary_ms=900)
-    assert vocal.peak_probability == pytest.approx(.9)
-    # The classifier consumed samples from before the causal boundary, but that
-    # receptive field is provenance rather than evidence that voice was active
-    # before the boundary. New positive evidence appears at the frame timestamp.
-    assert not vocal.active_across_causal_boundary
-    assert vocal.post_causal_onset_ms == 1000
+    vocal = history.summarize_vocal(start_ms=760, end_ms=1240)
+    by_source = {item.source: item for item in vocal.series}
+    assert by_source['nonlexical'].peak_probability == pytest.approx(.9)
+    assert by_source['nonlexical'].active_count > 0
+    assert by_source['speech'].active_count == 0
+    # No cross-model mean/"combined probability" exists; only the union of
+    # independently thresholded time support is exposed for temporal reasoning.
+    assert vocal.active_intervals
 
 
-def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
+def test_vocal_history_is_a_queryable_measurement_cache_not_a_boundary_state_machine():
     history = AcousticObservationHistory()
     history.add_vocal(tuple(
-        VocalActivityFrame(at_ms=at_ms, probability=probability)
+        VocalActivityFrame(at_ms=at_ms, probability=probability, source='speech')
         for at_ms, probability in (
             (960, .9), (976, .9), (992, .9),
-            (1008, .9), (1024, .9),
+            (1008, .9), (1024, .9), (1040, .1), (1056, .1),
+            (1072, .9), (1088, .9),
         )
     ))
 
-    crossing = history.summarize_vocal(
-        start_ms=1000, end_ms=1024, causal_boundary_ms=1000)
-    assert crossing.active_across_causal_boundary
-    assert crossing.post_causal_onset_ms is None
-
-    history.add_vocal(tuple(
-        VocalActivityFrame(at_ms=at_ms, probability=probability)
-        for at_ms, probability in (
-            (1040, .1), (1056, .1), (1072, .9), (1088, .9),
-        )
-    ))
-    restarted = history.summarize_vocal(
-        start_ms=1000, end_ms=1088, causal_boundary_ms=1000)
-    assert restarted.active_across_causal_boundary
-    assert restarted.post_causal_onset_ms == 1072
-
-    separated = AcousticObservationHistory()
-    separated.add_vocal((
-        VocalActivityFrame(at_ms=500, probability=.9),
-        VocalActivityFrame(at_ms=1008, probability=.9),
-        VocalActivityFrame(at_ms=1024, probability=.9),
-    ))
-    after_gap = separated.summarize_vocal(
-        start_ms=1000, end_ms=1024, causal_boundary_ms=1000)
-    assert not after_gap.active_across_causal_boundary
-    assert after_gap.post_causal_onset_ms == 1008
+    full = history.summarize_vocal(start_ms=950, end_ms=1100)
+    clipped = history.summarize_vocal(start_ms=1000, end_ms=1100)
+    assert full.series[0].active_intervals == ((960, 1024), (1072, 1088))
+    assert clipped.series[0].active_intervals == ((1008, 1024), (1072, 1088))
+    # Causal-boundary meaning is intentionally absent from the measurement
+    # cache; the assessment request applies that fact later.
+    assert not hasattr(full, 'active_across_causal_boundary')
+    assert not hasattr(full, 'post_causal_onset_ms')
 
 
-def test_vocal_recurrence_discounts_periodicity_already_explained_by_background_audio():
+def test_vocal_recurrence_keeps_structure_level_and_low_vocal_reference_separate():
     def history_for(current_components):
         history = AcousticObservationHistory()
         for at_ms in (600, 1000, 1400):
-            history.add_fingerprint(
-                tonal_chunk(at_ms, ((440.0, 0.25),)), vocal_relevance=0.05)
+            history.add_fingerprint(tonal_chunk(at_ms, ((440.0, 0.25),)))
         for at_ms in (1800, 2200, 2600, 3000):
-            history.add_fingerprint(
-                tonal_chunk(at_ms, current_components), vocal_relevance=0.9)
+            history.add_fingerprint(tonal_chunk(at_ms, current_components))
+            history.add_vocal((VocalActivityFrame(
+                at_ms=at_ms, probability=.9, source='speech'),))
         return history.recurrence(start_ms=1500, end_ms=3000)
 
-    background_only = history_for(((440.0, 0.25),))
-    vocal_over_background = history_for(((440.0, 0.25), (1000.0, 0.5)))
+    same_as_low_vocal_reference = history_for(((440.0, 0.25),))
+    vocal_over_reference = history_for(((440.0, 0.25), (1000.0, 0.5)))
 
-    assert background_only.strength == 0.0
-    assert vocal_over_background.strength > background_only.strength
-    assert vocal_over_background.period_ms is not None
+    assert same_as_low_vocal_reference.strength > 0.0
+    assert vocal_over_reference.strength > 0.0
+    assert same_as_low_vocal_reference.low_vocal_reference_similarity > \
+        vocal_over_reference.low_vocal_reference_similarity
+    assert vocal_over_reference.period_ms is not None
 
-    # Recurrence is evidence for a stable continuing structure, not merely for
-    # repeated spectral shape.  A decaying finite event must therefore carry
-    # weaker recurrence evidence than level-stable repetition of the same sound.
     stable = AcousticObservationHistory()
     decaying = AcousticObservationHistory()
-    for at_ms, amplitude in zip((1800, 2200, 2600, 3000), (0.5, 0.5, 0.5, 0.5)):
-        stable.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)), vocal_relevance=.9)
-    for at_ms, amplitude in zip((1800, 2200, 2600, 3000), (0.5, 0.41, 0.32, 0.24)):
-        decaying.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)), vocal_relevance=.9)
+    times = (1800, 2200, 2600, 3000)
+    for at_ms, amplitude in zip(times, (0.5, 0.5, 0.5, 0.5)):
+        stable.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)))
+        stable.add_vocal((VocalActivityFrame(at_ms=at_ms, probability=.9),))
+    for at_ms, amplitude in zip(times, (0.5, 0.41, 0.32, 0.24)):
+        decaying.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)))
+        decaying.add_vocal((VocalActivityFrame(at_ms=at_ms, probability=.9),))
     stable_recurrence = stable.recurrence(start_ms=1500, end_ms=3000)
     decaying_recurrence = decaying.recurrence(start_ms=1500, end_ms=3000)
-    assert stable_recurrence.strength > decaying_recurrence.strength
+    assert stable_recurrence.strength == pytest.approx(decaying_recurrence.strength, abs=.03)
+    assert stable_recurrence.level_consistency > decaying_recurrence.level_consistency

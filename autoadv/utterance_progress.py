@@ -1,9 +1,9 @@
-"""Stateful inference of whether the current presentation voice is active, ended or unknown.
+"""Snapshot-based native-audio assessment for one presentation.
 
-The observers in this module describe acoustic facts.  The estimator combines
-known-text relation, causal timing and human-vocal activity into one presentation
-judgment.  It never classifies foreground/background sources and never owns game
-input or fallback policy.
+Observers and alignment backends publish measurements tied to exact audio/time
+ranges.  This module combines one immutable snapshot into the only three product
+results needed by Controller.  It deliberately keeps no event identity or
+inference history: evaluating the same snapshot twice produces the same result.
 """
 from __future__ import annotations
 
@@ -16,30 +16,66 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class VocalEvidenceSeries:
+    """One observer's human-vocal measurements on its own score scale."""
+
+    source: str
+    frame_count: int
+    active_count: int
+    peak_probability: float
+    active_intervals: tuple[tuple[int, int], ...] = ()
+
+
+@dataclass(frozen=True)
 class HumanVocalEvidence:
-    """Frame-derived human-vocal activity over one analysis interval."""
+    """Time-local human-vocal support without cross-model score averaging."""
 
     start_ms: int
     end_ms: int
-    frame_count: int
-    mean_probability: float
-    peak_probability: float
-    active_fraction: float
-    first_active_ms: int | None
-    last_active_ms: int | None
-    active_intervals: tuple[tuple[int, int], ...] = ()
-    active_across_causal_boundary: bool = False
-    post_causal_onset_ms: int | None = None
+    series: tuple[VocalEvidenceSeries, ...] = ()
+
+    @property
+    def active_intervals(self) -> tuple[tuple[int, int], ...]:
+        intervals = sorted(
+            interval for item in self.series for interval in item.active_intervals)
+        if not intervals:
+            return ()
+        merged: list[tuple[int, int]] = [intervals[0]]
+        for start_ms, end_ms in intervals[1:]:
+            if start_ms <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end_ms))
+            else:
+                merged.append((start_ms, end_ms))
+        return tuple(merged)
+
+    @property
+    def first_active_ms(self) -> int | None:
+        intervals = self.active_intervals
+        return intervals[0][0] if intervals else None
+
+    @property
+    def last_active_ms(self) -> int | None:
+        intervals = self.active_intervals
+        return intervals[-1][1] if intervals else None
 
 
 @dataclass(frozen=True)
 class VocalRecurrenceEvidence:
-    """Similarity evidence for continuing human-vocal weighted acoustics."""
+    """Independent measurements of repeated acoustic structure.
+
+    Values intentionally remain separate.  ``strength`` is spectral recurrence
+    among time points supported by a human-vocal observer.  ``level_consistency``
+    is amplitude consistency for those pairs.  ``low_vocal_reference_similarity``
+    measures how well the same structure is already explained by nearby audio
+    without positive human-vocal support; it is not a background/source label.
+    """
 
     strength: float = 0.0
     period_ms: int | None = None
     period_stability: float = 0.0
     recent_strength: float = 0.0
+    level_consistency: float = 0.0
+    low_vocal_reference_similarity: float = 0.0
 
 
 class UtteranceProgressState(str, Enum):
@@ -50,6 +86,8 @@ class UtteranceProgressState(str, Enum):
 
 @dataclass(frozen=True)
 class LexicalProgressEvidence:
+    """Target-conditioned alignment measurement for one PCM snapshot."""
+
     target_units: int
     aligned_target_units: int
     target_associated: bool
@@ -88,7 +126,12 @@ class LexicalProgressEvidence:
 
 @dataclass(frozen=True)
 class NativeAudioObservation:
-    """Independent acoustic facts measured for one target generation."""
+    """Measurements for one explicit audio snapshot/query.
+
+    ``causal_lower_bound_ms`` is an observed game-input lower bound when one is
+    available. ``target_attached_ms`` is retained only as factual telemetry for
+    when the known text became available; it is never an acoustic boundary.
+    """
 
     kind: str
     capture_start_ms: int | None = None
@@ -105,12 +148,10 @@ class NativeAudioObservation:
 
 @dataclass(frozen=True)
 class UtteranceProgress:
+    """One stateless integrated answer consumed by Controller."""
+
     state: UtteranceProgressState = UtteranceProgressState.UNKNOWN
     ended_at_ms: int | None = None
-    target_audio_associated: bool = False
-    lexical_target_ended: bool = False
-    target_vocal_observed: bool = False
-    recurrent_tail_observed: bool = False
     evidence_at_ms: int | None = None
 
     @property
@@ -126,311 +167,175 @@ class UtteranceProgress:
         return self.state == UtteranceProgressState.UNKNOWN
 
 
-class UtteranceProgressEstimator:
-    """Infer whether the current presentation still has a finite vocal event.
+END_CONTEXT_MS = 360
+LOOP_STRENGTH = 0.78
+LOOP_STABILITY = 0.60
+RECENT_LOOP_STRENGTH = 0.72
+LOOP_LEVEL_CONSISTENCY = 0.55
+MIN_LOOP_OBSERVATION_MS = 1200
+LOOP_REFERENCE_MARGIN = 0.06
 
-    The estimator does not identify speakers or classify foreground/background
-    sources.  A vocal event can start from current known-text alignment or from
-    a new human-vocal onset after a known AutoAdv causal boundary.  Once open,
-    the event remains ACTIVE through short internal quiet and closes only after
-    enough acoustic quiet has actually been observed.  Transport heartbeats do
-    not mutate this acoustic state.
 
-    Lexical evidence still records target association for diagnostics and can
-    turn a closed event into ENDED. A causal-only event is selected only after
-    the target has attached: retained pre-HOOK audio is re-evaluated against that
-    stronger boundary instead of freezing the first post-input vocal onset. The
-    selected unowned event merely suppresses fallback while it is open; when it
-    closes the result returns to UNKNOWN.
-    """
-
-    END_CONTEXT_MS = 180
-    EVENT_CLOSE_QUIET_MS = END_CONTEXT_MS * 2
-    ALIGNMENT_ATTACH_GRACE_MS = 120
-    LOOP_STRENGTH = 0.72
-    LOOP_STABILITY = 0.60
-    RECENT_LOOP_STRENGTH = 0.62
-    MIN_LOOP_OBSERVATION_MS = 1200
-
-    def __init__(self):
-        self.progress = UtteranceProgress()
-        self._target_audio_associated = False
-        self._lexical_target_ended = False
-        self._lexical_end_ms: int | None = None
-        self._target_span_start_ms: int | None = None
-        self._target_span_end_ms: int | None = None
-        self._target_vocal_observed = False
-        self._recurrent_tail_observed = False
-
-        self._event_open = False
-        self._event_start_ms: int | None = None
-        self._event_last_vocal_ms: int | None = None
-        self._event_has_lexical_anchor = False
-        self._causal_candidate_consumed = False
-
-    @staticmethod
-    def _overlaps(interval: tuple[int, int], start_ms: int, end_ms: int) -> bool:
-        left, right = interval
-        return right >= start_ms and left <= end_ms
-
-    def _lexical_is_current(self, observation: NativeAudioObservation,
-                            lexical: LexicalProgressEvidence) -> bool:
-        if not lexical.target_associated:
-            return False
-        # A known AutoAdv/session lower bound constrains the analyzed audio to
-        # the current causal presentation.  With no known lower bound, retained
-        # history may contain an older matching line; require alignment evidence
-        # to reach the factual target-attach time before claiming ownership.
-        if observation.causal_lower_bound_ms is not None:
-            return True
-        if observation.target_attached_ms is None or lexical.aligned_end_ms is None:
-            return False
-        return lexical.aligned_end_ms + self.ALIGNMENT_ATTACH_GRACE_MS >= observation.target_attached_ms
-
-    def _extend_event_from_interval(self, interval: tuple[int, int]) -> bool:
-        """Extend the open event unless observed quiet would already close it."""
-        start_ms, end_ms = interval
-        if not self._event_open or self._event_last_vocal_ms is None:
-            return False
-        if end_ms <= self._event_last_vocal_ms:
-            return False
-        if start_ms - self._event_last_vocal_ms >= self.EVENT_CLOSE_QUIET_MS:
-            return False
-        self._event_last_vocal_ms = end_ms
-        return True
-
-    def _lexical_event(self, vocal: HumanVocalEvidence | None) -> tuple[int, int] | None:
-        """Return one finite vocal event connected to the aligned target span."""
-        if (
-            vocal is None
-            or not vocal.active_intervals
-            or not self._target_audio_associated
-            or self._target_span_start_ms is None
-            or self._target_span_end_ms is None
-        ):
-            return None
-        intervals = tuple(sorted(vocal.active_intervals))
-        anchor_index = next((
-            i for i, interval in enumerate(intervals)
-            if self._overlaps(interval, self._target_span_start_ms, self._target_span_end_ms)
+def _connected_chain(
+    intervals: tuple[tuple[int, int], ...],
+    anchor_start: int,
+    anchor_end: int,
+) -> tuple[int, int] | None:
+    """Return vocal support connected in time to a measured target span."""
+    ordered = sorted(intervals)
+    anchor_index = next((
+        index for index, (start_ms, end_ms) in enumerate(ordered)
+        if end_ms >= anchor_start and start_ms <= anchor_end
+    ), None)
+    if anchor_index is None:
+        # The lexical model itself establishes a vocal span.  A vocal observer
+        # may miss it; only a nearby *later* observation can extend the physical
+        # tail beyond that measured lexical span.
+        later = next((
+            (start_ms, end_ms) for start_ms, end_ms in ordered
+            if 0 <= start_ms - anchor_end < END_CONTEXT_MS
         ), None)
-        if anchor_index is None:
+        if later is None:
             return None
-        start_ms, end_ms = intervals[anchor_index]
-        for interval in intervals[anchor_index + 1:]:
-            if interval[0] - end_ms >= self.EVENT_CLOSE_QUIET_MS:
-                break
-            end_ms = max(end_ms, interval[1])
-        return start_ms, end_ms
+        start_ms, end_ms = anchor_start, later[1]
+        anchor_index = ordered.index(later)
+    else:
+        start_ms, end_ms = ordered[anchor_index]
+        start_ms = min(start_ms, anchor_start)
+        end_ms = max(end_ms, anchor_end)
 
-    def _causal_event(
-        self, observation: NativeAudioObservation, vocal: HumanVocalEvidence | None,
-    ) -> tuple[int, int] | None:
-        """Return one still-open causal candidate re-evaluated at target attach.
+    for next_start, next_end in ordered[anchor_index + 1:]:
+        if next_start - end_ms >= END_CONTEXT_MS:
+            break
+        end_ms = max(end_ms, next_end)
+    return start_ms, end_ms
 
-        AutoAdv input is the lower bound for the presentation, while HOOK/target
-        attachment tells us which presentation retained audio must now be judged
-        against. A vocal interval that closed before target attachment is therefore
-        not frozen in as the current candidate merely because it was the first
-        post-input onset. Delayed HOOK remains supported when the same finite event
-        is still active at attachment.
 
-        Causal timing is not source ownership, so only one unowned candidate may
-        suppress fallback. After that candidate closes, later unrelated human-vocal
-        activity is not repeatedly promoted; known-text evidence may still establish
-        target ownership independently.
-        """
-        if self._causal_candidate_consumed or vocal is None or not vocal.active_intervals:
-            return None
-        attached_ms = observation.target_attached_ms
-        capture_end_ms = observation.capture_end_ms
-        if attached_ms is None or capture_end_ms is None or capture_end_ms < attached_ms:
-            return None
+def _stable_recurrence(
+    recurrence: VocalRecurrenceEvidence | None,
+    *,
+    start_ms: int | None,
+    capture_end_ms: int,
+) -> bool:
+    if recurrence is None or start_ms is None or recurrence.period_ms is None:
+        return False
+    observed_ms = capture_end_ms - start_ms
+    reference_distinct = (
+        recurrence.low_vocal_reference_similarity <= 0.0
+        or recurrence.strength >= (
+            recurrence.low_vocal_reference_similarity + LOOP_REFERENCE_MARGIN)
+    )
+    return bool(
+        recurrence.strength >= LOOP_STRENGTH
+        and recurrence.period_stability >= LOOP_STABILITY
+        and recurrence.recent_strength >= RECENT_LOOP_STRENGTH
+        and recurrence.level_consistency >= LOOP_LEVEL_CONSISTENCY
+        and reference_distinct
+        and observed_ms >= max(MIN_LOOP_OBSERVATION_MS, recurrence.period_ms * 2)
+    )
 
-        intervals = tuple(sorted(vocal.active_intervals))
-        chains: list[tuple[int, int]] = []
-        for start_ms, end_ms in intervals:
-            if chains and start_ms - chains[-1][1] < self.EVENT_CLOSE_QUIET_MS:
-                chains[-1] = (chains[-1][0], max(chains[-1][1], end_ms))
-            else:
-                chains.append((start_ms, end_ms))
 
-        # If voice was already active across the strong AutoAdv input lower bound,
-        # the first chain is inherited context. It cannot become current merely
-        # because a later HOOK identifies the text. A later separated chain can
-        # still be considered.
-        if vocal.active_across_causal_boundary and chains:
-            chains = chains[1:]
+def _new_post_boundary_intervals(
+    intervals: tuple[tuple[int, int], ...], boundary_ms: int,
+) -> tuple[tuple[int, int], ...]:
+    """Return activity that observably begins after the causal lower bound.
 
-        open_candidates = [
-            (start_ms, end_ms)
-            for start_ms, end_ms in chains
-            if end_ms + self.ALIGNMENT_ATTACH_GRACE_MS >= attached_ms
-            and capture_end_ms - end_ms < self.EVENT_CLOSE_QUIET_MS
-        ]
-        if not open_candidates:
-            return None
-        return max(open_candidates, key=lambda interval: (interval[1], interval[0]))
+    Activity already present across the lower bound is not re-labelled as an
+    old/background source.  It simply is not evidence that a new finite vocal
+    risk began in this Presentation.  A separated later interval remains new
+    evidence because the intervening lack of positive support is observable.
+    """
+    return tuple(
+        (start_ms, end_ms)
+        for start_ms, end_ms in intervals
+        if start_ms >= boundary_ms
+    )
 
-    def _open_event(self, start_ms: int, end_ms: int, *, lexical: bool) -> None:
-        self._event_open = True
-        self._event_start_ms = start_ms
-        self._event_last_vocal_ms = end_ms
-        self._event_has_lexical_anchor = lexical
 
-    def _clear_event(self) -> None:
-        self._event_open = False
-        self._event_start_ms = None
-        self._event_last_vocal_ms = None
-        self._event_has_lexical_anchor = False
+def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtteranceProgress:
+    """Evaluate one immutable measurement snapshot with no retained inference state."""
+    capture_end = observation.capture_end_ms
+    if capture_end is None:
+        return UtteranceProgress(evidence_at_ms=None)
 
-    def _event_connected_to(self, start_ms: int, end_ms: int) -> bool:
-        if (not self._event_open or self._event_start_ms is None
-                or self._event_last_vocal_ms is None):
-            return False
-        if end_ms < self._event_start_ms:
-            return self._event_start_ms - end_ms < self.EVENT_CLOSE_QUIET_MS
-        if start_ms > self._event_last_vocal_ms:
-            return start_ms - self._event_last_vocal_ms < self.EVENT_CLOSE_QUIET_MS
-        return True
+    vocal_intervals = observation.vocal.active_intervals if observation.vocal else ()
+    lexical = observation.lexical
 
-    def _update_open_event(self, vocal: HumanVocalEvidence | None) -> None:
-        if not self._event_open or vocal is None:
-            return
-        for interval in sorted(vocal.active_intervals):
-            self._extend_event_from_interval(interval)
-
-    def _stable_recurrence(self, recurrence: VocalRecurrenceEvidence,
-                           capture_end_ms: int | None) -> bool:
-        if (
-            recurrence.period_ms is None
-            or recurrence.strength < self.LOOP_STRENGTH
-            or recurrence.period_stability < self.LOOP_STABILITY
-            or recurrence.recent_strength < self.RECENT_LOOP_STRENGTH
-            or self._event_start_ms is None
-            or capture_end_ms is None
-        ):
-            return False
-        observed_ms = capture_end_ms - self._event_start_ms
-        return observed_ms >= max(self.MIN_LOOP_OBSERVATION_MS, recurrence.period_ms * 2)
-
-    def observe(self, observation: NativeAudioObservation) -> UtteranceProgress:
-        if self.progress.ended:
-            return self.progress
-
-        # A transport heartbeat carries no new acoustic interval.  It may cause
-        # NativeAudio to flush pending PCM, but it must never advance, clear or
-        # confirm the vocal-event lifecycle by itself.
-        if observation.capture_end_ms is None:
-            return self.progress
-
-        capture_end = observation.capture_end_ms
-        lexical = observation.lexical
-        current_lexical = False
-        if lexical is not None:
-            current_lexical = self._lexical_is_current(observation, lexical)
-            if current_lexical:
-                self._target_audio_associated = True
-                if lexical.target_start_ms is not None:
-                    self._target_span_start_ms = (
-                        lexical.target_start_ms if self._target_span_start_ms is None
-                        else min(self._target_span_start_ms, lexical.target_start_ms)
-                    )
-                if lexical.aligned_end_ms is not None:
-                    self._target_span_end_ms = (
-                        lexical.aligned_end_ms if self._target_span_end_ms is None
-                        else max(self._target_span_end_ms, lexical.aligned_end_ms)
-                    )
-                if lexical.complete_alignment and lexical.committed_target_end:
-                    self._lexical_target_ended = True
-                    if lexical.target_end_ms is not None:
-                        self._lexical_end_ms = lexical.target_end_ms
-
-        vocal = observation.vocal
-        lexical_event = self._lexical_event(vocal)
-        if lexical_event is not None:
-            self._target_vocal_observed = True
-            if not self._event_open:
-                # Do not reopen a vocal event whose quiet endpoint is already
-                # visible in this same retained observation.
-                if capture_end - lexical_event[1] < self.EVENT_CLOSE_QUIET_MS:
-                    self._open_event(*lexical_event, lexical=True)
-            elif self._event_connected_to(*lexical_event):
-                self._event_has_lexical_anchor = True
-                self._update_open_event(vocal)
-            elif not self._event_has_lexical_anchor:
-                # Known-text relation is stronger than the provisional causal
-                # guard. If target evidence points to a separate event, replace
-                # the unowned candidate instead of letting old/background vocal
-                # activity block the current target. An already-closed lexical
-                # event remains closed so the delayed-END branch below can use it.
-                self._clear_event()
-                if capture_end - lexical_event[1] < self.EVENT_CLOSE_QUIET_MS:
-                    self._open_event(*lexical_event, lexical=True)
-
-        if self._event_open:
-            self._update_open_event(vocal)
-        elif observation.causal_lower_bound_ms is not None:
-            causal_event = self._causal_event(observation, vocal)
-            if causal_event is not None:
-                start_ms, end_ms = causal_event
-                self._causal_candidate_consumed = True
-                self._open_event(start_ms, end_ms, lexical=False)
-
-        recurrence = observation.recurrence or VocalRecurrenceEvidence()
-        recurrent_tail = bool(
-            self._event_open
-            and self._event_has_lexical_anchor
-            and self._lexical_target_ended
-            and self._stable_recurrence(recurrence, capture_end)
-        )
-        self._recurrent_tail_observed = self._recurrent_tail_observed or recurrent_tail
-
-        ended_at = None
-        if recurrent_tail:
-            state = UtteranceProgressState.ENDED
-            ended_at = self._lexical_end_ms
-            self._event_open = False
-        elif self._event_open and self._event_last_vocal_ms is not None:
-            quiet_ms = capture_end - self._event_last_vocal_ms
-            if quiet_ms >= self.EVENT_CLOSE_QUIET_MS:
-                lexical_event_closed = self._event_has_lexical_anchor and self._lexical_target_ended
-                event_end_ms = self._event_last_vocal_ms
-                self._clear_event()
-                if lexical_event_closed:
-                    state = UtteranceProgressState.ENDED
-                    ended_at = max(
-                        value for value in (self._lexical_end_ms, event_end_ms)
-                        if value is not None
-                    )
-                else:
-                    state = UtteranceProgressState.UNKNOWN
-            else:
-                state = UtteranceProgressState.ACTIVE
-        elif (
-            lexical_event is not None
-            and self._lexical_target_ended
-            and capture_end - lexical_event[1] >= self.EVENT_CLOSE_QUIET_MS
-        ):
-            # Delayed HOOK/alignment may first observe an already-finished event.
-            # The clean lexical relation plus retained vocal interval is enough
-            # to infer that the finite target event has ended without replaying
-            # an artificial ACTIVE period.
-            state = UtteranceProgressState.ENDED
-            ended_at = max(
-                value for value in (self._lexical_end_ms, lexical_event[1])
-                if value is not None
+    # Known-text relation is the strongest direct evidence available.  An
+    # associated prefix that has not reached a committed target end is still a
+    # finite target utterance in progress.
+    if lexical is not None and lexical.target_associated:
+        target_start = lexical.target_start_ms
+        aligned_end = lexical.aligned_end_ms
+        target_end = lexical.target_end_ms
+        if not (lexical.complete_alignment and lexical.committed_target_end and target_end is not None):
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE,
+                evidence_at_ms=capture_end,
             )
-        else:
-            state = UtteranceProgressState.UNKNOWN
 
-        self.progress = UtteranceProgress(
-            state=state,
-            ended_at_ms=ended_at,
-            target_audio_associated=self._target_audio_associated,
-            lexical_target_ended=self._lexical_target_ended,
-            target_vocal_observed=self._target_vocal_observed,
-            recurrent_tail_observed=self._recurrent_tail_observed,
+        anchor_start = target_start if target_start is not None else target_end
+        anchor_end = max(
+            value for value in (aligned_end, target_end)
+            if value is not None
+        )
+        chain = _connected_chain(vocal_intervals, anchor_start, anchor_end)
+        physical_end = chain[1] if chain is not None else anchor_end
+        vocal_measurement_present = bool(
+            observation.vocal is not None
+            and any(item.frame_count > 0 for item in observation.vocal.series)
+        )
+
+        if _stable_recurrence(
+            observation.recurrence,
+            start_ms=target_end,
+            capture_end_ms=capture_end,
+        ):
+            return UtteranceProgress(
+                state=UtteranceProgressState.ENDED,
+                ended_at_ms=target_end,
+                evidence_at_ms=capture_end,
+            )
+
+        if capture_end - physical_end < END_CONTEXT_MS:
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE,
+                evidence_at_ms=capture_end,
+            )
+        if not vocal_measurement_present:
+            return UtteranceProgress(
+                state=UtteranceProgressState.UNKNOWN,
+                evidence_at_ms=capture_end,
+            )
+
+        return UtteranceProgress(
+            state=UtteranceProgressState.ENDED,
+            ended_at_ms=physical_end,
             evidence_at_ms=capture_end,
         )
-        return self.progress
+
+    # Without a lexical relation, a known input lower bound can still protect a
+    # non-lexical finite vocal change from fallback.  This is deliberately a
+    # risk judgment, not source ownership, so its disappearance/repetition
+    # returns to UNKNOWN rather than manufacturing ENDED.
+    boundary = observation.causal_lower_bound_ms
+    if boundary is not None:
+        new_intervals = _new_post_boundary_intervals(vocal_intervals, boundary)
+        if new_intervals:
+            first_new = new_intervals[0][0]
+            if not _stable_recurrence(
+                observation.recurrence,
+                start_ms=first_new,
+                capture_end_ms=capture_end,
+            ):
+                latest_end = new_intervals[-1][1]
+                if capture_end - latest_end < END_CONTEXT_MS:
+                    return UtteranceProgress(
+                        state=UtteranceProgressState.ACTIVE,
+                        evidence_at_ms=capture_end,
+                    )
+
+    return UtteranceProgress(
+        state=UtteranceProgressState.UNKNOWN,
+        evidence_at_ms=capture_end,
+    )

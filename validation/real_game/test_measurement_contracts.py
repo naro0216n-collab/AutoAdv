@@ -393,8 +393,14 @@ def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_co
             {'event': 'trace_started', 'version': 3, 'at_ns': 1},
             {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'raw': raw},
             {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
-             'vocal_active_across_causal_boundary': True,
-             'vocal_post_causal_onset_ms': 1072, 'recurrence_strength': .91},
+             'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
+                               'active_count': 4, 'peak_probability': .93,
+                               'active_intervals': [[1072, 1312]]}],
+             'vocal_active_intervals': [[1072, 1312]],
+             'recurrence_strength': .91, 'recurrence_period_ms': 640,
+             'recurrence_stability': .82, 'recent_recurrence_strength': .88,
+             'recurrence_level_consistency': .84,
+             'recurrence_low_vocal_reference_similarity': .17},
         ]
         trace.extend({
             'event': 'alignment_inference', 'seq': i + 3, 'at_ns': 20 + i,

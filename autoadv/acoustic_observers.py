@@ -15,7 +15,7 @@ import numpy as np
 
 from .audio_buffer import PCMChunk
 from .forced_alignment import _downsample_48k_to_16k
-from .utterance_progress import HumanVocalEvidence, VocalRecurrenceEvidence
+from .utterance_progress import HumanVocalEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence
 
 
 @dataclass(frozen=True)
@@ -31,21 +31,16 @@ class VocalActivityFrame:
     at_ms: int
     probability: float
     support_start_ms: int | None = None
+    source: str = "speech"
 
 
 @dataclass(frozen=True)
 class AcousticFingerprint:
-    """Compact spectrum with independent vocal and background evidence.
-
-    ``background_relevance`` measures similarity to recent low-vocal process
-    audio.  It is evidence about the mix, not a semantic music classifier.
-    """
+    """Target-independent spectral measurement for one PCM packet."""
 
     at_ms: int
     values: tuple[float, ...]
-    vocal_relevance: float
     rms: float
-    background_relevance: float = 0.0
 
 
 class VocalActivityObserver(Protocol):
@@ -103,7 +98,7 @@ class TenVadActivityObserver:
             frames.append(VocalActivityFrame(
                 at_ms=int(round(start_ms + (index + 1) * hop_ms)),
                 probability=max(0.0, min(1.0, float(probability))),
-                support_start_ms=frame_start,
+                support_start_ms=frame_start, source="speech",
             ))
 
         consumed = full * self.HOP_SIZE
@@ -215,7 +210,7 @@ class AudioSetHumanVocalObserver:
             frames.append(VocalActivityFrame(
                 at_ms=at_ms,
                 probability=max(0.0, min(1.0, probability)),
-                support_start_ms=support_start,
+                support_start_ms=support_start, source="nonlexical",
             ))
             self._next_emit += self.HOP_SAMPLES
 
@@ -245,12 +240,19 @@ class HumanVocalActivityObserver:
 
 
 class AcousticObservationHistory:
-    """Compact continuous feature history independent of HOOK arrival."""
+    """Target-independent measurement cache over the retained audio timeline.
 
-    ACTIVE_PROBABILITY = 0.45
-    BACKGROUND_VOCAL_MAX = 0.20
-    BACKGROUND_LOOKBACK_MS = 8_000
+    The cache is only a cheaper representation of PCM.  It does not store
+    utterance/event/source identity and every semantic assessment is rebuilt for
+    the requested time range.
+    """
+
+    ACTIVE_PROBABILITY = {
+        "speech": 0.45,
+        "nonlexical": 0.45,
+    }
     FINGERPRINT_BANDS = 12
+    LOW_VOCAL_REFERENCE_MS = 8_000
 
     def __init__(self, *, horizon_ms: int = 10 * 60 * 1000):
         self.horizon_ms = int(horizon_ms)
@@ -285,28 +287,16 @@ class AcousticObservationHistory:
         self._vocal.extend(frames)
         self._trim(frames[-1].at_ms)
 
-    def add_fingerprint(self, chunk: PCMChunk, *, vocal_relevance: float) -> None:
+    def add_fingerprint(self, chunk: PCMChunk) -> None:
         values = self._spectral_fingerprint(chunk)
         if values is None:
             return
         raw = np.frombuffer(chunk.frames, dtype="<f4").reshape(-1, 2)
         mono = raw.mean(axis=1, dtype=np.float32)
         rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)))) if mono.size else 0.0
-        relevance = max(0.0, min(1.0, float(vocal_relevance)))
         at_ms = int(chunk.at_ms)
-        background = [
-            item for item in self._fingerprints
-            if item.vocal_relevance <= self.BACKGROUND_VOCAL_MAX
-            and item.at_ms >= at_ms - self.BACKGROUND_LOOKBACK_MS
-        ]
-        background_relevance = max(
-            (self._spectral_similarity(values, item.values) for item in background),
-            default=0.0,
-        )
         self._fingerprints.append(AcousticFingerprint(
-            at_ms=at_ms, values=values, vocal_relevance=relevance,
-            rms=rms,
-            background_relevance=background_relevance,
+            at_ms=at_ms, values=values, rms=rms,
         ))
         self._trim(at_ms)
 
@@ -328,8 +318,6 @@ class AcousticObservationHistory:
         waveform = _downsample_48k_to_16k(mono)
         if waveform.size < 128:
             return None
-        # A compact log-spectrum is sufficient for recurrence; it is not a
-        # semantic classifier and is always weighted by vocal relevance later.
         size = min(4096, waveform.size)
         segment = waveform[-size:]
         windowed = segment * np.hanning(segment.size)
@@ -348,69 +336,54 @@ class AcousticObservationHistory:
             vector /= norm
         return tuple(float(x) for x in vector)
 
-    def summarize_vocal(self, *, start_ms: int, end_ms: int,
-                        causal_boundary_ms: int | None = None) -> HumanVocalEvidence:
-        frames = [f for f in self._vocal if start_ms <= f.at_ms <= end_ms]
-        probabilities = [f.probability for f in frames]
-        active = [f for f in frames if f.probability >= self.ACTIVE_PROBABILITY]
+    @classmethod
+    def _threshold(cls, source: str) -> float:
+        return float(cls.ACTIVE_PROBABILITY.get(source, 0.45))
 
+    @staticmethod
+    def _series_intervals(frames: list[VocalActivityFrame], *, start_ms: int,
+                          end_ms: int, threshold: float) -> tuple[tuple[int, int], ...]:
+        active = [frame for frame in frames if frame.probability >= threshold]
+        if not active:
+            return ()
         gaps = [b.at_ms - a.at_ms for a, b in zip(frames, frames[1:]) if b.at_ms > a.at_ms]
         nominal_gap = float(np.median(gaps)) if gaps else 16.0
         join_gap = max(32.0, nominal_gap * 2.0)
         intervals: list[tuple[int, int]] = []
         for frame in active:
-            # ``at_ms`` is when this backend produced positive event evidence.
-            # A wider classifier's support_start_ms is only provenance for the
-            # samples used to produce that evidence and cannot establish that
-            # voice was active throughout the receptive field.
             observed_at = min(end_ms, max(start_ms, int(frame.at_ms)))
             if intervals and observed_at - intervals[-1][1] <= join_gap:
                 intervals[-1] = (intervals[-1][0], max(intervals[-1][1], observed_at))
             else:
                 intervals.append((observed_at, observed_at))
+        return tuple(intervals)
 
-        active_across_boundary = False
-        post_causal_onset_ms = intervals[0][0] if intervals else None
-        if causal_boundary_ms is not None:
-            post_causal_onset_ms = None
-            active_across_boundary = any(
-                left < causal_boundary_ms <= right for left, right in intervals)
-
-            # The requested summary window can start exactly at the causal
-            # boundary. Preserve one factual frame of preceding continuity so a
-            # speech stream already active before that boundary is not relabeled
-            # as a new onset merely because the reporting window was clipped.
-            if not active_across_boundary and intervals:
-                previous = next((
-                    frame for frame in reversed(self._vocal)
-                    if frame.at_ms < start_ms and frame.probability >= self.ACTIVE_PROBABILITY
-                ), None)
-                first_left, first_right = intervals[0]
-                if (previous is not None and previous.at_ms < causal_boundary_ms <= first_right
-                        and first_left - previous.at_ms <= join_gap):
-                    active_across_boundary = True
-
-            for left, right in intervals:
-                if right < causal_boundary_ms:
-                    continue
-                if left < causal_boundary_ms <= right:
-                    continue
-                if (active_across_boundary and intervals and
-                        (left, right) == intervals[0]):
-                    continue
-                post_causal_onset_ms = max(left, causal_boundary_ms)
-                break
-
+    def summarize_vocal(self, *, start_ms: int, end_ms: int) -> HumanVocalEvidence:
+        selected = [frame for frame in self._vocal if start_ms <= frame.at_ms <= end_ms]
+        by_source: dict[str, list[VocalActivityFrame]] = {}
+        for frame in selected:
+            by_source.setdefault(frame.source, []).append(frame)
+        series: list[VocalEvidenceSeries] = []
+        for source, frames in sorted(by_source.items()):
+            threshold = self._threshold(source)
+            active_count = sum(frame.probability >= threshold for frame in frames)
+            series.append(VocalEvidenceSeries(
+                source=source,
+                frame_count=len(frames),
+                active_count=active_count,
+                peak_probability=max((frame.probability for frame in frames), default=0.0),
+                active_intervals=self._series_intervals(
+                    frames, start_ms=start_ms, end_ms=end_ms, threshold=threshold),
+            ))
         return HumanVocalEvidence(
-            start_ms=int(start_ms), end_ms=int(end_ms), frame_count=len(frames),
-            mean_probability=float(np.mean(probabilities)) if probabilities else 0.0,
-            peak_probability=max(probabilities, default=0.0),
-            active_fraction=(len(active) / len(frames)) if frames else 0.0,
-            first_active_ms=(intervals[0][0] if intervals else None),
-            last_active_ms=(intervals[-1][1] if intervals else None),
-            active_intervals=tuple(intervals),
-            active_across_causal_boundary=active_across_boundary,
-            post_causal_onset_ms=post_causal_onset_ms,
+            start_ms=int(start_ms), end_ms=int(end_ms), series=tuple(series))
+
+    def _active_near(self, at_ms: int, *, tolerance_ms: int = 320) -> bool:
+        left = at_ms - tolerance_ms
+        right = at_ms + tolerance_ms
+        return any(
+            left <= frame.at_ms <= right and frame.probability >= self._threshold(frame.source)
+            for frame in self._vocal
         )
 
     @staticmethod
@@ -419,67 +392,75 @@ class AcousticObservationHistory:
             return 0.0
         return max(0.0, min(1.0, float(np.dot(a, b))))
 
-    @classmethod
-    def _similarity(cls, a: AcousticFingerprint, b: AcousticFingerprint) -> float:
-        # Recurrence concerns the human-vocal component, not periodicity that
-        # can already be explained by recent low-vocal background audio.  The
-        # factors remain separate evidence: no observer labels a source as a
-        # completed utterance or as semantic music.
-        spectral = cls._spectral_similarity(a.values, b.values)
-        vocal = min(a.vocal_relevance, b.vocal_relevance)
-        background = max(a.background_relevance, b.background_relevance)
+    @staticmethod
+    def _level_consistency(a: AcousticFingerprint, b: AcousticFingerprint) -> float:
         if max(a.rms, b.rms) <= 1e-12:
-            level = 1.0
-        else:
-            level = min(a.rms, b.rms) / max(a.rms, b.rms)
-        # A moderate overlap is expected whenever the foreground is mixed over
-        # BGM. Only a spectrum that is strongly explained by low-vocal audio
-        # should collapse recurrence evidence.
-        foreground = 1.0 - background ** 3
-        return spectral * vocal * max(0.0, foreground) * level
+            return 1.0
+        return max(0.0, min(1.0, min(a.rms, b.rms) / max(a.rms, b.rms)))
 
     def recurrence(self, *, start_ms: int, end_ms: int) -> VocalRecurrenceEvidence:
-        current = [f for f in self._fingerprints
-                   if start_ms <= f.at_ms <= end_ms and f.vocal_relevance >= 0.25]
+        # Recurrence is measured only at time points where at least one human-
+        # vocal observer has positive support.  The score scales themselves are
+        # not averaged or multiplied into spectral similarity.
+        current = [
+            fp for fp in self._fingerprints
+            if start_ms <= fp.at_ms <= end_ms and self._active_near(fp.at_ms)
+        ]
         if len(current) < 3:
             return VocalRecurrenceEvidence()
 
-        pairs: list[tuple[float, int]] = []
-        for i, later in enumerate(current):
-            for earlier in current[:i]:
+        pairs: list[tuple[float, float, int]] = []
+        for index, later in enumerate(current):
+            for earlier in current[:index]:
                 lag = later.at_ms - earlier.at_ms
                 if lag < 300:
                     continue
-                score = self._similarity(later, earlier)
-                if score >= 0.55:
-                    pairs.append((score, lag))
-        if not pairs:
-            strength = 0.0
-            period = None
-            stability = 0.0
-        else:
-            pairs.sort(reverse=True)
-            top = pairs[:min(12, len(pairs))]
-            strength = float(np.mean([score for score, _ in top]))
-            lags = np.asarray([lag for _, lag in top], dtype=np.float64)
-            period = int(round(float(np.median(lags))))
-            spread = float(np.median(np.abs(lags - period))) if len(lags) else 0.0
-            stability = max(0.0, 1.0 - spread / max(250.0, float(period)))
+                spectral = self._spectral_similarity(later.values, earlier.values)
+                level = self._level_consistency(later, earlier)
+                if spectral >= 0.65 and level >= 0.40:
+                    pairs.append((spectral, level, lag))
 
-        # Recent recurrence is useful only as evidence about the continuation
-        # currently being heard.  Earlier fingerprints, including material just
-        # before start_ms, are reference data; matching them does not establish
-        # target ownership.
-        previous = [f for f in self._fingerprints
-                    if start_ms - 8000 <= f.at_ms < start_ms and f.vocal_relevance >= 0.25]
-        recent = [f for f in current if f.at_ms >= end_ms - 1500]
-        reference = previous + [f for f in current if f.at_ms < end_ms - 300]
-        best_recent: list[float] = []
+        if not pairs:
+            return VocalRecurrenceEvidence()
+
+        pairs.sort(key=lambda item: item[0], reverse=True)
+        top = pairs[:min(16, len(pairs))]
+        strength = float(np.mean([spectral for spectral, _, _ in top]))
+        level_consistency = float(np.mean([level for _, level, _ in top]))
+        lags = np.asarray([lag for _, _, lag in top], dtype=np.float64)
+        period = int(round(float(np.median(lags))))
+        spread = float(np.median(np.abs(lags - period))) if len(lags) else 0.0
+        stability = max(0.0, 1.0 - spread / max(250.0, float(period)))
+
+        recent = [fp for fp in current if fp.at_ms >= end_ms - 1500]
+        reference = [fp for fp in current if fp.at_ms < end_ms - 300]
+        recent_scores: list[float] = []
         for now in recent:
             candidates = [before for before in reference if before.at_ms <= now.at_ms - 300]
             if candidates:
-                best_recent.append(max(self._similarity(now, before) for before in candidates))
-        recent_strength = float(np.mean(best_recent)) if best_recent else 0.0
+                recent_scores.append(max(
+                    self._spectral_similarity(now.values, before.values)
+                    for before in candidates
+                ))
+        recent_strength = float(np.mean(recent_scores)) if recent_scores else 0.0
+
+        low_vocal_refs = [
+            fp for fp in self._fingerprints
+            if start_ms - self.LOW_VOCAL_REFERENCE_MS <= fp.at_ms < end_ms
+            and not self._active_near(fp.at_ms)
+        ]
+        low_vocal_similarity = 0.0
+        if low_vocal_refs and recent:
+            low_vocal_similarity = max(
+                self._spectral_similarity(now.values, ref.values)
+                for now in recent for ref in low_vocal_refs
+            )
+
         return VocalRecurrenceEvidence(
-            strength=strength, period_ms=period, period_stability=stability,
-            recent_strength=recent_strength)
+            strength=strength,
+            period_ms=period,
+            period_stability=stability,
+            recent_strength=recent_strength,
+            level_consistency=level_consistency,
+            low_vocal_reference_similarity=low_vocal_similarity,
+        )

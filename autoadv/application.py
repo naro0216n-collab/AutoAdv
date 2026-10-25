@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from .conversation import Controller, Target, Token
 from .g2p import G2PBackend, default_g2p
 from .utterance_progress import (
-    NativeAudioObservation, UtteranceProgressEstimator, UtteranceProgressState,
+    NativeAudioObservation, UtteranceProgressState, evaluate_audio_snapshot,
 )
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
@@ -35,7 +35,7 @@ from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .storage import Catalog
 from .voice import VoiceJobs
-from .windows_input import WindowsAdvancementInput
+from .windows_input import WindowsAdvancementInput, WindowsGameInputObserver
 
 
 @dataclass(frozen=True)
@@ -549,6 +549,8 @@ class AutoAdvApplication:
     directly, or translates Controller reasons into user-facing status text.
     """
 
+    USER_INPUT_HOOK_PROXIMITY_MS = 2_000
+
     def __init__(self, catalog: Catalog, persist: Callable[[], None], *,
                  input_send: Callable | None = None, target_ready: Callable | None = None,
                  g2p: G2PBackend | None = None):
@@ -567,8 +569,9 @@ class AutoAdvApplication:
         self._irodori_epoch = 0
         self._native_audio: NativeAudio | None = None
         self._native_audio_epoch = 0
-        self._progress_token: Token | None = None
-        self._progress_estimator = UtteranceProgressEstimator()
+        self._game_input_observer: WindowsGameInputObserver | None = None
+        self._game_input_lock = threading.Lock()
+        self._game_input_times: deque[int] = deque(maxlen=64)
         # Application-only synchronization fence: when the text-derived fallback
         # boundary arrives, Controller must see acoustic evidence through PCM
         # that was already captured at that instant.  This does not extend the
@@ -671,6 +674,60 @@ class AutoAdvApplication:
             callback()
         else:
             self._schedule_runtime(0, callback)
+
+    def _record_game_input(self, at_ms: int) -> None:
+        """Record one factual user-input time directed at the monitored game."""
+        at_ms = int(at_ms)
+        if at_ms <= 0:
+            return
+        with self._game_input_lock:
+            self._game_input_times.append(at_ms)
+        self._dispatch_runtime(
+            lambda ms=at_ms: self._emit_telemetry(
+                'game_input_observed', self.controller.token, at_ms=ms))
+
+    def _recent_game_input_lower_bound(self, hook_received_ns: int) -> int | None:
+        """Return the latest nearby observed user input preceding a replacement HOOK."""
+        if hook_received_ns <= 0:
+            return None
+        hook_ms = hook_received_ns // 1_000_000
+        oldest = hook_ms - self.USER_INPUT_HOOK_PROXIMITY_MS
+        with self._game_input_lock:
+            while self._game_input_times and self._game_input_times[0] < oldest:
+                self._game_input_times.popleft()
+            candidates = [
+                at_ms for at_ms in self._game_input_times
+                if oldest <= at_ms <= hook_ms
+            ]
+            if not candidates:
+                return None
+            selected = candidates[-1]
+            # One physical user input can bound only the transition it is paired
+            # with. Drop it and any older observations so a later HOOK cannot
+            # reuse the same causal fact.
+            while self._game_input_times and self._game_input_times[0] <= selected:
+                self._game_input_times.popleft()
+            return selected
+
+    def _start_game_input_observer(self, target: Target, profile: Profile) -> None:
+        self._close_game_input_observer()
+        if profile.advance_mode.value != 'audio' or sys.platform != 'win32':
+            return
+        try:
+            observer = WindowsGameInputObserver(
+                target.pid, self._record_game_input)
+            observer.start()
+        except Exception as exc:
+            self._emit_runtime_event('game_input_observer_error', None, reason=str(exc))
+            return
+        self._game_input_observer = observer
+
+    def _close_game_input_observer(self) -> None:
+        observer, self._game_input_observer = self._game_input_observer, None
+        with self._game_input_lock:
+            self._game_input_times.clear()
+        if observer is not None:
+            observer.close()
 
     def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
         token = self.controller.token
@@ -823,11 +880,11 @@ class AutoAdvApplication:
             return
         native = self._native_audio
         fence_ms = native.observation_fence(token) if native is not None else None
-        progress = self._progress_estimator.progress
+        progress = self.controller.native_progress
         if (fence_ms is not None and
                 (progress.evidence_at_ms is None or progress.evidence_at_ms < fence_ms)):
             self._audio_deadline_fence = (token, fence_ms)
-            native.request_observation_through(token, fence_ms)
+            native.request_assessment_through(token, fence_ms)
             return
         self._apply_audio_deadline(token)
 
@@ -842,8 +899,6 @@ class AutoAdvApplication:
         if utterance is None or token != state.token:
             return 0
         self._cancel_voice()
-        self._progress_token = token
-        self._progress_estimator = UtteranceProgressEstimator()
         self._audio_deadline_fence = None
         native_audio_target = bool(
             utterance.advance_mode.value == 'audio' and not utterance.use_tts)
@@ -853,11 +908,22 @@ class AutoAdvApplication:
             # cancellation here.
             self._native_audio.cancel()
         external_ns = self.controller.take_external_transition(token)
+        input_lower_bound_ms = (
+            self._recent_game_input_lower_bound(external_ns)
+            if external_ns and native_audio_target else None
+        )
         if external_ns:
             if native_audio_target and self._native_audio is not None:
-                self._native_audio.external_transition()
+                if input_lower_bound_ms is not None:
+                    self._native_audio.set_causal_lower_bound(at_ms=input_lower_bound_ms)
+                else:
+                    self._native_audio.external_transition()
             self._emit_runtime_event(
-                'external_hook_transition', token, received_ns=external_ns)
+                'external_hook_transition', token, received_ns=external_ns,
+                input_lower_bound_ms=input_lower_bound_ms)
+            if input_lower_bound_ms is not None:
+                self._emit_runtime_event(
+                    'audio_input_lower_bound', token, at_ms=input_lower_bound_ms, source='user_input')
         if utterance.advance_mode.value == 'text':
             self._schedule(utterance.text_wait_ms,
                            lambda t=token: self._runtime_presentation_event(t, 'text_elapsed'))
@@ -877,8 +943,6 @@ class AutoAdvApplication:
 
     def _close_runtime(self, reason: str = 'stopped') -> None:
         self._hook_output_group.clear()
-        self._progress_token = None
-        self._progress_estimator = UtteranceProgressEstimator()
         self._audio_deadline_fence = None
         self.controller.close(reason)
         self._notify_runtime()
@@ -906,6 +970,7 @@ class AutoAdvApplication:
                                connection.connection_generation)
             self._reconcile_hook_sync()
         self._start_native_audio(effective)
+        self._start_game_input_observer(target, effective)
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(
@@ -924,6 +989,7 @@ class AutoAdvApplication:
         target = self._runtime_target
         if target.selected:
             self._sync_hook_threads(target.hook_pid, clear=True)
+        self._close_game_input_observer()
         self._close_native_audio()
         self._close_ocr()
         self._cancel_voice()
@@ -1202,11 +1268,8 @@ class AutoAdvApplication:
         state = self.runtime_state()
         if token != state.token or state.completed or state.sent:
             return False
-        if self._progress_token != token:
-            self._progress_token = token
-            self._progress_estimator = UtteranceProgressEstimator()
-        previous = self._progress_estimator.progress
-        progress = self._progress_estimator.observe(observation)
+        previous = self.controller.native_progress
+        progress = evaluate_audio_snapshot(observation)
 
         lexical = observation.lexical
         vocal = observation.vocal
@@ -1227,31 +1290,41 @@ class AutoAdvApplication:
             causal_lower_bound_ms=observation.causal_lower_bound_ms,
             target_attached_ms=observation.target_attached_ms,
             history_truncated=observation.history_truncated,
-            vocal_mean_probability=(vocal.mean_probability if vocal is not None else 0.0),
-            vocal_active_fraction=(vocal.active_fraction if vocal is not None else 0.0),
-            vocal_first_active_ms=(vocal.first_active_ms if vocal is not None else None),
-            vocal_last_active_ms=(vocal.last_active_ms if vocal is not None else None),
+            vocal_series=([{
+                'source': item.source,
+                'frame_count': item.frame_count,
+                'active_count': item.active_count,
+                'peak_probability': item.peak_probability,
+                'active_intervals': list(item.active_intervals),
+            } for item in vocal.series] if vocal is not None else []),
             vocal_active_intervals=(list(vocal.active_intervals) if vocal is not None else []),
-            vocal_active_across_causal_boundary=(
-                vocal.active_across_causal_boundary if vocal is not None else False),
-            vocal_post_causal_onset_ms=(vocal.post_causal_onset_ms if vocal is not None else None),
             recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
             recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
             recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),
             recent_recurrence_strength=(recurrence.recent_strength if recurrence is not None else 0.0),
+            recurrence_level_consistency=(recurrence.level_consistency if recurrence is not None else 0.0),
+            recurrence_low_vocal_reference_similarity=(
+                recurrence.low_vocal_reference_similarity if recurrence is not None else 0.0),
             pcm_last_frame_ms=observation.pcm_last_frame_ms,
             heartbeat_at_ms=observation.heartbeat_at_ms,
         )
+
+        # Snapshot evaluation is stateless, but callbacks may race across the
+        # alignment worker and the capture thread.  An older completed query is
+        # still useful telemetry; it must not replace a newer query result in
+        # Controller state. Equal frontiers remain eligible because a later
+        # target-conditioned measurement can strengthen the same PCM snapshot.
+        if (previous.evidence_at_ms is not None
+                and progress.evidence_at_ms is not None
+                and progress.evidence_at_ms < previous.evidence_at_ms):
+            return False
 
         if progress != previous:
             self._emit_runtime_event(
                 'utterance_progress', token,
                 state=progress.state.value,
                 ended_at_ms=progress.ended_at_ms,
-                target_audio_associated=progress.target_audio_associated,
-                lexical_target_ended=progress.lexical_target_ended,
-                target_vocal_observed=progress.target_vocal_observed,
-                recurrent_tail_observed=progress.recurrent_tail_observed)
+                evidence_at_ms=progress.evidence_at_ms)
         if progress.state == UtteranceProgressState.ENDED and progress.ended_at_ms is not None:
             self._emit_telemetry(
                 'utterance_progress_end_estimate', token,
@@ -1273,7 +1346,7 @@ class AutoAdvApplication:
                 return self._apply_audio_deadline(token)
             native = self._native_audio
             if native is not None:
-                native.request_observation_through(token, fence_ms)
+                native.request_assessment_through(token, fence_ms)
         return False
 
     def _start_native_audio(self, profile: Profile) -> bool:
