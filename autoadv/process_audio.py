@@ -62,6 +62,21 @@ class ProcessCapture:
         self._lock = Lock()
         self._startup_ack = Event()
         self._startup_failure: str | None = None
+        self._helper_clock_offset_ms: int | None = None
+
+    def _local_timestamp(self, helper_at_ms: int) -> int:
+        """Map the helper's monotonic clock into the controller clock domain.
+
+        The helper timestamps packets when WASAPI hands them to the bridge.  The
+        Python reader may consume those packets later if downstream observation
+        is busy, so receipt time is not capture time.  A fixed offset preserves
+        the helper's packet-to-packet chronology while keeping every timestamp in
+        the same monotonic domain as Controller deadlines and input boundaries.
+        """
+        helper_at_ms = int(helper_at_ms)
+        if self._helper_clock_offset_ms is None:
+            self._helper_clock_offset_ms = int(self.clock()) - helper_at_ms
+        return helper_at_ms + self._helper_clock_offset_ms
 
     def start(self) -> None:
         if sys.platform != 'win32' or not self.helper_dll.is_file():
@@ -90,8 +105,8 @@ class ProcessCapture:
         try:
             assert self.process and self.process.stdout
             while not self.stop_requested.is_set():
-                _, chunk = read_packet(self.process.stdout)
-                now = self.clock()  # clock domain is the controller's, not the helper's
+                helper_at, chunk = read_packet(self.process.stdout)
+                now = self._local_timestamp(helper_at)
                 if chunk is not None:
                     local_chunk = PCMChunk(now, chunk.frames, chunk.sample_rate,
                                            chunk.channels, chunk.sample_width_bytes)

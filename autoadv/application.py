@@ -842,13 +842,19 @@ class AutoAdvApplication:
         if utterance is None or token != state.token:
             return 0
         self._cancel_voice()
-        self._cancel_native_audio()
         self._progress_token = token
         self._progress_estimator = UtteranceProgressEstimator()
         self._audio_deadline_fence = None
+        native_audio_target = bool(
+            utterance.advance_mode.value == 'audio' and not utterance.use_tts)
+        if not native_audio_target and self._native_audio is not None:
+            # ``begin`` owns replacement of one native-audio target by the next.
+            # Only presentations that do not use native audio need an explicit
+            # cancellation here.
+            self._native_audio.cancel()
         external_ns = self.controller.take_external_transition(token)
         if external_ns:
-            if self._native_audio is not None:
+            if native_audio_target and self._native_audio is not None:
                 self._native_audio.external_transition()
             self._emit_runtime_event(
                 'external_hook_transition', token, received_ns=external_ns)
@@ -1368,10 +1374,6 @@ class AutoAdvApplication:
         native, self._native_audio = self._native_audio, None
         if native is not None:
             threading.Thread(target=native.close, daemon=True, name='autoadv-close-native').start()
-
-    def _cancel_native_audio(self) -> None:
-        if self._native_audio is not None:
-            self._native_audio.cancel()
 
     def _begin_native_audio(self, token: Token, alignment_text: str, candidates) -> bool:
         if self._native_audio is None:

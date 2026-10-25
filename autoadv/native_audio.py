@@ -67,13 +67,20 @@ class NativeAudio:
         self.aligner: TargetConditionedAligner | None = None
         self.start_ms = 0
         self.causal_lower_bound_ms: int | None = None
+        self._next_causal_lower_bound_ms: int | None = None
         self.target_attached_ms: int | None = None
         self.window_start_ms = 0
         self._last_processed_ms = -1
         self._last_processed_chunk: PCMChunk | None = None
+        # ``_inflight`` describes the physical single worker, not whether the
+        # current generation has work. Invalidating a target cannot cancel an
+        # ONNX call already executing in that worker.
         self._inference_at = -1
+        self._observation_at = -1
         self._inflight = False
         self._inflight_generation: int | None = None
+        self._pending_inference: tuple[Token, int, int, TargetConditionedAligner, int] | None = None
+        self._lexical_committed_generation: int | None = None
         self._generation = 0
         self._closed = False
         self._capture_pcm_packets = 0
@@ -102,10 +109,10 @@ class NativeAudio:
         if lower_bound_ms <= 0:
             raise ValueError("audio causal lower bound must be a positive monotonic timestamp")
         with self._lock:
-            self._invalidate_target_locked()
-            self.causal_lower_bound_ms = lower_bound_ms
-            self.window_start_ms = lower_bound_ms
-            self._reset_observation()
+            # The successful input belongs to the transition *after* the line
+            # that just completed. Recording that fact must not mutate worker
+            # state or create an intermediate target generation.
+            self._next_causal_lower_bound_ms = lower_bound_ms
 
     def external_transition(self) -> None:
         """Record that the new target has no observed input lower bound.
@@ -115,24 +122,28 @@ class NativeAudio:
         association where that association can be established independently.
         """
         with self._lock:
-            self._invalidate_target_locked()
-            self.causal_lower_bound_ms = None
-            earliest = self.features.earliest_ms
-            self.window_start_ms = int(earliest if earliest is not None else max(0, self.clock() - self.RAW_HISTORY_MS))
-            self._reset_observation()
+            # A replacement HOOK without an observed input invalidates any
+            # pending AutoAdv lower bound. ``begin`` performs the one actual
+            # target-generation transition.
+            self._next_causal_lower_bound_ms = None
 
-    def _invalidate_target_locked(self) -> None:
-        self._generation += 1
-        self._inflight = False
-        self._inflight_generation = None
+    def _retire_target_locked(self) -> None:
+        # In-flight ONNX work cannot be cancelled here. Only its result becomes
+        # stale. At most one not-yet-started request is retained and it belongs
+        # to the newest target. Generation advances exactly once when ``begin``
+        # attaches the next target.
+        self._pending_inference = None
+        self._lexical_committed_generation = None
         self.token = None
         self.aligner = None
+        self.causal_lower_bound_ms = None
         self.target_attached_ms = None
         self._last_processed_ms = -1
         self._last_processed_chunk = None
 
     def _reset_observation(self) -> None:
         self._inference_at = -1
+        self._observation_at = -1
         self._pcm_reported = False
         self._last_pcm_end_ms = -1
         self._capture_stereo_peak = 0.0
@@ -164,10 +175,12 @@ class NativeAudio:
         with self._lock:
             self._generation += 1
             generation = self._generation
-            self._inflight = False
-            self._inflight_generation = None
+            self._pending_inference = None
+            self._lexical_committed_generation = None
             self.token = token
             self.aligner = aligner
+            self.causal_lower_bound_ms = self._next_causal_lower_bound_ms
+            self._next_causal_lower_bound_ms = None
             self.start_ms = self.clock()
             self.target_attached_ms = self.start_ms
             analysis_end = self.features.latest_ms or self.start_ms
@@ -177,22 +190,31 @@ class NativeAudio:
             self._reset_observation()
 
             buffered = self.history.since(self.window_start_ms)
-            pending = [self._consume_locked(chunk, replay=True) for chunk in buffered]
-            feature_end = self.features.latest_ms
+            pending = []
+            for chunk in buffered:
+                self._consume_locked(chunk, replay=True)
             if buffered:
-                samples = self.history.since(self.window_start_ms)
-                if samples:
-                    self._inflight = True
-                    self._inflight_generation = generation
-                    self._inference_at = buffered[-1].at_ms
-                    pending.append((token, generation, None, samples, aligner))
+                first = buffered[0]
+                pending.append((
+                    "pcm", token, generation,
+                    len(first.frames) // (first.channels * first.sample_width_bytes)))
+            feature_end = self.features.latest_ms
+            if buffered and aligner is not None:
+                item = self._request_alignment_locked(buffered[-1].at_ms)
+                if item is not None:
+                    pending.append(item)
+            elif buffered:
+                observation = self._feature_observation_locked(
+                    token, generation, buffered[-1].at_ms, history_truncated=False)
+                if observation is not None:
+                    pending.append(observation)
             elif feature_end is not None:
                 # Raw history may have expired while compact evidence remains.
                 # Emit the evidence without fabricating lexical alignment.
-                observation = self._build_observation_locked(
-                    kind="acoustic_features", capture_start_ms=self.window_start_ms,
-                    capture_end_ms=feature_end, lexical=None, history_truncated=True)
-                pending.append((token, generation, None, None, None, observation))
+                observation = self._feature_observation_locked(
+                    token, generation, feature_end, history_truncated=True)
+                if observation is not None:
+                    pending.append(observation)
         for item in pending:
             self._dispatch(item)
         with self._lock:
@@ -204,19 +226,20 @@ class NativeAudio:
         with self._lock:
             if token != self.token:
                 return False
-            self._invalidate_target_locked()
+            self._retire_target_locked()
             self._reset_observation()
             return True
 
     def cancel(self) -> None:
         with self._lock:
-            self._invalidate_target_locked()
+            if self.token is not None or self.aligner is not None or self._pending_inference is not None:
+                self._retire_target_locked()
+            self._next_causal_lower_bound_ms = None
             # Do not erase the Presentation Epoch: a delayed/replacement HOOK may
             # still need the same continuous history.
             self._reset_observation()
 
     def health(self, status: CaptureHealth) -> None:
-        observation = None
         token = None
         drain = None
         with self._lock:
@@ -227,17 +250,11 @@ class NativeAudio:
                 else:
                     self._capture_heartbeats += 1
                     if self.token is not None and self._last_pcm_end_ms >= 0:
-                        observation = self._build_observation_locked(
-                            kind="transport", capture_start_ms=None, capture_end_ms=None,
-                            lexical=None, pcm_last_frame_ms=self._last_pcm_end_ms,
-                            heartbeat_at_ms=status.at_ms)
                         token = self.token
                         drain = self._idle_drain_locked()
             else:
                 self._capture_error = status.reason
                 token = self.token
-        if observation is not None and token is not None and self.on_observation is not None:
-            self.on_observation(token, observation)
         if drain is not None:
             self._dispatch(drain)
         if not status.healthy and token is not None:
@@ -245,19 +262,18 @@ class NativeAudio:
 
     def _idle_drain_locked(self):
         """Use a heartbeat only to schedule analysis of already captured PCM."""
-        if (self._closed or self.token is None or self._inflight
-                or self._last_pcm_end_ms < 0 or self._last_pcm_end_ms <= self._inference_at):
+        if self._closed or self.token is None or self._last_pcm_end_ms < 0:
             return None
-        start, _ = self._raw_analysis_start_locked(self._last_pcm_end_ms)
-        samples = self.history.since(start)
-        if not samples:
+        if (self.aligner is not None
+                and self._lexical_committed_generation != self._generation):
+            if self._last_pcm_end_ms <= self._inference_at:
+                return None
+            return self._request_alignment_locked(self._last_pcm_end_ms)
+        if self._last_pcm_end_ms <= self._observation_at:
             return None
-        token, generation, aligner = self.token, self._generation, self.aligner
-        self.window_start_ms = start
-        self._inflight = True
-        self._inflight_generation = generation
-        self._inference_at = self._last_pcm_end_ms
-        return token, generation, None, samples, aligner
+        return self._feature_observation_locked(
+            self.token, self._generation, self._last_pcm_end_ms,
+            history_truncated=False)
 
     def observation_fence(self, token: Token) -> int | None:
         """Snapshot the newest captured PCM timestamp for one current target.
@@ -271,35 +287,23 @@ class NativeAudio:
             return int(self._last_pcm_end_ms)
 
     def request_observation_through(self, token: Token, through_ms: int) -> bool:
-        """Ensure captured PCM through ``through_ms`` is scheduled for analysis.
+        """Publish continuous evidence through an already captured PCM fence.
 
-        Returns True when an inference is already in flight or a new one was
-        scheduled.  False means no additional inference work is required (or
-        the target is no longer current). The caller still uses the emitted
-        observation timestamp to know when its fence has actually been consumed.
+        This synchronization request never starts target-conditioned alignment.
+        A fallback deadline must account for human-vocal evidence that was
+        already captured, but it is not a second lexical-analysis scheduler.
         """
         item = None
         with self._lock:
             if self._closed or token != self.token:
                 return False
-            boundary = int(through_ms)
-            if self._inflight:
-                return True
-            if self._inference_at >= boundary:
+            boundary = min(int(through_ms), self._last_pcm_end_ms)
+            if boundary < 0 or self._observation_at >= boundary:
                 return False
-            start, _ = self._raw_analysis_start_locked(boundary)
-            samples = self.history.since(start)
-            samples = tuple(chunk for chunk in samples if chunk.at_ms <= boundary)
-            if not samples:
-                return False
-            generation, aligner = self._generation, self.aligner
-            self.window_start_ms = start
-            self._inflight = True
-            self._inflight_generation = generation
-            self._inference_at = samples[-1].at_ms
-            item = (token, generation, None, samples, aligner)
+            item = self._feature_observation_locked(
+                token, self._generation, boundary, history_truncated=False)
         self._dispatch(item)
-        return True
+        return item is not None
 
     def capture_status(self) -> dict:
         with self._lock:
@@ -332,12 +336,82 @@ class NativeAudio:
             self.features.add_vocal(frames)
             self.features.add_fingerprint(chunk, vocal_relevance=relevance)
 
+    def _start_alignment_locked(self, token: Token, generation: int, boundary: int,
+                                aligner: TargetConditionedAligner,
+                                requested_ns: int = 0):
+        if (self._closed or token != self.token or generation != self._generation
+                or aligner is not self.aligner
+                or self._lexical_committed_generation == generation):
+            return None
+        start, _ = self._raw_analysis_start_locked(boundary)
+        samples = tuple(
+            chunk for chunk in self.history.since(start)
+            if chunk.at_ms <= boundary)
+        if not samples:
+            return None
+        self.window_start_ms = start
+        self._inflight = True
+        self._inflight_generation = generation
+        return ("infer", token, generation, samples, aligner, requested_ns)
+
+    def _request_alignment_locked(self, boundary: int):
+        if (self._closed or self.token is None or self.aligner is None
+                or self._lexical_committed_generation == self._generation):
+            return None
+        boundary = int(boundary)
+        if boundary <= self._inference_at:
+            return None
+        self._inference_at = boundary
+        token, generation, aligner = self.token, self._generation, self.aligner
+        requested_ns = time.perf_counter_ns() if self.on_inference else 0
+        if self._inflight:
+            # One physical worker means queued generations can only make the
+            # newest target older. Keep a single latest request instead.
+            self._pending_inference = (
+                token, generation, boundary, aligner, requested_ns)
+            return None
+        return self._start_alignment_locked(
+            token, generation, boundary, aligner, requested_ns)
+
+    def _feature_observation_locked(self, token: Token, generation: int,
+                                    boundary: int, *, history_truncated: bool):
+        if (self._closed or token != self.token or generation != self._generation):
+            return None
+        boundary = int(boundary)
+        if boundary <= self._observation_at:
+            return None
+        observation = self._build_observation_locked(
+            kind="acoustic_features",
+            capture_start_ms=self.window_start_ms,
+            capture_end_ms=boundary,
+            lexical=None,
+            history_truncated=history_truncated,
+            pcm_last_frame_ms=boundary,
+            include_recurrence=(self._lexical_committed_generation == generation),
+        )
+        self._observation_at = boundary
+        return ("observe", token, generation, observation)
+
+    def _take_pending_locked(self):
+        pending, self._pending_inference = self._pending_inference, None
+        if pending is None:
+            return None
+        token, generation, boundary, aligner, requested_ns = pending
+        if (self._closed or token != self.token or generation != self._generation
+                or aligner is not self.aligner):
+            return None
+        if self._lexical_committed_generation == generation:
+            return self._feature_observation_locked(
+                token, generation, boundary, history_truncated=False)
+        return self._start_alignment_locked(
+            token, generation, boundary, aligner, requested_ns)
+
     def _consume_locked(self, chunk: PCMChunk, *, replay: bool = False):
         if (self._closed or self.token is None
                 or chunk.at_ms < self.window_start_ms
                 or chunk.at_ms < self._last_processed_ms
                 or (chunk.at_ms == self._last_processed_ms and chunk is self._last_processed_chunk)):
-            return None
+            return ()
         self._last_processed_ms = chunk.at_ms
         self._last_processed_chunk = chunk
         self._last_pcm_end_ms = max(self._last_pcm_end_ms, int(chunk.at_ms))
@@ -347,49 +421,82 @@ class NativeAudio:
             self._pcm_reported = True
             pcm_frames = len(chunk.frames) // (chunk.channels * chunk.sample_width_bytes)
 
-        samples = None
-        token, generation, aligner = self.token, self._generation, self.aligner
-        if not replay:
-            enough_pcm = chunk.at_ms - self.window_start_ms >= self.MIN_AUDIO_MS
+        if replay:
+            return ()
+
+        token, generation = self.token, self._generation
+        items = []
+        if pcm_frames is not None:
+            items.append(("pcm", token, generation, pcm_frames))
+
+        enough_pcm = chunk.at_ms - self.window_start_ms >= self.MIN_AUDIO_MS
+        if not enough_pcm:
+            return tuple(items)
+
+        if (self.aligner is not None
+                and self._lexical_committed_generation != generation):
             inference_due = (self._inference_at < 0
                              or chunk.at_ms - self._inference_at >= self.INFERENCE_INTERVAL_MS)
-            if not self._inflight and enough_pcm and inference_due:
-                start, _ = self._raw_analysis_start_locked(chunk.at_ms)
-                self.window_start_ms = start
-                candidate = self.history.since(start)
-                if candidate:
-                    self._inflight = True
-                    self._inflight_generation = generation
-                    self._inference_at = chunk.at_ms
-                    samples = candidate
-        return token, generation, pcm_frames, samples, aligner
+            if inference_due:
+                item = self._request_alignment_locked(chunk.at_ms)
+                if item is not None:
+                    items.append(item)
+        else:
+            observation_due = (self._observation_at < 0
+                               or chunk.at_ms - self._observation_at >= self.INFERENCE_INTERVAL_MS)
+            if observation_due:
+                item = self._feature_observation_locked(
+                    token, generation, chunk.at_ms, history_truncated=False)
+                if item is not None:
+                    items.append(item)
+        return tuple(items)
 
     def _dispatch(self, item) -> None:
         if item is None:
             return
-        if len(item) == 6:
-            token, generation, _pcm_frames, _samples, _aligner, observation = item
+        kind = item[0]
+        if kind == "observe":
+            _, token, generation, observation = item
             with self._lock:
                 if generation != self._generation or token != self.token:
                     return
             if self.on_observation is not None:
                 self.on_observation(token, observation)
             return
-        token, generation, pcm_frames, samples, aligner = item
+        if kind == "pcm":
+            _, token, generation, pcm_frames = item
+            with self._lock:
+                if generation != self._generation or token != self.token:
+                    return
+            if self.on_pcm is not None:
+                self.on_pcm(token, pcm_frames)
+            return
+        if kind != "infer":
+            raise RuntimeError(f"unknown native-audio work item: {kind}")
+        _, token, generation, samples, aligner, requested_ns = item
+        next_item = None
+        with self._lock:
+            if generation != self._generation or token != self.token:
+                if self._inflight_generation == generation:
+                    self._inflight = False
+                    self._inflight_generation = None
+                    next_item = self._take_pending_locked()
+        if next_item is not None:
+            self._dispatch(next_item)
+            return
         with self._lock:
             if generation != self._generation or token != self.token:
                 return
-        if pcm_frames is not None and self.on_pcm is not None:
-            self.on_pcm(token, pcm_frames)
-        if samples:
-            submitted_ns = time.perf_counter_ns() if self.on_inference else 0
-            try:
-                self._pool.submit(self._infer, token, generation, samples, aligner, submitted_ns)
-            except RuntimeError:
-                with self._lock:
-                    if self._inflight_generation == generation:
-                        self._inflight = False
-                        self._inflight_generation = None
+        try:
+            self._pool.submit(self._infer, token, generation, samples, aligner, requested_ns)
+        except RuntimeError:
+            with self._lock:
+                if self._inflight_generation == generation:
+                    self._inflight = False
+                    self._inflight_generation = None
+                    next_item = self._take_pending_locked()
+            if next_item is not None:
+                self._dispatch(next_item)
 
     def feed(self, chunk: PCMChunk) -> None:
         try:
@@ -403,8 +510,9 @@ class NativeAudio:
                 self.on_error(token, "human-vocal observer failure: " + str(exc))
             return
         with self._lock:
-            item = self._consume_locked(chunk)
-        self._dispatch(item)
+            items = self._consume_locked(chunk)
+        for item in items:
+            self._dispatch(item)
 
     @staticmethod
     def _audio_offset_to_wall_ms(samples: tuple[PCMChunk, ...], offset_ms: float) -> float | None:
@@ -424,7 +532,8 @@ class NativeAudio:
                                   lexical: LexicalProgressEvidence | None,
                                   history_truncated: bool = False,
                                   pcm_last_frame_ms: int | None = None,
-                                  heartbeat_at_ms: int | None = None) -> NativeAudioObservation:
+                                  heartbeat_at_ms: int | None = None,
+                                  include_recurrence: bool = True) -> NativeAudioObservation:
         feature_end = capture_end_ms if capture_end_ms is not None else self.features.latest_ms
         vocal = None
         recurrence = None
@@ -445,16 +554,18 @@ class NativeAudio:
                 start_ms=feature_start, end_ms=feature_end,
                 causal_boundary_ms=self.causal_lower_bound_ms)
 
-            if lexical is not None and lexical.target_end_ms is not None:
-                recurrence_start = lexical.target_end_ms
-            elif lexical is not None and lexical.target_start_ms is not None:
-                recurrence_start = lexical.target_start_ms
-            elif self.causal_lower_bound_ms is not None:
-                recurrence_start = self.causal_lower_bound_ms
-            else:
-                recurrence_start = feature_start
-            recurrence_start = min(int(recurrence_start), int(feature_end))
-            recurrence = self.features.recurrence(start_ms=recurrence_start, end_ms=feature_end)
+            if include_recurrence:
+                if lexical is not None and lexical.target_end_ms is not None:
+                    recurrence_start = lexical.target_end_ms
+                elif lexical is not None and lexical.target_start_ms is not None:
+                    recurrence_start = lexical.target_start_ms
+                elif self.causal_lower_bound_ms is not None:
+                    recurrence_start = self.causal_lower_bound_ms
+                else:
+                    recurrence_start = feature_start
+                recurrence_start = min(int(recurrence_start), int(feature_end))
+                recurrence = self.features.recurrence(
+                    start_ms=recurrence_start, end_ms=feature_end)
         return NativeAudioObservation(
             kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
             lexical=lexical, vocal=vocal, recurrence=recurrence,
@@ -470,7 +581,10 @@ class NativeAudio:
         started_ns = time.perf_counter_ns() if self.on_inference else 0
         if not submitted_ns:
             submitted_ns = started_ns
-        released_inflight = False
+        observation = None
+        alignment = None
+        target_end_ms = None
+        current_for_metrics = False
         try:
             capture_start_ms = int(round(samples[0].at_ms - samples[0].duration_ms)) if samples else None
             capture_end_ms = int(samples[-1].at_ms) if samples else None
@@ -503,34 +617,44 @@ class NativeAudio:
             with self._lock:
                 if (self._closed or generation != self._generation or token != self.token
                         or aligner is not self.aligner or not self.history.healthy):
-                    return
-                semantic_start = self.causal_lower_bound_ms
-                history_truncated = bool(
-                    semantic_start is not None and capture_start_ms is not None and
-                    capture_start_ms > semantic_start + 1)
-                observation = self._build_observation_locked(
-                    kind="acoustic", capture_start_ms=capture_start_ms,
-                    capture_end_ms=capture_end_ms, lexical=lexical,
-                    history_truncated=history_truncated,
-                    pcm_last_frame_ms=capture_end_ms)
+                    current_for_metrics = False
+                else:
+                    current_for_metrics = True
+                    if (alignment is not None and alignment.complete_alignment
+                            and alignment.committed_target_end):
+                        self._lexical_committed_generation = generation
+                    observation_end_ms = capture_end_ms
+                    if observation_end_ms is not None and self._observation_at >= 0:
+                        # A lightweight deadline/feature snapshot may already
+                        # have advanced continuous evidence beyond the PCM used
+                        # by this lexical inference. Publish the late lexical
+                        # fact on that newer acoustic frontier instead of
+                        # regressing UtteranceProgress in time.
+                        observation_end_ms = max(observation_end_ms, self._observation_at)
+                    semantic_start = self.causal_lower_bound_ms
+                    history_truncated = bool(
+                        semantic_start is not None and capture_start_ms is not None and
+                        capture_start_ms > semantic_start + 1)
+                    observation = self._build_observation_locked(
+                        kind="acoustic", capture_start_ms=capture_start_ms,
+                        capture_end_ms=observation_end_ms, lexical=lexical,
+                        history_truncated=history_truncated,
+                        pcm_last_frame_ms=observation_end_ms,
+                        include_recurrence=bool(
+                            alignment is not None and alignment.complete_alignment
+                            and alignment.committed_target_end),
+                    )
+                    if observation_end_ms is not None:
+                        self._observation_at = max(self._observation_at, observation_end_ms)
 
-            # Release this inference slot before publishing its observation.
-            # Application may synchronously request a follow-up through a newer
-            # deadline fence from the observation callback.  Keeping the slot
-            # marked in-flight until after that callback would lose the request.
-            with self._lock:
-                if self._inflight_generation == generation:
-                    self._inflight = False
-                    self._inflight_generation = None
-                    released_inflight = True
-
-            if self.on_inference is not None:
+            if current_for_metrics and observation is not None and self.on_inference is not None:
                 metrics = {
                     "queue_ms": round(max(0, started_ns - submitted_ns) / 1_000_000, 3),
                     "align_ms": round(max(0, decoded_ns - started_ns) / 1_000_000, 3),
                     "audio_ms": round(audio_ms, 3),
                     "capture_start_ms": capture_start_ms,
                     "capture_end_ms": capture_end_ms,
+                    "observation_end_ms": observation.capture_end_ms,
                     "causal_lower_bound_ms": self.causal_lower_bound_ms,
                     "target_attached_ms": self.target_attached_ms,
                     "history_truncated": observation.history_truncated,
@@ -569,16 +693,19 @@ class NativeAudio:
                     self.on_inference(token, metrics)
                 except Exception:
                     pass
-            if self.on_observation is not None:
+            if current_for_metrics and observation is not None and self.on_observation is not None:
                 self.on_observation(token, observation)
         except Exception as exc:
             self.on_error(token, "acoustic inference failure: " + str(exc))
         finally:
-            if not released_inflight:
-                with self._lock:
-                    if self._inflight_generation == generation:
-                        self._inflight = False
-                        self._inflight_generation = None
+            next_item = None
+            with self._lock:
+                if self._inflight_generation == generation:
+                    self._inflight = False
+                    self._inflight_generation = None
+                    next_item = self._take_pending_locked()
+            if next_item is not None:
+                self._dispatch(next_item)
 
     def close(self) -> None:
         self.cancel()

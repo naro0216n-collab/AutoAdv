@@ -16,6 +16,7 @@ import zipfile
 import pytest
 
 from autoadv import luna_runtime, native_runtime
+from autoadv.audio_buffer import AudioHistory
 from autoadv.application import AutoAdvApplication
 from autoadv.conversation import Target
 from autoadv.game_windows import ProcessCandidate, WindowCandidate, find_game_processes, find_game_windows
@@ -24,6 +25,7 @@ from autoadv.hook_host_worker import NativeHost, _full_string_hook_code, _luna_o
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.luna_abi import load_exports, validate_abi
 from autoadv.model import HookSelection, ReplacementRule, SpeakerStyle
+from autoadv.process_audio import ProcessCapture
 from autoadv.running_target_dialog import available_targets
 from autoadv.storage import Catalog, CommonSettings, load, save
 from autoadv.voice import synthesize
@@ -35,6 +37,19 @@ from scripts import adopt_luna_release
 from tests.g2p_support import TEST_G2P
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_process_capture_preserves_helper_timeline_when_python_reader_is_delayed():
+    readings = iter((10_000, 25_000, 40_000))
+    capture = ProcessCapture(
+        42, Path('unused.dll'), AudioHistory(), lambda _chunk: None,
+        lambda _status: None, clock=lambda: next(readings))
+
+    # The first packet establishes only the clock-domain offset. Later receive
+    # latency must not compress or stretch the helper's factual capture times.
+    assert capture._local_timestamp(5_000) == 10_000
+    assert capture._local_timestamp(5_100) == 10_100
+    assert capture._local_timestamp(7_500) == 12_500
 
 
 def test_irodori_request_omits_unset_caption_and_sends_explicit_caption():

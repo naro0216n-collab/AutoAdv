@@ -43,6 +43,16 @@ class StaticPosterior:
         return self.logits
 
 
+class CountingPosterior(StaticPosterior):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls = 0
+
+    def infer(self, chunks):
+        self.calls += 1
+        return super().infer(chunks)
+
+
 class StaticVocalObserver:
     def observe(self, chunk):
         start = int(round(chunk.at_ms - chunk.duration_ms))
@@ -55,8 +65,10 @@ class BlockingPosterior(StaticPosterior):
         super().__init__()
         self.started = Event()
         self.release = Event()
+        self.calls = 0
 
     def infer(self, chunks):
+        self.calls += 1
         self.started.set()
         self.release.wait(2)
         return self.logits
@@ -102,7 +114,7 @@ def wait_idle(native: NativeAudio) -> None:
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         with native._lock:
-            if not native._inflight:
+            if not native._inflight and native._pending_inference is None:
                 return
         time.sleep(.002)
     raise TimeoutError('alignment inference did not settle')
@@ -131,14 +143,12 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
     finally:
         native.close()
 
-def test_native_audio_generation_owns_target_and_discards_stale_inference():
+def test_native_audio_generation_keeps_one_physical_worker_and_only_latest_pending_target():
     observations = []
     model = BlockingPosterior()
     native = make_native(model, observations)
-    old, new = Token(1, 1), Token(1, 2)
+    old, skipped, newest = Token(1, 1), Token(1, 2), Token(1, 3)
     try:
-        native.begin(old, 'unknown')
-        assert native.aligner is None  # non-lexical audio remains observable without alignment
         native.history.start(42)
         native.set_causal_lower_bound(1000)
         native.begin(old, 'target')
@@ -146,10 +156,25 @@ def test_native_audio_generation_owns_target_and_discards_stale_inference():
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
         assert model.started.wait(1)
-        native.begin(new, 'other')
+
+        # Replacing a target invalidates the old result, but cannot make the
+        # physical ONNX worker idle. Intermediate targets are therefore
+        # coalesced instead of being queued behind obsolete work.
+        native.external_transition()
+        native.begin(skipped, 'other')
+        native.external_transition()
+        native.begin(newest, 'target')
+        with native._lock:
+            assert native._inflight
+            assert native._inflight_generation != native._generation
+            assert native._pending_inference is not None
+            assert native._pending_inference[0] == newest
+
         model.release.set()
         wait_idle(native)
-        assert not any(token == old for token, _ in observations)
+        assert model.calls == 2
+        assert observations
+        assert all(token == newest for token, _ in observations)
     finally:
         model.release.set()
         native.close()
@@ -173,11 +198,10 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
         assert item.lexical.complete_alignment and item.lexical.committed_target_end
         assert item.vocal is not None
 
+        before = len(observations)
         native.health(CaptureHealth(2100, True, '', pcm_frames=0))
-        transport = observations[-1][1]
-        assert transport.kind == 'transport'
-        assert transport.lexical is None
-        assert transport.heartbeat_at_ms == 2100
+        wait_idle(native)
+        assert not any(item.kind == 'transport' for _, item in observations[before:])
     finally:
         native.close()
 
@@ -240,7 +264,8 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
 
 def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evidence():
     observations = []
-    native = make_native(StaticPosterior(), observations)
+    model = CountingPosterior()
+    native = make_native(model, observations)
     token = Token(8, 1)
     try:
         native.history.start(42)
@@ -251,22 +276,72 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         native.feed(short)
         assert not any(item.kind == 'acoustic' for _, item in observations)
 
-        # A policy boundary can fence PCM that is already captured without
-        # interpreting a transport heartbeat as acoustic evidence.
+        # A policy boundary snapshots continuous evidence already captured. It
+        # must not start a second target-conditioned inference path.
         assert native.observation_fence(token) == 1200
         assert native.request_observation_through(token, 1200)
-        wait_idle(native)
-        acoustic = [item for _, item in observations if item.kind == 'acoustic']
-        assert len(acoustic) == 1 and acoustic[0].capture_end_ms == 1200
+        assert model.calls == 0
+        snapshots = [item for _, item in observations if item.kind == 'acoustic_features']
+        assert len(snapshots) == 1 and snapshots[0].capture_end_ms == 1200
 
+        # Heartbeat retains its original purpose: if no more PCM arrives, flush
+        # the last captured audio through the ordinary lexical scheduler. It
+        # does not publish a transport observation that the estimator discards.
         native.health(CaptureHealth(1300, True, '', pcm_frames=0))
         wait_idle(native)
+        assert model.calls == 1
         assert len([item for _, item in observations if item.kind == 'acoustic']) == 1
-        transport = [item for _, item in observations if item.kind == 'transport'][-1]
-        assert transport.heartbeat_at_ms == 1300
-        assert transport.lexical is None
+        assert not any(item.kind == 'transport' for _, item in observations)
         status = native.capture_status()
         assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
+    finally:
+        native.close()
+
+
+def test_committed_lexical_end_stops_ctc_reanalysis_but_keeps_acoustic_tail_observation():
+    observations = []
+    model = CountingPosterior(frames=49, starts=(10, 20, 30))
+    native = make_native(model, observations)
+    token = Token(9, 1)
+    try:
+        native.history.start(42)
+        native.set_causal_lower_bound(1000)
+        native.begin(token, 'target')
+        first = stereo_chunk(2000, 1000)
+        native.history.push(first, target_pid=42)
+        native.feed(first)
+        wait_idle(native)
+        assert model.calls == 1
+        assert observations[-1][1].lexical is not None
+        assert observations[-1][1].lexical.committed_target_end
+
+        tail = stereo_chunk(2600, 600)
+        native.history.push(tail, target_pid=42)
+        native.feed(tail)
+        wait_idle(native)
+        assert model.calls == 1
+        assert observations[-1][1].kind == 'acoustic_features'
+        assert observations[-1][1].capture_end_ms == 2600
+    finally:
+        native.close()
+
+
+def test_causal_lower_bound_is_consumed_by_next_target_and_external_replacement_clears_it():
+    observations = []
+    native = make_native(StaticPosterior(), observations)
+    first, second = Token(10, 1), Token(10, 2)
+    try:
+        native.history.start(42)
+        native.set_causal_lower_bound(1000)
+        assert native.causal_lower_bound_ms is None
+        native.begin(first, 'target')
+        assert native.causal_lower_bound_ms == 1000
+        native.finish_line(first)
+
+        native.set_causal_lower_bound(2000)
+        native.external_transition()
+        native.begin(second, 'target')
+        assert native.causal_lower_bound_ms is None
     finally:
         native.close()
 
