@@ -29,6 +29,11 @@ class NativeAudio:
 
     RAW_HISTORY_MS = 180_000
     MAX_ALIGNMENT_WINDOW_MS = 60_000
+    # Without an observed input lower bound, a long process-history scan has no
+    # causal ownership advantage and can starve later Presentations. Keep the
+    # expensive target-conditioned query bounded; retained PCM/features remain
+    # available as factual history and truncation is reported explicitly.
+    MAX_UNBOUNDED_ALIGNMENT_WINDOW_MS = 20_000
     INFERENCE_INTERVAL_MS = 500
     MIN_AUDIO_MS = 300
 
@@ -151,16 +156,28 @@ class NativeAudio:
         self._last_pcm_end_ms = -1
         self._capture_stereo_peak = 0.0
 
-    def _raw_analysis_start_locked(self, end_ms: int | None = None) -> tuple[int, bool]:
+    def _semantic_history_start_locked(self) -> int:
         if self.causal_lower_bound_ms is not None:
-            semantic_start = self.causal_lower_bound_ms
-        else:
-            semantic_start = self.features.earliest_ms or max(0, self.clock() - self.RAW_HISTORY_MS)
+            return int(self.causal_lower_bound_ms)
+        return int(self.features.earliest_ms or max(0, self.clock() - self.RAW_HISTORY_MS))
+
+    def _raw_analysis_start_locked(self, end_ms: int | None = None) -> tuple[int, bool]:
+        semantic_start = self._semantic_history_start_locked()
         if end_ms is None:
             end_ms = self.features.latest_ms or self.clock()
-        resource_start = max(0, int(end_ms) - self.MAX_ALIGNMENT_WINDOW_MS)
-        start = max(int(semantic_start), resource_start)
-        return start, start > int(semantic_start)
+        max_window = (
+            self.MAX_ALIGNMENT_WINDOW_MS
+            if self.causal_lower_bound_ms is not None
+            else self.MAX_UNBOUNDED_ALIGNMENT_WINDOW_MS
+        )
+        resource_start = max(0, int(end_ms) - max_window)
+        start = max(semantic_start, resource_start)
+        return start, start > semantic_start
+
+    def _history_truncated_locked(self, capture_start_ms: int | None) -> bool:
+        if capture_start_ms is None:
+            return False
+        return int(capture_start_ms) > self._semantic_history_start_locked() + 1
 
     def begin(self, token: Token, alignment_text: str, *,
               candidates: tuple[PronunciationCandidate, ...] | None = None) -> None:
@@ -371,7 +388,9 @@ class NativeAudio:
             capture_start_ms=self.window_start_ms,
             capture_end_ms=boundary,
             lexical=self._lexical_measurement,
-            history_truncated=history_truncated,
+            history_truncated=(
+                history_truncated or self._history_truncated_locked(self.window_start_ms)
+            ),
             pcm_last_frame_ms=boundary,
             include_recurrence=True,
         )
@@ -543,6 +562,8 @@ class NativeAudio:
             if include_recurrence:
                 if lexical is not None and lexical.target_end_ms is not None:
                     recurrence_start = lexical.target_end_ms
+                elif lexical is not None and lexical.aligned_end_ms is not None:
+                    recurrence_start = lexical.aligned_end_ms
                 elif lexical is not None and lexical.target_start_ms is not None:
                     recurrence_start = lexical.target_start_ms
                 elif self.causal_lower_bound_ms is not None:
@@ -611,10 +632,7 @@ class NativeAudio:
                     # newer feature snapshot is a separate query, not a reason
                     # to rewrite this result's time frontier.
                     observation_end_ms = capture_end_ms
-                    semantic_start = self.causal_lower_bound_ms
-                    history_truncated = bool(
-                        semantic_start is not None and capture_start_ms is not None and
-                        capture_start_ms > semantic_start + 1)
+                    history_truncated = self._history_truncated_locked(capture_start_ms)
                     if (lexical is not None and lexical.complete_alignment
                             and lexical.committed_target_end):
                         self._lexical_measurement = lexical

@@ -262,6 +262,15 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1100, 1580),)), end=1600))
     assert prefix.state == UtteranceProgressState.ACTIVE
 
+    # Prefix association is not a persistent event label.  Once the finite
+    # target-connected chain has endpoint-confirming context, the same partial
+    # lexical relation becomes unresolved rather than suppressing fallback
+    # forever.
+    closed_prefix = evaluate_audio_snapshot(observation(
+        lex=lexical(complete=False, committed=False),
+        voc=vocal(intervals=((1100, 1340),), end=1800), end=1800))
+    assert closed_prefix.state == UtteranceProgressState.UNKNOWN
+
     continuing_snapshot = observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580), (1700, 1980)), end=2000),
         end=2000)
@@ -329,6 +338,13 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     crossing_then_new = evaluate_audio_snapshot(observation(
         voc=vocal(intervals=((900, 1240), (1700, 1980)), end=2000), end=2000))
     assert crossing_then_new.state == UtteranceProgressState.ACTIVE
+
+    # With no lexical ownership, only the first finite post-boundary chain can
+    # protect the Presentation.  Once it has visibly closed, a later unrelated
+    # human-vocal chain is not promoted as a new current-event candidate.
+    later_unowned_voice = evaluate_audio_snapshot(observation(
+        voc=vocal(intervals=((1120, 1380), (1800, 1980)), end=2000), end=2000))
+    assert later_unowned_voice.state == UtteranceProgressState.UNKNOWN
 
     # HOOK arrival is knowledge timing only. Changing it while every acoustic
     # measurement and causal bound remains identical cannot change the answer.

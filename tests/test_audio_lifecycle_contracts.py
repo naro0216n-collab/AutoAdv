@@ -262,6 +262,34 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
     assert early.recurrence == late.recurrence
 
 
+def test_unbounded_target_alignment_has_a_resource_window_without_inventing_a_causal_bound():
+    observations, reports = [], []
+    native = make_native(
+        CountingPosterior(), observations, reports=reports, clock=lambda: 50_000)
+    token = Token(7, 1)
+    try:
+        native.history.start(42)
+        # Target-independent history can be much older than the current query.
+        # With no observed input lower bound, expensive CTC work is resource-
+        # bounded and the loss of older search history is exposed as provenance,
+        # not rewritten into an acoustic start fact.
+        native.features.add_vocal((
+            VocalActivityFrame(at_ms=1_000, probability=0.0),
+            VocalActivityFrame(at_ms=50_000, probability=0.0),
+        ))
+        recent = stereo_chunk(50_000, 1_000)
+        native.history.push(recent, target_pid=42)
+        native.begin(token, 'target')
+        wait_idle(native)
+
+        assert native.causal_lower_bound_ms is None
+        assert native.window_start_ms >= 50_000 - native.MAX_UNBOUNDED_ALIGNMENT_WINDOW_MS
+        assert reports[-1][1]['audio_ms'] == pytest.approx(1_000.0)
+        assert observations[-1][1].history_truncated
+    finally:
+        native.close()
+
+
 def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evidence():
     observations = []
     model = CountingPosterior()

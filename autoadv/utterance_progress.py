@@ -176,39 +176,56 @@ MIN_LOOP_OBSERVATION_MS = 1200
 LOOP_REFERENCE_MARGIN = 0.06
 
 
+def _vocal_chains(
+    intervals: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int], ...]:
+    """Reconstruct finite vocal continuity from one immutable snapshot.
+
+    Observer-positive intervals are measurements, not event identities.  A short
+    gap can be an internal pause or a detector miss, so the reducer joins only
+    gaps smaller than the endpoint-confirmation context.  Larger gaps remain
+    separate finite candidates.  Re-running this function on the same snapshot
+    therefore reproduces the old event-lifecycle meaning without retaining any
+    inferred event state.
+    """
+    ordered = sorted(intervals)
+    if not ordered:
+        return ()
+    chains: list[tuple[int, int]] = [ordered[0]]
+    for start_ms, end_ms in ordered[1:]:
+        previous_start, previous_end = chains[-1]
+        if start_ms - previous_end < END_CONTEXT_MS:
+            chains[-1] = (previous_start, max(previous_end, end_ms))
+        else:
+            chains.append((start_ms, end_ms))
+    return tuple(chains)
+
+
 def _connected_chain(
     intervals: tuple[tuple[int, int], ...],
     anchor_start: int,
     anchor_end: int,
 ) -> tuple[int, int] | None:
-    """Return vocal support connected in time to a measured target span."""
-    ordered = sorted(intervals)
+    """Return the finite vocal chain connected to a measured target span."""
+    chains = _vocal_chains(intervals)
     anchor_index = next((
-        index for index, (start_ms, end_ms) in enumerate(ordered)
+        index for index, (start_ms, end_ms) in enumerate(chains)
         if end_ms >= anchor_start and start_ms <= anchor_end
     ), None)
-    if anchor_index is None:
-        # The lexical model itself establishes a vocal span.  A vocal observer
-        # may miss it; only a nearby *later* observation can extend the physical
-        # tail beyond that measured lexical span.
-        later = next((
-            (start_ms, end_ms) for start_ms, end_ms in ordered
-            if 0 <= start_ms - anchor_end < END_CONTEXT_MS
-        ), None)
-        if later is None:
-            return None
-        start_ms, end_ms = anchor_start, later[1]
-        anchor_index = ordered.index(later)
-    else:
-        start_ms, end_ms = ordered[anchor_index]
-        start_ms = min(start_ms, anchor_start)
-        end_ms = max(end_ms, anchor_end)
+    if anchor_index is not None:
+        start_ms, end_ms = chains[anchor_index]
+        return min(start_ms, anchor_start), max(end_ms, anchor_end)
 
-    for next_start, next_end in ordered[anchor_index + 1:]:
-        if next_start - end_ms >= END_CONTEXT_MS:
-            break
-        end_ms = max(end_ms, next_end)
-    return start_ms, end_ms
+    # The lexical model itself establishes a vocal span. A human-vocal observer
+    # may miss that span, but a later positive chain can still establish a
+    # connected physical tail when no endpoint-confirming gap separates them.
+    later = next((
+        (start_ms, end_ms) for start_ms, end_ms in chains
+        if 0 <= start_ms - anchor_end < END_CONTEXT_MS
+    ), None)
+    if later is None:
+        return None
+    return anchor_start, later[1]
 
 
 def _stable_recurrence(
@@ -235,21 +252,29 @@ def _stable_recurrence(
     )
 
 
-def _new_post_boundary_intervals(
+def _first_post_boundary_chain(
     intervals: tuple[tuple[int, int], ...], boundary_ms: int,
-) -> tuple[tuple[int, int], ...]:
-    """Return activity that observably begins after the causal lower bound.
+) -> tuple[int, int] | None:
+    """Return the one causal-only finite candidate for this Presentation.
 
-    Activity already present across the lower bound is not re-labelled as an
-    old/background source.  It simply is not evidence that a new finite vocal
-    risk began in this Presentation.  A separated later interval remains new
-    evidence because the intervening lack of positive support is observable.
+    A chain already active across the observed input lower bound is inherited
+    acoustic context and cannot establish a new finite risk.  With no lexical
+    ownership evidence, only the first separated post-boundary chain is allowed
+    to protect fallback.  Once that chain is visibly closed, later unrelated
+    human-vocal activity cannot be repeatedly promoted merely because it is the
+    newest sound.  This is the stateless equivalent of the old one-shot causal
+    candidate guard.
     """
-    return tuple(
-        (start_ms, end_ms)
-        for start_ms, end_ms in intervals
-        if start_ms >= boundary_ms
-    )
+    for start_ms, end_ms in _vocal_chains(intervals):
+        if start_ms < boundary_ms <= end_ms:
+            continue
+        if start_ms >= boundary_ms:
+            return start_ms, end_ms
+    return None
+
+
+def _vocal_measurement_present(vocal: HumanVocalEvidence | None) -> bool:
+    return bool(vocal is not None and any(item.frame_count > 0 for item in vocal.series))
 
 
 def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtteranceProgress:
@@ -261,79 +286,105 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
     vocal_intervals = observation.vocal.active_intervals if observation.vocal else ()
     lexical = observation.lexical
 
-    # Known-text relation is the strongest direct evidence available.  An
-    # associated prefix that has not reached a committed target end is still a
-    # finite target utterance in progress.
+    # Known-text relation is the strongest ownership evidence.  Association says
+    # that some target prefix was acoustically supported; it does *not* say that
+    # the finite vocal event is still open.  The target-connected vocal chain (or
+    # the measured lexical span itself when the vocal observer misses it) owns the
+    # cut-risk decision at the current snapshot frontier.
     if lexical is not None and lexical.target_associated:
         target_start = lexical.target_start_ms
         aligned_end = lexical.aligned_end_ms
         target_end = lexical.target_end_ms
-        if not (lexical.complete_alignment and lexical.committed_target_end and target_end is not None):
-            return UtteranceProgress(
-                state=UtteranceProgressState.ACTIVE,
-                evidence_at_ms=capture_end,
-            )
+        anchor_end = target_end if (
+            lexical.complete_alignment and lexical.committed_target_end
+            and target_end is not None
+        ) else aligned_end
+        anchor_start = target_start if target_start is not None else anchor_end
 
-        anchor_start = target_start if target_start is not None else target_end
-        anchor_end = max(
-            value for value in (aligned_end, target_end)
-            if value is not None
-        )
-        chain = _connected_chain(vocal_intervals, anchor_start, anchor_end)
-        physical_end = chain[1] if chain is not None else anchor_end
-        vocal_measurement_present = bool(
-            observation.vocal is not None
-            and any(item.frame_count > 0 for item in observation.vocal.series)
-        )
-
-        if _stable_recurrence(
-            observation.recurrence,
-            start_ms=target_end,
-            capture_end_ms=capture_end,
-        ):
-            return UtteranceProgress(
-                state=UtteranceProgressState.ENDED,
-                ended_at_ms=target_end,
-                evidence_at_ms=capture_end,
-            )
-
-        if capture_end - physical_end < END_CONTEXT_MS:
-            return UtteranceProgress(
-                state=UtteranceProgressState.ACTIVE,
-                evidence_at_ms=capture_end,
-            )
-        if not vocal_measurement_present:
+        if anchor_start is None or anchor_end is None:
             return UtteranceProgress(
                 state=UtteranceProgressState.UNKNOWN,
                 evidence_at_ms=capture_end,
             )
 
+        chain = _connected_chain(vocal_intervals, anchor_start, anchor_end)
+        physical_end = chain[1] if chain is not None else anchor_end
+        recurrence_start = target_end if target_end is not None else anchor_end
+        recurrent = _stable_recurrence(
+            observation.recurrence,
+            start_ms=recurrence_start,
+            capture_end_ms=capture_end,
+        )
+        complete = bool(
+            lexical.complete_alignment
+            and lexical.committed_target_end
+            and target_end is not None
+        )
+
+        if not complete:
+            # A partial target relation protects only while its finite vocal chain
+            # is observably still open.  Once endpoint-confirming context exists,
+            # ownership of the *whole* utterance is unresolved and Controller may
+            # apply its explicit uncertainty policy.  Stable repetition likewise
+            # removes indefinite protection but never manufactures ENDED.
+            if recurrent:
+                return UtteranceProgress(
+                    state=UtteranceProgressState.UNKNOWN,
+                    evidence_at_ms=capture_end,
+                )
+            if capture_end - physical_end < END_CONTEXT_MS:
+                return UtteranceProgress(
+                    state=UtteranceProgressState.ACTIVE,
+                    evidence_at_ms=capture_end,
+                )
+            return UtteranceProgress(
+                state=UtteranceProgressState.UNKNOWN,
+                evidence_at_ms=capture_end,
+            )
+
+        # A committed lexical end gives ownership but not a physical voice EOF.
+        # Stable recurrent tail after that independently established target end can
+        # stop extending the finite event; otherwise connected human-vocal support
+        # remains protected through short internal gaps.
+        if recurrent:
+            return UtteranceProgress(
+                state=UtteranceProgressState.ENDED,
+                ended_at_ms=target_end,
+                evidence_at_ms=capture_end,
+            )
+        if capture_end - physical_end < END_CONTEXT_MS:
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE,
+                evidence_at_ms=capture_end,
+            )
+        if not _vocal_measurement_present(observation.vocal):
+            return UtteranceProgress(
+                state=UtteranceProgressState.UNKNOWN,
+                evidence_at_ms=capture_end,
+            )
         return UtteranceProgress(
             state=UtteranceProgressState.ENDED,
-            ended_at_ms=physical_end,
+            ended_at_ms=max(target_end, physical_end),
             evidence_at_ms=capture_end,
         )
 
-    # Without a lexical relation, a known input lower bound can still protect a
-    # non-lexical finite vocal change from fallback.  This is deliberately a
-    # risk judgment, not source ownership, so its disappearance/repetition
-    # returns to UNKNOWN rather than manufacturing ENDED.
+    # Without lexical ownership, an observed input lower bound can still expose
+    # one new finite human-vocal risk.  Its disappearance/repetition only removes
+    # fallback suppression; it cannot prove that the current text itself ended.
     boundary = observation.causal_lower_bound_ms
     if boundary is not None:
-        new_intervals = _new_post_boundary_intervals(vocal_intervals, boundary)
-        if new_intervals:
-            first_new = new_intervals[0][0]
+        candidate = _first_post_boundary_chain(vocal_intervals, boundary)
+        if candidate is not None:
+            start_ms, end_ms = candidate
             if not _stable_recurrence(
                 observation.recurrence,
-                start_ms=first_new,
+                start_ms=start_ms,
                 capture_end_ms=capture_end,
-            ):
-                latest_end = new_intervals[-1][1]
-                if capture_end - latest_end < END_CONTEXT_MS:
-                    return UtteranceProgress(
-                        state=UtteranceProgressState.ACTIVE,
-                        evidence_at_ms=capture_end,
-                    )
+            ) and capture_end - end_ms < END_CONTEXT_MS:
+                return UtteranceProgress(
+                    state=UtteranceProgressState.ACTIVE,
+                    evidence_at_ms=capture_end,
+                )
 
     return UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN,
