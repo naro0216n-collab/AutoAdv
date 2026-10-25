@@ -269,9 +269,9 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert ended.state == UtteranceProgressState.ENDED
     assert ended.ended_at_ms == 1580
 
-    # A terminal quiet observation is provisional. Human-vocal activity that
-    # resumes while the owned lexical event is still open extends that event
-    # without a fixed inter-segment gap threshold.
+    # A terminal quiet span is an endpoint condition, not source identity.
+    # Human-vocal activity that resumes before enough endpoint quiet has been
+    # observed keeps the same finite presentation event open.
     resumed = UtteranceProgressEstimator()
     assert resumed.observe(observation(lex=lexical(), voc=vocal())).active
     assert resumed.observe(observation(
@@ -311,18 +311,27 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert recurrence_only.state == UtteranceProgressState.UNKNOWN
     assert not recurrence_only.target_audio_associated
 
-    # Human voice elsewhere in the mix is not target voice.  Only vocal
-    # activity connected to the target-associated acoustic span can hold it.
-    unrelated_background = UtteranceProgressEstimator().observe(observation(
+    # Human voice elsewhere in the mix is not promoted to target voice.  A new
+    # post-causal vocal event can nevertheless hold input while it is physically
+    # open; because it has no lexical anchor, closing it returns to UNKNOWN rather
+    # than claiming target completion.
+    unrelated = UtteranceProgressEstimator()
+    unrelated_background = unrelated.observe(observation(
         lex=lexical(start=1100, aligned_end=1320, target_end=1320),
         voc=vocal(intervals=((1500, 1590),), onset=1500)))
-    assert unrelated_background.state == UtteranceProgressState.UNKNOWN
+    assert unrelated_background.state == UtteranceProgressState.ACTIVE
     assert unrelated_background.lexical_target_ended
     assert not unrelated_background.target_vocal_observed
+    unrelated_closed = unrelated.observe(observation(
+        lex=lexical(start=1100, aligned_end=1320, target_end=1320),
+        voc=vocal(intervals=((1500, 1590),), end=2000, onset=1500), end=2000))
+    assert unrelated_closed.state == UtteranceProgressState.UNKNOWN
+    assert not unrelated_closed.ended
 
-    # Causal timing constrains evidence but does not identify the source. A new
-    # process-mix vocal onset after the bound is therefore insufficient, just as
-    # activity already crossing the bound is insufficient.
+    # Activity already crossing the causal bound cannot start a current event.
+    # A genuinely new onset can hold input without becoming target ownership,
+    # survives an internal quiet shorter than endpoint confirmation, and returns
+    # to UNKNOWN after enough acoustic quiet. Transport-only observations are inert.
     crossing = UtteranceProgressEstimator().observe(observation(
         voc=vocal(intervals=((1000, 1390),), crossing=True, onset=None), end=1400))
     assert crossing.state == UtteranceProgressState.UNKNOWN
@@ -330,8 +339,18 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     nonlexical = UtteranceProgressEstimator()
     nonlex_onset = nonlexical.observe(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400, crossing=False, onset=1120), end=1400))
-    assert nonlex_onset.state == UtteranceProgressState.UNKNOWN
+    assert nonlex_onset.state == UtteranceProgressState.ACTIVE
     assert not nonlex_onset.target_audio_associated
+    transport = nonlexical.observe(NativeAudioObservation(
+        kind='transport', causal_lower_bound_ms=1000, heartbeat_at_ms=1600))
+    assert transport == nonlex_onset
+    internal_pause = nonlexical.observe(observation(
+        voc=vocal(intervals=((1120, 1380), (1700, 1800)), end=1820, onset=1120), end=1820))
+    assert internal_pause.state == UtteranceProgressState.ACTIVE
+    nonlex_closed = nonlexical.observe(observation(
+        voc=vocal(intervals=((1120, 1380), (1700, 1800)), end=2200, onset=1120), end=2200))
+    assert nonlex_closed.state == UtteranceProgressState.UNKNOWN
+    assert not nonlex_closed.ended
 
     # An unknown external transition does not turn retained old alignment into
     # current-target ownership.  If alignment actually reaches audio at/after
