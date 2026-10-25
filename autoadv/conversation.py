@@ -308,23 +308,24 @@ class Controller:
                 return False
             self.audio_deadline_elapsed = True
             if self.native_progress.ended:
-                self._resolve_pause('utterance_progress_unresolved_hold')
-                self._resolve_pause('utterance_progress_active_hold')
+                self._resolve_pause('audio_judgment_unknown_hold')
+                self._resolve_pause('audio_judgment_active_hold')
                 return self._presentation_done('utterance_progress')
-            # The text deadline is a fallback policy, not a duration estimate.
-            # It must never cut a finite human-vocal event that acoustic
-            # inference says is still active or ending.  Only unresolved or
-            # persistent/looping states may use the explicitly enabled
-            # uncertainty fallback.
-            if u.uncertain_text_fallback and not self.native_progress.finite_vocal_incomplete:
+            if self.native_progress.active:
+                self.pause('audio_judgment_active_hold')
+                return False
+            if u.uncertain_text_fallback:
                 return self._presentation_done('uncertain_text_fallback')
-            self.pause('utterance_progress_active_hold'
-                       if self.native_progress.finite_vocal_incomplete
-                       else 'utterance_progress_unresolved_hold')
+            self.pause('audio_judgment_unknown_hold')
             return False
         if event in ('native_unavailable', 'native_failed'):
             if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
                 return False
+            # Loss of the acoustic path makes the current judgment unknown; it
+            # does not prove that an earlier ACTIVE target has ended.
+            self.native_progress = UtteranceProgress()
+            if u.uncertain_text_fallback and self.audio_deadline_elapsed:
+                return self._presentation_done('uncertain_text_fallback')
             if not u.uncertain_text_fallback:
                 self.pause('native_audio_unavailable_hold' if event == 'native_unavailable'
                            else 'native_audio_failure')
@@ -333,7 +334,7 @@ class Controller:
 
 
     def apply_utterance_progress(self, token: Token, progress: UtteranceProgress) -> bool:
-        """Consume the unified audio inference without reinterpreting its evidence."""
+        """Consume the unified audio judgment without reinterpreting evidence."""
         if token != self.token or self.sent or self.completed or not self.utterance:
             return False
         u = self.utterance
@@ -342,22 +343,33 @@ class Controller:
         self.native_progress = progress
         if progress.ended:
             if self.hold_reason in {
-                    'utterance_progress_unresolved_hold',
-                    'utterance_progress_active_hold',
+                    'audio_judgment_unknown_hold',
+                    'audio_judgment_active_hold',
                     'native_audio_unavailable_hold',
                     'native_audio_failure'}:
                 self.hold_reason = None
             return self._presentation_done('utterance_progress')
-        if self.audio_deadline_elapsed and u.uncertain_text_fallback:
-            if not progress.finite_vocal_incomplete:
-                if self.hold_reason in {
-                        'utterance_progress_unresolved_hold',
-                        'utterance_progress_active_hold',
-                        'native_audio_unavailable_hold',
-                        'native_audio_failure'}:
-                    self.hold_reason = None
-                return self._presentation_done('uncertain_text_fallback')
-            self.pause('utterance_progress_active_hold')
+        if not self.audio_deadline_elapsed:
+            return False
+        if progress.active:
+            if self.hold_reason in {
+                    'audio_judgment_unknown_hold',
+                    'native_audio_unavailable_hold',
+                    'native_audio_failure'}:
+                self.hold_reason = None
+            self.pause('audio_judgment_active_hold')
+            return False
+        if u.uncertain_text_fallback:
+            if self.hold_reason in {
+                    'audio_judgment_unknown_hold',
+                    'audio_judgment_active_hold',
+                    'native_audio_unavailable_hold',
+                    'native_audio_failure'}:
+                self.hold_reason = None
+            return self._presentation_done('uncertain_text_fallback')
+        if self.hold_reason in {'audio_judgment_active_hold', 'native_audio_failure'}:
+            self.hold_reason = None
+        self.pause('audio_judgment_unknown_hold')
         return False
 
     def _presentation_done(self, reason: str) -> bool:

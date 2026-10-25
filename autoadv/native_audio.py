@@ -21,9 +21,7 @@ from .conversation import Token
 from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from .g2p import PronunciationCandidate
 from .process_audio import ProcessCapture, CaptureHealth
-from .utterance_progress import (
-    LexicalProgressEvidence, NativeAudioObservation, PresentationBoundaryCertainty,
-)
+from .utterance_progress import LexicalProgressEvidence, NativeAudioObservation
 
 
 class NativeAudio:
@@ -62,8 +60,8 @@ class NativeAudio:
         self.token: Token | None = None
         self.aligner: TargetConditionedAligner | None = None
         self.start_ms = 0
-        self.boundary_ms: int | None = None
-        self.boundary_certainty = PresentationBoundaryCertainty.SESSION_START
+        self.causal_lower_bound_ms: int | None = None
+        self.target_attached_ms: int | None = None
         self.window_start_ms = 0
         self._last_processed_ms = -1
         self._last_processed_chunk: PCMChunk | None = None
@@ -81,36 +79,32 @@ class NativeAudio:
         self._last_pcm_end_ms = -1
 
     def start(self) -> None:
-        # Capture and compact observers begin before the first HOOK.
-        self.boundary(certainty=PresentationBoundaryCertainty.SESSION_START)
+        # Capture starts before the first HOOK, but monitoring start is not a
+        # causal boundary for a game line: the current voice may already be in
+        # progress.  Only an AutoAdv-owned advance can establish that bound.
         self._capture.start()
 
-    def boundary(self, at_ms: int | None = None, *,
-                 certainty: PresentationBoundaryCertainty = PresentationBoundaryCertainty.AUTOADV) -> None:
-        """Open a Presentation Epoch at a known causal boundary."""
-        boundary_ms = self.clock() if at_ms is None else int(at_ms)
-        if boundary_ms <= 0:
-            raise ValueError("audio boundary must be a positive monotonic timestamp")
+    def set_causal_lower_bound(self, at_ms: int | None = None) -> None:
+        """Record a known lower bound for the next target's audio."""
+        lower_bound_ms = self.clock() if at_ms is None else int(at_ms)
+        if lower_bound_ms <= 0:
+            raise ValueError("audio causal lower bound must be a positive monotonic timestamp")
         with self._lock:
             self._invalidate_target_locked()
-            self.boundary_ms = boundary_ms
-            self.boundary_certainty = certainty
-            self.window_start_ms = boundary_ms
-            # Raw PCM stays a bounded resource cache.  Semantic epoch history
-            # is carried separately by compact acoustic features.
+            self.causal_lower_bound_ms = lower_bound_ms
+            self.window_start_ms = lower_bound_ms
             self._reset_observation()
 
     def external_transition(self) -> None:
-        """Record that a new presentation began at an unknown time.
+        """Record that the new target's causal start time is unobserved.
 
-        HOOK arrival is deliberately not substituted for the missing boundary.
-        Raw PCM falls back to the bounded capture history while compact features
-        keep their own longer history.
+        HOOK arrival remains a separate factual timestamp and is never promoted
+        to the missing lower bound. Retained audio stays available for known-text
+        association where that association can be established independently.
         """
         with self._lock:
             self._invalidate_target_locked()
-            self.boundary_ms = None
-            self.boundary_certainty = PresentationBoundaryCertainty.EXTERNAL_UNKNOWN
+            self.causal_lower_bound_ms = None
             earliest = self.features.earliest_ms
             self.window_start_ms = int(earliest if earliest is not None else max(0, self.clock() - self.RAW_HISTORY_MS))
             self._reset_observation()
@@ -121,6 +115,7 @@ class NativeAudio:
         self._inflight_generation = None
         self.token = None
         self.aligner = None
+        self.target_attached_ms = None
         self._last_processed_ms = -1
         self._last_processed_chunk = None
 
@@ -131,8 +126,8 @@ class NativeAudio:
         self._capture_stereo_peak = 0.0
 
     def _raw_analysis_start_locked(self, end_ms: int | None = None) -> tuple[int, bool]:
-        if self.boundary_ms is not None:
-            semantic_start = self.boundary_ms
+        if self.causal_lower_bound_ms is not None:
+            semantic_start = self.causal_lower_bound_ms
         else:
             semantic_start = self.features.earliest_ms or max(0, self.clock() - self.RAW_HISTORY_MS)
         if end_ms is None:
@@ -162,6 +157,7 @@ class NativeAudio:
             self.token = token
             self.aligner = aligner
             self.start_ms = self.clock()
+            self.target_attached_ms = self.start_ms
             analysis_end = self.features.latest_ms or self.start_ms
             self.window_start_ms, _ = self._raw_analysis_start_locked(analysis_end)
             self._last_processed_ms = -1
@@ -259,7 +255,7 @@ class NativeAudio:
                 pcm_frames=self._capture_pcm_frames,
                 heartbeats=self._capture_heartbeats,
                 capture_stereo_peak=round(self._capture_stereo_peak, 6),
-                boundary_certainty=self.boundary_certainty.value,
+                causal_lower_bound_ms=self.causal_lower_bound_ms,
                 failure=self._capture_error,
             )
 
@@ -374,18 +370,37 @@ class NativeAudio:
         vocal = None
         recurrence = None
         if feature_end is not None:
-            if self.boundary_ms is not None:
-                feature_start = self.boundary_ms
+            if lexical is not None and lexical.target_associated and lexical.target_start_ms is not None:
+                feature_start = lexical.target_start_ms
+            elif self.causal_lower_bound_ms is not None:
+                feature_start = self.causal_lower_bound_ms
+            elif self.target_attached_ms is not None:
+                # Target attachment is not a presentation boundary.  It is only
+                # a factual floor for new non-lexical observations when no
+                # independent causal lower bound exists.
+                feature_start = self.target_attached_ms
             else:
                 feature_start = self.features.earliest_ms or max(0, feature_end - self.features.horizon_ms)
+            feature_start = min(int(feature_start), int(feature_end))
             vocal = self.features.summarize_vocal(
-                start_ms=feature_start, end_ms=feature_end, epoch_start_ms=self.boundary_ms)
-            recurrence = self.features.recurrence(epoch_start_ms=self.boundary_ms, end_ms=feature_end)
+                start_ms=feature_start, end_ms=feature_end,
+                causal_boundary_ms=self.causal_lower_bound_ms)
+
+            if lexical is not None and lexical.target_end_ms is not None:
+                recurrence_start = lexical.target_end_ms
+            elif lexical is not None and lexical.target_start_ms is not None:
+                recurrence_start = lexical.target_start_ms
+            elif self.causal_lower_bound_ms is not None:
+                recurrence_start = self.causal_lower_bound_ms
+            else:
+                recurrence_start = feature_start
+            recurrence_start = min(int(recurrence_start), int(feature_end))
+            recurrence = self.features.recurrence(start_ms=recurrence_start, end_ms=feature_end)
         return NativeAudioObservation(
             kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
             lexical=lexical, vocal=vocal, recurrence=recurrence,
-            boundary_at_ms=self.boundary_ms,
-            boundary_certainty=self.boundary_certainty,
+            causal_lower_bound_ms=self.causal_lower_bound_ms,
+            target_attached_ms=self.target_attached_ms,
             history_truncated=history_truncated,
             pcm_last_frame_ms=pcm_last_frame_ms,
             heartbeat_at_ms=heartbeat_at_ms,
@@ -403,20 +418,33 @@ class NativeAudio:
             decoded_ns = time.perf_counter_ns() if self.on_inference else 0
             audio_ms = sum(chunk.duration_ms for chunk in samples)
             lexical = None
+            target_start_ms = None
+            aligned_end_ms = None
             target_end_ms = None
             if alignment is not None:
+                if alignment.target_unit_spans:
+                    wall = self._audio_offset_to_wall_ms(
+                        samples, alignment.target_unit_spans[0].start * alignment.frame_ms)
+                    if wall is not None:
+                        target_start_ms = int(round(wall))
+                    wall = self._audio_offset_to_wall_ms(
+                        samples, alignment.target_unit_spans[-1].end * alignment.frame_ms)
+                    if wall is not None:
+                        aligned_end_ms = int(round(wall))
                 if alignment.target_end_frame is not None:
                     wall = self._audio_offset_to_wall_ms(
                         samples, alignment.target_end_frame * alignment.frame_ms)
                     if wall is not None:
                         target_end_ms = int(round(wall))
-                lexical = LexicalProgressEvidence.from_alignment(alignment, target_end_ms)
+                lexical = LexicalProgressEvidence.from_alignment(
+                    alignment, target_start_ms=target_start_ms,
+                    aligned_end_ms=aligned_end_ms, target_end_ms=target_end_ms)
 
             with self._lock:
                 if (self._closed or generation != self._generation or token != self.token
                         or aligner is not self.aligner or not self.history.healthy):
                     return
-                semantic_start = self.boundary_ms
+                semantic_start = self.causal_lower_bound_ms
                 history_truncated = bool(
                     semantic_start is not None and capture_start_ms is not None and
                     capture_start_ms > semantic_start + 1)
@@ -433,19 +461,21 @@ class NativeAudio:
                     "audio_ms": round(audio_ms, 3),
                     "capture_start_ms": capture_start_ms,
                     "capture_end_ms": capture_end_ms,
-                    "boundary_certainty": self.boundary_certainty.value,
+                    "causal_lower_bound_ms": self.causal_lower_bound_ms,
+                    "target_attached_ms": self.target_attached_ms,
                     "history_truncated": observation.history_truncated,
                     "vocal_mean_probability": round(observation.vocal.mean_probability, 4) if observation.vocal else 0.0,
                     "vocal_active_fraction": round(observation.vocal.active_fraction, 4) if observation.vocal else 0.0,
                     "vocal_last_active_ms": observation.vocal.last_active_ms if observation.vocal else None,
-                    "vocal_active_across_epoch_boundary": (
-                        observation.vocal.active_across_epoch_boundary if observation.vocal else False),
-                    "vocal_post_boundary_onset_ms": (
-                        observation.vocal.post_boundary_onset_ms if observation.vocal else None),
+                    "vocal_active_across_causal_boundary": (
+                        observation.vocal.active_across_causal_boundary if observation.vocal else False),
+                    "vocal_post_causal_onset_ms": (
+                        observation.vocal.post_causal_onset_ms if observation.vocal else None),
+                    "vocal_active_intervals": (
+                        list(observation.vocal.active_intervals) if observation.vocal else []),
                     "recurrence_strength": round(observation.recurrence.strength, 4) if observation.recurrence else 0.0,
                     "recurrence_period_ms": observation.recurrence.period_ms if observation.recurrence else None,
                     "recurrence_stability": round(observation.recurrence.period_stability, 4) if observation.recurrence else 0.0,
-                    "cross_epoch_persistence": round(observation.recurrence.cross_epoch_persistence, 4) if observation.recurrence else 0.0,
                     "recent_recurrence_strength": round(observation.recurrence.recent_strength, 4) if observation.recurrence else 0.0,
                 }
                 if alignment is not None:

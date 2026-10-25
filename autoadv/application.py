@@ -203,8 +203,8 @@ _PLAY_ISSUES = {
     'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ocr_unverified_change': ('OCRの変化を次の台詞と確認できないため自動送りを保留しています。', 'open_capture'),
     'ocr_failure': ('OCRで台詞を取得できないため、自動送りを保留しています。', 'open_capture'),
-    'utterance_progress_unresolved_hold': ('現在の発声が終了したと確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
-    'utterance_progress_active_hold': ('人の発声が続いているため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
+    'audio_judgment_unknown_hold': ('現在の台詞の音声終了を判断できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
+    'audio_judgment_active_hold': ('現在の台詞に対応する発声が続いているため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_failure': ('ゲーム音声を確認できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'native_audio_unavailable_hold': ('音声判断を利用できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'tts_playback_failed': ('TTS再生に失敗したため、この台詞の自動送りを保留しています。', 'open_voice'),
@@ -675,11 +675,11 @@ class AutoAdvApplication:
         # it only after the input call succeeds. This keeps failed sends inside
         # the current epoch while retaining PCM that may arrive before the
         # Windows message API returns.
-        boundary_at_ms = native.clock() if native is not None else None
+        lower_bound_ms = native.clock() if native is not None else None
         self._raw_input_send(target, virtual_key)
         if native is not None and native is self._native_audio:
-            native.boundary(at_ms=boundary_at_ms)
-            self._emit_runtime_event('audio_observation_boundary', token)
+            native.set_causal_lower_bound(at_ms=lower_bound_ms)
+            self._emit_runtime_event('audio_causal_lower_bound', token, at_ms=lower_bound_ms)
         self._emit_runtime_event(
             'advance_input', token, presentation_reason=self.controller.presentation_reason)
 
@@ -798,7 +798,7 @@ class AutoAdvApplication:
         completed = self.controller.presentation_event(token, 'audio_deadline_elapsed')
         self._finish_presentation_transition(token, completed)
         if (not completed and self.runtime_state().pause_reason in {
-                'utterance_progress_unresolved_hold', 'utterance_progress_active_hold'}):
+                'audio_judgment_unknown_hold', 'audio_judgment_active_hold'}):
             self._emit_native_capture_summary(token)
 
     def _start_presentation(self, token: Token) -> int:
@@ -819,8 +819,7 @@ class AutoAdvApplication:
         if external_ns:
             if self._native_audio is not None:
                 self._native_audio.external_transition()
-            self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns,
-                                     boundary_certainty='external_unknown')
+            self._emit_runtime_event('external_hook_transition', token, received_ns=external_ns)
         if utterance.advance_mode.value == 'text':
             self._schedule(utterance.text_wait_ms,
                            lambda t=token: self._runtime_presentation_event(t, 'text_elapsed'))
@@ -1180,20 +1179,25 @@ class AutoAdvApplication:
             target_associated=(lexical.target_associated if lexical is not None else False),
             complete_alignment=(lexical.complete_alignment if lexical is not None else False),
             committed_target_end=(lexical.committed_target_end if lexical is not None else False),
+            lexical_target_start_ms=(lexical.target_start_ms if lexical is not None else None),
+            lexical_aligned_end_ms=(lexical.aligned_end_ms if lexical is not None else None),
             lexical_target_end_ms=(lexical.target_end_ms if lexical is not None else None),
             capture_start_ms=observation.capture_start_ms,
             capture_end_ms=observation.capture_end_ms,
-            boundary_at_ms=observation.boundary_at_ms,
-            boundary_certainty=observation.boundary_certainty.value,
+            causal_lower_bound_ms=observation.causal_lower_bound_ms,
+            target_attached_ms=observation.target_attached_ms,
             history_truncated=observation.history_truncated,
             vocal_mean_probability=(vocal.mean_probability if vocal is not None else 0.0),
             vocal_active_fraction=(vocal.active_fraction if vocal is not None else 0.0),
             vocal_first_active_ms=(vocal.first_active_ms if vocal is not None else None),
             vocal_last_active_ms=(vocal.last_active_ms if vocal is not None else None),
+            vocal_active_intervals=(list(vocal.active_intervals) if vocal is not None else []),
+            vocal_active_across_causal_boundary=(
+                vocal.active_across_causal_boundary if vocal is not None else False),
+            vocal_post_causal_onset_ms=(vocal.post_causal_onset_ms if vocal is not None else None),
             recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
             recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
             recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),
-            cross_epoch_persistence=(recurrence.cross_epoch_persistence if recurrence is not None else 0.0),
             recent_recurrence_strength=(recurrence.recent_strength if recurrence is not None else 0.0),
             pcm_last_frame_ms=observation.pcm_last_frame_ms,
             heartbeat_at_ms=observation.heartbeat_at_ms,
@@ -1204,19 +1208,18 @@ class AutoAdvApplication:
                 'utterance_progress', token,
                 state=progress.state.value,
                 ended_at_ms=progress.ended_at_ms,
-                lexical_target_associated=progress.lexical_target_associated,
+                target_audio_associated=progress.target_audio_associated,
                 lexical_target_ended=progress.lexical_target_ended,
-                finite_vocal_observed=progress.finite_vocal_observed,
-                persistent_vocal_observed=progress.persistent_vocal_observed,
-                boundary_certainty=progress.boundary_certainty.value)
+                target_vocal_observed=progress.target_vocal_observed,
+                recurrent_tail_observed=progress.recurrent_tail_observed)
         if progress.state == UtteranceProgressState.ENDED and progress.ended_at_ms is not None:
             self._emit_telemetry(
                 'utterance_progress_end_estimate', token,
                 estimated_at_ns=progress.ended_at_ms * 1_000_000,
                 evidence='utterance_progress')
 
-        # Controller needs every state transition so the fallback deadline can
-        # distinguish uncertainty from a known finite vocal event in progress.
+        # Controller consumes only the integrated ACTIVE / ENDED / UNKNOWN
+        # judgment and never reinterprets individual acoustic evidence.
         completed = self.controller.apply_utterance_progress(token, progress)
         if completed:
             self._finish_presentation_transition(token, True)

@@ -16,7 +16,7 @@ LunaTranslatorを別途起動して設定を重複管理することなく、複
 
 - GUIで既存のIrodori-TTS-Serverフォルダを指定する。既存サーバーへの接続を優先し、必要なら指定された環境をAutoAdv起動時に自動起動する。
 - 使用可能なVoice IDを取得し、試聴できる。サーバー・Voiceの状態と問題をGUIで確認できる。
-- 標準起動経路はAutoAdv自身が所有するWindows runtimeを`%LOCALAPPDATA%\AutoAdv\runtime`へ準備し、GUI・音声・OCR・NativeAudioに必要なPython依存、固定target-conditioned alignment model/vocabulary、Haqumei G2P、Process Loopback helperを同じ管理領域から利用する。依存定義・helperソース・alignment固定版が変わらない限り再インストール・再ビルド・再ダウンロードしない。
+- 標準起動経路はAutoAdv自身が所有するWindows runtimeを`%LOCALAPPDATA%\AutoAdv\runtime`へ準備し、GUI・音声判断・OCRに必要なPython依存、採用中の既知本文音響対応モデル、Haqumei G2P、process音響取得helperを同じ管理領域から利用する。依存定義・helperソース・採用モデルが変わらない限り再インストール・再ビルド・再ダウンロードしない。
 - 音声判断を使わない運用でも標準runtimeの準備を利用者へ手作業で要求しない。G2P/Process Loopback/音響observerの個別パスは通常設定ではmanaged runtimeを既定とし、明示的な上書きが必要な場合だけ詳細設定から指定できる。AutoAdv管理領域以外の既存Python環境、Irodori環境、ゲーム素材を勝手に変更しない。
 
 ### GUIの操作体系
@@ -84,35 +84,33 @@ LunaHostの選択済みflush出力から、話者、表示本文、読み上げ�
 | 方式 | TTS使用 | TTS非使用 |
 |---|---|---|
 | 文字のみ判断 | 表示本文から計算する閲覧時間と、Irodori音声がWindows音声システム上で実再生を完了したことの両方を待つ | 計算した閲覧時間で提示完了する |
-| 音声判断 | Irodori音声がWindows音声システム上で実再生を完了したことで提示完了する | 現在のPresentation Epochに属する有限なhuman vocal eventの進行を`UtteranceProgress`として複合推定し、その終了が確認できた場合に提示完了する。確定できない場合は明示フォールバック設定に従う |
+| 音声判断 | Irodori音声がWindows音声システム上で実再生を完了したことで提示完了する | 現在の台詞に対応する有限な人間発声が終了したと判断できた場合に提示完了する。判断不能時は明示フォールバック設定に従う |
 
-音声判断かつTTS非使用では、Process Loopbackをセッション中継続して観測する。HOOK受信を実発声開始時刻とみなさず、AutoAdv自身が前Utteranceへ送り入力を送った時刻を次Presentation Epochの強い因果境界とする。HOOK本文が遅れて到着した場合も、その時点からのPCMだけを使わず、Presentation Epoch開始後に保持した音響履歴へ既知本文を遡及適用する。raw PCMに資源上の保持上限を置く場合、その上限をUtterance開始という意味的境界へ読み替えず、必要な長時間情報は時間整列可能なcompact acoustic featureとして保持する。
+### 音声判断の不変契約
 
-AutoAdv入力なしに利用者操作・ゲーム内Auto・スクリプト等で次Utteranceへ移った場合、本文として採用中の取得元から新しいflushが成立した事実を外部進行として扱う。進行原因をOS全体のクリック・キー監視で復元せず、HOOK到着時刻等から未知の開始時刻を捏造しない。外部進行のPresentation Epoch境界は不確実であること自体を状態として保持し、既知本文との対応や継続音響履歴から復帰できる範囲だけを知識化する。
+音声判断の目的は、process内の音や人声一般を分類することではなく、**現在の台詞に対応する有限な発声がまだ進行中か、終了したか、判断できないかを区別すること**である。BGM、SE、背景発話、前台詞のtail、loop素材を現在台詞の未完了発声として誤帰属させず、HOOK到着が実発声開始より遅い場合も扱えることを優先する。
 
-NativeAudioの各observerは、自身が観測した意味だけを返し、独立したcompletion判定器にならない。少なくとも次を一つの時系列推論へ入力できるようにする。
+音声判断に使う各種証拠は次の目的を持つ。具体的なモデル、状態数、閾値、クラス分割は正準仕様としない。
 
-- 既知本文のtarget-conditioned forced alignmentから得るlexical / phonetic progressと対象対応強度
-- 人間発声らしい活動の時間分布。VADはendpoint detectorではなくhuman vocal activityの観測として扱う
-- 本文に対応しない泣き・叫び・喘ぎ・笑い・息遣い等も含むhuman-vocal representation
-- human-vocal成分を重視したself-similarity / recurrenceと、epochを跨ぐpersistence
-- 利用可能な場合のspeaker / acoustic continuity
-- Presentation Epoch境界の確度と過去の`UtteranceProgress`状態
+- **既知本文と音響の対応**は、現在本文と音響区間の関係および本文発声の進行を知るために使う。本文部分の対応終了だけから、人間発声全体の終了を直接導かない。自由ASR等を同じ責務の第二判定経路として並走させない。
+- **人間発声らしい活動**は、本文発声の末尾に続く語尾、泣き、叫び、喘ぎ、笑い、息遣い等の物理的継続を見るために使う。process内に人声が存在することだけを、現在台詞への帰属または未完了の根拠にしない。process mix全体の無音も終了の必須条件にしない。
+- **時間関係**は、過去音声・前台詞・現在台詞の取り違えを防ぐために使う。AutoAdv自身が前台詞へ入力した時刻は次台詞に対する強い因果的下限として利用できる。外部操作やゲーム内進行で開始時刻を観測できなかった場合は、HOOK到着時刻等から開始時刻を捏造せず、保持済み音響と既知本文から成立する範囲だけを知識化する。HOOKが遅れても利用できるよう、必要な過去音響情報を保持する。
+- **反復性**は、現在台詞に関係する発声が終端候補後も継続している場合に、その継続が有限に変化する発声か、同じ音響構造の反復・持続かを識別し、無意味な永久待機を避けるために使う。反復性だけで現在台詞への帰属を成立させず、BGM等の周期性だけで台詞終了を認定しない。
+- speaker特性その他の音響連続性を利用する場合も補助証拠とし、高精度なspeaker identificationを通常台詞または非言語発声の成立条件にしない。
 
-forced alignmentは音声判断の重要な既知本文証拠だが、target本文のphonetic alignment終了からhuman vocal event自体の終了を直接導かない。本文発話後に泣き・喘ぎ・息・叫び等が続く場合はUtteranceを継続中として扱える必要がある。逆に、BGM・SE・背景発話等のためprocess mix全体が活動し続けても、global VAD inactiveを終了の必須条件にしない。自由ASRを同じ対象対応・終端判定責務の第二経路として並走させず、将来利用する場合も一つの観測として統合する。
+複数証拠の統合結果は、少なくとも利用者方針から見て **現在台詞の発声が継続中／終了／確定不能** を区別できなければならない。観測されていない事実を否定形から補わず、古い人声活動だけで現在台詞を継続中としない。終了へ向かう途中状態やloop種別等を内部で持つことはできるが、それらの分類自体を製品目的にしない。
 
-human vocal activityが存在する間すべて待機するとloop素材で永久停止するため、`finite human vocal event`と`persistent / looping human vocal source`を区別する。recurrenceはraw mixの周期性だけで決めず、human-vocal relevanceと背景音の影響を分離できる表現を用いる。epoch以前から継続する背景人声、epoch開始後に出現するloop人声、自然な有限反復、BGM自身のloopを同一状態へ潰さない。高精度なspeaker identificationを非言語発声の成立条件にはしない。
+ゲーム入力権限はController一箇所が所有する。Controllerは統合済みの音声判断結果、利用者の自動送り許可、明示フォールバック方針、session / token / targetを組み合わせ、一台詞一回だけ進行を決める。音響observerや音声推論はゲーム入力を送らず、Controllerも個別のVAD・alignment・反復値を再解釈して第二の音声判定器にならない。
 
-`UtteranceProgress`は、少なくとも「確定不能」「有限発声が継続中」「有限発声が終了へ向かっている」「persistent/looping source」「終了済み」を区別できるstatefulなDomain状態とする。一つの観測の欠如から別状態を確定せず、たとえばalignment不成立を原音不存在または発話終了へ読み替えない。Observer、NativeAudio、`UtteranceProgress`推論はゲーム入力を送らない。
+音声判断内に限り、**「音声から現在台詞の終了を判断できないとき、本文から確定した待機時間で進む」**という1個のON/OFF設定を用意する。既定はONとし、共通設定・作品上書きが可能で、現在の適用値をGUIへ表示する。本文時間は原音durationの推定値ではなく、フォールバック時の利用者方針である。
 
-ゲーム入力権限はController一箇所が所有する。Controllerは`UtteranceProgress`、利用者の自動送り許可、フォールバック方針、session / token / targetを組み合わせ、十分な終了根拠が成立した場合だけprogress-based completionとして提示完了する。本文からG2Pで一度確定する`text_wait_ms`は閲覧時間と明示フォールバックの時間方針であり、原音durationの推定値として使わない。
+- 音声判断で終了を確認できれば、本文時間に関係なく音声判断による提示完了とする。
+- 現在台詞に対応する発声が継続中と判断できている間は、本文時間フォールバックだけを理由に途中送りしない。
+- 音声判断が確定不能で、フォールバックONかつ本文時間期限に到達した場合だけ、明示フォールバックとして提示完了できる。これは原音不存在または終了の認定ではない。
+- フォールバックOFFでは確定不能を時間送りせず保留する。音声取得・推論が利用不能または失敗した場合も確定不能として同じ方針を適用する。
+- GUI、診断、検証では音声判断による完了とフォールバックによる完了を混同しない。
 
-音声判断内に限り、**「`UtteranceProgress`から終了を確認できなかったとき、本文から確定した待機時間で進む」**という1個のON/OFF設定を用意する。既定はONとし、共通設定・作品上書きが可能で、現在の適用値をGUIへ表示する。これは音声推論を補強する判定ではなく、利用者が明示的に選ぶ別の進行方針である。
-
-- 対象はTTS非使用の音声判断台詞のみ。期限前に`UtteranceProgress`が終了へ到達すれば`utterance_progress`として提示完了する。
-- ONでは期限時点までに終了を確認できなければ`uncertain_text_fallback`として提示完了する。これは原音不存在または終了の認定ではない。
-- OFFでは推論不能を時間送りせず保留する。後から`UtteranceProgress`が終了へ到達すればprogress-based completionとして提示完了する。NativeAudioが利用不能・失敗した場合も同じ契約で、ONなら本文時間期限、OFFなら保留とする。
-- GUIと診断ではprogress-based completionと`uncertain_text_fallback`を混同しない。フォールバックによる途中送りを音声推論成功として扱わない。
+実行時の記録は、取得した本文、音響観測、統合音声判断、Controllerが実際に行った完了・入力等の事実を残す。観測器自身に測定の正否、安全性、成功・失敗の判定を持たせない。
 
 ## 6. 発音量ベースの本文時間と自動送り権限
 
@@ -124,9 +122,9 @@ human vocal activityが存在する間すべて待機するとloop素材で永�
 
 初期値は最低本文時間700ms・1読み単位200msとする。これは声優の演技時間や原音終了を保証する値ではなく、作品・利用者ごとの閲覧ペースとして調整可能にする。
 
-原音の安全性評価では、製品が推定した`UtteranceProgress`終了時刻、独立したclean source波形から求めるsource acoustic endpoint、音声file端、ゲームvoice channel inactive、Controller判断、入力送信の時刻を区別する。voice channel inactiveは入力自身によって発生し得るため実発声末尾とみなさず、安全性の正解値に使わない。実機検証oracleは製品へ一切入力しないclean foreground sourceからsource acoustic endpointを独立算出し、AutoAdv入力でchannelが途中停止しても「入力が独立source acoustic endpointより前だったか」を評価可能にする。製品の終了推定時刻とsource acoustic endpointは同一視せず、両者の差と終了推定→入力の遅延、音声開始→HOOK通知の符号付き時差を診断に記録する。source endpointを得られない場合は時刻を捏造せず欠測として扱う。本文時間フォールバックも音声推論精度の正常値へ混ぜない。
+原音の安全性評価では、製品が推定した音声終了時刻、独立したclean source波形から求めるsource acoustic endpoint、音声file端、ゲームvoice channel inactive、Controller判断、入力送信の時刻を区別する。voice channel inactiveは入力自身によって発生し得るため実発声末尾とみなさず、安全性の正解値に使わない。実機検証oracleは製品へ一切入力しないclean foreground sourceからsource acoustic endpointを独立算出し、AutoAdv入力でchannelが途中停止しても「入力が独立source acoustic endpointより前だったか」を評価可能にする。製品の終了推定時刻とsource acoustic endpointは同一視せず、両者の差と終了推定→入力の遅延、音声開始→HOOK通知の符号付き時差を診断に記録する。source endpointを得られない場合は時刻を捏造せず欠測として扱う。本文時間フォールバックも音声推論精度の正常値へ混ぜない。
 
-一台詞の提示完了には本文時間、TTS実再生終了、確認済み`UtteranceProgress`終了、明示された不確実時フォールバックの**互いに異なる理由**を持たせる。同じControllerがトークン、本文時間期限、TTS実再生、`UtteranceProgress`、完了状態、送信履歴を所有し、進行可否を一度だけ決める。NativeAudioと音声解析は観測を生成し、`UtteranceProgress`推論は複数観測を根拠付きで統合するが、ゲーム入力を所有しない。GUI、TTS、NativeAudio、OCR、HOOKは個別にゲーム入力を送らない。
+一台詞の提示完了には本文時間、TTS実再生終了、音声判断による終了、明示された不確実時フォールバックの**互いに異なる理由**を持たせる。同じControllerがトークン、本文時間期限、TTS実再生、統合済み音声判断、完了状態、送信履歴を所有し、進行可否を一度だけ決める。音響取得・音声推論はゲーム入力を所有せず、GUI、TTS、OCR、HOOKも個別にゲーム入力を送らない。
 
 Controllerは入力前に明示許可、入力対象、セッション・Utterance token、TTS再生状態、送信済みを確認する。Windows入力は選択したゲームHWNDへ直接送るため、ゲームのforeground/focusを要求せず、利用者が操作中の別アプリからフォーカスを奪わない。送信直前には対象HWNDが現在も選択した入力PIDに属することを確認する。**自動送りのON/OFFは利用者の選択として保持し、音声根拠不足、入力対象喪失、次HOOK待ち、取得曖昧等の実行時問題は「保留」として別に表現する。利用者操作なしに自動送りのONをOFFへ書き換えない。** 保留中は入力を送らず、成立した次Utteranceや設定・接続の復旧により安全条件が戻れば、利用者のON状態を引き継いで処理を継続する。一台詞一回の入力後は次のHOOKを待つ。Windowsが対象メッセージを受理してもゲーム側の処理完了は保証されないため、同じUtteranceへ別方式の入力を自動再送しない。旧セッションのTTS通知や時間イベントは現行台詞を完成させない。失敗した音声再生を成功と扱わない。取得・TTSは自動送り許可なしでも使える。
 
@@ -150,19 +148,19 @@ LunaHook Native/Hostをゲーム処理と分離して管理し、64bit Windows�
 |---|---|
 | HOOK探索・選択・保存と複数選択出力 | Lunaのflushと選択HOOKの対応から一意な台詞・話者を得られ、曖昧な場合には入力を停止する |
 | 話者依存の本文整形 | 同一会話の話者または既存の話者設定と本文先頭が完全一致する囲み会話だけを本文へ展開し、補足・ルビ・未知話者表記を誤って分離しない |
-| TTS利用と非使用の話者混在 | 話者別TTS使用の決定は2モードと独立し、TTS中に原音のNativeAudio進行推論を開始しない |
+| TTS利用と非使用の話者混在 | 話者別TTS使用の決定は2モードと独立し、TTS再生を使う台詞ではゲーム原音の音声判断を送り条件にしない |
 | 文字のみ判断 | Haqumei primary pronunciationから得た読み単位数・本文待機下限・設定された1読み単位時間で送り、TTS使用時には実再生終了も待つ |
-| 音声判断・TTS使用 | 原音のNativeAudio進行推論を使わずTTSの実再生終了で提示完了する |
-| 音声判断・非TTS | 既知本文・human vocal activity・recurrence等を統合した`UtteranceProgress`で有限発声の終了を判断し、不確実時は明示フォールバックON/OFFの結果とその理由が一致する |
-| HOOK遅延・非言語・loop・BGM/SE/背景発話 | HOOKを音声開始とみなさず、本文量と再生時間を結び付けず、finite vocal eventとpersistent sourceを区別し、実測されたリスク・保留・途中送りを区別する |
+| 音声判断・TTS使用 | ゲーム原音の音声判断を送り条件にせずTTSの実再生終了で提示完了する |
+| 音声判断・非TTS | 既知本文との音響対応、人間発声の継続、時間関係、必要な反復性をそれぞれの意味を保って統合し、現在台詞の有限発声の終了・継続・確定不能を区別する。不確実時だけ明示フォールバック方針を適用する |
+| HOOK遅延・非言語・loop・BGM/SE/背景発話 | HOOKを音声開始とみなさず、本文量と再生時間を結び付けず、現在台詞に属する有限発声と無関係・反復継続する音を取り違えず、実測されたリスク・保留・途中送りを区別する |
 | 連続送信、同文別台詞、セッション切替 | 一台詞一入力、旧Token失効、入力対象確認・手動停止・次HOOK待機を満たし、非アクティブなゲームでも他アプリのフォーカスを奪わず送れる |
 | 共通・作品設定の保存・復元 | 設定反映とGUI表示が一致し、現行設定形式を一つの正本として保存・復元する |
-| Hosted実ゲーム検収 | prebuilt検証ゲームで選択HOOK→文字判断→実入力→次HOOKを検証する。Process Loopback・音響observer・NativeAudioの成立証拠にはしない |
-| 自動進行精度実機計測 | 実際に利用するWindows実機で選択HOOK→Process Loopback→NativeAudio→`UtteranceProgress`→Controller→実入力→次HOOKを標準ケース全件で観測し、自動進行率・安全な自動進行率・回復率・早送り・保留・遅延・誤帰属を計測する。原音ありだけでなく原音なし台詞も含め、未実施は未計測として報告する |
+| Hosted実ゲーム検収 | prebuilt検証ゲームで選択HOOK→文字判断→実入力→次HOOKを検証する。音声判断を使わない経路の成立を音声判断経路の成立証拠にはしない |
+| 自動進行精度実機計測 | 実際に利用するWindows実機で通常のHOOK取得・継続音響取得・音声判断・Controller・Windows入力・次HOOKまで製品の実経路を通し、自動進行率・安全な自動進行率・回復率・早送り・保留・遅延・誤帰属を計測する。原音ありだけでなく原音なし台詞も含め、未実施は未計測として報告する |
 
 ユニット・時系列・GUI・Persistence・Fast CI・実モデル・Hosted実ゲーム・自動進行精度実機計測の証拠を区別する。observer/model単体のF1・coverage・RTFは補助指標で、単体評価を時系列会話送りの成功と同一視しない。Hosted実ゲーム検収はprebuiltゲームを使って**LunaHook受信→文字判断のController（`presentation_event`→`try_advance`）→対象HWNDへのWindows入力→次HOOK**を確認し、ゲームをforegroundへ移さず成立することを含めて確認する。音声捕捉環境は要求しない。
 
-自動進行精度実機計測は**合格点を設定して落とすゲートではなく、自動進行精度を製品上異なる入力同値クラスで測る計測スイート**とする。音声開始とHOOK到着の遅延等の外部条件はゲーム側で作ってよいが、PCM録音の直接投入、固定HOOK通知、固定入力応答を実環境成立の代用にせず、**LunaHook受信→継続Process Loopback→製品NativeAudio・`UtteranceProgress`→Controller→Windows入力→次HOOK**を実際に利用するWindowsデスクトップで観測する。物理スピーカーやヘッドホンから利用者が可聴であることは条件にしない。自動進行精度実機計測はFast CI、Windows Adapter Validation、Hosted Liveその他の一括テストへ含めない。
+自動進行精度実機計測は**合格点を設定して落とすゲートではなく、自動進行精度を製品上異なる入力同値クラスで測る計測スイート**とする。音声開始とHOOK到着の遅延等の外部条件はゲーム側で作ってよいが、PCM録音の直接投入、固定HOOK通知、固定入力応答を実環境成立の代用にせず、**通常のHOOK受信→継続音響取得→製品音声判断→Controller→Windows入力→次HOOK**を実際に利用するWindowsデスクトップで観測する。物理スピーカーやヘッドホンから利用者が可聴であることは条件にしない。自動進行精度実機計測はFast CI、Windows Adapter Validation、Hosted Liveその他の一括テストへ含めない。
 
 ケース件数そのものは不変条件にしない一方、少なくとも次の入力同値クラスを落とさない。既知不具合ごとのfixtureを無制限に累積せず、同じ製品性質を測るケースは統合する。
 
@@ -171,16 +169,16 @@ LunaHook Native/Hostをゲーム処理と分離して管理し、64bit Windows�
 - HOOKが実発声開始より遅れ、到着時に発話の途中・大半終了・完全終了になっている場合
 - 短い本文と長い演技、長い本文と高速発話、同一本文を異なる音声時間で演じるpaired case、lexical本文終了後の長い非言語tail
 - 泣き、叫び、喘ぎ、笑い・息遣い、内部に短い無音を含む非言語発声
-- epoch以前から継続するloop人声、epoch開始後に出現するloop人声、loop人声と有限target speechの重なり、自然な有限反復、BGM loop、周期的な背景日本語発話
+- 台詞境界以前から継続するloop人声、現在台詞中に出現するloop人声、loop人声と有限target speechの重なり、自然な有限反復、BGM loop、周期的な背景日本語発話
 
-全ケースは一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで開始から終了まで連続して実行し、ケース間で再起動、再接続、NativeAudio再初期化、profile再設定、state clearを行わない。場面転換では通常ゲームで成立する背景変更、BGM・環境音・背景発話・SEの開始停止だけを使い、台詞境界を跨ぐ音は意図的に残す。途中で音声判断が保留、早送り、誤帰属、入力失敗、次HOOK未取得等になっても、その結果自体を理由にスイートを中断しない。後続ケースの実測を失わないためだけに検証driverが回復入力を送ってよいが、製品入力・音声推論成功・次HOOK成功とは別理由として記録し、製品へ検証専用状態を注入しない。
+全ケースは一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで開始から終了まで連続して実行し、ケース間で再起動、再接続、音声判断系の再初期化、profile再設定、state clearを行わない。場面転換では通常ゲームで成立する背景変更、BGM・環境音・背景発話・SEの開始停止だけを使い、台詞境界を跨ぐ音は意図的に残す。途中で音声判断が保留、早送り、誤帰属、入力失敗、次HOOK未取得等になっても、その結果自体を理由にスイートを中断しない。後続ケースの実測を失わないためだけに検証driverが回復入力を送ってよいが、製品入力・音声推論成功・次HOOK成功とは別理由として記録し、製品へ検証専用状態を注入しない。
 
-各ケースについて、AutoAdvによる自動進行有無、独立source acoustic endpointより前の入力、endpoint後の入力遅延、`UtteranceProgress`による完了、`uncertain_text_fallback`による完了とその早送り、背景音・背景人声・SE・loopへの誤帰属、非言語発声中の早送り、HOOK遅延量との品質関係、同一本文・異なる音声時間間の品質差、persistent/loop sourceによる過剰保留、finite vocal eventをloopと誤認した件数を集計する。forced alignment coverage、VAD、recurrence等は原因分析用の内部値として利用できるが、それぞれ単独の合否にはしない。
+各ケースについて、AutoAdvによる自動進行有無、独立source acoustic endpointより前の入力、endpoint後の入力遅延、音声判断による完了、明示フォールバックによる完了とその早送り、背景音・背景人声・SE・loopへの誤帰属、非言語発声中の早送り、HOOK遅延量との品質関係、同一本文・異なる音声時間間の品質差、反復音による過剰保留、有限発声を反復と誤認した件数を集計する。個別observerやモデルの内部値は原因分析に利用できるが、それぞれ単独の合否にはしない。
 
 ### 検証結果の独立性と計測判断
 
-検証時に固定してよいのは音声素材、ゲーム側の再生条件、HOOK到着遅延などの**外部条件**である。自動進行の発話帰属、進行許可、`UtteranceProgress`、入力結果は製品の処理経路に委ねる。検証用ゲームは台詞の表示、clean foreground sourceから求めたsource acoustic endpoint、音声channel lifecycleを**AutoAdvとは独立**に時刻記録し、製品が出力したHOOK/PCM/音響観測/Controller/入力/次HOOKの事実と検証側で照合する。ゲーム側のログを製品判断に注入しない。自動進行精度実機計測の回復入力は製品の送り成功・音声判断・進行成立の根拠へ注入せず、製品が自力で次ケースへ到達できない保留状態へ入った後にだけ検証driverからゲームへ送る。回復後の次HOOKも通常の作品別同文規則と外部進行処理だけで受理し、検証専用の製品状態変更APIを設けない。
+検証時に固定してよいのは音声素材、ゲーム側の再生条件、HOOK到着遅延などの**外部条件**である。自動進行の発話帰属、音声判断、進行許可、入力結果は製品の処理経路に委ねる。検証用ゲームは台詞の表示、clean foreground sourceから求めたsource acoustic endpoint、音声channel lifecycleを**AutoAdvとは独立**に時刻記録し、製品が出力したHOOK/PCM/音響観測/Controller/入力/次HOOKの事実と検証側で照合する。ゲーム側のログを製品判断に注入しない。自動進行精度実機計測の回復入力は製品の送り成功・音声判断・進行成立の根拠へ注入せず、製品が自力で次ケースへ到達できない保留状態へ入った後にだけ検証driverからゲームへ送る。回復後の次HOOKも通常の作品別同文規則と外部進行処理だけで受理し、検証専用の製品状態変更APIを設けない。
 
-実環境での評価は**台詞ごと**に、独立source acoustic endpointより前の入力、endpoint後の入力遅延、製品の`UtteranceProgress`終了推定、明示フォールバック送信、誤帰属、入力保留、二重送り、次HOOK未取得を区別する。全体の自動進行率・安全な自動進行率・回復率に加えて、`utterance_progress`完了率とその早送り、`uncertain_text_fallback`率とその早送りを別々に集計し、一方を他方の成功へ算入しない。過剰保留は固定閾値を設定していないrunで0件と断定せず、source acoustic endpoint→入力の実測分布と保留件数を報告する。これらの品質値に固定合格閾値を置いて自動進行精度計測スイート自体を失敗終了させない。入力が独立source acoustic endpointより前なら、voice channelがその入力によって直後にinactiveになった場合も早送りとして扱う。独立source acoustic endpointを取得できなければ音声進行の安全成功と認定せず、voice channel inactiveや音声file EOFで代用しない。検証ゲームのvoice channel lifecycleは再生systemの診断として記録するが、入力自身が停止原因になり得るため安全性の正解値には使わない。VAD F1・alignment coverage・モデル単体RTF等は原因分析に限り、送り成功や安全性の代理合格条件にはしない。
+実環境での評価は**台詞ごと**に、独立source acoustic endpointより前の入力、endpoint後の入力遅延、製品の音声終了推定、明示フォールバック送信、誤帰属、入力保留、二重送り、次HOOK未取得を区別する。全体の自動進行率・安全な自動進行率・回復率に加えて、音声判断完了率とその早送り、明示フォールバック率とその早送りを別々に集計し、一方を他方の成功へ算入しない。過剰保留は固定閾値を設定していないrunで0件と断定せず、source acoustic endpoint→入力の実測分布と保留件数を報告する。これらの品質値に固定合格閾値を置いて自動進行精度計測スイート自体を失敗終了させない。入力が独立source acoustic endpointより前なら、voice channelがその入力によって直後にinactiveになった場合も早送りとして扱う。独立source acoustic endpointを取得できなければ音声進行の安全成功と認定せず、voice channel inactiveや音声file EOFで代用しない。検証ゲームのvoice channel lifecycleは再生systemの診断として記録するが、入力自身が停止原因になり得るため安全性の正解値には使わない。VAD F1・alignment coverage・モデル単体RTF等は原因分析に限り、送り成功や安全性の代理合格条件にはしない。
 
 内部契約、実録音の音響observer評価、HostedのHOOK/文字送り実経路、Windows実機の自動進行精度実経路、利用者の任意の実作品での検収は別の証拠階層とし、いずれかの削除や評価指標の置換によって上位の未検収を合格としてはならない。自動進行精度実機計測をHosted CIへ移して環境差を製品合否へ混ぜず、自動進行の変更では関連する局所検証を優先し、毎回全てのCI重量級テストを起動することを要求しない。

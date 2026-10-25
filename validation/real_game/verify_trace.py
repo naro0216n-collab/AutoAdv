@@ -89,9 +89,8 @@ def _core_timeline(records: Sequence[dict], fixture_records: Sequence[dict] | No
             key = (record.get('session'), record.get('line'))
             signature = (
                 record.get('state'), record.get('ended_at_ms'),
-                record.get('lexical_target_associated'), record.get('lexical_target_ended'),
-                record.get('finite_vocal_observed'), record.get('persistent_vocal_observed'),
-                record.get('boundary_certainty'),
+                record.get('target_audio_associated'), record.get('lexical_target_ended'),
+                record.get('target_vocal_observed'), record.get('recurrent_tail_observed'),
             )
             if progress_state.get(key) == signature:
                 continue

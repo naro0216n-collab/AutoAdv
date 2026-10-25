@@ -198,47 +198,43 @@ class AcousticObservationHistory:
         return tuple(float(x) for x in vector)
 
     def summarize_vocal(self, *, start_ms: int, end_ms: int,
-                        epoch_start_ms: int | None = None) -> HumanVocalEvidence:
+                        causal_boundary_ms: int | None = None) -> HumanVocalEvidence:
         frames = [f for f in self._vocal if start_ms <= f.at_ms <= end_ms]
         probabilities = [f.probability for f in frames]
         active = [f for f in frames if f.probability >= self.ACTIVE_PROBABILITY]
-        pre_epoch: list[VocalActivityFrame] = []
-        active_across_boundary = False
-        post_boundary_onset_ms = active[0].at_ms if active else None
-        if epoch_start_ms is not None:
-            # Look behind a boundary only to describe persistence; the interval
-            # is not used as an invented start time for the new utterance.
-            pre_start = max(0, epoch_start_ms - 1500)
-            pre_epoch = [f for f in self._vocal if pre_start <= f.at_ms < epoch_start_ms]
 
-            # Preserve a factual distinction between vocal activity that already
-            # crossed the presentation boundary and a new threshold crossing
-            # observed afterwards.  This does not identify a speaker or decide
-            # that either activity belongs to the target utterance.
-            before = pre_epoch[-1] if pre_epoch else None
-            after = frames[0] if frames else None
+        gaps = [b.at_ms - a.at_ms for a, b in zip(frames, frames[1:]) if b.at_ms > a.at_ms]
+        nominal_gap = float(np.median(gaps)) if gaps else 16.0
+        join_gap = max(32.0, nominal_gap * 2.0)
+        intervals: list[tuple[int, int]] = []
+        for frame in active:
+            if intervals and frame.at_ms - intervals[-1][1] <= join_gap:
+                intervals[-1] = (intervals[-1][0], frame.at_ms)
+            else:
+                intervals.append((frame.at_ms, frame.at_ms))
+
+        active_across_boundary = False
+        post_causal_onset_ms = active[0].at_ms if active else None
+        if causal_boundary_ms is not None:
+            pre_start = max(0, causal_boundary_ms - 1500)
+            pre = [f for f in self._vocal if pre_start <= f.at_ms < causal_boundary_ms]
+            before = pre[-1] if pre else None
+            after = next((f for f in frames if f.at_ms >= causal_boundary_ms), None)
             if before is not None and after is not None:
-                pre_near = pre_epoch[-8:]
-                post_near = frames[:8]
-                gaps = [
-                    b.at_ms - a.at_ms
-                    for segment in (pre_near, post_near)
-                    for a, b in zip(segment, segment[1:])
-                    if b.at_ms > a.at_ms
-                ]
-                nominal_gap = float(np.median(gaps)) if gaps else 16.0
                 active_across_boundary = bool(
-                    before.probability >= self.ACTIVE_PROBABILITY and
-                    after.probability >= self.ACTIVE_PROBABILITY and
-                    after.at_ms - before.at_ms <= max(32.0, nominal_gap * 2.0)
+                    before.probability >= self.ACTIVE_PROBABILITY
+                    and after.probability >= self.ACTIVE_PROBABILITY
+                    and after.at_ms - before.at_ms <= join_gap
                 )
 
             previous_active = active_across_boundary
-            post_boundary_onset_ms = None
+            post_causal_onset_ms = None
             for frame in frames:
+                if frame.at_ms < causal_boundary_ms:
+                    continue
                 current_active = frame.probability >= self.ACTIVE_PROBABILITY
                 if current_active and not previous_active:
-                    post_boundary_onset_ms = frame.at_ms
+                    post_causal_onset_ms = frame.at_ms
                     break
                 previous_active = current_active
 
@@ -249,11 +245,9 @@ class AcousticObservationHistory:
             active_fraction=(len(active) / len(frames)) if frames else 0.0,
             first_active_ms=(active[0].at_ms if active else None),
             last_active_ms=(active[-1].at_ms if active else None),
-            pre_epoch_active_fraction=(
-                sum(f.probability >= self.ACTIVE_PROBABILITY for f in pre_epoch) / len(pre_epoch)
-                if pre_epoch else 0.0),
-            active_across_epoch_boundary=active_across_boundary,
-            post_boundary_onset_ms=post_boundary_onset_ms,
+            active_intervals=tuple(intervals),
+            active_across_causal_boundary=active_across_boundary,
+            post_causal_onset_ms=post_causal_onset_ms,
         )
 
     @staticmethod
@@ -277,10 +271,9 @@ class AcousticObservationHistory:
         foreground = 1.0 - background ** 3
         return spectral * vocal * max(0.0, foreground)
 
-    def recurrence(self, *, epoch_start_ms: int | None, end_ms: int) -> VocalRecurrenceEvidence:
+    def recurrence(self, *, start_ms: int, end_ms: int) -> VocalRecurrenceEvidence:
         current = [f for f in self._fingerprints
-                   if (epoch_start_ms is None or f.at_ms >= epoch_start_ms) and f.at_ms <= end_ms
-                   and f.vocal_relevance >= 0.25]
+                   if start_ms <= f.at_ms <= end_ms and f.vocal_relevance >= 0.25]
         if len(current) < 3:
             return VocalRecurrenceEvidence()
 
@@ -306,22 +299,12 @@ class AcousticObservationHistory:
             spread = float(np.median(np.abs(lags - period))) if len(lags) else 0.0
             stability = max(0.0, 1.0 - spread / max(250.0, float(period)))
 
-        cross = 0.0
-        previous: list[AcousticFingerprint] = []
-        if epoch_start_ms is not None:
-            previous = [f for f in self._fingerprints
-                        if f.at_ms < epoch_start_ms and f.at_ms >= epoch_start_ms - 8000
-                        and f.vocal_relevance >= 0.25]
-            if previous:
-                scores = [self._similarity(now, before)
-                          for now in current[-6:] for before in previous[-12:]]
-                cross = max(scores, default=0.0)
-
-        # A historical loop classification is not enough to decide what the
-        # post-target vocal tail currently contains.  Describe whether recent
-        # vocal-weighted fingerprints themselves still match an older pattern.
-        # A new finite cry/breath tail can therefore lower this value even when
-        # a persistent source was observed earlier in the epoch.
+        # Recent recurrence is useful only as evidence about the continuation
+        # currently being heard.  Earlier fingerprints, including material just
+        # before start_ms, are reference data; matching them does not establish
+        # target ownership.
+        previous = [f for f in self._fingerprints
+                    if start_ms - 8000 <= f.at_ms < start_ms and f.vocal_relevance >= 0.25]
         recent = [f for f in current if f.at_ms >= end_ms - 1500]
         reference = previous + [f for f in current if f.at_ms < end_ms - 300]
         best_recent: list[float] = []
@@ -331,6 +314,5 @@ class AcousticObservationHistory:
                 best_recent.append(max(self._similarity(now, before) for before in candidates))
         recent_strength = float(np.mean(best_recent)) if best_recent else 0.0
         return VocalRecurrenceEvidence(
-            strength=strength, period_ms=period,
-            period_stability=stability, cross_epoch_persistence=cross,
+            strength=strength, period_ms=period, period_stability=stability,
             recent_strength=recent_strength)

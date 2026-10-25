@@ -105,7 +105,7 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
         # Deliberately contradictory product inference. Offline classification must
         # not consume it.
         {'event': 'utterance_progress', 'seq': 2, 'at_ns': start_ns + 2,
-         'session': 1, 'line': 1, 'state': 'finite_vocal_active'},
+         'session': 1, 'line': 1, 'state': 'active'},
         {'event': 'advance_attempt', 'seq': 3, 'at_ns': input_ns, 'session': 1, 'line': 1},
         {'event': 'advance_input', 'seq': 4, 'at_ns': input_ns + 1, 'session': 1, 'line': 1},
     ]
@@ -163,7 +163,7 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
         )
         driver.state = 'running'
         driver.tick()  # observe case-1
-        runtime.pause_reason = 'utterance_progress_active_hold'
+        runtime.pause_reason = 'audio_judgment_active_hold'
         runtime.sent = True
         clock[0] = 13.1
         driver.tick()

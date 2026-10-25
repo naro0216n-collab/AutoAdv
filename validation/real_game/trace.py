@@ -38,7 +38,7 @@ class ProductTraceObserver:
     _PASSTHROUGH = frozenset({
         'monitor_started', 'monitor_ended', 'external_hook_transition',
         'presentation_complete', 'next_line_timeout', 'advance_attempt',
-        'advance_input', 'audio_observation_boundary', 'audio_deadline_elapsed',
+        'advance_input', 'audio_causal_lower_bound', 'audio_deadline_elapsed',
         'native_capture_summary', 'native_audio_error', 'native_pcm',
         'alignment_inference', 'native_audio_observation', 'utterance_progress',
         'tts_timing', 'tts_result', 'controller_handoff',
@@ -90,7 +90,7 @@ class ProductTraceObserver:
         fields.update(self._token_fields(token))
         if event == 'monitor_ended':
             fields.setdefault('session', detail.get('session', 0))
-        if event == 'audio_observation_boundary' and token is not None:
+        if event == 'audio_causal_lower_bound' and token is not None:
             fields.pop('line', None)
             fields['after_line'] = token.line
         self.trace.emit(event, **fields)

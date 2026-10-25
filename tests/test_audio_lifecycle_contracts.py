@@ -98,6 +98,19 @@ def make_native(model, observations, errors=None, reports=None, *, clock=lambda:
     )
 
 
+
+def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
+    observations = []
+    native = make_native(StaticPosterior(), observations, clock=lambda: 1000)
+    started = []
+    monkeypatch.setattr(native._capture, "start", lambda: started.append(True))
+    try:
+        native.start()
+        assert started == [True]
+        assert native.causal_lower_bound_ms is None
+    finally:
+        native.close()
+
 def test_native_audio_generation_owns_target_and_discards_stale_inference():
     observations = []
     model = BlockingPosterior()
@@ -107,7 +120,7 @@ def test_native_audio_generation_owns_target_and_discards_stale_inference():
         native.begin(old, 'unknown')
         assert native.aligner is None  # non-lexical audio remains observable without alignment
         native.history.start(42)
-        native.boundary(1000)
+        native.set_causal_lower_bound(1000)
         native.begin(old, 'target')
         chunk = stereo_chunk(1600)
         native.history.push(chunk, target_pid=42)
@@ -128,7 +141,7 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
     token = Token(2, 1)
     try:
         native.history.start(42)
-        native.boundary(1000)
+        native.set_causal_lower_bound(1000)
         native.begin(token, 'target')
         chunk = stereo_chunk(2000, 1000)
         native.history.push(chunk, target_pid=42)
@@ -155,11 +168,11 @@ def test_pcm_history_replay_and_gap_mapping_preserve_wall_clock_provenance():
     token = Token(4, 2)
     try:
         native.history.start(42)
-        native.boundary(1000)
+        native.set_causal_lower_bound(1000)
         old = stereo_chunk(900, 200)
-        # This packet starts before the Presentation Epoch and ends after it.
-        # Replay must crop the pre-boundary frames instead of leaking them into
-        # the new utterance's alignment window.
+        # This packet starts before the known causal lower bound and ends after
+        # it. Replay must crop earlier frames instead of leaking them into the
+        # new target's alignment window.
         kept = stereo_chunk(1400, 500)
         native.history.push(old, target_pid=42)
         native.history.push(kept, target_pid=42)
@@ -184,7 +197,7 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
         token = Token(6, 1)
         try:
             native.history.start(42)
-            native.boundary(1000)
+            native.set_causal_lower_bound(1000)
             # Process Loopback and compact observers run before the HOOK/text is
             # attached. The same captured series must mean the same thing even
             # if the HOOK arrives much later.
@@ -211,7 +224,7 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
     token = Token(8, 1)
     try:
         native.history.start(42)
-        native.boundary(1000)
+        native.set_causal_lower_bound(1000)
         native.begin(token, 'target')
         short = stereo_chunk(1200, 200)
         native.history.push(short, target_pid=42)
@@ -224,7 +237,7 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         assert transport.heartbeat_at_ms == 1300
         assert transport.lexical is None
         status = native.capture_status()
-        assert 'pcm_frames' in status and status['boundary_certainty'] == 'autoadv'
+        assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
     finally:
         native.close()
 
@@ -240,9 +253,9 @@ def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
     ))
 
     crossing = history.summarize_vocal(
-        start_ms=1000, end_ms=1024, epoch_start_ms=1000)
-    assert crossing.active_across_epoch_boundary
-    assert crossing.post_boundary_onset_ms is None
+        start_ms=1000, end_ms=1024, causal_boundary_ms=1000)
+    assert crossing.active_across_causal_boundary
+    assert crossing.post_causal_onset_ms is None
 
     history.add_vocal(tuple(
         VocalActivityFrame(at_ms=at_ms, probability=probability)
@@ -251,9 +264,9 @@ def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
         )
     ))
     restarted = history.summarize_vocal(
-        start_ms=1000, end_ms=1088, epoch_start_ms=1000)
-    assert restarted.active_across_epoch_boundary
-    assert restarted.post_boundary_onset_ms == 1072
+        start_ms=1000, end_ms=1088, causal_boundary_ms=1000)
+    assert restarted.active_across_causal_boundary
+    assert restarted.post_causal_onset_ms == 1072
 
     separated = AcousticObservationHistory()
     separated.add_vocal((
@@ -262,9 +275,9 @@ def test_vocal_history_distinguishes_boundary_continuity_from_new_onset():
         VocalActivityFrame(at_ms=1024, probability=.9),
     ))
     after_gap = separated.summarize_vocal(
-        start_ms=1000, end_ms=1024, epoch_start_ms=1000)
-    assert not after_gap.active_across_epoch_boundary
-    assert after_gap.post_boundary_onset_ms == 1008
+        start_ms=1000, end_ms=1024, causal_boundary_ms=1000)
+    assert not after_gap.active_across_causal_boundary
+    assert after_gap.post_causal_onset_ms == 1008
 
 
 def test_vocal_recurrence_discounts_periodicity_already_explained_by_background_audio():
@@ -276,7 +289,7 @@ def test_vocal_recurrence_discounts_periodicity_already_explained_by_background_
         for at_ms in (1800, 2200, 2600, 3000):
             history.add_fingerprint(
                 tonal_chunk(at_ms, current_components), vocal_relevance=0.9)
-        return history.recurrence(epoch_start_ms=1500, end_ms=3000)
+        return history.recurrence(start_ms=1500, end_ms=3000)
 
     background_only = history_for(((440.0, 0.25),))
     vocal_over_background = history_for(((440.0, 0.25), (1000.0, 0.5)))

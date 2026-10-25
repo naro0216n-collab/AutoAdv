@@ -54,7 +54,7 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     token = observe(ctrl, '「本文」')
     assert token is not None
     assert not ctrl.presentation_event(token, 'audio_deadline_elapsed')
-    assert ctrl.pause_reason == 'utterance_progress_unresolved_hold'
+    assert ctrl.pause_reason == 'audio_judgment_unknown_hold'
     assert ctrl.presentation_reason is None
     assert ctrl.apply_utterance_progress(token, UtteranceProgress(state=UtteranceProgressState.ENDED))
     assert ctrl.presentation_reason == 'utterance_progress'
@@ -68,23 +68,20 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     assert ctrl.presentation_event(token, 'audio_deadline_elapsed')
     assert ctrl.presentation_reason == 'uncertain_text_fallback'
 
-    # A text deadline is never allowed to cut a finite vocal event that the
-    # unified inference still observes as active.  If the state later becomes
-    # uncertain/persistent after the deadline, the explicit fallback may act.
+    # The text deadline never cuts a target that the integrated audio judgment
+    # still classifies as ACTIVE. If that judgment later becomes UNKNOWN, the
+    # explicit uncertainty fallback may act without relabeling audio as ended.
     active, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=True)
     active_token = observe(active, '「短い本文」')
     assert active_token is not None
     assert not active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.FINITE_VOCAL_ACTIVE, finite_vocal_observed=True))
+        state=UtteranceProgressState.ACTIVE,
+        target_audio_associated=True, target_vocal_observed=True))
     assert not active.presentation_event(active_token, 'audio_deadline_elapsed')
-    assert active.pause_reason == 'utterance_progress_active_hold'
-    assert active.presentation_reason is None
-    assert not active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.FINITE_VOCAL_ENDING, finite_vocal_observed=True))
+    assert active.pause_reason == 'audio_judgment_active_hold'
     assert active.presentation_reason is None
     assert active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.PERSISTENT_OR_LOOPING,
-        finite_vocal_observed=True, persistent_vocal_observed=True))
+        state=UtteranceProgressState.UNKNOWN))
     assert active.presentation_reason == 'uncertain_text_fallback'
 
     strict, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=False)
