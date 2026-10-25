@@ -283,9 +283,6 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         assert model.calls == 0
         snapshots = [item for _, item in observations if item.kind == 'acoustic_features']
         assert len(snapshots) == 1 and snapshots[0].capture_end_ms == 1200
-        # Recurrence is a continuous acoustic fact, not a post-lexical-only
-        # diagnostic. Empty evidence is still published before lexical commit.
-        assert snapshots[0].recurrence is not None
 
         # Heartbeat retains its original purpose: if no more PCM arrives, flush
         # the last captured audio through the ordinary lexical scheduler. It

@@ -387,6 +387,7 @@ class NativeAudio:
             lexical=None,
             history_truncated=history_truncated,
             pcm_last_frame_ms=boundary,
+            include_recurrence=(self._lexical_committed_generation == generation),
         )
         self._observation_at = boundary
         return ("observe", token, generation, observation)
@@ -531,7 +532,8 @@ class NativeAudio:
                                   lexical: LexicalProgressEvidence | None,
                                   history_truncated: bool = False,
                                   pcm_last_frame_ms: int | None = None,
-                                  heartbeat_at_ms: int | None = None) -> NativeAudioObservation:
+                                  heartbeat_at_ms: int | None = None,
+                                  include_recurrence: bool = True) -> NativeAudioObservation:
         feature_end = capture_end_ms if capture_end_ms is not None else self.features.latest_ms
         vocal = None
         recurrence = None
@@ -552,17 +554,18 @@ class NativeAudio:
                 start_ms=feature_start, end_ms=feature_end,
                 causal_boundary_ms=self.causal_lower_bound_ms)
 
-            if lexical is not None and lexical.target_end_ms is not None:
-                recurrence_start = lexical.target_end_ms
-            elif lexical is not None and lexical.target_start_ms is not None:
-                recurrence_start = lexical.target_start_ms
-            elif self.causal_lower_bound_ms is not None:
-                recurrence_start = self.causal_lower_bound_ms
-            else:
-                recurrence_start = feature_start
-            recurrence_start = min(int(recurrence_start), int(feature_end))
-            recurrence = self.features.recurrence(
-                start_ms=recurrence_start, end_ms=feature_end)
+            if include_recurrence:
+                if lexical is not None and lexical.target_end_ms is not None:
+                    recurrence_start = lexical.target_end_ms
+                elif lexical is not None and lexical.target_start_ms is not None:
+                    recurrence_start = lexical.target_start_ms
+                elif self.causal_lower_bound_ms is not None:
+                    recurrence_start = self.causal_lower_bound_ms
+                else:
+                    recurrence_start = feature_start
+                recurrence_start = min(int(recurrence_start), int(feature_end))
+                recurrence = self.features.recurrence(
+                    start_ms=recurrence_start, end_ms=feature_end)
         return NativeAudioObservation(
             kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
             lexical=lexical, vocal=vocal, recurrence=recurrence,
@@ -637,6 +640,9 @@ class NativeAudio:
                         capture_end_ms=observation_end_ms, lexical=lexical,
                         history_truncated=history_truncated,
                         pcm_last_frame_ms=observation_end_ms,
+                        include_recurrence=bool(
+                            alignment is not None and alignment.complete_alignment
+                            and alignment.committed_target_end),
                     )
                     if observation_end_ms is not None:
                         self._observation_at = max(self._observation_at, observation_end_ms)

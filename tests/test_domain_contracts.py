@@ -287,10 +287,9 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert resumed_end.state == UtteranceProgressState.ENDED
     assert resumed_end.ended_at_ms == 2080
 
-    # Recurrence never establishes target ownership by itself. Once target
-    # ownership and an end candidate exist it can stop a stable repeated tail
-    # from holding forever; before ownership it can also prevent vocal structure
-    # inherited across the causal boundary from being promoted to current ACTIVE.
+    # Recurrence has one purpose: once target ownership and an end candidate are
+    # established, a stable repeated continuation can stop holding the finite
+    # target forever. It cannot establish target ownership by itself.
     looping = UtteranceProgressEstimator().observe(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 2980),), end=3000), end=3000,
         rec=VocalRecurrenceEvidence(
@@ -337,35 +336,67 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1000, 1390),), crossing=True, onset=None), end=1400))
     assert crossing.state == UtteranceProgressState.UNKNOWN
 
-    # A short detector dropout does not turn the same cross-boundary vocal
-    # context into a new current event. A longer reappearance remains UNKNOWN
-    # when stable recurrence ties it to the inherited context, while changed
-    # acoustics after real endpoint quiet can still become a causal candidate.
-    crossing_restart = UtteranceProgressEstimator().observe(observation(
-        voc=vocal(intervals=((1000, 1250), (1450, 1600)), end=1620,
-                  crossing=True, onset=1450), end=1620))
-    assert crossing_restart.state == UtteranceProgressState.UNKNOWN
+    # Target attachment is a stronger boundary than the earlier input lower bound.
+    # Retained audio is re-evaluated when the HOOK identifies the target: an old
+    # event already closed before attachment cannot hold the new line, while a
+    # delayed current event still active at attachment and a genuinely later event
+    # can. The latest still-open candidate is chosen from retained history rather
+    # than freezing the first post-input vocal onset.
+    closed_before_attach = UtteranceProgressEstimator().observe(observation(
+        voc=vocal(intervals=((1080, 1200),), end=1500, onset=1080),
+        end=1500, attached=1400))
+    assert closed_before_attach.state == UtteranceProgressState.UNKNOWN
 
-    recurrent_reappearance = UtteranceProgressEstimator().observe(observation(
-        voc=vocal(intervals=((1000, 1200), (1800, 2980)), end=3000,
-                  crossing=True, onset=1800), end=3000,
-        rec=VocalRecurrenceEvidence(
-            strength=.95, period_ms=700, period_stability=.9, recent_strength=.9)))
-    assert recurrent_reappearance.state == UtteranceProgressState.UNKNOWN
+    replay_before_attach = UtteranceProgressEstimator().observe(observation(
+        voc=vocal(intervals=((1080, 1380),), end=1380, onset=1080),
+        end=1380, attached=1400))
+    assert replay_before_attach.state == UtteranceProgressState.UNKNOWN
 
-    changed_reappearance = UtteranceProgressEstimator().observe(observation(
-        voc=vocal(intervals=((1000, 1200), (1800, 2980)), end=3000,
-                  crossing=True, onset=1800), end=3000,
-        rec=VocalRecurrenceEvidence(
-            strength=.95, period_ms=700, period_stability=.9, recent_strength=.2)))
-    assert changed_reappearance.state == UtteranceProgressState.ACTIVE
+    delayed_current = UtteranceProgressEstimator().observe(observation(
+        voc=vocal(intervals=((1080, 1450),), end=1460, onset=1080),
+        end=1460, attached=1400))
+    assert delayed_current.state == UtteranceProgressState.ACTIVE
 
-    clean_recurrent_nonlexical = UtteranceProgressEstimator().observe(observation(
-        voc=vocal(intervals=((1100, 2980),), end=3000, crossing=False, onset=1100),
-        end=3000,
-        rec=VocalRecurrenceEvidence(
-            strength=.95, period_ms=700, period_stability=.9, recent_strength=.9)))
-    assert clean_recurrent_nonlexical.state == UtteranceProgressState.ACTIVE
+    reevaluated = UtteranceProgressEstimator()
+    latest_open = reevaluated.observe(observation(
+        voc=vocal(intervals=((1080, 1200), (1450, 1580), (2050, 2280)),
+                  end=2500, onset=1080),
+        end=2500, attached=1400))
+    assert latest_open.state == UtteranceProgressState.ACTIVE
+    closed = reevaluated.observe(observation(
+        voc=vocal(intervals=((1080, 1200), (1450, 1580), (2050, 2280)),
+                  end=2700, onset=1080),
+        end=2700, attached=1400))
+    assert closed.state == UtteranceProgressState.UNKNOWN
+    # A causal guard is deliberately one-shot. Repeated unrelated human-vocal
+    # fragments after it closes must not keep an unvoiced line alive forever.
+    later_background = reevaluated.observe(observation(
+        voc=vocal(intervals=((1080, 1200), (1450, 1580), (2050, 2280), (2800, 2980)),
+                  end=3000, onset=1080),
+        end=3000, attached=1400))
+    assert later_background.state == UtteranceProgressState.UNKNOWN
+
+    inherited_then_new = UtteranceProgressEstimator().observe(observation(
+        voc=vocal(intervals=((1000, 1240), (1700, 1980)), end=2000,
+                  crossing=True, onset=1700),
+        end=2000, attached=1500))
+    assert inherited_then_new.state == UtteranceProgressState.ACTIVE
+
+    # Strong known-text ownership supersedes a disconnected provisional causal
+    # guard. Background activity observed first must not prevent a later target
+    # event from becoming the owned ACTIVE event.
+    superseded = UtteranceProgressEstimator()
+    assert superseded.observe(observation(
+        voc=vocal(intervals=((1450, 1600),), end=1620, onset=1450),
+        end=1620, attached=1400)).active
+    owned_after_guard = superseded.observe(observation(
+        lex=lexical(start=2100, aligned_end=2380, target_end=2380,
+                    complete=False, committed=False, associated=True),
+        voc=vocal(intervals=((1450, 1600), (2100, 2480)), end=2500, onset=1450),
+        end=2500, attached=1400))
+    assert owned_after_guard.state == UtteranceProgressState.ACTIVE
+    assert owned_after_guard.target_audio_associated
+    assert owned_after_guard.target_vocal_observed
 
     nonlexical = UtteranceProgressEstimator()
     nonlex_onset = nonlexical.observe(observation(

@@ -137,10 +137,11 @@ class UtteranceProgressEstimator:
     not mutate this acoustic state.
 
     Lexical evidence still records target association for diagnostics and can
-    turn a closed event into ENDED. A causal-only event can suppress fallback
-    only when it is not merely continuity or stable recurrence of human-vocal
-    structure that already crossed the causal boundary. When an unowned event
-    closes, the result returns to UNKNOWN.
+    turn a closed event into ENDED. A causal-only event is selected only after
+    the target has attached: retained pre-HOOK audio is re-evaluated against that
+    stronger boundary instead of freezing the first post-input vocal onset. The
+    selected unowned event merely suppresses fallback while it is open; when it
+    closes the result returns to UNKNOWN.
     """
 
     END_CONTEXT_MS = 180
@@ -165,8 +166,7 @@ class UtteranceProgressEstimator:
         self._event_start_ms: int | None = None
         self._event_last_vocal_ms: int | None = None
         self._event_has_lexical_anchor = False
-        self._event_from_cross_boundary_context = False
-        self._last_consumed_causal_onset_ms: int | None = None
+        self._causal_candidate_consumed = False
 
     @staticmethod
     def _overlaps(interval: tuple[int, int], start_ms: int, end_ms: int) -> bool:
@@ -223,88 +223,66 @@ class UtteranceProgressEstimator:
             end_ms = max(end_ms, interval[1])
         return start_ms, end_ms
 
-    def _stable_recurrence_since(
-        self, recurrence: VocalRecurrenceEvidence, start_ms: int | None, capture_end_ms: int | None
-    ) -> bool:
-        if (
-            recurrence.period_ms is None
-            or recurrence.strength < self.LOOP_STRENGTH
-            or recurrence.period_stability < self.LOOP_STABILITY
-            or recurrence.recent_strength < self.RECENT_LOOP_STRENGTH
-            or start_ms is None
-            or capture_end_ms is None
-        ):
-            return False
-        observed_ms = capture_end_ms - start_ms
-        return observed_ms >= max(self.MIN_LOOP_OBSERVATION_MS, recurrence.period_ms * 2)
-
     def _causal_event(
-        self, vocal: HumanVocalEvidence | None, recurrence: VocalRecurrenceEvidence,
-        capture_end_ms: int | None,
-    ) -> tuple[int, int, int, bool] | None:
-        """Return a finite post-boundary candidate that is not inherited context.
+        self, observation: NativeAudioObservation, vocal: HumanVocalEvidence | None,
+    ) -> tuple[int, int] | None:
+        """Return one still-open causal candidate re-evaluated at target attach.
 
-        A detector gap is not a new presentation event when human voice already
-        crossed the causal boundary and the later positive interval remains
-        connected through less than endpoint-confirming quiet. If a larger gap
-        occurs, stable recurrence can still show that the reappearance belongs
-        to a persistent pre-boundary structure. Neither fact establishes source
-        identity; both only prevent old context from being promoted to current
-        target activity.
+        AutoAdv input is the lower bound for the presentation, while HOOK/target
+        attachment tells us which presentation retained audio must now be judged
+        against. A vocal interval that closed before target attachment is therefore
+        not frozen in as the current candidate merely because it was the first
+        post-input onset. Delayed HOOK remains supported when the same finite event
+        is still active at attachment.
+
+        Causal timing is not source ownership, so only one unowned candidate may
+        suppress fallback. After that candidate closes, later unrelated human-vocal
+        activity is not repeatedly promoted; known-text evidence may still establish
+        target ownership independently.
         """
-        if vocal is None or not vocal.active_intervals or vocal.post_causal_onset_ms is None:
+        if self._causal_candidate_consumed or vocal is None or not vocal.active_intervals:
             return None
-        onset = vocal.post_causal_onset_ms
-        if (self._last_consumed_causal_onset_ms is not None
-                and onset <= self._last_consumed_causal_onset_ms):
+        attached_ms = observation.target_attached_ms
+        capture_end_ms = observation.capture_end_ms
+        if attached_ms is None or capture_end_ms is None or capture_end_ms < attached_ms:
             return None
+
         intervals = tuple(sorted(vocal.active_intervals))
-        anchor_index = next((
-            i for i, interval in enumerate(intervals)
-            if interval[0] <= onset <= interval[1]
-        ), None)
-        if anchor_index is None:
+        chains: list[tuple[int, int]] = []
+        for start_ms, end_ms in intervals:
+            if chains and start_ms - chains[-1][1] < self.EVENT_CLOSE_QUIET_MS:
+                chains[-1] = (chains[-1][0], max(chains[-1][1], end_ms))
+            else:
+                chains.append((start_ms, end_ms))
+
+        # If voice was already active across the strong AutoAdv input lower bound,
+        # the first chain is inherited context. It cannot become current merely
+        # because a later HOOK identifies the text. A later separated chain can
+        # still be considered.
+        if vocal.active_across_causal_boundary and chains:
+            chains = chains[1:]
+
+        open_candidates = [
+            (start_ms, end_ms)
+            for start_ms, end_ms in chains
+            if end_ms + self.ALIGNMENT_ATTACH_GRACE_MS >= attached_ms
+            and capture_end_ms - end_ms < self.EVENT_CLOSE_QUIET_MS
+        ]
+        if not open_candidates:
             return None
+        return max(open_candidates, key=lambda interval: (interval[1], interval[0]))
 
-        inherited_context = False
-        if vocal.active_across_causal_boundary and anchor_index > 0:
-            chain_end = intervals[0][1]
-            inherited_context = True
-            for interval in intervals[1:anchor_index + 1]:
-                if interval[0] - chain_end >= self.EVENT_CLOSE_QUIET_MS:
-                    inherited_context = False
-                    break
-                chain_end = max(chain_end, interval[1])
-            if inherited_context:
-                return None
-            if self._stable_recurrence_since(
-                recurrence, vocal.start_ms, capture_end_ms
-            ):
-                return None
-
-        start_ms, end_ms = intervals[anchor_index]
-        for interval in intervals[anchor_index + 1:]:
-            if interval[0] - end_ms >= self.EVENT_CLOSE_QUIET_MS:
-                break
-            end_ms = max(end_ms, interval[1])
-        return onset, start_ms, end_ms, vocal.active_across_causal_boundary
-
-    def _open_event(
-        self, start_ms: int, end_ms: int, *, lexical: bool,
-        from_cross_boundary_context: bool = False,
-    ) -> None:
+    def _open_event(self, start_ms: int, end_ms: int, *, lexical: bool) -> None:
         self._event_open = True
         self._event_start_ms = start_ms
         self._event_last_vocal_ms = end_ms
         self._event_has_lexical_anchor = lexical
-        self._event_from_cross_boundary_context = from_cross_boundary_context
 
     def _clear_event(self) -> None:
         self._event_open = False
         self._event_start_ms = None
         self._event_last_vocal_ms = None
         self._event_has_lexical_anchor = False
-        self._event_from_cross_boundary_context = False
 
     def _event_connected_to(self, start_ms: int, end_ms: int) -> bool:
         if (not self._event_open or self._event_start_ms is None
@@ -324,8 +302,17 @@ class UtteranceProgressEstimator:
 
     def _stable_recurrence(self, recurrence: VocalRecurrenceEvidence,
                            capture_end_ms: int | None) -> bool:
-        return self._stable_recurrence_since(
-            recurrence, self._event_start_ms, capture_end_ms)
+        if (
+            recurrence.period_ms is None
+            or recurrence.strength < self.LOOP_STRENGTH
+            or recurrence.period_stability < self.LOOP_STABILITY
+            or recurrence.recent_strength < self.RECENT_LOOP_STRENGTH
+            or self._event_start_ms is None
+            or capture_end_ms is None
+        ):
+            return False
+        observed_ms = capture_end_ms - self._event_start_ms
+        return observed_ms >= max(self.MIN_LOOP_OBSERVATION_MS, recurrence.period_ms * 2)
 
     def observe(self, observation: NativeAudioObservation) -> UtteranceProgress:
         if self.progress.ended:
@@ -371,27 +358,26 @@ class UtteranceProgressEstimator:
             elif self._event_connected_to(*lexical_event):
                 self._event_has_lexical_anchor = True
                 self._update_open_event(vocal)
+            elif not self._event_has_lexical_anchor:
+                # Known-text relation is stronger than the provisional causal
+                # guard. If target evidence points to a separate event, replace
+                # the unowned candidate instead of letting old/background vocal
+                # activity block the current target. An already-closed lexical
+                # event remains closed so the delayed-END branch below can use it.
+                self._clear_event()
+                if capture_end - lexical_event[1] < self.EVENT_CLOSE_QUIET_MS:
+                    self._open_event(*lexical_event, lexical=True)
 
-        recurrence = observation.recurrence or VocalRecurrenceEvidence()
         if self._event_open:
             self._update_open_event(vocal)
         elif observation.causal_lower_bound_ms is not None:
-            causal_event = self._causal_event(vocal, recurrence, capture_end)
+            causal_event = self._causal_event(observation, vocal)
             if causal_event is not None:
-                onset, start_ms, end_ms, from_cross_boundary_context = causal_event
-                self._last_consumed_causal_onset_ms = onset
-                if capture_end - end_ms < self.EVENT_CLOSE_QUIET_MS:
-                    self._open_event(
-                        start_ms, end_ms, lexical=False,
-                        from_cross_boundary_context=from_cross_boundary_context)
+                start_ms, end_ms = causal_event
+                self._causal_candidate_consumed = True
+                self._open_event(start_ms, end_ms, lexical=False)
 
-        recurrent_context = bool(
-            self._event_open
-            and not self._event_has_lexical_anchor
-            and self._event_from_cross_boundary_context
-            and vocal is not None
-            and self._stable_recurrence_since(recurrence, vocal.start_ms, capture_end)
-        )
+        recurrence = observation.recurrence or VocalRecurrenceEvidence()
         recurrent_tail = bool(
             self._event_open
             and self._event_has_lexical_anchor
@@ -404,14 +390,7 @@ class UtteranceProgressEstimator:
         if recurrent_tail:
             state = UtteranceProgressState.ENDED
             ended_at = self._lexical_end_ms
-            self._clear_event()
-        elif recurrent_context:
-            # Stable recurrence of a structure that already crossed the causal
-            # boundary is inherited context, not current-target ACTIVE. It can
-            # therefore release an elapsed fallback policy without pretending
-            # that the current utterance itself has ended.
-            self._clear_event()
-            state = UtteranceProgressState.UNKNOWN
+            self._event_open = False
         elif self._event_open and self._event_last_vocal_ms is not None:
             quiet_ms = capture_end - self._event_last_vocal_ms
             if quiet_ms >= self.EVENT_CLOSE_QUIET_MS:
