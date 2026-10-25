@@ -5,6 +5,7 @@ whether a dialogue line has completed and never own game input.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,9 @@ import numpy as np
 
 from .audio_buffer import PCMChunk
 from .forced_alignment import _downsample_48k_to_16k
-from .utterance_progress import HumanVocalEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence
+from .utterance_progress import (
+    HumanVocalEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence, VocalScoreSample,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,16 @@ class AcousticFingerprint:
     at_ms: int
     values: tuple[float, ...]
     rms: float
+
+
+@dataclass(frozen=True)
+class _RecurrencePairBatch:
+    """Cached target-independent pair measurements for one later fingerprint."""
+
+    later_at_ms: int
+    earlier_at_ms: np.ndarray
+    spectral: np.ndarray
+    level: np.ndarray
 
 
 class VocalActivityObserver(Protocol):
@@ -252,16 +265,25 @@ class AcousticObservationHistory:
         "nonlexical": 0.45,
     }
     FINGERPRINT_BANDS = 12
+    # Recurrence never considers lags below 300 ms.  Sampling fingerprints at a
+    # fixed cadence keeps this target-independent cache independent of WASAPI
+    # packet size while retaining several measurements per minimum recurrence
+    # period.
+    FINGERPRINT_INTERVAL_MS = 80
     LOW_VOCAL_REFERENCE_MS = 8_000
 
     def __init__(self, *, horizon_ms: int = 10 * 60 * 1000):
         self.horizon_ms = int(horizon_ms)
         self._vocal: deque[VocalActivityFrame] = deque()
         self._fingerprints: deque[AcousticFingerprint] = deque()
+        self._recurrence_pairs: deque[_RecurrencePairBatch] = deque()
+        self._last_fingerprint_ms: int | None = None
 
     def reset(self) -> None:
         self._vocal.clear()
         self._fingerprints.clear()
+        self._recurrence_pairs.clear()
+        self._last_fingerprint_ms = None
 
     @property
     def latest_ms(self) -> int | None:
@@ -288,17 +310,47 @@ class AcousticObservationHistory:
         self._trim(frames[-1].at_ms)
 
     def add_fingerprint(self, chunk: PCMChunk) -> None:
+        at_ms = int(chunk.at_ms)
+        self._trim(at_ms)
+        if (self._last_fingerprint_ms is not None
+                and at_ms - self._last_fingerprint_ms < self.FINGERPRINT_INTERVAL_MS):
+            return
         values = self._spectral_fingerprint(chunk)
         if values is None:
             return
         raw = np.frombuffer(chunk.frames, dtype="<f4").reshape(-1, 2)
         mono = raw.mean(axis=1, dtype=np.float32)
         rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)))) if mono.size else 0.0
-        at_ms = int(chunk.at_ms)
-        self._fingerprints.append(AcousticFingerprint(
-            at_ms=at_ms, values=values, rms=rms,
-        ))
-        self._trim(at_ms)
+        self._last_fingerprint_ms = at_ms
+        fingerprint = AcousticFingerprint(at_ms=at_ms, values=values, rms=rms)
+
+        # Similarity is a target-independent measurement of two immutable
+        # fingerprints.  Measure each pair once when the later point arrives;
+        # recurrence queries may then select whatever time range they need
+        # without rebuilding all historical pairwise dot products.
+        if self._fingerprints:
+            earlier = tuple(self._fingerprints)
+            matrix = np.asarray([fp.values for fp in earlier], dtype=np.float64)
+            current = np.asarray(values, dtype=np.float64)
+            spectral = np.clip(matrix @ current, 0.0, 1.0)
+            earlier_levels = np.asarray([fp.rms for fp in earlier], dtype=np.float64)
+            maximum = np.maximum(earlier_levels, rms)
+            minimum = np.minimum(earlier_levels, rms)
+            level = np.ones_like(maximum)
+            nonzero = maximum > 1e-12
+            level[nonzero] = minimum[nonzero] / maximum[nonzero]
+            earlier_times = np.asarray([fp.at_ms for fp in earlier], dtype=np.int64)
+            lag = at_ms - earlier_times
+            keep = (lag >= 300) & (spectral >= 0.65) & (level >= 0.40)
+            if np.any(keep):
+                self._recurrence_pairs.append(_RecurrencePairBatch(
+                    later_at_ms=at_ms,
+                    earlier_at_ms=np.ascontiguousarray(earlier_times[keep]),
+                    spectral=np.ascontiguousarray(spectral[keep], dtype=np.float64),
+                    level=np.ascontiguousarray(level[keep], dtype=np.float64),
+                ))
+
+        self._fingerprints.append(fingerprint)
 
     def _trim(self, now_ms: int) -> None:
         cutoff = int(now_ms) - self.horizon_ms
@@ -306,6 +358,8 @@ class AcousticObservationHistory:
             self._vocal.popleft()
         while self._fingerprints and self._fingerprints[0].at_ms < cutoff:
             self._fingerprints.popleft()
+        while self._recurrence_pairs and self._recurrence_pairs[0].later_at_ms < cutoff:
+            self._recurrence_pairs.popleft()
 
     @classmethod
     def _spectral_fingerprint(cls, chunk: PCMChunk) -> tuple[float, ...] | None:
@@ -372,89 +426,111 @@ class AcousticObservationHistory:
                 frame_count=len(frames),
                 active_count=active_count,
                 peak_probability=max((frame.probability for frame in frames), default=0.0),
+                active_threshold=threshold,
                 active_intervals=self._series_intervals(
                     frames, start_ms=start_ms, end_ms=end_ms, threshold=threshold),
+                samples=tuple(
+                    VocalScoreSample(
+                        at_ms=int(frame.at_ms),
+                        probability=float(frame.probability),
+                        support_start_ms=int(
+                            frame.support_start_ms
+                            if frame.support_start_ms is not None else frame.at_ms),
+                    )
+                    for frame in frames
+                ),
             ))
         return HumanVocalEvidence(
             start_ms=int(start_ms), end_ms=int(end_ms), series=tuple(series))
 
-    def _active_near(self, at_ms: int, *, tolerance_ms: int = 320) -> bool:
-        left = at_ms - tolerance_ms
-        right = at_ms + tolerance_ms
-        return any(
-            left <= frame.at_ms <= right and frame.probability >= self._threshold(frame.source)
-            for frame in self._vocal
-        )
-
-    @staticmethod
-    def _spectral_similarity(a: tuple[float, ...], b: tuple[float, ...]) -> float:
-        if not a or not b or len(a) != len(b):
-            return 0.0
-        return max(0.0, min(1.0, float(np.dot(a, b))))
-
-    @staticmethod
-    def _level_consistency(a: AcousticFingerprint, b: AcousticFingerprint) -> float:
-        if max(a.rms, b.rms) <= 1e-12:
-            return 1.0
-        return max(0.0, min(1.0, min(a.rms, b.rms) / max(a.rms, b.rms)))
-
     def recurrence(self, *, start_ms: int, end_ms: int) -> VocalRecurrenceEvidence:
         # Recurrence is measured only at time points where at least one human-
-        # vocal observer has positive support.  The score scales themselves are
-        # not averaged or multiplied into spectral similarity.
+        # vocal observer has positive support.  Build the active-time index once
+        # for this immutable query instead of re-scanning every vocal frame for
+        # every fingerprint.
+        active_times = sorted(
+            frame.at_ms for frame in self._vocal
+            if frame.probability >= self._threshold(frame.source)
+            and start_ms - self.LOW_VOCAL_REFERENCE_MS - 320 <= frame.at_ms <= end_ms + 320
+        )
+
+        def active_near(at_ms: int) -> bool:
+            if not active_times:
+                return False
+            index = bisect_left(active_times, at_ms - 320)
+            return index < len(active_times) and active_times[index] <= at_ms + 320
+
         current = [
             fp for fp in self._fingerprints
-            if start_ms <= fp.at_ms <= end_ms and self._active_near(fp.at_ms)
+            if start_ms <= fp.at_ms <= end_ms and active_near(fp.at_ms)
         ]
         if len(current) < 3:
             return VocalRecurrenceEvidence()
 
-        pairs: list[tuple[float, float, int]] = []
-        for index, later in enumerate(current):
-            for earlier in current[:index]:
-                lag = later.at_ms - earlier.at_ms
-                if lag < 300:
-                    continue
-                spectral = self._spectral_similarity(later.values, earlier.values)
-                level = self._level_consistency(later, earlier)
-                if spectral >= 0.65 and level >= 0.40:
-                    pairs.append((spectral, level, lag))
+        active_set = {fp.at_ms for fp in current}
+        pair_spectral_parts: list[np.ndarray] = []
+        pair_level_parts: list[np.ndarray] = []
+        pair_lag_parts: list[np.ndarray] = []
+        for batch in self._recurrence_pairs:
+            later = batch.later_at_ms
+            if later < start_ms:
+                continue
+            if later > end_ms:
+                break
+            if later not in active_set:
+                continue
+            keep = np.fromiter(
+                (start_ms <= int(at) <= end_ms and int(at) in active_set
+                 for at in batch.earlier_at_ms),
+                dtype=np.bool_, count=batch.earlier_at_ms.size)
+            if not np.any(keep):
+                continue
+            earlier = batch.earlier_at_ms[keep]
+            pair_spectral_parts.append(batch.spectral[keep])
+            pair_level_parts.append(batch.level[keep])
+            pair_lag_parts.append(later - earlier)
 
-        if not pairs:
+        if not pair_spectral_parts:
             return VocalRecurrenceEvidence()
-
-        pairs.sort(key=lambda item: item[0], reverse=True)
-        top = pairs[:min(16, len(pairs))]
-        strength = float(np.mean([spectral for spectral, _, _ in top]))
-        level_consistency = float(np.mean([level for _, level, _ in top]))
-        lags = np.asarray([lag for _, _, lag in top], dtype=np.float64)
-        period = int(round(float(np.median(lags))))
-        spread = float(np.median(np.abs(lags - period))) if len(lags) else 0.0
+        pair_spectral = np.concatenate(pair_spectral_parts)
+        pair_level = np.concatenate(pair_level_parts)
+        pair_lag = np.concatenate(pair_lag_parts)
+        order = np.argsort(-pair_spectral, kind="stable")[:min(16, pair_spectral.size)]
+        top_spectral = pair_spectral[order]
+        top_level = pair_level[order]
+        top_lag = pair_lag[order].astype(np.float64, copy=False)
+        strength = float(np.mean(top_spectral))
+        level_consistency = float(np.mean(top_level))
+        period = int(round(float(np.median(top_lag))))
+        spread = float(np.median(np.abs(top_lag - period))) if top_lag.size else 0.0
         stability = max(0.0, 1.0 - spread / max(250.0, float(period)))
 
         recent = [fp for fp in current if fp.at_ms >= end_ms - 1500]
         reference = [fp for fp in current if fp.at_ms < end_ms - 300]
         recent_scores: list[float] = []
-        for now in recent:
-            candidates = [before for before in reference if before.at_ms <= now.at_ms - 300]
-            if candidates:
-                recent_scores.append(max(
-                    self._spectral_similarity(now.values, before.values)
-                    for before in candidates
-                ))
+        if recent and reference:
+            recent_values = np.asarray([fp.values for fp in recent], dtype=np.float64)
+            reference_values = np.asarray([fp.values for fp in reference], dtype=np.float64)
+            similarities = np.clip(recent_values @ reference_values.T, 0.0, 1.0)
+            reference_times = np.asarray([fp.at_ms for fp in reference], dtype=np.int64)
+            for row, now in enumerate(recent):
+                eligible = reference_times <= now.at_ms - 300
+                if np.any(eligible):
+                    recent_scores.append(float(np.max(similarities[row, eligible])))
         recent_strength = float(np.mean(recent_scores)) if recent_scores else 0.0
 
         low_vocal_refs = [
             fp for fp in self._fingerprints
             if start_ms - self.LOW_VOCAL_REFERENCE_MS <= fp.at_ms < end_ms
-            and not self._active_near(fp.at_ms)
+            and not active_near(fp.at_ms)
         ]
         low_vocal_similarity = 0.0
         if low_vocal_refs and recent:
-            low_vocal_similarity = max(
-                self._spectral_similarity(now.values, ref.values)
-                for now in recent for ref in low_vocal_refs
-            )
+            recent_values = np.asarray([fp.values for fp in recent], dtype=np.float64)
+            low_values = np.asarray([fp.values for fp in low_vocal_refs], dtype=np.float64)
+            similarities = np.clip(recent_values @ low_values.T, 0.0, 1.0)
+            if similarities.size:
+                low_vocal_similarity = float(np.max(similarities))
 
         return VocalRecurrenceEvidence(
             strength=strength,

@@ -188,8 +188,12 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
         {'event': 'trace_started', 'version': 3, 'at_ns': start_ns},
         {'event': 'validation_collection_target', 'seq': 1, 'at_ns': start_ns + 1,
          'phase': 'accuracy', 'dialogues': 2, 'final_observation_seconds': 12.0},
-        {'event': 'validation_game_input', 'seq': 2, 'at_ns': voice_ns + 100_000_000,
+        {'event': 'game_input_observed', 'seq': 2, 'at_ns': voice_ns + 90_000_000,
+         'at_ms': 1234},
+        {'event': 'validation_game_input', 'seq': 3, 'at_ns': voice_ns + 100_000_000,
          'case': ACCURACY_SCENARIO[0]['id'], 'scheduled_after_ms': 100},
+        {'event': 'audio_input_lower_bound', 'seq': 4, 'at_ns': voice_ns + 150_000_000,
+         'at_ms': 1234, 'source': 'external_input'},
     ]
     authored_fixture = [
         {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': start_ns, 'pid': 50},
@@ -209,6 +213,8 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
     assert first_result['product_input_at_ns'] is None
     assert first_result['early_input'] is None
     assert authored['facts']['validation_game_inputs'] == 1
+    assert authored['facts']['validation_game_inputs_observed'] == 1
+    assert authored['facts']['validation_game_input_bounds'] == 1
 
 
 def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
@@ -396,7 +402,6 @@ def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_co
              'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
                                'active_count': 4, 'peak_probability': .93,
                                'active_intervals': [[1072, 1312]]}],
-             'vocal_active_intervals': [[1072, 1312]],
              'recurrence_strength': .91, 'recurrence_period_ms': 640,
              'recurrence_stability': .82, 'recent_recurrence_strength': .88,
              'recurrence_level_consistency': .84,
@@ -500,21 +505,30 @@ def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_
                 if frame < frames:
                     logits[frame, 0] = 0.0; logits[frame, self.vocab[phone]] = 7.0
             return logits
+        infer_full = infer
 
     with tempfile.TemporaryDirectory() as root:
         model, vocab = Path(root) / 'model', Path(root) / 'vocab'
         model.write_bytes(b'x'); vocab.write_bytes(b'x')
-        report = run_alignment_benchmark(model, vocab, conditions=('clean',), rounds=1, seed=10,
-                                         model_backend=StaticModel(), g2p=StaticG2P())
+        report = run_alignment_benchmark(
+            model, vocab, conditions=('clean',), rounds=1, seed=10,
+            model_backend=StaticModel(), g2p=StaticG2P(), compare_full_posterior=True)
     assert report['schema'] == 'autoadv-alignment-benchmark-v3'
     assert 'cer' not in report['conditions']['clean'] and not report['real_game_verified']
+    assert report['whole_window_reference']['semantic_mismatches'] == 0
+    assert report['whole_window_reference']['frame_count_mismatches'] == 0
 
-    unsafe = {'conditions': {
-        'clean': {'runs': 1, 'associated': 1, 'committed': 1, 'early_commits': 1, 'early_decisions': 0},
-        'bgm': {'runs': 1, 'associated': 1, 'committed': 0, 'early_commits': 0, 'early_decisions': 0},
-        'truncated': {'runs': 1, 'committed': 1},
-    }}
+    unsafe = {
+        'conditions': {
+            'clean': {'runs': 1, 'associated': 1, 'committed': 1, 'early_commits': 1, 'early_decisions': 0},
+            'bgm': {'runs': 1, 'associated': 1, 'committed': 0, 'early_commits': 0, 'early_decisions': 0},
+            'truncated': {'runs': 1, 'committed': 1},
+        },
+        'whole_window_reference': {'semantic_mismatches': 1, 'frame_count_mismatches': 1},
+    }
     failures = contract_failures(unsafe)
     assert any('early committed' in x for x in failures)
     assert any('bgm target end' in x for x in failures)
     assert any('missing target suffix' in x for x in failures)
+    assert any('target-alignment semantics' in x for x in failures)
+    assert any('CTC frame timeline' in x for x in failures)

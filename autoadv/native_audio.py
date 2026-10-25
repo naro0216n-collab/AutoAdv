@@ -29,11 +29,6 @@ class NativeAudio:
 
     RAW_HISTORY_MS = 180_000
     MAX_ALIGNMENT_WINDOW_MS = 60_000
-    # Without an observed input lower bound, a long process-history scan has no
-    # causal ownership advantage and can starve later Presentations. Keep the
-    # expensive target-conditioned query bounded; retained PCM/features remain
-    # available as factual history and truncation is reported explicitly.
-    MAX_UNBOUNDED_ALIGNMENT_WINDOW_MS = 20_000
     INFERENCE_INTERVAL_MS = 500
     MIN_AUDIO_MS = 300
 
@@ -165,12 +160,7 @@ class NativeAudio:
         semantic_start = self._semantic_history_start_locked()
         if end_ms is None:
             end_ms = self.features.latest_ms or self.clock()
-        max_window = (
-            self.MAX_ALIGNMENT_WINDOW_MS
-            if self.causal_lower_bound_ms is not None
-            else self.MAX_UNBOUNDED_ALIGNMENT_WINDOW_MS
-        )
-        resource_start = max(0, int(end_ms) - max_window)
+        resource_start = max(0, int(end_ms) - self.MAX_ALIGNMENT_WINDOW_MS)
         start = max(semantic_start, resource_start)
         return start, start > semantic_start
 
@@ -280,7 +270,7 @@ class NativeAudio:
         if self.aligner is not None and self._lexical_measurement is None:
             if self._last_pcm_end_ms <= self._inference_at:
                 return None
-            return self._request_alignment_locked(self._last_pcm_end_ms)
+            return self._request_alignment_locked(self._last_pcm_end_ms, queue_if_busy=True)
         if self._last_pcm_end_ms <= self._observation_at:
             return None
         return self._feature_observation_locked(
@@ -309,7 +299,7 @@ class NativeAudio:
                 return False
             if (self.aligner is not None and self._lexical_measurement is None
                     and boundary - self.window_start_ms >= self.MIN_AUDIO_MS):
-                item = self._request_alignment_locked(boundary)
+                item = self._request_alignment_locked(boundary, queue_if_busy=True)
             else:
                 item = self._feature_observation_locked(
                     token, self._generation, boundary, history_truncated=False)
@@ -358,21 +348,28 @@ class NativeAudio:
         self._inflight_generation = generation
         return ("infer", token, generation, samples, aligner, requested_ns)
 
-    def _request_alignment_locked(self, boundary: int):
+    def _request_alignment_locked(self, boundary: int, *, queue_if_busy: bool = False):
         if (self._closed or self.token is None or self.aligner is None):
             return None
         boundary = int(boundary)
         if boundary <= self._inference_at:
             return None
-        self._inference_at = boundary
         token, generation, aligner = self.token, self._generation, self.aligner
         requested_ns = time.perf_counter_ns() if self.on_inference else 0
         if self._inflight:
-            # One physical worker means queued generations can only make the
-            # newest target older. Keep a single latest request instead.
-            self._pending_inference = (
-                token, generation, boundary, aligner, requested_ns)
+            # Intermediate snapshots are observations, not obligations.  When
+            # the same target already has ONNX work in flight, continuously
+            # queueing every 500 ms makes the worker permanently lag behind the
+            # PCM frontier.  Drop those redundant intermediate requests without
+            # advancing ``_inference_at``: a later explicit fence must still be
+            # able to request that PCM frontier.  A generation replacement or
+            # synchronization fence keeps exactly one newest pending request.
+            if queue_if_busy or self._inflight_generation != generation:
+                self._inference_at = boundary
+                self._pending_inference = (
+                    token, generation, boundary, aligner, requested_ns)
             return None
+        self._inference_at = boundary
         return self._start_alignment_locked(
             token, generation, boundary, aligner, requested_ns)
 
@@ -662,10 +659,13 @@ class NativeAudio:
                         "frame_count": item.frame_count,
                         "active_count": item.active_count,
                         "peak_probability": round(item.peak_probability, 4),
+                        "active_threshold": item.active_threshold,
+                        "measurement_support_start_ms": min(
+                            (sample.support_start_ms for sample in item.samples), default=None),
+                        "measurement_support_end_ms": max(
+                            (sample.at_ms for sample in item.samples), default=None),
                         "active_intervals": list(item.active_intervals),
                     } for item in observation.vocal.series] if observation.vocal else []),
-                    "vocal_active_intervals": (
-                        list(observation.vocal.active_intervals) if observation.vocal else []),
                     "recurrence_strength": round(observation.recurrence.strength, 4) if observation.recurrence else 0.0,
                     "recurrence_period_ms": observation.recurrence.period_ms if observation.recurrence else None,
                     "recurrence_stability": round(observation.recurrence.period_stability, 4) if observation.recurrence else 0.0,

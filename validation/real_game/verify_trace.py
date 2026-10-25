@@ -111,8 +111,62 @@ def _successful_product_inputs(records: Sequence[dict], issues: list[str]) -> li
     return successful
 
 
+def _external_input_contract(records: Sequence[dict], issues: list[str]) -> dict:
+    """Match authored stimuli to product-observed external-input facts.
+
+    This is provenance verification only: it does not infer that the input
+    advanced dialogue.  The product must first observe the same low-level input,
+    then a later HOOK may consume that timestamp as its causal lower bound.
+    """
+    authored = [
+        row for row in records
+        if row.get('event') == 'validation_game_input' and type(row.get('at_ns')) is int
+    ]
+    observed = [
+        row for row in records
+        if row.get('event') == 'game_input_observed'
+        and type(row.get('at_ns')) is int and type(row.get('at_ms')) is int
+    ]
+    bounds = [
+        row for row in records
+        if row.get('event') == 'audio_input_lower_bound'
+        and row.get('source') == 'external_input'
+        and type(row.get('at_ms')) is int
+    ]
+    matched_observed = 0
+    matched_bounds = 0
+    matches: dict[tuple[str, int], dict] = {}
+    for stimulus in authored:
+        at_ns = int(stimulus['at_ns'])
+        candidates = [
+            row for row in observed
+            if abs(int(row['at_ns']) - at_ns) <= 500_000_000
+        ]
+        if not candidates:
+            issues.append(
+                f"authored game input was not observed by product input path: case={stimulus.get('case')}")
+            continue
+        measurement = min(candidates, key=lambda row: abs(int(row['at_ns']) - at_ns))
+        matched_observed += 1
+        bound = next((row for row in bounds if row.get('at_ms') == measurement.get('at_ms')), None)
+        if bound is None:
+            issues.append(
+                f"observed authored game input was not consumed as a causal lower bound: case={stimulus.get('case')}")
+        else:
+            matched_bounds += 1
+        key = (str(stimulus.get('case') or ''), at_ns)
+        matches[key] = {'observed': measurement, 'bound': bound}
+    return {
+        'authored': authored,
+        'matches': matches,
+        'observed_count': matched_observed,
+        'bound_count': matched_bounds,
+    }
+
+
 def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[dict],
-                           expected: Sequence[dict], issues: list[str]) -> list[dict]:
+                           expected: Sequence[dict], issues: list[str],
+                           input_contract: dict | None = None) -> list[dict]:
     cases = [r for r in fixture_records if r.get('event') == 'fixture_case']
     expected_ids = [str(line.get('id') or '') for line in expected]
     first_pass = cases[:len(expected_ids)]
@@ -174,6 +228,11 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             row for row in authored_inputs
             if row.get('case') == case_id and in_case_window(row)
         ]
+        authored_match = None
+        if case_authored_inputs and input_contract is not None:
+            authored = case_authored_inputs[0]
+            authored_key = (str(authored.get('case') or ''), int(authored.get('at_ns') or 0))
+            authored_match = input_contract.get('matches', {}).get(authored_key)
         case_recoveries = [
             row for row in recoveries
             if row.get('case') == case_id and in_case_window(row)
@@ -231,6 +290,11 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             'product_input_count': len(case_inputs),
             'authored_game_input_at_ns': authored_input_ns,
             'authored_game_input_count': len(case_authored_inputs),
+            'authored_input_observed_at_ns': (
+                authored_match['observed'].get('at_ns') if authored_match else None),
+            'authored_input_causal_bound_ms': (
+                authored_match['bound'].get('at_ms')
+                if authored_match and authored_match.get('bound') else None),
             'recovery_input_at_ns': case_recoveries[0].get('at_ns') if case_recoveries else None,
             'foreground_endpoint_status': endpoint_status,
             'known_foreground_end_earliest_ns': earliest_end_ns,
@@ -259,6 +323,8 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
         issues.append(
             f'fixture cases not observed: observed={len(fixture_cases)} requested={requested_cases}')
 
+    input_contract = _external_input_contract(records, issues) if phase == 'accuracy' else None
+
     facts = {
         'requested_cases': requested_cases,
         'fixture_cases': len(fixture_cases) if fixture_records is not None else None,
@@ -268,6 +334,10 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
         'presentation_completions': sum(r.get('event') == 'presentation_complete' for r in records),
         'advance_inputs': sum(r.get('event') == 'advance_input' for r in records),
         'validation_game_inputs': sum(r.get('event') == 'validation_game_input' for r in records),
+        'validation_game_inputs_observed': (
+            input_contract['observed_count'] if input_contract is not None else None),
+        'validation_game_input_bounds': (
+            input_contract['bound_count'] if input_contract is not None else None),
         'validation_recovery_inputs': sum(r.get('event') == 'validation_recovery_input' for r in records),
         'driver_failures': sum(r.get('event') == 'validation_driver_failure' for r in records),
     }
@@ -281,7 +351,8 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
             if requested_cases is None:
                 requested_cases = len(expected)
                 facts['requested_cases'] = requested_cases
-            case_results = _accuracy_case_results(records, fixture_records, expected, issues)
+            case_results = _accuracy_case_results(
+                records, fixture_records, expected, issues, input_contract)
 
     failures = [row for row in case_results
                 if row.get('outcome') in {

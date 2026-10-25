@@ -1,10 +1,10 @@
 """Windows input boundaries used by AutoAdv.
 
 Automatic advancement is posted directly to the selected game HWND so it does
-not steal focus.  Separately, monitoring can observe ordinary keyboard/mouse
-input that is actually directed at the selected game process.  The observer
-publishes only a monotonic timestamp; it never decides that the input advanced
-dialogue or changed product state.
+not steal focus.  Separately, monitoring can observe low-level keyboard/mouse
+input from outside AutoAdv that is actually directed at the selected game
+process.  The observer publishes only a monotonic timestamp; it never decides
+that the input advanced dialogue or changed product state.
 """
 from __future__ import annotations
 
@@ -36,8 +36,6 @@ _EXTENDED_KEYS = {
 }
 _KEY_DOWN = frozenset({WM_KEYDOWN, WM_SYSKEYDOWN})
 _MOUSE_DOWN = frozenset({WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN})
-LLKHF_INJECTED = 0x10
-LLMHF_INJECTED = 0x01
 
 
 def key_message_parameters(virtual_key: int, scan_code: int) -> tuple[int, int, int, int]:
@@ -90,11 +88,13 @@ class WindowsAdvancementInput:
 
 
 class WindowsGameInputObserver:
-    """Observe physical keyboard/mouse-button input directed at one game process.
+    """Observe external low-level keyboard/mouse input directed at one game.
 
     The callback receives only a monotonic timestamp.  No key/button is treated
-    as proof that dialogue advanced.  AutoAdv's own PostMessage path is not a
-    low-level input event, and explicitly injected low-level events are ignored.
+    as proof that dialogue advanced.  AutoAdv's own advancement path uses
+    PostMessage and therefore never appears here.  Low-level input injected by
+    another application is still an external game input and is retained as the
+    same factual timing evidence as hardware input.
     """
 
     def __init__(self, expected_pid: int, on_input: Callable[[int], None], *,
@@ -199,7 +199,7 @@ class WindowsGameInputObserver:
             if code >= 0 and int(message) in _KEY_DOWN:
                 info = ctypes.cast(data, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 hwnd = int(user32.GetForegroundWindow() or 0)
-                if not (int(info.flags) & LLKHF_INJECTED) and self._window_pid(user32, hwnd) == self.pid:
+                if self._window_pid(user32, hwnd) == self.pid:
                     publish()
             return user32.CallNextHookEx(keyboard_hook, code, message, data)
 
@@ -208,7 +208,7 @@ class WindowsGameInputObserver:
             if code >= 0 and int(message) in _MOUSE_DOWN:
                 info = ctypes.cast(data, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
                 hwnd = int(user32.WindowFromPoint(info.pt) or 0)
-                if not (int(info.flags) & LLMHF_INJECTED) and self._window_pid(user32, hwnd) == self.pid:
+                if self._window_pid(user32, hwnd) == self.pid:
                     publish()
             return user32.CallNextHookEx(mouse_hook, code, message, data)
 

@@ -549,7 +549,7 @@ class AutoAdvApplication:
     directly, or translates Controller reasons into user-facing status text.
     """
 
-    USER_INPUT_HOOK_PROXIMITY_MS = 2_000
+    EXTERNAL_INPUT_HOOK_PROXIMITY_MS = 2_000
 
     def __init__(self, catalog: Catalog, persist: Callable[[], None], *,
                  input_send: Callable | None = None, target_ready: Callable | None = None,
@@ -676,7 +676,7 @@ class AutoAdvApplication:
             self._schedule_runtime(0, callback)
 
     def _record_game_input(self, at_ms: int) -> None:
-        """Record one factual user-input time directed at the monitored game."""
+        """Record one factual external-input time directed at the monitored game."""
         at_ms = int(at_ms)
         if at_ms <= 0:
             return
@@ -687,11 +687,11 @@ class AutoAdvApplication:
                 'game_input_observed', self.controller.token, at_ms=ms))
 
     def _recent_game_input_lower_bound(self, hook_received_ns: int) -> int | None:
-        """Return the latest nearby observed user input preceding a replacement HOOK."""
+        """Return the latest nearby observed external input preceding a replacement HOOK."""
         if hook_received_ns <= 0:
             return None
         hook_ms = hook_received_ns // 1_000_000
-        oldest = hook_ms - self.USER_INPUT_HOOK_PROXIMITY_MS
+        oldest = hook_ms - self.EXTERNAL_INPUT_HOOK_PROXIMITY_MS
         with self._game_input_lock:
             while self._game_input_times and self._game_input_times[0] < oldest:
                 self._game_input_times.popleft()
@@ -702,7 +702,7 @@ class AutoAdvApplication:
             if not candidates:
                 return None
             selected = candidates[-1]
-            # One physical user input can bound only the transition it is paired
+            # One external game input can bound only the transition it is paired
             # with. Drop it and any older observations so a later HOOK cannot
             # reuse the same causal fact.
             while self._game_input_times and self._game_input_times[0] <= selected:
@@ -923,7 +923,7 @@ class AutoAdvApplication:
                 input_lower_bound_ms=input_lower_bound_ms)
             if input_lower_bound_ms is not None:
                 self._emit_runtime_event(
-                    'audio_input_lower_bound', token, at_ms=input_lower_bound_ms, source='user_input')
+                    'audio_input_lower_bound', token, at_ms=input_lower_bound_ms, source='external_input')
         if utterance.advance_mode.value == 'text':
             self._schedule(utterance.text_wait_ms,
                            lambda t=token: self._runtime_presentation_event(t, 'text_elapsed'))
@@ -1295,9 +1295,13 @@ class AutoAdvApplication:
                 'frame_count': item.frame_count,
                 'active_count': item.active_count,
                 'peak_probability': item.peak_probability,
+                'active_threshold': item.active_threshold,
+                'measurement_support_start_ms': (
+                    min((sample.support_start_ms for sample in item.samples), default=None)),
+                'measurement_support_end_ms': (
+                    max((sample.at_ms for sample in item.samples), default=None)),
                 'active_intervals': list(item.active_intervals),
             } for item in vocal.series] if vocal is not None else []),
-            vocal_active_intervals=(list(vocal.active_intervals) if vocal is not None else []),
             recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
             recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
             recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),

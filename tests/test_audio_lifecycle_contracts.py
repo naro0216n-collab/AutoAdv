@@ -157,6 +157,25 @@ def test_native_audio_generation_keeps_one_physical_worker_and_only_latest_pendi
         native.feed(chunk)
         assert model.started.wait(1)
 
+        # New PCM for the same target does not create an ONNX backlog while the
+        # previous snapshot is still running; an intermediate snapshot can be
+        # skipped without changing any later immutable query result.
+        later = stereo_chunk(2200, 600)
+        native.history.push(later, target_pid=42)
+        native.feed(later)
+        with native._lock:
+            assert native._pending_inference is None
+            assert native._inference_at < later.at_ms
+
+        # A synchronization fence at the dropped frontier is not lost.  Unlike
+        # a periodic intermediate snapshot it is an Application obligation and
+        # must become the one pending query while the worker is occupied.
+        assert native.request_assessment_through(old, later.at_ms) is False
+        with native._lock:
+            assert native._pending_inference is not None
+            assert native._pending_inference[0] == old
+            assert native._pending_inference[2] == later.at_ms
+
         # Replacing a target invalidates the old result, but cannot make the
         # physical ONNX worker idle. Intermediate targets are therefore
         # coalesced instead of being queued behind obsolete work.
@@ -262,7 +281,7 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
     assert early.recurrence == late.recurrence
 
 
-def test_unbounded_target_alignment_has_a_resource_window_without_inventing_a_causal_bound():
+def test_target_alignment_resource_window_does_not_invent_a_causal_bound():
     observations, reports = [], []
     native = make_native(
         CountingPosterior(), observations, reports=reports, clock=lambda: 50_000)
@@ -270,9 +289,9 @@ def test_unbounded_target_alignment_has_a_resource_window_without_inventing_a_ca
     try:
         native.history.start(42)
         # Target-independent history can be much older than the current query.
-        # With no observed input lower bound, expensive CTC work is resource-
-        # bounded and the loss of older search history is exposed as provenance,
-        # not rewritten into an acoustic start fact.
+        # The finite alignment resource window is provenance only; truncating
+        # retained search history must not be rewritten into an acoustic start
+        # fact or a causal lower bound.
         native.features.add_vocal((
             VocalActivityFrame(at_ms=1_000, probability=0.0),
             VocalActivityFrame(at_ms=50_000, probability=0.0),
@@ -283,7 +302,7 @@ def test_unbounded_target_alignment_has_a_resource_window_without_inventing_a_ca
         wait_idle(native)
 
         assert native.causal_lower_bound_ms is None
-        assert native.window_start_ms >= 50_000 - native.MAX_UNBOUNDED_ALIGNMENT_WINDOW_MS
+        assert native.window_start_ms >= 50_000 - native.MAX_ALIGNMENT_WINDOW_MS
         assert reports[-1][1]['audio_ms'] == pytest.approx(1_000.0)
         assert observations[-1][1].history_truncated
     finally:
@@ -397,10 +416,12 @@ def test_human_vocal_observers_keep_independent_score_series_and_time_support():
     by_source = {item.source: item for item in vocal.series}
     assert by_source['nonlexical'].peak_probability == pytest.approx(.9)
     assert by_source['nonlexical'].active_count > 0
+    assert by_source['nonlexical'].samples
+    assert by_source['nonlexical'].samples[0].support_start_ms == 760
     assert by_source['speech'].active_count == 0
     # No cross-model mean/"combined probability" exists; only the union of
     # independently thresholded time support is exposed for temporal reasoning.
-    assert vocal.active_intervals
+    assert any(item.active_intervals for item in vocal.series)
 
 
 def test_vocal_history_is_a_queryable_measurement_cache_not_a_boundary_state_machine():

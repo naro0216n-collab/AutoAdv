@@ -215,7 +215,7 @@ def test_unsent_hook_replacement_uses_only_nearby_observed_game_input_as_causal_
     assert any(name == 'audio_input_lower_bound' and detail['at_ms'] == 1400
                for name, _, detail in events)
 
-    # A stale user input is not stretched to explain a later HOOK. With no
+    # A stale external input is not stretched to explain a later HOOK. With no
     # nearby observed input, the new target remains unbounded rather than using
     # HOOK time as an invented start.
     app._record_game_input(2000)
