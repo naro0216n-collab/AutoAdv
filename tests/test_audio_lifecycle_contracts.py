@@ -179,7 +179,7 @@ def make_native(model, observations, errors=None, reports=None, *, clock=lambda:
         42, Path('unused-helper.dll'), Path('unused.onnx'), Path('unused.json'),
         lambda token, reason: (errors if errors is not None else []).append((token, reason)),
         model_backend=model, g2p=StaticG2P(), clock=clock, vocal_observer=vocal_observer or StaticVocalObserver(),
-        on_observation=lambda token, item: observations.append((token, item)),
+        on_progress=lambda token, _progress, item: observations.append((token, item)),
         on_inference=(lambda token, item: reports.append((token, item))) if reports is not None else None,
     )
 

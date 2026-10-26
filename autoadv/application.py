@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from .conversation import Controller, Target, Token
 from .g2p import G2PBackend, default_g2p
 from .utterance_progress import (
-    NativeAudioObservation, UtteranceProgress, UtteranceProgressState, evaluate_audio_snapshot,
+    NativeAudioObservation, UtteranceProgress, UtteranceProgressState,
 )
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
@@ -1245,13 +1245,14 @@ class AutoAdvApplication:
     def native_audio_available(self) -> bool:
         return self._native_audio is not None
 
-    def _consume_native_observation(self, token: Token, observation: NativeAudioObservation) -> bool:
-        """Apply one current-generation acoustic observation to product state."""
+    def _consume_native_progress(
+        self, token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+    ) -> bool:
+        """Apply one current-generation integrated acoustic result to product state."""
         state = self.runtime_state()
         if token != state.token or state.completed or state.sent:
             return False
         previous = self.controller.native_progress
-        progress = evaluate_audio_snapshot(observation)
 
         lexical = observation.lexical
         vocal = observation.vocal
@@ -1296,11 +1297,10 @@ class AutoAdvApplication:
             heartbeat_at_ms=observation.heartbeat_at_ms,
         )
 
-        # Snapshot evaluation is stateless, but callbacks may race across the
-        # alignment worker and the capture thread.  An older completed query is
-        # still useful telemetry; it must not replace a newer query result in
-        # Controller state. Equal frontiers remain eligible because a later
-        # target-conditioned measurement can strengthen the same PCM snapshot.
+        # Alignment work and endpoint observation may complete out of order. An
+        # older result remains useful telemetry but cannot replace a newer audio
+        # frontier in Controller state. Equal frontiers remain eligible because
+        # stronger evidence can be produced for the same captured PCM.
         if (previous.evidence_at_ms is not None
                 and progress.evidence_at_ms is not None
                 and progress.evidence_at_ms < previous.evidence_at_ms):
@@ -1370,13 +1370,18 @@ class AutoAdvApplication:
             if current():
                 self._dispatch_runtime(lambda: consume_error(token, detail))
 
-        def consume_observation(token: Token, observation: NativeAudioObservation) -> None:
+        def consume_progress(
+            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+        ) -> None:
             if current():
-                self._consume_native_observation(token, observation)
+                self._consume_native_progress(token, progress, observation)
 
-        def publish_observation(token: Token, observation: NativeAudioObservation) -> None:
+        def publish_progress(
+            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+        ) -> None:
             if current():
-                self._dispatch_runtime(lambda: consume_observation(token, observation))
+                self._dispatch_runtime(
+                    lambda: consume_progress(token, progress, observation))
 
         def publish_pcm(token: Token, frames: int) -> None:
             if current():
@@ -1418,7 +1423,7 @@ class AutoAdvApplication:
                     human_vocal_model=Path(human_vocal_model),
                     on_pcm=publish_pcm,
                     on_inference=publish_inference,
-                    on_observation=publish_observation)
+                    on_progress=publish_progress)
                 native.start()
                 self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:

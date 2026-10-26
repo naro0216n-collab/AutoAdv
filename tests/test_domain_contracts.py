@@ -9,7 +9,7 @@ from autoadv.audio_buffer import PCMChunk
 from autoadv.utterance_progress import (
     HumanVocalEvidence, LexicalProgressEvidence, NativeAudioObservation,
     VocalEvidenceSeries, VocalRecurrenceEvidence, VocalScoreSample, UtteranceProgressState,
-    evaluate_audio_snapshot,
+    evaluate_utterance_progress,
 )
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import HaqumeiG2P, PronunciationCandidate, count_reading_units, reading_units_from_candidates
@@ -260,10 +260,21 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             causal_lower_bound_ms=lower, input_candidates_ms=tuple(inputs),
             target_attached_ms=attached)
 
+    def evaluate(item: NativeAudioObservation):
+        progress, _recurrence = evaluate_utterance_progress(
+            capture_end_ms=item.capture_end_ms, lexical=item.lexical, vocal=item.vocal,
+            causal_lower_bound_ms=item.causal_lower_bound_ms,
+            input_candidates_ms=item.input_candidates_ms,
+            recurrence_lookup=(
+                lambda _start, _end: item.recurrence
+                if item.recurrence is not None else VocalRecurrenceEvidence()),
+        )
+        return progress
+
     # A known-text prefix is direct evidence that a finite target utterance is
     # still in progress. A committed text end is not enough while connected
     # human-vocal support is still physically continuing.
-    prefix = evaluate_audio_snapshot(observation(
+    prefix = evaluate(observation(
         lex=lexical(complete=False, committed=False),
         voc=vocal(intervals=((1100, 1580),)), end=1600))
     assert prefix.state == UtteranceProgressState.ACTIVE
@@ -272,7 +283,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     # target-connected chain has endpoint-confirming context, the same partial
     # lexical relation becomes unresolved rather than suppressing fallback
     # forever.
-    closed_prefix = evaluate_audio_snapshot(observation(
+    closed_prefix = evaluate(observation(
         lex=lexical(complete=False, committed=False),
         voc=vocal(intervals=((1100, 1340),), end=1800), end=1800))
     assert closed_prefix.state == UtteranceProgressState.UNKNOWN
@@ -280,13 +291,13 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     continuing_snapshot = observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580), (1700, 1980)), end=2000),
         end=2000)
-    continuing = evaluate_audio_snapshot(continuing_snapshot)
+    continuing = evaluate(continuing_snapshot)
     assert continuing.state == UtteranceProgressState.ACTIVE
-    # The reducer has no inference history: identical evidence is identical
+    # The evaluator has no inference history: identical evidence is identical
     # regardless of how many previous evaluations happened.
-    assert evaluate_audio_snapshot(continuing_snapshot) == continuing
+    assert evaluate(continuing_snapshot) == continuing
 
-    ended = evaluate_audio_snapshot(observation(
+    ended = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100), end=2100))
     assert ended.state == UtteranceProgressState.ENDED
     assert ended.ended_at_ms == 1580
@@ -295,7 +306,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         strength=.9, period_ms=600, period_stability=.85,
         recent_strength=.86, level_consistency=.9,
         low_vocal_reference_similarity=.2)
-    loop_released = evaluate_audio_snapshot(observation(
+    loop_released = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 2980),), end=3000),
         rec=stable_loop, end=3000))
     # Repetition can release finite-risk protection, but it cannot manufacture
@@ -309,7 +320,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         strength=.9, period_ms=600, period_stability=.85,
         recent_strength=.86, level_consistency=.9,
         low_vocal_reference_similarity=.88)
-    still_active = evaluate_audio_snapshot(observation(
+    still_active = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 2980),), end=3000),
         rec=explained_loop, end=3000))
     assert still_active.state == UtteranceProgressState.ACTIVE
@@ -317,7 +328,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     # Lack of an observer measurement is not observed quiet.  A committed
     # lexical end cannot become a physical endpoint merely because the vocal
     # measurement series is absent.
-    unmeasured = evaluate_audio_snapshot(observation(
+    unmeasured = evaluate(observation(
         lex=lexical(), voc=HumanVocalEvidence(start_ms=900, end_ms=2100), end=2100))
     assert unmeasured.state == UtteranceProgressState.UNKNOWN
 
@@ -334,38 +345,38 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             ),
         ),),
     )
-    assert evaluate_audio_snapshot(observation(
+    assert evaluate(observation(
         lex=lexical(), voc=missed_voice, end=2100)).state == UtteranceProgressState.UNKNOWN
 
     # Non-lexical human-vocal change after an observed input lower bound is a
     # finite-vocal cut risk, not source ownership. It suppresses fallback while
     # active, then returns to UNKNOWN when quiet or stable recurrence removes
     # that risk; it never manufactures ENDED.
-    nonlex_active = evaluate_audio_snapshot(observation(
+    nonlex_active = evaluate(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400))
     assert nonlex_active.state == UtteranceProgressState.ACTIVE
 
     # External user inputs remain independent timestamps.  No oldest/newest
     # input is selected as a boundary: an open non-lexical vocal change is only
     # protected when at least one observed input precedes that measured change.
-    without_input_candidate = evaluate_audio_snapshot(observation(
+    without_input_candidate = evaluate(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400, lower=None))
     assert without_input_candidate.state == UtteranceProgressState.UNKNOWN
-    with_input_candidates = evaluate_audio_snapshot(observation(
+    with_input_candidates = evaluate(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400,
         lower=None, inputs=(1080, 1200, 1300)))
     assert with_input_candidates.state == UtteranceProgressState.ACTIVE
-    only_post_onset_input = evaluate_audio_snapshot(observation(
+    only_post_onset_input = evaluate(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400,
         lower=None, inputs=(1200, 1300)))
     assert only_post_onset_input.state == UtteranceProgressState.UNKNOWN
 
     # For known text, retained-PCM alignment locates the target itself.  External
     # input timestamps neither widen nor move the lexical relation.
-    lexical_without_inputs = evaluate_audio_snapshot(observation(
+    lexical_without_inputs = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100),
         end=2100, lower=None))
-    lexical_with_inputs = evaluate_audio_snapshot(observation(
+    lexical_with_inputs = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100),
         end=2100, lower=None, inputs=(800, 1200, 1900)))
     assert lexical_with_inputs == lexical_without_inputs
@@ -387,7 +398,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             ),
         ),),
     )
-    assert evaluate_audio_snapshot(observation(
+    assert evaluate(observation(
         voc=subthreshold_vocal, end=1520)).state == UtteranceProgressState.UNKNOWN
 
     # Receptive-field overlap across the causal boundary is not itself a new
@@ -407,7 +418,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             ),
         ),),
     )
-    assert evaluate_audio_snapshot(observation(
+    assert evaluate(observation(
         voc=inherited_support, end=1200)).state == UtteranceProgressState.UNKNOWN
 
     crossing_rise = HumanVocalEvidence(
@@ -423,36 +434,36 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             ),
         ),),
     )
-    assert evaluate_audio_snapshot(observation(
+    assert evaluate(observation(
         voc=crossing_rise, end=1200)).state == UtteranceProgressState.ACTIVE
 
-    nonlex_quiet = evaluate_audio_snapshot(observation(
+    nonlex_quiet = evaluate(observation(
         voc=vocal(intervals=((1120, 1380),), end=1800), end=1800))
     assert nonlex_quiet.state == UtteranceProgressState.UNKNOWN
 
-    nonlex_loop = evaluate_audio_snapshot(observation(
+    nonlex_loop = evaluate(observation(
         voc=vocal(intervals=((1120, 2980),), end=3000), rec=stable_loop, end=3000))
     assert nonlex_loop.state == UtteranceProgressState.UNKNOWN
 
     # Positive activity already present at the causal lower bound is not
     # relabelled as old/background; it simply cannot establish that a new finite
     # vocal risk began after the input. A separated later change can.
-    crossing_only = evaluate_audio_snapshot(observation(
+    crossing_only = evaluate(observation(
         voc=vocal(intervals=((900, 1390),), end=1400), end=1400))
     assert crossing_only.state == UtteranceProgressState.UNKNOWN
-    crossing_then_new = evaluate_audio_snapshot(observation(
+    crossing_then_new = evaluate(observation(
         voc=vocal(intervals=((900, 1240), (1700, 1980)), end=2000), end=2000))
     assert crossing_then_new.state == UtteranceProgressState.ACTIVE
 
     # Stateless evaluation does not consume the first post-boundary chain.  A
     # later finite human-vocal change is still a present cut risk when it is open.
-    later_unowned_voice = evaluate_audio_snapshot(observation(
+    later_unowned_voice = evaluate(observation(
         voc=vocal(intervals=((1120, 1380), (1800, 1980)), end=2000), end=2000))
     assert later_unowned_voice.state == UtteranceProgressState.ACTIVE
 
     # A measured lexical prefix can locate a cut-risk chain before it reaches the
     # stricter target_associated ownership threshold.
-    weak_relation = evaluate_audio_snapshot(observation(
+    weak_relation = evaluate(observation(
         lex=lexical(start=1400, aligned_end=1530, complete=False, committed=False,
                     associated=False),
         voc=vocal(intervals=((1120, 1260), (1450, 1780)), end=1800), end=1800))
@@ -464,11 +475,11 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400, attached=1200)
     late_hook = observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400, attached=5200)
-    assert evaluate_audio_snapshot(early_hook) == evaluate_audio_snapshot(late_hook)
+    assert evaluate(early_hook) == evaluate(late_hook)
 
     # Without an observed lower bound or lexical relation, non-lexical activity
     # remains uncertain rather than gaining an invented presentation identity.
-    unbounded = evaluate_audio_snapshot(observation(
+    unbounded = evaluate(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400, lower=None))
     assert unbounded.state == UtteranceProgressState.UNKNOWN
 

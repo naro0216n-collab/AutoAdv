@@ -1,15 +1,14 @@
-"""Snapshot-based native-audio assessment for one presentation.
+"""Native-audio evidence and final progression assessment for one presentation.
 
 Observers and alignment backends publish measurements tied to exact audio/time
-ranges.  This module combines one immutable snapshot into the only three product
-results needed by Controller.  It deliberately keeps no event identity or
-inference history: evaluating the same snapshot twice produces the same result.
+ranges.  Direct evidence is evaluated before optional ambiguity evidence, and
+only one integrated progress result is emitted for Controller.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from .forced_alignment import TargetTimeAlignment
@@ -31,7 +30,7 @@ class VocalEvidenceSeries:
 
     ``active_intervals`` is the observer's strong-positive view only.  ``samples``
     preserves the continuous scores and receptive-field provenance so the
-    snapshot reducer can preserve model-local evidence without pretending that
+    progression evaluator can preserve model-local evidence without pretending that
     different observers share one probability scale or one time resolution.
     """
 
@@ -121,13 +120,15 @@ class LexicalProgressEvidence:
 
 @dataclass(frozen=True)
 class NativeAudioObservation:
-    """Measurements for one explicit audio snapshot/query.
+    """Factual measurements published alongside the integrated progress result.
 
-    ``causal_lower_bound_ms`` is an observed game-input lower bound when one is
+    Downstream application code records this object for diagnosis but does not
+    run a second progression evaluator over it. ``causal_lower_bound_ms`` is an
+    observed game-input lower bound when one is
     available from AutoAdv's own successful advancement input.
     ``input_candidates_ms`` are earlier external game-input observations that
     may or may not have advanced dialogue.  They remain independent timestamps:
-    no reducer step selects one and turns it into a Presentation boundary.
+    no inference step selects one and turns it into a Presentation boundary.
     ``target_attached_ms`` is
     retained only as factual telemetry for when the known text became
     available; it is never an acoustic boundary.
@@ -149,7 +150,7 @@ class NativeAudioObservation:
 
 @dataclass(frozen=True)
 class UtteranceProgress:
-    """One stateless integrated answer consumed by Controller."""
+    """One integrated answer consumed by Controller."""
 
     state: UtteranceProgressState = UtteranceProgressState.UNKNOWN
     ended_at_ms: int | None = None
@@ -190,7 +191,7 @@ def _selected_risk_samples(series: VocalEvidenceSeries) -> tuple[VocalScoreSampl
     """Return this observer's own strong-positive measurements.
 
     Score scales stay observer-local.  Sub-threshold values remain factual
-    telemetry but are not promoted into human-vocal evidence by the reducer;
+    telemetry but are not promoted into human-vocal evidence by integration;
     observer coverage problems must be solved at measurement/model level rather
     than by a second adaptive detector hidden in integration logic.
     """
@@ -325,78 +326,31 @@ def _open_post_input_risk(
     return max(risks, key=lambda item: item[1]) if risks else None
 
 
-def recurrence_query_start(observation: NativeAudioObservation) -> int | None:
-    """Return the endpoint-local start that needs recurrence evidence, if any.
+def evaluate_utterance_progress(
+    *,
+    capture_end_ms: int | None,
+    lexical: LexicalProgressEvidence | None,
+    vocal: HumanVocalEvidence | None,
+    causal_lower_bound_ms: int | None = None,
+    input_candidates_ms: tuple[int, ...] = (),
+    recurrence_lookup: Callable[[int, int], VocalRecurrenceEvidence | None] | None = None,
+) -> tuple[UtteranceProgress, VocalRecurrenceEvidence | None]:
+    """Produce one progress result, requesting recurrence only when needed.
 
-    Recurrence is not a standing observer for every Presentation.  It is only
-    useful after direct evidence has located a finite vocal risk whose endpoint
-    is still open long enough that stable repetition could explain the apparent
-    continuation.  This keeps the ordinary path on alignment + vocal evidence
-    and asks the cached recurrence measurements only for genuine endpoint
-    ambiguity.
+    Direct evidence is evaluated first.  Known text establishes its own acoustic
+    location; external input timestamps are only needed when no lexical location
+    exists.  Recurrence is queried lazily only while a directly observed vocal
+    risk remains open long enough that stable repetition could explain it.
     """
-    capture_end = observation.capture_end_ms
-    if capture_end is None:
-        return None
+    if capture_end_ms is None:
+        return UtteranceProgress(evidence_at_ms=None), None
+    capture_end = int(capture_end_ms)
 
-    lexical = observation.lexical
-    lexical_span = bool(
-        lexical is not None
-        and lexical.aligned_target_units > 0
-        and lexical.target_start_ms is not None
-        and lexical.aligned_end_ms is not None
-    )
-    if lexical_span and lexical is not None:
-        complete = bool(
-            lexical.target_associated
-            and lexical.complete_alignment
-            and lexical.committed_target_end
-            and lexical.target_end_ms is not None
-        )
-        if not complete:
+    def recurrence_if_needed(start_ms: int) -> VocalRecurrenceEvidence | None:
+        if recurrence_lookup is None or capture_end - int(start_ms) < MIN_LOOP_OBSERVATION_MS:
             return None
-        target_start = int(lexical.target_start_ms)
-        target_end = int(lexical.target_end_ms)
-        reference_before = (
-            observation.causal_lower_bound_ms
-            if observation.causal_lower_bound_ms is not None
-            else target_start
-        )
-        chains = _series_risk_chains(
-            observation.vocal, reference_before_ms=reference_before)
-        connected_end = _connected_chain_end(chains, target_start, target_end)
-        if connected_end is None:
-            return None
-        physical_risk_end = max(target_end, connected_end)
-        if capture_end - physical_risk_end >= END_CONTEXT_MS:
-            return None
-        if capture_end - target_end < MIN_LOOP_OBSERVATION_MS:
-            return None
-        return target_end
+        return recurrence_lookup(int(start_ms), capture_end)
 
-    boundary = observation.causal_lower_bound_ms
-    if boundary is not None:
-        candidate = _open_post_boundary_risk(
-            observation.vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
-    else:
-        candidate = _open_post_input_risk(
-            observation.vocal, candidates=observation.input_candidates_ms,
-            capture_end_ms=capture_end)
-    if candidate is None:
-        return None
-    start_ms, _ = candidate
-    if capture_end - start_ms < MIN_LOOP_OBSERVATION_MS:
-        return None
-    return start_ms
-
-
-def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtteranceProgress:
-    """Evaluate one immutable measurement snapshot with no retained inference state."""
-    capture_end = observation.capture_end_ms
-    if capture_end is None:
-        return UtteranceProgress(evidence_at_ms=None)
-
-    lexical = observation.lexical
     lexical_span = bool(
         lexical is not None
         and lexical.aligned_target_units > 0
@@ -414,85 +368,72 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
             and lexical.target_end_ms is not None
         )
         anchor_end = int(lexical.target_end_ms) if complete else aligned_end
-        # Known text locates itself in retained PCM.  External input timestamps
-        # do not choose or widen that lexical boundary; only AutoAdv's own
-        # successful advancement has causal-lower-bound semantics.
-        reference_before = (
-            observation.causal_lower_bound_ms
-            if observation.causal_lower_bound_ms is not None
-            else target_start
-        )
-        chains = _series_risk_chains(
-            observation.vocal, reference_before_ms=reference_before)
+        # Once known text has an acoustic location, input timing has completed
+        # its narrowing role. Endpoint evidence is evaluated from the located
+        # target itself rather than carrying input stamps into a second path.
+        chains = _series_risk_chains(vocal, reference_before_ms=target_start)
         connected_end = _connected_chain_end(chains, target_start, anchor_end)
         physical_risk_end = max(anchor_end, connected_end or anchor_end)
-        recurrence_start = int(lexical.target_end_ms) if complete else aligned_end
-        recurrent = _stable_recurrence(
-            observation.recurrence, start_ms=recurrence_start,
-            capture_end_ms=capture_end)
 
-        # Any measured target prefix can locate a cut-risk candidate even before
-        # it satisfies the stricter ownership threshold.  This is intentionally
-        # not an ownership claim: after the connected risk closes, incomplete
-        # lexical evidence returns to UNKNOWN and fallback policy remains in the
-        # Controller.
+        # Before the aligner has committed the target end, an open target-connected
+        # vocal chain is enough to protect against cutting.  Recurrence cannot
+        # release this protection because the lexical target itself is still open.
         if not complete:
-            if recurrent:
-                return UtteranceProgress(
-                    state=UtteranceProgressState.UNKNOWN, evidence_at_ms=capture_end)
             if capture_end - physical_risk_end < END_CONTEXT_MS:
-                return UtteranceProgress(
-                    state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end)
-            return UtteranceProgress(
-                state=UtteranceProgressState.UNKNOWN, evidence_at_ms=capture_end)
+                return (UtteranceProgress(
+                    state=UtteranceProgressState.ACTIVE,
+                    evidence_at_ms=capture_end), None)
+            return (UtteranceProgress(
+                state=UtteranceProgressState.UNKNOWN,
+                evidence_at_ms=capture_end), None)
 
         # A committed lexical end establishes target relation, not physical EOF.
-        # ENDED also needs an independently observed vocal-risk chain connected
-        # to that target.  Merely running a classifier and seeing no positive
-        # support is not endpoint evidence; a detector that missed the whole
-        # vocal event therefore leaves the Presentation UNKNOWN.
+        # Independent human-vocal support must have covered the target before its
+        # closure can establish a physical endpoint.
         if connected_end is None:
-            return UtteranceProgress(
-                state=UtteranceProgressState.UNKNOWN, evidence_at_ms=capture_end)
+            return (UtteranceProgress(
+                state=UtteranceProgressState.UNKNOWN,
+                evidence_at_ms=capture_end), None)
 
-        # Stable repetition can release finite-risk protection but never upgrades
-        # itself into target completion.
-        if recurrent:
-            return UtteranceProgress(
-                state=UtteranceProgressState.UNKNOWN, evidence_at_ms=capture_end)
-        if capture_end - physical_risk_end < END_CONTEXT_MS:
-            return UtteranceProgress(
-                state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end)
+        if capture_end - physical_risk_end >= END_CONTEXT_MS:
+            return (UtteranceProgress(
+                state=UtteranceProgressState.ENDED,
+                ended_at_ms=physical_risk_end,
+                evidence_at_ms=capture_end), None)
 
-        # Physical endpoint confirmation is the conjunction of an independently
-        # established lexical end and closure of target-connected human-vocal
-        # support.  This path is valid only when the observer actually covered
-        # the event; a detector miss above returned UNKNOWN rather than being
-        # repaired here with an adaptive score threshold.
-        return UtteranceProgress(
-            state=UtteranceProgressState.ENDED,
-            ended_at_ms=physical_risk_end,
-            evidence_at_ms=capture_end,
-        )
+        recurrence = recurrence_if_needed(int(lexical.target_end_ms))
+        if _stable_recurrence(
+                recurrence, start_ms=int(lexical.target_end_ms),
+                capture_end_ms=capture_end):
+            return (UtteranceProgress(
+                state=UtteranceProgressState.UNKNOWN,
+                evidence_at_ms=capture_end), recurrence)
+        return (UtteranceProgress(
+            state=UtteranceProgressState.ACTIVE,
+            evidence_at_ms=capture_end), recurrence)
 
-    # No lexical ownership is required to protect a new finite human-vocal risk.
-    # AutoAdv's own successful input supplies a causal lower bound; external
-    # inputs remain independent timestamps related to each observed open chain.
-    boundary = observation.causal_lower_bound_ms
+    # Without a lexical location, only a newly observed finite vocal change that
+    # follows a real timing fact can suppress fallback.  AutoAdv's own successful
+    # input is a strong lower bound; external inputs remain independent candidates.
+    boundary = causal_lower_bound_ms
     if boundary is not None:
         candidate = _open_post_boundary_risk(
-            observation.vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
+            vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
     else:
         candidate = _open_post_input_risk(
-            observation.vocal, candidates=observation.input_candidates_ms,
-            capture_end_ms=capture_end)
-    if candidate is not None:
-        start_ms, _end_ms = candidate
-        if not _stable_recurrence(
-                observation.recurrence, start_ms=start_ms,
-                capture_end_ms=capture_end):
-            return UtteranceProgress(
-                state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end)
+            vocal, candidates=input_candidates_ms, capture_end_ms=capture_end)
+    if candidate is None:
+        return (UtteranceProgress(
+            state=UtteranceProgressState.UNKNOWN,
+            evidence_at_ms=capture_end), None)
 
-    return UtteranceProgress(
-        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=capture_end)
+    start_ms, _end_ms = candidate
+    recurrence = recurrence_if_needed(start_ms)
+    if _stable_recurrence(
+            recurrence, start_ms=start_ms, capture_end_ms=capture_end):
+        return (UtteranceProgress(
+            state=UtteranceProgressState.UNKNOWN,
+            evidence_at_ms=capture_end), recurrence)
+    return (UtteranceProgress(
+        state=UtteranceProgressState.ACTIVE,
+        evidence_at_ms=capture_end), recurrence)

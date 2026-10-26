@@ -24,7 +24,8 @@ from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from .g2p import PronunciationCandidate
 from .process_audio import ProcessCapture, CaptureHealth
 from .utterance_progress import (
-    LexicalProgressEvidence, NativeAudioObservation, recurrence_query_start,
+    LexicalProgressEvidence, NativeAudioObservation, UtteranceProgress,
+    evaluate_utterance_progress,
 )
 
 
@@ -42,12 +43,12 @@ class NativeAudio:
                  vocal_observer: VocalActivityObserver | None = None,
                  on_pcm: Callable[[Token, int], None] | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None,
-                 on_observation: Callable[[Token, NativeAudioObservation], None] | None = None):
+                 on_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation], None] | None = None):
         self.pid = pid
         self.on_error = on_error
         self.on_pcm = on_pcm
         self.on_inference = on_inference
-        self.on_observation = on_observation
+        self.on_progress = on_progress
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
         self.history = AudioHistory(horizon_ms=self.RETENTION_MS)
         self.features = AcousticObservationHistory(horizon_ms=self.RETENTION_MS)
@@ -68,11 +69,10 @@ class NativeAudio:
 
         self.token: Token | None = None
         self.aligner: TargetConditionedAligner | None = None
-        self.start_ms = 0
         self.causal_lower_bound_ms: int | None = None
         self.input_candidates_ms: tuple[int, ...] = ()
         self.target_attached_ms: int | None = None
-        self.window_start_ms = 0
+        self.alignment_start_ms = 0
         self._committed_lexical: LexicalProgressEvidence | None = None
         self._last_processed_ms = -1
         self._last_processed_chunk: PCMChunk | None = None
@@ -132,7 +132,7 @@ class NativeAudio:
             end_ms = self.clock()
         return max(0, int(end_ms) - self.RETENTION_MS)
 
-    def _initial_analysis_start_locked(self, end_ms: int) -> int:
+    def _initial_alignment_start_locked(self, end_ms: int) -> int:
         retained_start = self._retained_start_locked(end_ms)
         if self.causal_lower_bound_ms is not None:
             return max(retained_start, int(self.causal_lower_bound_ms))
@@ -186,7 +186,7 @@ class NativeAudio:
                 # Keep one model frame of context so rounding the located onset
                 # cannot crop the first phone on the next assessment.
                 desired = max(retained_start, target_start - max(1, int(round(frame_ms))))
-        self.window_start_ms = max(int(self.window_start_ms), int(desired))
+        self.alignment_start_ms = max(int(self.alignment_start_ms), int(desired))
 
     def begin(self, token: Token, alignment_text: str, *,
               candidates: tuple[PronunciationCandidate, ...] | None = None,
@@ -217,16 +217,15 @@ class NativeAudio:
             self.aligner = aligner
             self.causal_lower_bound_ms = lower_bound
             self.input_candidates_ms = input_candidates
-            self.start_ms = self.clock()
-            self.target_attached_ms = self.start_ms
-            analysis_end = self.features.latest_ms or self.start_ms
-            self.window_start_ms = self._initial_analysis_start_locked(int(analysis_end))
+            self.target_attached_ms = self.clock()
+            analysis_end = self.features.latest_ms or self.target_attached_ms
+            self.alignment_start_ms = self._initial_alignment_start_locked(int(analysis_end))
             self._committed_lexical = None
             self._last_processed_ms = -1
             self._last_processed_chunk = None
             self._reset_observation()
 
-            buffered = self.history.since(self.window_start_ms)
+            buffered = self.history.since(self.alignment_start_ms)
             pending = []
             for chunk in buffered:
                 self._consume_locked(chunk, replay=True)
@@ -237,7 +236,7 @@ class NativeAudio:
                     len(first.frames) // (first.channels * first.sample_width_bytes)))
             feature_end = self.features.latest_ms
             if (buffered and aligner is not None
-                    and buffered[-1].at_ms - self.window_start_ms >= self.MIN_AUDIO_MS):
+                    and buffered[-1].at_ms - self.alignment_start_ms >= self.MIN_AUDIO_MS):
                 item = self._request_alignment_locked(buffered[-1].at_ms)
                 if item is not None:
                     pending.append(item)
@@ -325,7 +324,7 @@ class NativeAudio:
             if boundary < 0:
                 return False
             if (self.aligner is not None
-                    and boundary - self.window_start_ms >= self.MIN_AUDIO_MS):
+                    and boundary - self.alignment_start_ms >= self.MIN_AUDIO_MS):
                 item = self._request_alignment_locked(boundary, queue_if_busy=True)
             else:
                 item = self._feature_observation_locked(
@@ -364,13 +363,13 @@ class NativeAudio:
         if (self._closed or token != self.token or generation != self._generation
                 or aligner is not self.aligner):
             return None
-        start = max(self._retained_start_locked(boundary), int(self.window_start_ms))
+        start = max(self._retained_start_locked(boundary), int(self.alignment_start_ms))
         samples = tuple(
             chunk for chunk in self.history.since(start)
             if chunk.at_ms <= boundary)
         if not samples:
             return None
-        self.window_start_ms = start
+        self.alignment_start_ms = start
         self._inflight = True
         self._inflight_generation = generation
         return ("infer", token, generation, samples, aligner, requested_ns)
@@ -407,18 +406,18 @@ class NativeAudio:
         boundary = int(boundary)
         if boundary <= self._observation_at:
             return None
-        observation = self._build_observation_locked(
+        observation, progress = self._assess_locked(
             kind="snapshot",
-            capture_start_ms=self.window_start_ms,
+            capture_start_ms=self.alignment_start_ms,
             capture_end_ms=boundary,
             lexical=self._committed_lexical,
             history_truncated=(
-                history_truncated or self._history_truncated_locked(self.window_start_ms)
+                history_truncated or self._history_truncated_locked(self.alignment_start_ms)
             ),
             pcm_last_frame_ms=boundary,
         )
         self._observation_at = boundary
-        return ("observe", token, generation, observation)
+        return ("progress", token, generation, progress, observation)
 
     def _take_pending_locked(self):
         pending, self._pending_inference = self._pending_inference, None
@@ -433,7 +432,7 @@ class NativeAudio:
 
     def _consume_locked(self, chunk: PCMChunk, *, replay: bool = False):
         if (self._closed or self.token is None
-                or chunk.at_ms < self.window_start_ms
+                or chunk.at_ms < self.alignment_start_ms
                 or chunk.at_ms < self._last_processed_ms
                 or (chunk.at_ms == self._last_processed_ms and chunk is self._last_processed_chunk)):
             return ()
@@ -454,7 +453,7 @@ class NativeAudio:
         if pcm_frames is not None:
             items.append(("pcm", token, generation, pcm_frames))
 
-        enough_pcm = chunk.at_ms - self.window_start_ms >= self.MIN_AUDIO_MS
+        enough_pcm = chunk.at_ms - self.alignment_start_ms >= self.MIN_AUDIO_MS
         if not enough_pcm:
             return tuple(items)
 
@@ -479,13 +478,13 @@ class NativeAudio:
         if item is None:
             return
         kind = item[0]
-        if kind == "observe":
-            _, token, generation, observation = item
+        if kind == "progress":
+            _, token, generation, progress, observation = item
             with self._lock:
                 if generation != self._generation or token != self.token:
                     return
-            if self.on_observation is not None:
-                self.on_observation(token, observation)
+            if self.on_progress is not None:
+                self.on_progress(token, progress, observation)
             return
         if kind == "pcm":
             _, token, generation, pcm_frames = item
@@ -551,15 +550,23 @@ class NativeAudio:
             consumed += duration
         return None
 
-    def _build_observation_locked(self, *, kind: str, capture_start_ms: int | None,
-                                  capture_end_ms: int | None,
-                                  lexical: LexicalProgressEvidence | None,
-                                  history_truncated: bool = False,
-                                  pcm_last_frame_ms: int | None = None,
-                                  heartbeat_at_ms: int | None = None) -> NativeAudioObservation:
-        feature_end = capture_end_ms if capture_end_ms is not None else self.features.latest_ms
+    def _assess_locked(self, *, kind: str, capture_start_ms: int | None,
+                       capture_end_ms: int | None,
+                       lexical: LexicalProgressEvidence | None,
+                       history_truncated: bool = False,
+                       pcm_last_frame_ms: int | None = None,
+                       heartbeat_at_ms: int | None = None,
+                       ) -> tuple[NativeAudioObservation, UtteranceProgress]:
+        assessment_end = capture_end_ms if capture_end_ms is not None else self.features.latest_ms
+        feature_end = self.features.latest_ms
+        if assessment_end is not None and feature_end is not None:
+            feature_end = min(int(feature_end), int(assessment_end))
         vocal = None
         if feature_end is not None:
+            # Once known text has located itself in PCM, endpoint observation is
+            # anchored to that acoustic location.  Input stamps are no longer a
+            # parallel interpretation path.  Without a lexical location they
+            # remain timing facts for non-lexical cut-risk only.
             if lexical is not None and lexical.target_start_ms is not None:
                 feature_start = int(lexical.target_start_ms)
             elif self.causal_lower_bound_ms is not None:
@@ -571,26 +578,26 @@ class NativeAudio:
             if feature_start is not None:
                 feature_start = min(int(feature_start), int(feature_end))
                 vocal = self.features.summarize_vocal(
-                    start_ms=feature_start, end_ms=feature_end)
+                    start_ms=feature_start, end_ms=int(feature_end))
 
-        observation = NativeAudioObservation(
-            kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
-            lexical=lexical, vocal=vocal, recurrence=None,
+        recurrence = None
+
+        def recurrence_lookup(start_ms: int, end_ms: int):
+            nonlocal recurrence
+            recurrence = self.features.recurrence(
+                start_ms=min(int(start_ms), int(end_ms)), end_ms=int(end_ms))
+            return recurrence
+
+        progress, recurrence = evaluate_utterance_progress(
+            capture_end_ms=assessment_end,
+            lexical=lexical,
+            vocal=vocal,
             causal_lower_bound_ms=self.causal_lower_bound_ms,
             input_candidates_ms=self.input_candidates_ms,
-            target_attached_ms=self.target_attached_ms,
-            history_truncated=history_truncated,
-            pcm_last_frame_ms=pcm_last_frame_ms,
-            heartbeat_at_ms=heartbeat_at_ms,
+            recurrence_lookup=recurrence_lookup,
         )
-        recurrence_start = recurrence_query_start(observation)
-        if recurrence_start is None or feature_end is None:
-            return observation
-        recurrence = self.features.recurrence(
-            start_ms=min(int(recurrence_start), int(feature_end)),
-            end_ms=int(feature_end))
-        return NativeAudioObservation(
-            kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
+        observation = NativeAudioObservation(
+            kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=assessment_end,
             lexical=lexical, vocal=vocal, recurrence=recurrence,
             causal_lower_bound_ms=self.causal_lower_bound_ms,
             input_candidates_ms=self.input_candidates_ms,
@@ -599,6 +606,7 @@ class NativeAudio:
             pcm_last_frame_ms=pcm_last_frame_ms,
             heartbeat_at_ms=heartbeat_at_ms,
         )
+        return observation, progress
 
     def _infer(self, token: Token, generation: int, samples: tuple[PCMChunk, ...],
                aligner: TargetConditionedAligner | None, submitted_ns: int = 0) -> None:
@@ -606,6 +614,7 @@ class NativeAudio:
         if not submitted_ns:
             submitted_ns = started_ns
         observation = None
+        progress = None
         alignment = None
         target_end_ms = None
         current_for_metrics = False
@@ -650,11 +659,11 @@ class NativeAudio:
                     if (alignment is not None and not alignment.target_associated
                             and self.causal_lower_bound_ms is None
                             and self.input_candidates_ms
-                            and int(self.window_start_ms) > retained_start):
+                            and int(self.alignment_start_ms) > retained_start):
                         # The cheap candidate-anchored search did not locate the
                         # target.  Widen once to retained evidence instead of
                         # declaring the candidate range authoritative.
-                        self.window_start_ms = retained_start
+                        self.alignment_start_ms = retained_start
                         retry_wider_search = True
                         if capture_end_ms is not None:
                             self._pending_inference = (
@@ -672,7 +681,7 @@ class NativeAudio:
                     if not retry_wider_search:
                         observation_end_ms = capture_end_ms
                         history_truncated = self._history_truncated_locked(capture_start_ms)
-                        observation = self._build_observation_locked(
+                        observation, progress = self._assess_locked(
                             kind="snapshot", capture_start_ms=capture_start_ms,
                             capture_end_ms=observation_end_ms, lexical=lexical,
                             history_truncated=history_truncated,
@@ -755,8 +764,9 @@ class NativeAudio:
                     self.on_inference(token, metrics)
                 except Exception:
                     pass
-            if current_for_metrics and observation is not None and self.on_observation is not None:
-                self.on_observation(token, observation)
+            if (current_for_metrics and observation is not None and progress is not None
+                    and self.on_progress is not None):
+                self.on_progress(token, progress, observation)
             if follow_up_item is not None:
                 self._dispatch(follow_up_item)
         except Exception as exc:

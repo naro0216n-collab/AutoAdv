@@ -8,7 +8,7 @@ import pytest
 from autoadv.application import AutoAdvApplication
 from autoadv.utterance_progress import (
     HumanVocalEvidence, LexicalProgressEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence,
-    VocalScoreSample,
+    VocalScoreSample, UtteranceProgress, UtteranceProgressState,
 )
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent
@@ -286,7 +286,8 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     active_token = runtime_hook(active_app, active_source, '短い本文', 2)
     assert active_token is not None
     active_app._native_audio = RetainedNative()
-    active_app._consume_native_observation(active_token, NativeAudioObservation(
+    active_app._consume_native_progress(active_token, UtteranceProgress(
+        state=UtteranceProgressState.ACTIVE, evidence_at_ms=1500), NativeAudioObservation(
         kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
         lexical=LexicalProgressEvidence(
             target_units=5, aligned_target_units=3, target_associated=True,
@@ -308,7 +309,8 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         target_attached_ms=1100))
     # Query callbacks may complete out of order. An older snapshot is telemetry,
     # not permission to replace the newer integrated judgment.
-    active_app._consume_native_observation(active_token, NativeAudioObservation(
+    active_app._consume_native_progress(active_token, UtteranceProgress(
+        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
         kind='snapshot', capture_start_ms=1000, capture_end_ms=1400,
         vocal=HumanVocalEvidence(start_ms=1000, end_ms=1400),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000))
@@ -359,7 +361,8 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     fenced_deadline()
     assert not fenced_app.runtime_state().completed
     assert fenced_native.requested == [(fenced_token, 1500)]
-    fenced_app._consume_native_observation(fenced_token, NativeAudioObservation(
+    fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
+        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1500), NativeAudioObservation(
         kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
         vocal=HumanVocalEvidence(
             start_ms=1000, end_ms=1500,
@@ -583,7 +586,7 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
     assert native.started and native.pid == 202
     assert (str(native.helper), str(native.model), str(native.vocab)) == (
         managed.helper_dll, managed.alignment_model, managed.alignment_vocab)
-    assert {'on_pcm', 'on_inference', 'on_observation'} <= set(native.callbacks)
+    assert {'on_pcm', 'on_inference', 'on_progress'} <= set(native.callbacks)
     assert str(native.callbacks['human_vocal_model']) == managed.human_vocal_model
     app.stop_monitoring('session_changed')
     assert native.closed and not app.native_audio_available
