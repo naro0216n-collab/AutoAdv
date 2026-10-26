@@ -265,20 +265,24 @@ def test_external_progress_timeout_and_stale_presentation_evidence_preserve_stat
     assert tts.authorized and tts.pause_reason == 'tts_playback_failed'
 
 
-def test_ocr_changes_require_a_verified_boundary_before_becoming_a_new_utterance():
+def test_stable_ocr_body_changes_share_the_normal_utterance_admission_contract():
     p = profile()
     p.source = 'ocr'
     ctrl = Controller(lambda *_: None, lambda _target: True, TEST_G2P)
     ctrl.begin(p, Target(101, 202), 'ocr', 1)
     first = ctrl.observe_ocr(sequence=1, text='一つ目', pid=101, session=ctrl.session)
     assert first is not None
-    assert ctrl.observe_ocr(sequence=2, text='別の表示', pid=101, session=ctrl.session) is None
-    assert ctrl.pause_reason == 'ocr_unverified_change'
 
-    # A blank observation is an explicit OCR boundary; the next stable text may
-    # become a new line without pretending the previous text completed.
-    ctrl.hold_reason = None
-    assert ctrl.observe_ocr(sequence=3, text='', pid=101, session=ctrl.session) is None
-    second = ctrl.observe_ocr(sequence=4, text='二つ目', pid=101, session=ctrl.session)
+    # OCRWorker has already stabilized this changed body.  A blank frame is not
+    # a second Presentation-boundary requirement.
+    second = ctrl.observe_ocr(sequence=2, text='二つ目', pid=101, session=ctrl.session)
     assert second is not None and second != first
     assert ctrl.utterance.text == '二つ目'
+
+    # An unchanged stable OCR body is still the same Presentation.  A stable
+    # blank remains useful only for distinguishing the otherwise identical next
+    # body.
+    assert ctrl.observe_ocr(sequence=3, text='二つ目', pid=101, session=ctrl.session) is None
+    assert ctrl.observe_ocr(sequence=4, text='', pid=101, session=ctrl.session) is None
+    third = ctrl.observe_ocr(sequence=5, text='二つ目', pid=101, session=ctrl.session)
+    assert third is not None and third != second

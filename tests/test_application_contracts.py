@@ -474,10 +474,23 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     app._record_game_input(10)
     monkeypatch.setattr(application_module.time, 'monotonic_ns', lambda: 20_000_000)
     worker.on_text(3, '台詞')
+    first_token = app.runtime_state().token
     assert app.runtime_state().utterance.raw == '台詞'
     assert app._presentation_input_candidates is not None
     assert app._presentation_input_candidates[1] == (10,)
     assert delayed
+
+    # A second stabilized OCR body is admitted directly without inventing a
+    # blank-only transition rule.  Inputs observed since the prior admitted
+    # body are attached to this Presentation as factual timestamps.
+    app._record_game_input(30)
+    monkeypatch.setattr(application_module.time, 'monotonic_ns', lambda: 40_000_000)
+    worker.on_text(4, '次台詞')
+    assert app.runtime_state().utterance.raw == '次台詞'
+    assert app.runtime_state().token != first_token
+    assert app._presentation_input_candidates is not None
+    assert app._presentation_input_candidates[1] == (30,)
+
     worker.on_error('capture failed')
     assert app.runtime_state().pause_reason == 'ocr_failure'
     app.stop_monitoring('session_changed')

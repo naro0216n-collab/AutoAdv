@@ -530,9 +530,11 @@ class NativeAudio:
                     recurrence_start = lexical.target_start_ms
                 elif self.causal_lower_bound_ms is not None:
                     recurrence_start = self.causal_lower_bound_ms
-                elif self.input_candidates_ms:
-                    recurrence_start = self.input_candidates_ms[0]
                 else:
+                    # External inputs are timing observations, not an acoustic
+                    # boundary.  Recurrence is measured from retained acoustic
+                    # context; the reducer relates individual open vocal events
+                    # to every input stamp without selecting one here.
                     recurrence_start = feature_start
                 recurrence_start = min(int(recurrence_start), int(feature_end))
                 recurrence = self.features.recurrence(

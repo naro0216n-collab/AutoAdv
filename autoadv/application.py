@@ -202,7 +202,6 @@ _PLAY_ISSUES = {
     'ambiguous_identical_line': ('同じ本文が続き、次の台詞か判断できないため自動送りを保留しています。', 'open_capture'),
     'ambiguous_multihook_lines': ('同じ本文取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
-    'ocr_unverified_change': ('OCRの変化を次の台詞と確認できないため自動送りを保留しています。', 'open_capture'),
     'ocr_failure': ('OCRで台詞を取得できないため、自動送りを保留しています。', 'open_capture'),
     'audio_judgment_unknown_hold': ('現在の台詞の音声終了を判断できないため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
     'audio_judgment_active_hold': ('現在の台詞に対応する発声が続いているため、この台詞の自動送りを保留しています。', 'open_audio_policy'),
@@ -217,7 +216,6 @@ _PLAY_ISSUES_WITHOUT_AUTO = {
     'ambiguous_identical_line',
     'ambiguous_multihook_lines',
     'ambiguous_multihook_speakers',
-    'ocr_unverified_change',
     'ocr_failure',
     'tts_playback_failed',
     'host_changed',
@@ -1136,11 +1134,15 @@ class AutoAdvApplication:
 
     def _handle_runtime_ocr_output(self, *, session: int, pid: int, sequence: int,
                                    text: str, received_ns: int = 0) -> Token | None:
-        """Own OCR boundary transitions before admitting text to Controller."""
+        """Admit stable OCR bodies through the same Presentation lifecycle as HOOK."""
         if self._capture_transition_pending and text.strip():
             state = self.runtime_state()
-            if state.utterance is None or state.sent or state.ocr_blank:
-                # The replacement OCR worker will observe the still-visible line.
+            if (state.utterance is None or state.sent or state.ocr_blank
+                    or text != state.utterance.raw):
+                # A stable changed body is already a Presentation boundary.  Let
+                # the replacement OCR worker re-observe the still-visible line
+                # under the staged capture settings rather than requiring a
+                # blank-only transition rule.
                 self._apply_capture_transition()
                 return None
         return self.controller.observe_ocr(

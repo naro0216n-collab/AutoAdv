@@ -340,17 +340,30 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400))
     assert nonlex_active.state == UtteranceProgressState.ACTIVE
 
-    # External user input is weaker than AutoAdv's own advancement input.  With
-    # no causal lower bound it can still provide a candidate interval for
-    # protecting a post-input finite vocal change, but it never certifies an
-    # endpoint or rewrites the candidate into a causal fact.
+    # External user inputs remain independent timestamps.  No oldest/newest
+    # input is selected as a boundary: an open non-lexical vocal change is only
+    # protected when at least one observed input precedes that measured change.
     without_input_candidate = evaluate_audio_snapshot(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400, lower=None))
     assert without_input_candidate.state == UtteranceProgressState.UNKNOWN
-    with_input_candidate = evaluate_audio_snapshot(observation(
+    with_input_candidates = evaluate_audio_snapshot(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400,
-        lower=None, inputs=(1100,)))
-    assert with_input_candidate.state == UtteranceProgressState.ACTIVE
+        lower=None, inputs=(1080, 1200, 1300)))
+    assert with_input_candidates.state == UtteranceProgressState.ACTIVE
+    only_post_onset_input = evaluate_audio_snapshot(observation(
+        voc=vocal(intervals=((1120, 1380),), end=1400), end=1400,
+        lower=None, inputs=(1200, 1300)))
+    assert only_post_onset_input.state == UtteranceProgressState.UNKNOWN
+
+    # For known text, retained-PCM alignment locates the target itself.  External
+    # input timestamps neither widen nor move the lexical relation.
+    lexical_without_inputs = evaluate_audio_snapshot(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100),
+        end=2100, lower=None))
+    lexical_with_inputs = evaluate_audio_snapshot(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100),
+        end=2100, lower=None, inputs=(800, 1200, 1900)))
+    assert lexical_with_inputs == lexical_without_inputs
 
     # Integration does not create a second adaptive vocal detector from
     # sub-threshold observer scores.  Coverage failures stay UNKNOWN until an

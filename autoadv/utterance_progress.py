@@ -126,8 +126,9 @@ class NativeAudioObservation:
     ``causal_lower_bound_ms`` is an observed game-input lower bound when one is
     available from AutoAdv's own successful advancement input.
     ``input_candidates_ms`` are earlier external game-input observations that
-    may or may not have advanced dialogue; they are only timing candidates and
-    never become a causal boundary by themselves. ``target_attached_ms`` is
+    may or may not have advanced dialogue.  They remain independent timestamps:
+    no reducer step selects one and turns it into a Presentation boundary.
+    ``target_attached_ms`` is
     retained only as factual telemetry for when the known text became
     available; it is never an acoustic boundary.
     """
@@ -332,19 +333,27 @@ def _open_post_boundary_risk(
     return max(candidates, key=lambda item: item[1]) if candidates else None
 
 
-def _input_candidate_before(
-    candidates: tuple[int, ...], *, not_after_ms: int,
-) -> int | None:
-    """Return the earliest external-input candidate not later than an anchor.
+def _open_post_input_risk(
+    vocal: HumanVocalEvidence | None, *, candidates: tuple[int, ...],
+    capture_end_ms: int,
+) -> tuple[int, int] | None:
+    """Find an open vocal change that has at least one earlier input stamp.
 
-    External input is deliberately weaker than AutoAdv-owned advancement: a
-    menu click can be unrelated to dialogue.  Using the earliest compatible
-    candidate only broadens the pre-target acoustic context relative to using
-    the lexical target start itself; it never truncates the target to the most
-    recent click/key event.
+    External inputs remain factual alternatives.  We never choose the oldest,
+    newest, or closest input as a boundary; the acoustic event supplies its own
+    observed start time and an input merely establishes that the event could
+    have followed a user action.
     """
-    eligible = [int(value) for value in candidates if 0 < int(value) <= not_after_ms]
-    return min(eligible) if eligible else None
+    stamps = tuple(sorted({int(value) for value in candidates if int(value) > 0}))
+    if not stamps:
+        return None
+    risks = [
+        (chain.first_observed_ms, chain.last_observed_ms)
+        for chain in _series_risk_chains(vocal, reference_before_ms=None)
+        if capture_end_ms - chain.last_observed_ms < END_CONTEXT_MS
+        and any(stamp <= chain.first_observed_ms for stamp in stamps)
+    ]
+    return max(risks, key=lambda item: item[1]) if risks else None
 
 
 def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtteranceProgress:
@@ -371,12 +380,12 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
             and lexical.target_end_ms is not None
         )
         anchor_end = int(lexical.target_end_ms) if complete else aligned_end
-        input_candidate = _input_candidate_before(
-            observation.input_candidates_ms, not_after_ms=target_start)
+        # Known text locates itself in retained PCM.  External input timestamps
+        # do not choose or widen that lexical boundary; only AutoAdv's own
+        # successful advancement has causal-lower-bound semantics.
         reference_before = (
             observation.causal_lower_bound_ms
             if observation.causal_lower_bound_ms is not None
-            else input_candidate if input_candidate is not None
             else target_start
         )
         chains = _series_risk_chains(
@@ -432,23 +441,24 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
             evidence_at_ms=capture_end,
         )
 
-    # No lexical ownership is required to protect a new finite human-vocal risk
-    # after an observed input lower bound.  Evaluate every currently open chain;
-    # do not consume the first chain and ignore a later one.
+    # No lexical ownership is required to protect a new finite human-vocal risk.
+    # AutoAdv's own successful input supplies a causal lower bound; external
+    # inputs remain independent timestamps related to each observed open chain.
     boundary = observation.causal_lower_bound_ms
-    if boundary is None:
-        boundary = _input_candidate_before(
-            observation.input_candidates_ms, not_after_ms=capture_end)
     if boundary is not None:
         candidate = _open_post_boundary_risk(
             observation.vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
-        if candidate is not None:
-            start_ms, _end_ms = candidate
-            if not _stable_recurrence(
-                    observation.recurrence, start_ms=start_ms,
-                    capture_end_ms=capture_end):
-                return UtteranceProgress(
-                    state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end)
+    else:
+        candidate = _open_post_input_risk(
+            observation.vocal, candidates=observation.input_candidates_ms,
+            capture_end_ms=capture_end)
+    if candidate is not None:
+        start_ms, _end_ms = candidate
+        if not _stable_recurrence(
+                observation.recurrence, start_ms=start_ms,
+                capture_end_ms=capture_end):
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end)
 
     return UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=capture_end)

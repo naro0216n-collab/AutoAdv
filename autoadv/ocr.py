@@ -68,7 +68,7 @@ class OCRWorker:
             if count >= self.reader.config.stable_samples and pending != previous:
                 previous = pending
                 sequence += 1
-                self.on_text(sequence, pending)  # Stable blank marks a boundary.
+                self.on_text(sequence, pending)  # Stable observations, including blank, are acquisition facts.
             self.stopping.wait(self.reader.config.interval_ms / 1000)
 
     def close(self):

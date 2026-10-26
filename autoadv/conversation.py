@@ -209,11 +209,10 @@ class Controller:
             return None
         self.highest_sequence = sequence
         if not text.strip():
+            # A stable blank is useful only to disambiguate an identical line
+            # appearing again.  It is not a prerequisite for accepting a
+            # different stable OCR body as the next Presentation.
             self.ocr_blank = True
-            return None
-        if self.utterance and not self.ocr_blank and not self.sent:
-            if text != self.utterance.raw:
-                self.pause('ocr_unverified_change')
             return None
         if self.utterance and text == self.utterance.raw and not self.ocr_blank:
             return None
