@@ -108,7 +108,6 @@ class LexicalProgressEvidence:
 class NativeAudioObservation:
     """Factual measurements published alongside one integrated progress result."""
 
-    kind: str
     capture_start_ms: int | None = None
     capture_end_ms: int | None = None
     lexical: LexicalProgressEvidence | None = None
@@ -118,8 +117,6 @@ class NativeAudioObservation:
     input_candidates_ms: tuple[int, ...] = ()
     target_attached_ms: int | None = None
     history_truncated: bool = False
-    pcm_last_frame_ms: int | None = None
-    heartbeat_at_ms: int | None = None
 
 
 @dataclass(frozen=True)

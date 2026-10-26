@@ -12,7 +12,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .audio_buffer import PCMChunk, PCM_CONTIGUITY_TOLERANCE_MS
+from .audio_buffer import PCMChunk
 from .forced_alignment import _downsample_48k_to_16k
 from .utterance_progress import (
     HumanVocalEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence, VocalScoreSample,
@@ -51,12 +51,10 @@ class TenVadActivityObserver:
         self.backend = backend
         self._tail = np.empty(0, dtype=np.float32)
         self._tail_start_ms: float | None = None
-        self._last_chunk_end_ms: float | None = None
 
     def reset(self) -> None:
         self._tail = np.empty(0, dtype=np.float32)
         self._tail_start_ms = None
-        self._last_chunk_end_ms = None
 
     @staticmethod
     def _waveform(chunk: PCMChunk) -> np.ndarray:
@@ -69,12 +67,6 @@ class TenVadActivityObserver:
     def observe(self, chunk: PCMChunk) -> tuple[VocalActivityFrame, ...]:
         waveform = self._waveform(chunk)
         chunk_start = float(chunk.start_ms)
-        if (self._last_chunk_end_ms is not None
-                and abs(chunk_start - self._last_chunk_end_ms) > PCM_CONTIGUITY_TOLERANCE_MS):
-            # Every PCM consumer shares the timeline's continuity rule.  Missing
-            # capture is neither silently concatenated nor fabricated as quiet.
-            self._tail = np.empty(0, dtype=np.float32)
-            self._tail_start_ms = None
         if self._tail.size:
             start_ms = self._tail_start_ms if self._tail_start_ms is not None else chunk_start
             waveform = np.concatenate((self._tail, waveform))
@@ -99,7 +91,6 @@ class TenVadActivityObserver:
         consumed = full * self.HOP_SIZE
         self._tail = np.ascontiguousarray(waveform[consumed:], dtype=np.float32)
         self._tail_start_ms = start_ms + consumed * 1000.0 / self.SAMPLE_RATE
-        self._last_chunk_end_ms = float(chunk.at_ms)
         return tuple(frames)
 
 
@@ -153,13 +144,11 @@ class AudioSetHumanVocalObserver:
         self._waveform = np.empty(0, dtype=np.float32)
         self._start_ms: float | None = None
         self._next_emit = self.HOP_SAMPLES
-        self._last_chunk_end_ms: float | None = None
 
     def reset(self) -> None:
         self._waveform = np.empty(0, dtype=np.float32)
         self._start_ms = None
         self._next_emit = self.HOP_SAMPLES
-        self._last_chunk_end_ms = None
 
     @staticmethod
     def _waveform_16k(chunk: PCMChunk) -> np.ndarray:
@@ -179,11 +168,7 @@ class AudioSetHumanVocalObserver:
         if not waveform.size:
             return ()
         chunk_start = float(chunk.start_ms)
-        discontinuous = (
-            self._last_chunk_end_ms is not None
-            and abs(chunk_start - self._last_chunk_end_ms) > PCM_CONTIGUITY_TOLERANCE_MS
-        )
-        if self._start_ms is None or not self._waveform.size or discontinuous:
+        if self._start_ms is None or not self._waveform.size:
             self._reset_span(waveform, chunk_start)
         else:
             self._waveform = np.concatenate((self._waveform, waveform))
@@ -216,7 +201,6 @@ class AudioSetHumanVocalObserver:
             self._waveform = np.ascontiguousarray(self._waveform[removable:], dtype=np.float32)
             self._start_ms += removable * 1000.0 / self.SAMPLE_RATE
             self._next_emit -= removable
-        self._last_chunk_end_ms = float(chunk.at_ms)
         return tuple(frames)
 
 

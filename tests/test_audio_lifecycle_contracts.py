@@ -146,22 +146,6 @@ class RecordingBlankPosterior:
         return logits
 
 
-class BlockingVocalObserver:
-    """Make observation arbitrarily slow without changing capture semantics."""
-
-    def __init__(self):
-        self.started = Event()
-        self.release = Event()
-
-    def observe(self, chunk):
-        self.started.set()
-        self.release.wait(2)
-        return ()
-
-    def reset(self):
-        pass
-
-
 class StaticAudioEventModel:
     def __init__(self, *, class_index=19, score=.9):
         self.class_index = class_index
@@ -203,17 +187,13 @@ def tonal_chunk(end_ms: int, components: tuple[tuple[float, float], ...],
     return PCMChunk(end_ms, stereo.tobytes(), 48000, 2, 4)
 
 
-def wait_idle(native: NativeAudio) -> None:
+def wait_until(predicate, message='native audio result did not arrive') -> None:
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        with native._lock:
-            if (not native._alignment_inflight
-                    and native._pending_alignment is None
-                    and not native._observer_inflight
-                    and not native._observer_queue):
-                return
+        if predicate():
+            return
         time.sleep(.002)
-    raise TimeoutError('native audio analysis did not settle')
+    raise TimeoutError(message)
 
 
 def make_native(model, observations, errors=None, reports=None, *, clock=lambda: 1000, vocal_observer=None):
@@ -262,17 +242,19 @@ def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_
         # A fallback/deadline fence is an obligation: once the worker becomes
         # available, the latest captured frontier must be evaluated directly
         # rather than draining every obsolete intermediate snapshot first.
-        native.request_assessment_through(token, 3400)
-        with native._lock:
-            assert native._pending_alignment is not None
-            assert native._pending_alignment[2] == 3400
+        assert native.request_assessment_through(token, 3400)
+        wait_until(lambda: (native.capture_status()['observer_frontier_ms'] or 0) >= 3400)
+        assert not any(
+            observed == token and item.capture_end_ms >= 3400
+            for observed, item in observations)
         model.release.set()
-        wait_idle(native)
+        wait_until(lambda: any(
+            observed == token and item.capture_end_ms == 3400
+            for observed, item in observations))
 
-        # Continuous human-vocal observation may publish cheap progress while
-        # alignment is busy.  The expensive target query coalesces to one newest
-        # pending fence.  If the first query commits the lexical endpoint, that
-        # pending query becomes unnecessary rather than being drained anyway.
+        # Observer processing may reach the fence while alignment is still busy,
+        # but only the integrated frontier is published. If the first query commits
+        # the lexical endpoint, the pending query becomes unnecessary.
         aligned_frontiers = [item['capture_end_ms'] for observed, item in reports
                              if observed == token]
         assert aligned_frontiers == [1600]
@@ -300,7 +282,7 @@ def test_replaced_target_cannot_publish_stale_alignment_result():
         before_replacement = len(observations)
         native.begin(newest, 'other')
         model.release.set()
-        wait_idle(native)
+        wait_until(lambda: bool(observations[before_replacement:]))
 
         assert observations[before_replacement:]
         assert all(token == newest for token, _ in observations[before_replacement:])
@@ -319,7 +301,7 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
         chunk = stereo_chunk(2000, 1000)
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
-        wait_idle(native)
+        wait_until(lambda: bool(observations) and observations[-1][1].lexical is not None)
         item = observations[-1][1]
         assert item.lexical is not None
         assert item.lexical.target_end_ms == 1620
@@ -328,8 +310,9 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
 
         before = len(observations)
         native.health(CaptureHealth(2100, True, '', pcm_frames=0))
-        wait_idle(native)
-        assert not any(item.kind == 'transport' for _, item in observations[before:])
+        assert native.capture_status()['heartbeats'] >= 1
+        time.sleep(.02)
+        assert len(observations) == before
     finally:
         native.close()
 
@@ -350,7 +333,7 @@ def test_pcm_timeline_query_crops_causal_boundary_without_replaying_capture_stat
         native.history.push(kept, target_pid=42)
         native.feed(kept)
         native.begin(token, 'target', causal_lower_bound_ms=1000)
-        wait_idle(native)
+        wait_until(lambda: bool(observations))
         item = observations[-1][1]
         assert (item.capture_start_ms, item.capture_end_ms) == (1000, 1400)
         assert item.causal_lower_bound_ms == 1000
@@ -368,7 +351,7 @@ def test_external_input_candidates_narrow_initial_search_without_becoming_causal
             native.history.push(chunk, target_pid=42)
             native.feed(chunk)
         native.begin(token, 'target', input_candidates_ms=(1200, 1400))
-        wait_idle(native)
+        wait_until(lambda: bool(observations))
         item = observations[-1][1]
         assert item.causal_lower_bound_ms is None
         assert item.input_candidates_ms == (1200, 1400)
@@ -391,8 +374,8 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
                 native.history.push(chunk, target_pid=42)
                 native.feed(chunk)
             native.begin(token, 'target', causal_lower_bound_ms=1000)
-            wait_idle(native)
-            return observations[-1][1]
+            wait_until(lambda: any(item.capture_end_ms == 1600 for _, item in observations))
+            return [item for _, item in observations if item.capture_end_ms == 1600][-1]
         finally:
             native.close()
 
@@ -415,7 +398,8 @@ def test_candidate_search_widens_to_retained_pcm_only_when_target_is_not_found()
             native.history.push(chunk, target_pid=42)
             native.feed(chunk)
         native.begin(token, 'target', input_candidates_ms=(1200,))
-        wait_idle(native)
+        wait_until(lambda: bool(observations) and observations[-1][1].lexical is not None
+                   and observations[-1][1].lexical.target_associated)
 
         assert native.causal_lower_bound_ms is None
         assert model.calls == 2
@@ -437,24 +421,24 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         short = stereo_chunk(1200, 200)
         native.history.push(short, target_pid=42)
         native.feed(short)
-        assert not any(item.kind == 'acoustic' for _, item in observations)
+        assert not observations
 
         # A policy boundary requests exactly the already-captured snapshot. With
         # less than the alignment minimum it can still publish feature evidence
         # without inventing a lexical result.
         assert native.observation_fence(token) == 1200
         native.request_assessment_through(token, 1200)
-        wait_idle(native)
-        snapshots = [item for _, item in observations if item.kind == 'snapshot']
+        wait_until(lambda: any(item.capture_end_ms == 1200 for _, item in observations))
+        snapshots = [item for _, item in observations]
         assert snapshots and snapshots[-1].capture_end_ms == 1200
         before = len(snapshots)
 
         # A heartbeat can request the newest already-captured frontier, but with
         # no new PCM or measurement it must not manufacture another observation.
         native.health(CaptureHealth(1300, True, '', pcm_frames=0))
-        wait_idle(native)
-        assert len([item for _, item in observations if item.kind == 'snapshot']) == before
-        assert not any(item.kind == 'transport' for _, item in observations)
+        assert native.capture_status()['heartbeats'] >= 1
+        time.sleep(.02)
+        assert len(observations) == before
         status = native.capture_status()
         assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
     finally:
@@ -472,7 +456,8 @@ def test_committed_target_mapping_is_reused_while_later_pcm_only_updates_endpoin
         first = stereo_chunk(2000, 1000)
         native.history.push(first, target_pid=42)
         native.feed(first)
-        wait_idle(native)
+        wait_until(lambda: bool(observations) and observations[-1][1].lexical is not None
+                   and observations[-1][1].lexical.committed_target_end)
         first_snapshot = observations[-1][1]
         assert first_snapshot.capture_end_ms == 2000
         assert first_snapshot.lexical is not None
@@ -481,7 +466,7 @@ def test_committed_target_mapping_is_reused_while_later_pcm_only_updates_endpoin
         tail = stereo_chunk(2600, 600)
         native.history.push(tail, target_pid=42)
         native.feed(tail)
-        wait_idle(native)
+        wait_until(lambda: bool(observations) and observations[-1][1].capture_end_ms == 2600)
         second_snapshot = observations[-1][1]
         assert second_snapshot.capture_end_ms == 2600
         assert second_snapshot.lexical is not None
@@ -511,7 +496,8 @@ def test_recurrence_is_queried_only_after_direct_endpoint_evidence_remains_open(
         first = stereo_chunk(2000, 1000, value=.05)
         native.history.push(first, target_pid=42)
         native.feed(first)
-        wait_idle(native)
+        wait_until(lambda: bool(observations) and observations[-1][1].lexical is not None
+                   and observations[-1][1].lexical.committed_target_end)
         assert observations[-1][1].lexical is not None
         assert observations[-1][1].lexical.committed_target_end
         assert recurrence_calls == []
@@ -519,7 +505,7 @@ def test_recurrence_is_queried_only_after_direct_endpoint_evidence_remains_open(
         tail = stereo_chunk(3200, 1200, value=.05)
         native.history.push(tail, target_pid=42)
         native.feed(tail)
-        wait_idle(native)
+        wait_until(lambda: bool(recurrence_calls))
         assert recurrence_calls
         assert recurrence_calls[-1][0] == observations[-1][1].lexical.target_end_ms
     finally:
@@ -546,22 +532,45 @@ def test_causal_lower_bound_is_explicit_per_target_and_does_not_leak():
         native.close()
 
 
-def test_capture_callback_is_not_blocked_by_human_vocal_inference():
+def test_capture_callback_is_not_blocked_by_acoustic_analysis():
     observations = []
-    observer = BlockingVocalObserver()
-    native = make_native(StaticPosterior(), observations, vocal_observer=observer)
-    chunk = stereo_chunk(1600)
+    native = make_native(
+        StaticPosterior(frames=49, starts=(10, 20, 30)), observations,
+        vocal_observer=ActiveVocalObserver())
+    token = Token(11, 1)
+    recurrence_started = Event()
+    recurrence_release = Event()
+    original_recurrence = native.features.recurrence
+
+    def blocking_recurrence(*, start_ms, end_ms):
+        recurrence_started.set()
+        recurrence_release.wait(2)
+        return original_recurrence(start_ms=start_ms, end_ms=end_ms)
+
     try:
         native.history.start(42)
-        native.history.push(chunk, target_pid=42)
-        feeder = Thread(target=native.feed, args=(chunk,))
+        native.begin(token, 'target', causal_lower_bound_ms=1000)
+        first = stereo_chunk(2000, 1000, value=.05)
+        native.history.push(first, target_pid=42)
+        native.feed(first)
+        wait_until(lambda: bool(observations) and observations[-1][1].lexical is not None
+                   and observations[-1][1].lexical.committed_target_end)
+
+        native.features.recurrence = blocking_recurrence
+        tail = stereo_chunk(3200, 1200, value=.05)
+        native.history.push(tail, target_pid=42)
+        native.feed(tail)
+        assert recurrence_started.wait(1)
+
+        newest = stereo_chunk(3400, 200, value=.05)
+        native.history.push(newest, target_pid=42)
+        feeder = Thread(target=native.feed, args=(newest,))
         feeder.start()
-        assert observer.started.wait(1)
         feeder.join(.2)
         assert not feeder.is_alive()
-        assert native.history.latest_ms == 1600
+        assert native.history.latest_ms == 3400
     finally:
-        observer.release.set()
+        recurrence_release.set()
         native.close()
 
 
@@ -578,7 +587,7 @@ def test_alignment_never_compresses_pcm_gaps_into_one_acoustic_snapshot():
         native.history.push(stereo_chunk(1000, 400), target_pid=42)
         native.history.push(stereo_chunk(1800, 400), target_pid=42)
         native.begin(token, 'target')
-        wait_idle(native)
+        wait_until(lambda: bool(reports))
 
         assert model.calls == 2
         assert reports
@@ -598,7 +607,7 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
             native.history.push(compact_chunk(end_ms), target_pid=42)
 
         native.begin(token, 'target')
-        wait_idle(native)
+        wait_until(lambda: bool(observations))
         initial = tuple(model.durations_ms)
         assert 7_000 <= initial[0] <= 9_000
         assert len(initial) <= 4
@@ -609,7 +618,7 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
         fresh = compact_chunk(60_500, 500)
         native.history.push(fresh, target_pid=42)
         native.feed(fresh)
-        wait_idle(native)
+        wait_until(lambda: len(model.durations_ms) > len(initial))
         additional = tuple(model.durations_ms[len(initial):])
         assert additional
         assert max(additional) <= 10_000

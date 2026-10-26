@@ -254,7 +254,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     def observation(*, lex=None, voc=None, rec=None, end=1600, lower=1000,
                     inputs=(), attached=1050):
         return NativeAudioObservation(
-            kind='snapshot', lexical=lex, vocal=voc,
+            lexical=lex, vocal=voc,
             recurrence=rec or VocalRecurrenceEvidence(),
             capture_start_ms=900, capture_end_ms=end,
             causal_lower_bound_ms=lower, input_candidates_ms=tuple(inputs),

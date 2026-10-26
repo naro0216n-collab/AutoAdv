@@ -151,32 +151,45 @@ class AudioHistory:
                     result.append(cropped)
             return tuple(result)
 
-    @staticmethod
-    def split_contiguous(
-        chunks: tuple[PCMChunk, ...], *,
-        tolerance_ms: float = PCM_CONTIGUITY_TOLERANCE_MS,
-    ) -> tuple[tuple[PCMChunk, ...], ...]:
-        """Partition PCM by observed transport continuity.
-
-        Missing PCM is not synthesized as silence and is not compressed into a
-        continuous model input.  Consumers therefore agree on the same captured
-        spans even when their model-specific preprocessing differs.
-        """
-        if not chunks:
-            return ()
-        spans: list[list[PCMChunk]] = [[chunks[0]]]
-        for chunk in chunks[1:]:
-            previous = spans[-1][-1]
-            gap = chunk.start_ms - float(previous.at_ms)
-            if gap > float(tolerance_ms):
-                spans.append([chunk])
-            else:
-                spans[-1].append(chunk)
-        return tuple(tuple(span) for span in spans)
-
     def contiguous_slices(
         self, start_ms: int, end_ms: int | None = None, *,
         tolerance_ms: float = PCM_CONTIGUITY_TOLERANCE_MS,
     ) -> tuple[tuple[PCMChunk, ...], ...]:
-        return self.split_contiguous(
-            self.slice(start_ms, end_ms), tolerance_ms=tolerance_ms)
+        """Return exact range slices partitioned by raw transport continuity.
+
+        Continuity is decided from the retained packet timestamps before range
+        cropping, so a query boundary cannot hide a gap or overlap. Small packet
+        overlaps within the transport tolerance are cropped instead of duplicated
+        in model input.
+        """
+        start = int(start_ms)
+        with self._lock:
+            if not self._chunks:
+                return ()
+            end = int(self._chunks[-1].at_ms if end_ms is None else end_ms)
+            if end <= start:
+                return ()
+            spans: list[list[PCMChunk]] = []
+            current: list[PCMChunk] = []
+            previous_raw: PCMChunk | None = None
+            for chunk in self._chunks:
+                if chunk.at_ms <= start:
+                    continue
+                if chunk.start_ms >= end:
+                    break
+                if previous_raw is not None:
+                    gap = chunk.start_ms - float(previous_raw.at_ms)
+                    if abs(gap) > float(tolerance_ms):
+                        if current:
+                            spans.append(current)
+                        current = []
+                crop_start = start
+                if current:
+                    crop_start = max(crop_start, int(current[-1].at_ms))
+                cropped = self._crop(chunk, crop_start, end)
+                if cropped is not None:
+                    current.append(cropped)
+                previous_raw = chunk
+            if current:
+                spans.append(current)
+            return tuple(tuple(span) for span in spans)

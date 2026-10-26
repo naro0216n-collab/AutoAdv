@@ -1259,7 +1259,6 @@ class AutoAdvApplication:
         recurrence = observation.recurrence
         self._emit_telemetry(
             'native_audio_observation', token,
-            kind=observation.kind,
             target_units=(lexical.target_units if lexical is not None else 0),
             aligned_target_units=(lexical.aligned_target_units if lexical is not None else 0),
             target_associated=(lexical.target_associated if lexical is not None else False),
@@ -1291,8 +1290,6 @@ class AutoAdvApplication:
             recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),
             recent_recurrence_strength=(recurrence.recent_strength if recurrence is not None else 0.0),
             recurrence_level_consistency=(recurrence.level_consistency if recurrence is not None else 0.0),
-            pcm_last_frame_ms=observation.pcm_last_frame_ms,
-            heartbeat_at_ms=observation.heartbeat_at_ms,
         )
 
         # Alignment work and endpoint observation may complete out of order. An

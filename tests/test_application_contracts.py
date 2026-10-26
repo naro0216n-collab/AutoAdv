@@ -288,7 +288,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     active_app._native_audio = RetainedNative()
     active_app._consume_native_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.ACTIVE, evidence_at_ms=1500), NativeAudioObservation(
-        kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
+        capture_start_ms=1000, capture_end_ms=1500,
         lexical=LexicalProgressEvidence(
             target_units=5, aligned_target_units=3, target_associated=True,
             complete_alignment=False, committed_target_end=False,
@@ -311,7 +311,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     # not permission to replace the newer integrated judgment.
     active_app._consume_native_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
-        kind='snapshot', capture_start_ms=1000, capture_end_ms=1400,
+        capture_start_ms=1000, capture_end_ms=1400,
         vocal=HumanVocalEvidence(start_ms=1000, end_ms=1400),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000))
     assert active_app.controller.native_progress.active
@@ -363,7 +363,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     assert fenced_native.requested == [(fenced_token, 1500)]
     fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1500), NativeAudioObservation(
-        kind='acoustic', capture_start_ms=1000, capture_end_ms=1500,
+        capture_start_ms=1000, capture_end_ms=1500,
         vocal=HumanVocalEvidence(
             start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
