@@ -14,8 +14,6 @@ from threading import RLock
 from typing import Callable
 import time
 
-import numpy as np
-
 from .acoustic_observers import (
     AcousticObservationHistory, HumanVocalActivityObserver, VocalActivityObserver,
 )
@@ -67,12 +65,10 @@ class NativeAudio:
                  *, model_backend=None, g2p=None, clock=None,
                  human_vocal_model: Path | None = None,
                  vocal_observer: VocalActivityObserver | None = None,
-                 on_pcm: Callable[[Token, int], None] | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None,
                  on_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation], None] | None = None):
         self.pid = pid
         self.on_error = on_error
-        self.on_pcm = on_pcm
         self.on_inference = on_inference
         self.on_progress = on_progress
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
@@ -122,7 +118,6 @@ class NativeAudio:
         self._observer_cursor_ms: int | None = None
         self._observer_running = False
         self._observer_revision = 0
-        self._observer_reset_required = True
 
         # A fallback fence is just an assessment obligation. Progress is emitted
         # only when both lexical (when required) and observer measurements reach it.
@@ -131,12 +126,7 @@ class NativeAudio:
 
         self._generation = 0
         self._closed = False
-        self._capture_pcm_packets = 0
-        self._capture_pcm_frames = 0
-        self._capture_heartbeats = 0
         self._capture_error: str | None = None
-        self._capture_stereo_peak = 0.0
-        self._pcm_reported_generation: int | None = None
 
     def start(self) -> None:
         self._capture.start()
@@ -235,10 +225,8 @@ class NativeAudio:
 
         alignment_work = None
         submit_observer = False
-        pcm_notice = None
         with self._lock:
             self._generation += 1
-            generation = self._generation
             self._pending_alignment_boundary = None
             self.token = token
             self.aligner = aligner
@@ -252,7 +240,6 @@ class NativeAudio:
             self._last_alignment_query = None
             self._last_progress_key = None
             self._required_assessment_ms = None
-            self._pcm_reported_generation = None
 
             frontier = self.history.latest_ms
             if frontier is not None:
@@ -265,17 +252,10 @@ class NativeAudio:
             self._search_exhausted_at = None
 
             if frontier is not None:
-                retained = self.history.slice(self._search_start_ms, frontier)
-                if retained:
-                    first = retained[0]
-                    self._pcm_reported_generation = generation
-                    pcm_notice = (token, generation,
-                                  len(first.frames) // (first.channels * first.sample_width_bytes))
                 if aligner is not None and frontier - self._search_start_ms >= self.MIN_AUDIO_MS:
                     alignment_work = self._request_alignment_locked(int(frontier))
                 submit_observer = self._wake_observer_locked()
 
-        self._publish_pcm(pcm_notice)
         self._submit_alignment(alignment_work)
         if submit_observer:
             self._submit_observer()
@@ -310,32 +290,15 @@ class NativeAudio:
                 self._retire_target_locked()
 
     def health(self, status: CaptureHealth) -> None:
-        alignment_work = None
-        submit_observer = False
-        token = None
+        """Handle transport failure; healthy heartbeats carry no analysis work."""
+        if status.healthy:
+            return
         with self._lock:
-            if status.healthy:
-                if status.pcm_frames:
-                    self._capture_pcm_packets += 1
-                    self._capture_pcm_frames += status.pcm_frames
-                else:
-                    self._capture_heartbeats += 1
-                    token = self.token
-                    frontier = self.history.latest_ms
-                    if token is not None and frontier is not None and self.aligner is not None:
-                        alignment_work = self._request_alignment_locked(int(frontier), queue_if_busy=True)
-                    if token is not None:
-                        submit_observer = self._wake_observer_locked()
-            else:
-                self._capture_error = status.reason
-                token = self.token
-                self._observer_revision += 1
-                self._observer_cursor_ms = None
-                self._observer_reset_required = True
-        self._submit_alignment(alignment_work)
-        if submit_observer:
-            self._submit_observer()
-        if not status.healthy and token is not None:
+            self._capture_error = status.reason
+            token = self.token
+            self._observer_revision += 1
+            self._observer_cursor_ms = None
+        if token is not None:
             self.on_error(token, status.reason)
 
     def observation_fence(self, token: Token) -> int | None:
@@ -345,22 +308,23 @@ class NativeAudio:
             frontier = self.history.latest_ms
             return int(frontier) if frontier is not None else None
 
-    def request_assessment_through(self, token: Token, through_ms: int) -> bool:
+    def request_assessment_through(self, token: Token, through_ms: int) -> None:
+        """Require one integrated assessment through already-captured PCM."""
         alignment_work = None
         submit_observer = False
         with self._lock:
             if self._closed or token != self.token:
-                return False
+                return
             frontier = self.history.latest_ms
             if frontier is None:
-                return False
+                return
             boundary = min(int(through_ms), int(frontier))
             self._required_assessment_ms = max(
                 boundary,
                 self._required_assessment_ms if self._required_assessment_ms is not None else boundary,
             )
             if self.aligner is not None:
-                alignment_work = self._request_alignment_locked(boundary, queue_if_busy=True)
+                alignment_work = self._request_alignment_locked(boundary)
                 if (alignment_work is None
                         and self._alignment_inflight_generation is None
                         and boundary - int(self._search_start_ms) < self.MIN_AUDIO_MS):
@@ -370,29 +334,9 @@ class NativeAudio:
                         if self._alignment_ready_through_ms is not None else boundary,
                     )
             submit_observer = self._wake_observer_locked()
-            pending = bool(
-                alignment_work is not None
-                or self._alignment_inflight_generation is not None
-                or self._required_assessment_ms is not None
-            )
         self._submit_alignment(alignment_work)
         if submit_observer:
             self._submit_observer()
-        return pending
-
-    def capture_status(self) -> dict:
-        with self._lock:
-            return dict(
-                scope="capture_since_start",
-                pcm_packets=self._capture_pcm_packets,
-                pcm_frames=self._capture_pcm_frames,
-                heartbeats=self._capture_heartbeats,
-                capture_stereo_peak=round(self._capture_stereo_peak, 6),
-                causal_lower_bound_ms=self.causal_lower_bound_ms,
-                pcm_frontier_ms=self.history.latest_ms,
-                observer_frontier_ms=self._observer_cursor_ms,
-                failure=self._capture_error,
-            )
 
     def feed(self, chunk: PCMChunk) -> None:
         """Capture callback: wake timeline consumers and return without inference."""
@@ -443,30 +387,30 @@ class NativeAudio:
                             self._observer_running = False
                             return
                         spans = ()
-                        reset_required = False
                     else:
                         cursor = self._observer_cursor_ms
-                        reset_required = bool(
-                            self._observer_reset_required
-                            or cursor is None
-                            or int(cursor) < int(earliest)
+                        rebuild_features = bool(cursor is None or int(cursor) < int(earliest))
+                        start = int(earliest) if rebuild_features else int(cursor)
+                        window = self.history.read(start, int(frontier))
+                        spans = window.spans
+                        reset_stream = rebuild_features or bool(
+                            cursor is not None
+                            and spans
+                            and not window.continues_from_start
                         )
-                        start = int(earliest) if reset_required else int(cursor)
-                        spans = self.history.contiguous_slices(start, int(frontier))
                         assessment = None if spans else self._assessment_locked()
                         if not spans and assessment is None:
                             self._observer_running = False
                             return
 
                 if spans:
-                    if reset_required:
+                    if reset_stream:
                         reset = getattr(self.vocal_observer, "reset", None)
                         if callable(reset):
                             reset()
+                    if rebuild_features:
                         self.features.reset()
                     first_span = True
-                    latest_peak = 0.0
-                    first_pcm_frames = None
                     for span in spans:
                         if not first_span:
                             reset = getattr(self.vocal_observer, "reset", None)
@@ -474,26 +418,14 @@ class NativeAudio:
                                 reset()
                         first_span = False
                         for chunk in span:
-                            if first_pcm_frames is None:
-                                first_pcm_frames = len(chunk.frames) // (chunk.channels * chunk.sample_width_bytes)
                             frames = self.vocal_observer.observe(chunk)
                             self.features.add_vocal(frames)
-                            latest_peak = max(latest_peak, self._chunk_peak(chunk))
 
                     with self._lock:
                         if revision != self._observer_revision:
-                            self._observer_reset_required = True
                             continue
                         self._observer_cursor_ms = int(frontier)
-                        self._observer_reset_required = False
-                        self._capture_stereo_peak = max(self._capture_stereo_peak, latest_peak)
-                        pcm_notice = None
-                        if (self.token is not None and first_pcm_frames is not None
-                                and self._pcm_reported_generation != self._generation):
-                            self._pcm_reported_generation = self._generation
-                            pcm_notice = (self.token, self._generation, first_pcm_frames)
                         assessment = self._assessment_locked()
-                    self._publish_pcm(pcm_notice)
 
                 if assessment is not None:
                     self._run_assessment(assessment)
@@ -510,13 +442,6 @@ class NativeAudio:
                     self._observer_running = False
                 if token is not None:
                     self.on_error(token, "human-vocal observer failure: " + str(error))
-
-    @staticmethod
-    def _chunk_peak(chunk: PCMChunk) -> float:
-        if (chunk.sample_rate, chunk.channels, chunk.sample_width_bytes) != (48000, 2, 4):
-            return 0.0
-        values = np.frombuffer(chunk.frames, dtype="<f4")
-        return float(np.max(np.abs(values))) if values.size else 0.0
 
     def _ready_boundary_locked(self) -> int | None:
         if self.token is None or self._observer_cursor_ms is None:
@@ -644,7 +569,7 @@ class NativeAudio:
         if self._closed or self.token is None or self.aligner is None:
             return None
         start = max(self._minimum_search_start_locked(boundary), int(self._search_start_ms))
-        segments = self.history.contiguous_slices(start, boundary)
+        segments = self.history.read(start, boundary).spans
         if not segments:
             return None
         query = (start, int(boundary))
@@ -654,17 +579,23 @@ class NativeAudio:
         requested_ns = time.perf_counter_ns() if self.on_inference else 0
         return (self.token, generation, segments, self.aligner, requested_ns, query)
 
-    def _request_alignment_locked(self, boundary: int, *, queue_if_busy: bool = False):
+    def _request_alignment_locked(self, boundary: int):
         if self._closed or self.token is None or self.aligner is None:
             return None
         boundary = int(boundary)
         if boundary - int(self._search_start_ms) < self.MIN_AUDIO_MS:
             return None
         query = (max(self._minimum_search_start_locked(boundary), int(self._search_start_ms)), boundary)
-        if query == self._last_alignment_query and not queue_if_busy:
+        if query == self._last_alignment_query:
             return None
         if self._alignment_inflight_generation is not None:
-            if self._pending_alignment_boundary is None or boundary >= self._pending_alignment_boundary:
+            active_boundary = (
+                int(self._last_alignment_query[1])
+                if self._last_alignment_query is not None else -1
+            )
+            if boundary <= active_boundary:
+                return None
+            if self._pending_alignment_boundary is None or boundary > self._pending_alignment_boundary:
                 self._pending_alignment_boundary = boundary
             return None
         return self._start_alignment_locked(boundary)
@@ -796,7 +727,14 @@ class NativeAudio:
                     if not associated and not selection.ambiguous:
                         retry_same_boundary = self._expand_search_locked(boundary)
                         if retry_same_boundary:
-                            self._pending_alignment_boundary = boundary
+                            # Search widening changes the next query, but a newer
+                            # captured frontier already pending subsumes this older
+                            # snapshot and must not be discarded.
+                            self._pending_alignment_boundary = max(
+                                boundary,
+                                self._pending_alignment_boundary
+                                if self._pending_alignment_boundary is not None else boundary,
+                            )
                     if lexical is not None:
                         if lexical != self._lexical:
                             self._lexical = lexical
@@ -870,15 +808,6 @@ class NativeAudio:
                     self._alignment_inflight_generation = None
                     next_work = self._take_pending_alignment_locked()
             self._submit_alignment(next_work)
-
-    def _publish_pcm(self, notice) -> None:
-        if notice is None or self.on_pcm is None:
-            return
-        token, generation, frames = notice
-        with self._lock:
-            if self._closed or generation != self._generation or token != self.token:
-                return
-        self.on_pcm(token, frames)
 
     def close(self) -> None:
         self.cancel()

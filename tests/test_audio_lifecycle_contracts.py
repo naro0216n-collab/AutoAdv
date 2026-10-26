@@ -114,6 +114,19 @@ class StaticVocalObserver:
                      for t in range(start + 16, int(chunk.at_ms) + 1, 16))
 
 
+class RecordingVocalObserver(StaticVocalObserver):
+    def __init__(self):
+        self.observed_until = []
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def observe(self, chunk):
+        self.observed_until.append(int(chunk.at_ms))
+        return super().observe(chunk)
+
+
 class BlockingPosterior(StaticPosterior):
     def __init__(self):
         super().__init__()
@@ -126,6 +139,13 @@ class BlockingPosterior(StaticPosterior):
         self.started.set()
         self.release.wait(2)
         return self.logits
+
+
+class BlockingBlankPosterior(BlockingPosterior):
+    def __init__(self):
+        super().__init__()
+        self.logits[:] = -4.0
+        self.logits[:, 0] = 5.0
 
 
 class RecordingBlankPosterior:
@@ -221,46 +241,42 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
 
 def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_queries():
     observations, reports = [], []
-    model = BlockingPosterior()
-    native = make_native(model, observations, reports=reports)
+    model = BlockingBlankPosterior()
+    observer = RecordingVocalObserver()
+    native = make_native(model, observations, reports=reports, vocal_observer=observer, clock=lambda: 20_000)
     token = Token(1, 1)
     try:
         native.history.start(42)
+        retained = compact_chunk(20_000, 20_000)
+        native.history.push(retained, target_pid=42)
         native.begin(token, 'target', causal_lower_bound_ms=1000)
-        first = stereo_chunk(1600)
-        native.history.push(first, target_pid=42)
-        native.feed(first)
         assert model.started.wait(1)
 
-        # Capture can outrun one expensive whole-snapshot inference. Periodic
-        # intermediate frontiers are not Application obligations.
-        for end_ms in (2200, 2800, 3400):
-            chunk = stereo_chunk(end_ms, 600)
+        # Capture can outrun an expensive search. Intermediate frontiers are not
+        # separate Application obligations; the newest fence supersedes them.
+        for end_ms in (21_000, 22_000):
+            chunk = compact_chunk(end_ms, 1000)
             native.history.push(chunk, target_pid=42)
             native.feed(chunk)
 
-        # A fallback/deadline fence is an obligation: once the worker becomes
-        # available, the latest captured frontier must be evaluated directly
-        # rather than draining every obsolete intermediate snapshot first.
-        assert native.request_assessment_through(token, 3400)
-        wait_until(lambda: (native.capture_status()['observer_frontier_ms'] or 0) >= 3400)
+        native.request_assessment_through(token, 22_000)
+        wait_until(lambda: observer.observed_until and observer.observed_until[-1] >= 22_000)
         assert not any(
-            observed == token and item.capture_end_ms >= 3400
+            observed == token and item.capture_end_ms >= 22_000
             for observed, item in observations)
+
         model.release.set()
         wait_until(lambda: any(
-            observed == token and item.capture_end_ms == 3400
+            observed == token and item.capture_end_ms == 22_000
             for observed, item in observations))
 
-        # Observer processing may reach the fence while alignment is still busy,
-        # but only the integrated frontier is published. If the first query commits
-        # the lexical endpoint, the pending query becomes unnecessary.
+        # Widening the older search may legitimately re-query its boundary, but
+        # it must never replace the newer captured frontier with an obsolete one.
         aligned_frontiers = [item['capture_end_ms'] for observed, item in reports
                              if observed == token]
-        assert aligned_frontiers == [1600]
-        assert model.calls == 1
-        assert any(item.capture_end_ms == 3400 for observed, item in observations
-                   if observed == token)
+        assert aligned_frontiers[0] == 20_000
+        assert aligned_frontiers[-1] == 22_000
+        assert 21_000 not in aligned_frontiers
     finally:
         model.release.set()
         native.close()
@@ -309,8 +325,7 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
         assert item.vocal is not None
 
         before = len(observations)
-        native.health(CaptureHealth(2100, True, '', pcm_frames=0))
-        assert native.capture_status()['heartbeats'] >= 1
+        native.health(CaptureHealth(2100, True, ''))
         time.sleep(.02)
         assert len(observations) == before
     finally:
@@ -410,37 +425,55 @@ def test_candidate_search_widens_to_retained_pcm_only_when_target_is_not_found()
         native.close()
 
 
-def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evidence():
+def test_heartbeat_is_transport_health_only_and_never_schedules_acoustic_work():
     observations = []
-    model = CountingPosterior()
+    model = BlockingPosterior()
     native = make_native(model, observations)
     token = Token(8, 1)
     try:
         native.history.start(42)
         native.begin(token, 'target', causal_lower_bound_ms=1000)
-        short = stereo_chunk(1200, 200)
-        native.history.push(short, target_pid=42)
-        native.feed(short)
-        assert not observations
+        chunk = stereo_chunk(1600, 600)
+        native.history.push(chunk, target_pid=42)
+        native.feed(chunk)
+        assert model.started.wait(1)
 
-        # A policy boundary requests exactly the already-captured snapshot. With
-        # less than the alignment minimum it can still publish feature evidence
-        # without inventing a lexical result.
-        assert native.observation_fence(token) == 1200
-        native.request_assessment_through(token, 1200)
-        wait_until(lambda: any(item.capture_end_ms == 1200 for _, item in observations))
-        snapshots = [item for _, item in observations]
-        assert snapshots and snapshots[-1].capture_end_ms == 1200
-        before = len(snapshots)
-
-        # A heartbeat can request the newest already-captured frontier, but with
-        # no new PCM or measurement it must not manufacture another observation.
-        native.health(CaptureHealth(1300, True, '', pcm_frames=0))
-        assert native.capture_status()['heartbeats'] >= 1
+        # A healthy heartbeat reports transport liveness only. It must not
+        # request the same PCM frontier again while inference is in flight.
+        native.health(CaptureHealth(1700, True, ''))
+        model.release.set()
+        wait_until(lambda: bool(observations))
         time.sleep(.02)
-        assert len(observations) == before
-        status = native.capture_status()
-        assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
+        assert model.calls == 1
+    finally:
+        model.release.set()
+        native.close()
+
+
+def test_continuous_observation_resets_at_pcm_timeline_discontinuities():
+    observations = []
+    observer = RecordingVocalObserver()
+    native = make_native(StaticPosterior(), observations, vocal_observer=observer)
+    try:
+        native.history.start(42)
+        first = stereo_chunk(1000, 100)
+        contiguous = stereo_chunk(1100, 100)
+        separated = stereo_chunk(1500, 100)
+
+        for chunk in (first, contiguous):
+            native.history.push(chunk, target_pid=42)
+            native.feed(chunk)
+            wait_until(lambda end=chunk.at_ms: observer.observed_until and observer.observed_until[-1] >= end)
+        assert observer.resets == 1
+        before_gap = native.features.summarize_vocal(start_ms=900, end_ms=1100)
+        before_count = sum(series.frame_count for series in before_gap.series)
+
+        native.history.push(separated, target_pid=42)
+        native.feed(separated)
+        wait_until(lambda: observer.observed_until and observer.observed_until[-1] >= 1500)
+        assert observer.resets == 2
+        after_gap = native.features.summarize_vocal(start_ms=900, end_ms=1500)
+        assert sum(series.frame_count for series in after_gap.series) > before_count
     finally:
         native.close()
 

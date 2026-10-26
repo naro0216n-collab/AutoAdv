@@ -196,8 +196,7 @@ def test_admitted_text_keeps_auto_input_bound_distinct_from_external_input_candi
         def cancel(self): pass
         def finish_line(self, _token): pass
         def observation_fence(self, _token): return None
-        def request_assessment_through(self, _token, _through_ms): return False
-        def capture_status(self): return {}
+        def request_assessment_through(self, _token, _through_ms): pass
     native = Native()
     app._native_audio = native
 
@@ -263,9 +262,8 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
 
     class RetainedNative:
         pid = 101
-        def capture_status(self): return {}
         def observation_fence(self, _token): return None
-        def request_assessment_through(self, _token, _through_ms): return False
+        def request_assessment_through(self, _token, _through_ms): pass
         def finish_line(self, _token): raise AssertionError('inconclusive audio must remain active')
 
     # The Application must propagate non-terminal progress into Controller
@@ -349,8 +347,6 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
             return 1500
         def request_assessment_through(self, token, through_ms):
             self.requested.append((token, through_ms))
-            return True
-        def capture_status(self): return {}
         def finish_line(self, _token): pass
 
     fenced_native = FencedNative()
@@ -361,6 +357,18 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     fenced_deadline()
     assert not fenced_app.runtime_state().completed
     assert fenced_native.requested == [(fenced_token, 1500)]
+
+    # NativeAudio owns the fence obligation after the first request. Intermediate
+    # progress must not cause Application to inject the same scheduling request
+    # again.
+    fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
+        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
+            capture_start_ms=1000, capture_end_ms=1400,
+            vocal=HumanVocalEvidence(start_ms=1000, end_ms=1400),
+            recurrence=VocalRecurrenceEvidence()))
+    assert not fenced_app.runtime_state().completed
+    assert fenced_native.requested == [(fenced_token, 1500)]
+
     fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1500), NativeAudioObservation(
         capture_start_ms=1000, capture_end_ms=1500,
@@ -563,7 +571,6 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
         def close(self): self.closed = True
         def cancel(self): pass
         def boundary(self): pass
-        def capture_status(self): return {'packets': 0}
 
     managed = SimpleNamespace(
         helper_dll='C:/runtime/helper.dll',
@@ -586,7 +593,7 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
     assert native.started and native.pid == 202
     assert (str(native.helper), str(native.model), str(native.vocab)) == (
         managed.helper_dll, managed.alignment_model, managed.alignment_vocab)
-    assert {'on_pcm', 'on_inference', 'on_progress'} <= set(native.callbacks)
+    assert {'on_inference', 'on_progress'} <= set(native.callbacks)
     assert str(native.callbacks['human_vocal_model']) == managed.human_vocal_model
     app.stop_monitoring('session_changed')
     assert native.closed and not app.native_audio_available

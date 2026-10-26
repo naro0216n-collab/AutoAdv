@@ -1326,9 +1326,6 @@ class AutoAdvApplication:
             fence_ms = pending[1]
             if progress.evidence_at_ms is not None and progress.evidence_at_ms >= fence_ms:
                 return self._apply_fallback_due(token)
-            native = self._native_audio
-            if native is not None:
-                native.request_assessment_through(token, fence_ms)
         return False
 
     def _start_native_audio(self, profile: Profile) -> bool:
@@ -1378,10 +1375,6 @@ class AutoAdvApplication:
                 self._dispatch_runtime(
                     lambda: consume_progress(token, progress, observation))
 
-        def publish_pcm(token: Token, frames: int) -> None:
-            if current():
-                self._emit_telemetry('native_pcm', token, frames=frames, audio_pid=pid)
-
         def publish_inference(token: Token, metrics: dict) -> None:
             if current():
                 self._emit_telemetry('alignment_inference', token, **metrics)
@@ -1416,7 +1409,6 @@ class AutoAdvApplication:
                     pid, Path(native_helper), Path(alignment_model), Path(alignment_vocab),
                     publish_error,
                     human_vocal_model=Path(human_vocal_model),
-                    on_pcm=publish_pcm,
                     on_inference=publish_inference,
                     on_progress=publish_progress)
                 native.start()

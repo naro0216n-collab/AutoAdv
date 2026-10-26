@@ -36,6 +36,20 @@ class PCMChunk:
         return float(self.at_ms) - self.duration_ms
 
 
+@dataclass(frozen=True)
+class PCMWindow:
+    """One exact PCM query with transport continuity preserved.
+
+    ``continues_from_start`` tells incremental consumers whether the first
+    returned raw packet is transport-contiguous with the packet immediately
+    preceding ``start_ms``.  Internal discontinuities are represented by
+    separate spans.
+    """
+
+    spans: tuple[tuple[PCMChunk, ...], ...] = ()
+    continues_from_start: bool = False
+
+
 class AudioHistory:
     """Finite raw PCM timeline with exact range and continuity queries."""
 
@@ -131,58 +145,55 @@ class AudioHistory:
             sample_width_bytes=chunk.sample_width_bytes,
         )
 
-    def slice(self, start_ms: int, end_ms: int | None = None) -> tuple[PCMChunk, ...]:
-        """Return captured PCM inside one exact monotonic wall-clock range."""
-        start = int(start_ms)
-        with self._lock:
-            if not self._chunks:
-                return ()
-            end = int(self._chunks[-1].at_ms if end_ms is None else end_ms)
-            if end <= start:
-                return ()
-            result: list[PCMChunk] = []
-            for chunk in self._chunks:
-                if chunk.at_ms <= start:
-                    continue
-                if chunk.start_ms >= end:
-                    break
-                cropped = self._crop(chunk, start, end)
-                if cropped is not None:
-                    result.append(cropped)
-            return tuple(result)
+    def read(self, start_ms: int, end_ms: int | None = None) -> PCMWindow:
+        """Return an exact range partitioned by raw transport continuity.
 
-    def contiguous_slices(
-        self, start_ms: int, end_ms: int | None = None, *,
-        tolerance_ms: float = PCM_CONTIGUITY_TOLERANCE_MS,
-    ) -> tuple[tuple[PCMChunk, ...], ...]:
-        """Return exact range slices partitioned by raw transport continuity.
-
-        Continuity is decided from the retained packet timestamps before range
-        cropping, so a query boundary cannot hide a gap or overlap. Small packet
-        overlaps within the transport tolerance are cropped instead of duplicated
-        in model input.
+        Continuity is decided from retained raw packet timestamps before range
+        cropping.  This keeps an incremental consumer's cursor boundary from
+        hiding a gap or a large overlap between the last consumed packet and the
+        first newly returned packet.
         """
         start = int(start_ms)
         with self._lock:
             if not self._chunks:
-                return ()
+                return PCMWindow()
             end = int(self._chunks[-1].at_ms if end_ms is None else end_ms)
             if end <= start:
-                return ()
+                return PCMWindow()
+
             spans: list[list[PCMChunk]] = []
             current: list[PCMChunk] = []
             previous_raw: PCMChunk | None = None
+            continues_from_start = False
+            first_returned = True
+
             for chunk in self._chunks:
                 if chunk.at_ms <= start:
+                    previous_raw = chunk
                     continue
                 if chunk.start_ms >= end:
                     break
+
+                discontinuity = False
                 if previous_raw is not None:
                     gap = chunk.start_ms - float(previous_raw.at_ms)
-                    if abs(gap) > float(tolerance_ms):
-                        if current:
-                            spans.append(current)
-                        current = []
+                    discontinuity = abs(gap) > PCM_CONTIGUITY_TOLERANCE_MS
+
+                if first_returned:
+                    # If the query begins inside the oldest retained packet there
+                    # is no raw boundary to cross at ``start``. Otherwise the raw
+                    # predecessor decides whether an incremental stream may
+                    # continue without resetting its model state.
+                    if previous_raw is None and chunk.start_ms <= start < chunk.at_ms:
+                        continues_from_start = True
+                    else:
+                        continues_from_start = previous_raw is not None and not discontinuity
+                    first_returned = False
+                elif discontinuity:
+                    if current:
+                        spans.append(current)
+                    current = []
+
                 crop_start = start
                 if current:
                     crop_start = max(crop_start, int(current[-1].at_ms))
@@ -190,6 +201,10 @@ class AudioHistory:
                 if cropped is not None:
                     current.append(cropped)
                 previous_raw = chunk
+
             if current:
                 spans.append(current)
-            return tuple(tuple(span) for span in spans)
+            return PCMWindow(
+                spans=tuple(tuple(span) for span in spans),
+                continues_from_start=continues_from_start,
+            )
