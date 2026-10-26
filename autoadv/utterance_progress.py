@@ -1,14 +1,16 @@
-"""Native-audio evidence and final progression assessment for one presentation.
+"""Native-audio evidence and integrated progression assessment.
 
-Observers and alignment backends publish measurements tied to exact audio/time
-ranges.  Direct evidence is evaluated before optional ambiguity evidence, and
-only one integrated progress result is emitted for Controller.
+Measurements retain their own provenance.  This module combines lexical,
+human-vocal, temporal and optional recurrence evidence exactly once; it does not
+reconstruct source identity or reinterpret transport facts as endpoints.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
+
+import numpy as np
 
 if TYPE_CHECKING:
     from .forced_alignment import TargetTimeAlignment
@@ -26,13 +28,7 @@ class VocalScoreSample:
 
 @dataclass(frozen=True)
 class VocalEvidenceSeries:
-    """One observer's human-vocal measurements on its own score scale.
-
-    ``active_intervals`` is the observer's strong-positive view only.  ``samples``
-    preserves the continuous scores and receptive-field provenance so the
-    progression evaluator can preserve model-local evidence without pretending that
-    different observers share one probability scale or one time resolution.
-    """
+    """One observer's human-vocal measurements on its own score scale."""
 
     source: str
     frame_count: int
@@ -52,24 +48,15 @@ class HumanVocalEvidence:
     series: tuple[VocalEvidenceSeries, ...] = ()
 
 
-
 @dataclass(frozen=True)
 class VocalRecurrenceEvidence:
-    """Independent measurements of repeated acoustic structure.
-
-    Values intentionally remain separate.  ``strength`` is spectral recurrence
-    among time points supported by a human-vocal observer.  ``level_consistency``
-    is amplitude consistency for those pairs.  ``low_vocal_reference_similarity``
-    measures how well the same structure is already explained by nearby audio
-    without positive human-vocal support; it is not a background/source label.
-    """
+    """Repeated structure measured from a human-vocal observer time series."""
 
     strength: float = 0.0
     period_ms: int | None = None
     period_stability: float = 0.0
     recent_strength: float = 0.0
     level_consistency: float = 0.0
-    low_vocal_reference_similarity: float = 0.0
 
 
 class UtteranceProgressState(str, Enum):
@@ -80,7 +67,7 @@ class UtteranceProgressState(str, Enum):
 
 @dataclass(frozen=True)
 class LexicalProgressEvidence:
-    """Target-conditioned alignment measurement for one PCM snapshot."""
+    """Target-conditioned alignment measurement for one PCM query."""
 
     target_units: int
     aligned_target_units: int
@@ -120,19 +107,7 @@ class LexicalProgressEvidence:
 
 @dataclass(frozen=True)
 class NativeAudioObservation:
-    """Factual measurements published alongside the integrated progress result.
-
-    Downstream application code records this object for diagnosis but does not
-    run a second progression evaluator over it. ``causal_lower_bound_ms`` is an
-    observed game-input lower bound when one is
-    available from AutoAdv's own successful advancement input.
-    ``input_candidates_ms`` are earlier external game-input observations that
-    may or may not have advanced dialogue.  They remain independent timestamps:
-    no inference step selects one and turns it into a Presentation boundary.
-    ``target_attached_ms`` is
-    retained only as factual telemetry for when the known text became
-    available; it is never an acoustic boundary.
-    """
+    """Factual measurements published alongside one integrated progress result."""
 
     kind: str
     capture_start_ms: int | None = None
@@ -169,92 +144,78 @@ class UtteranceProgress:
         return self.state == UtteranceProgressState.UNKNOWN
 
 
-END_CONTEXT_MS = 360
 LOOP_STRENGTH = 0.78
 LOOP_STABILITY = 0.60
 RECENT_LOOP_STRENGTH = 0.72
 LOOP_LEVEL_CONSISTENCY = 0.55
 MIN_LOOP_OBSERVATION_MS = 1200
-LOOP_REFERENCE_MARGIN = 0.06
-
 
 
 @dataclass(frozen=True)
-class _VocalRiskChain:
+class _VocalRiskSpan:
     source: str
     support_start_ms: int
     first_observed_ms: int
     last_observed_ms: int
+    closure_context_ms: int
 
 
-def _selected_risk_samples(series: VocalEvidenceSeries) -> tuple[VocalScoreSample, ...]:
-    """Return this observer's own strong-positive measurements.
+def _series_timing(series: VocalEvidenceSeries) -> tuple[float, float]:
+    """Return observer-local cadence and receptive support width."""
+    if not series.samples:
+        return 16.0, 16.0
+    times = [sample.at_ms for sample in series.samples]
+    gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
+    cadence = float(np.median(gaps)) if gaps else 16.0
+    widths = [max(0, sample.at_ms - sample.support_start_ms) for sample in series.samples]
+    support = float(np.median(widths)) if widths else cadence
+    return max(1.0, cadence), max(1.0, support)
 
-    Score scales stay observer-local.  Sub-threshold values remain factual
-    telemetry but are not promoted into human-vocal evidence by integration;
-    observer coverage problems must be solved at measurement/model level rather
-    than by a second adaptive detector hidden in integration logic.
+
+def _series_closure_context_ms(series: VocalEvidenceSeries) -> int:
+    """Evidence horizon needed before one observer can call its activity closed.
+
+    The horizon is derived from that observer's actual sampling cadence and input
+    support.  It is deliberately not reused for lexical association, PCM
+    continuity, recurrence, or any other semantic responsibility.
     """
-    threshold = float(series.active_score_threshold)
-    return tuple(sample for sample in series.samples if sample.score >= threshold)
+    cadence, support = _series_timing(series)
+    return max(1, int(round(max(cadence * 2.0, support * 0.5))))
 
 
-def _series_risk_chains(
-    vocal: HumanVocalEvidence | None, *, reference_before_ms: int | None,
-) -> tuple[_VocalRiskChain, ...]:
+def _vocal_risk_spans(vocal: HumanVocalEvidence | None) -> tuple[_VocalRiskSpan, ...]:
     if vocal is None:
         return ()
-    chains: list[_VocalRiskChain] = []
+    spans: list[_VocalRiskSpan] = []
     for series in vocal.series:
-        selected = _selected_risk_samples(series)
-        if not selected:
+        if not series.active_intervals:
             continue
-        all_times = [sample.at_ms for sample in series.samples]
-        gaps = [b - a for a, b in zip(all_times, all_times[1:]) if b > a]
-        nominal_gap = float(sorted(gaps)[len(gaps) // 2]) if gaps else 16.0
-        join_gap = max(32.0, nominal_gap * 2.0, float(END_CONTEXT_MS))
-        current: list[VocalScoreSample] = []
-        for sample in selected:
-            if current and sample.at_ms - current[-1].at_ms >= join_gap:
-                chains.append(_VocalRiskChain(
-                    source=series.source,
-                    support_start_ms=min(item.support_start_ms for item in current),
-                    first_observed_ms=current[0].at_ms,
-                    last_observed_ms=current[-1].at_ms,
-                ))
-                current = []
-            current.append(sample)
-        if current:
-            chains.append(_VocalRiskChain(
+        threshold = float(series.active_score_threshold)
+        positives = [sample for sample in series.samples if sample.score >= threshold]
+        closure = _series_closure_context_ms(series)
+        for first, last in series.active_intervals:
+            covered = [sample for sample in positives if int(first) <= sample.at_ms <= int(last)]
+            support_start = min(
+                (sample.support_start_ms for sample in covered), default=int(first))
+            spans.append(_VocalRiskSpan(
                 source=series.source,
-                support_start_ms=min(item.support_start_ms for item in current),
-                first_observed_ms=current[0].at_ms,
-                last_observed_ms=current[-1].at_ms,
+                support_start_ms=int(support_start),
+                first_observed_ms=int(first),
+                last_observed_ms=int(last),
+                closure_context_ms=closure,
             ))
-    if reference_before_ms is not None:
-        chains = [chain for chain in chains if chain.last_observed_ms >= reference_before_ms]
     return tuple(sorted(
-        chains, key=lambda item: (item.first_observed_ms, item.last_observed_ms, item.source)))
+        spans, key=lambda item: (item.first_observed_ms, item.last_observed_ms, item.source)))
 
 
-def _connected_chain_end(
-    chains: tuple[_VocalRiskChain, ...],
-    anchor_start: int,
-    anchor_end: int,
-) -> int | None:
-    """Return latest observer risk whose measured support can touch a lexical span."""
-    ends = [
-        chain.last_observed_ms for chain in chains
-        if chain.last_observed_ms >= anchor_start
-        and chain.support_start_ms <= anchor_end
-    ]
-    if ends:
-        return max(max(ends), anchor_end)
-    later = [
-        chain.last_observed_ms for chain in chains
-        if 0 <= chain.first_observed_ms - anchor_end < END_CONTEXT_MS
-    ]
-    return max(later) if later else None
+def _overall_closure_context_ms(vocal: HumanVocalEvidence | None) -> int:
+    if vocal is None or not vocal.series:
+        return 0
+    return max((_series_closure_context_ms(series) for series in vocal.series), default=0)
+
+
+def _span_open(span: _VocalRiskSpan, evidence_end_ms: int) -> bool:
+    return int(evidence_end_ms) - span.last_observed_ms < span.closure_context_ms
 
 
 def _stable_recurrence(
@@ -266,39 +227,26 @@ def _stable_recurrence(
     if recurrence is None or start_ms is None or recurrence.period_ms is None:
         return False
     observed_ms = capture_end_ms - start_ms
-    reference_distinct = (
-        recurrence.low_vocal_reference_similarity <= 0.0
-        or recurrence.strength >= (
-            recurrence.low_vocal_reference_similarity + LOOP_REFERENCE_MARGIN)
-    )
     return bool(
         recurrence.strength >= LOOP_STRENGTH
         and recurrence.period_stability >= LOOP_STABILITY
         and recurrence.recent_strength >= RECENT_LOOP_STRENGTH
         and recurrence.level_consistency >= LOOP_LEVEL_CONSISTENCY
-        and reference_distinct
-        and observed_ms >= max(MIN_LOOP_OBSERVATION_MS, recurrence.period_ms * 2)
+        and observed_ms >= max(
+            MIN_LOOP_OBSERVATION_MS,
+            recurrence.period_ms * 3,
+        )
     )
-
 
 
 def _open_post_boundary_risk(
     vocal: HumanVocalEvidence | None, *, boundary_ms: int, capture_end_ms: int,
 ) -> tuple[int, int] | None:
-    """Find any currently open finite vocal-like change after a causal boundary.
-
-    No candidate is consumed merely because an earlier chain closed.  A later
-    measured change is evaluated from the same immutable snapshot, which avoids
-    rebuilding the old stateful one-shot event guard.
-    """
     candidates = [
-        (chain.first_observed_ms, chain.last_observed_ms)
-        for chain in _series_risk_chains(vocal, reference_before_ms=boundary_ms)
-        # A wide receptive field may cross the boundary.  Treating a positive
-        # sample as cut-risk is conservative and does not assign source
-        # ownership; its exact support remains available on the measurement.
-        if chain.first_observed_ms >= boundary_ms
-        and capture_end_ms - chain.last_observed_ms < END_CONTEXT_MS
+        (span.first_observed_ms, span.last_observed_ms)
+        for span in _vocal_risk_spans(vocal)
+        if span.first_observed_ms >= int(boundary_ms)
+        and _span_open(span, int(capture_end_ms))
     ]
     return max(candidates, key=lambda item: item[1]) if candidates else None
 
@@ -307,21 +255,14 @@ def _open_post_input_risk(
     vocal: HumanVocalEvidence | None, *, candidates: tuple[int, ...],
     capture_end_ms: int,
 ) -> tuple[int, int] | None:
-    """Find an open vocal change that has at least one earlier input stamp.
-
-    External inputs remain factual alternatives.  We never choose the oldest,
-    newest, or closest input as a boundary; the acoustic event supplies its own
-    observed start time and an input merely establishes that the event could
-    have followed a user action.
-    """
     stamps = tuple(sorted({int(value) for value in candidates if int(value) > 0}))
     if not stamps:
         return None
     risks = [
-        (chain.first_observed_ms, chain.last_observed_ms)
-        for chain in _series_risk_chains(vocal, reference_before_ms=None)
-        if capture_end_ms - chain.last_observed_ms < END_CONTEXT_MS
-        and any(stamp <= chain.first_observed_ms for stamp in stamps)
+        (span.first_observed_ms, span.last_observed_ms)
+        for span in _vocal_risk_spans(vocal)
+        if _span_open(span, int(capture_end_ms))
+        and any(stamp <= span.first_observed_ms for stamp in stamps)
     ]
     return max(risks, key=lambda item: item[1]) if risks else None
 
@@ -335,13 +276,7 @@ def evaluate_utterance_progress(
     input_candidates_ms: tuple[int, ...] = (),
     recurrence_lookup: Callable[[int, int], VocalRecurrenceEvidence | None] | None = None,
 ) -> tuple[UtteranceProgress, VocalRecurrenceEvidence | None]:
-    """Produce one progress result, requesting recurrence only when needed.
-
-    Direct evidence is evaluated first.  Known text establishes its own acoustic
-    location; external input timestamps are only needed when no lexical location
-    exists.  Recurrence is queried lazily only while a directly observed vocal
-    risk remains open long enough that stable repetition could explain it.
-    """
+    """Produce one stateless progression result from the available evidence."""
     if capture_end_ms is None:
         return UtteranceProgress(evidence_at_ms=None), None
     capture_end = int(capture_end_ms)
@@ -367,73 +302,79 @@ def evaluate_utterance_progress(
             and lexical.committed_target_end
             and lexical.target_end_ms is not None
         )
-        anchor_end = int(lexical.target_end_ms) if complete else aligned_end
-        # Once known text has an acoustic location, input timing has completed
-        # its narrowing role. Endpoint evidence is evaluated from the located
-        # target itself rather than carrying input stamps into a second path.
-        chains = _series_risk_chains(vocal, reference_before_ms=target_start)
-        connected_end = _connected_chain_end(chains, target_start, anchor_end)
-        physical_risk_end = max(anchor_end, connected_end or anchor_end)
+        spans = tuple(
+            span for span in _vocal_risk_spans(vocal)
+            if span.last_observed_ms >= target_start
+        )
+        closure_context = _overall_closure_context_ms(vocal)
 
-        # Before the aligner has committed the target end, an open target-connected
-        # vocal chain is enough to protect against cutting.  Recurrence cannot
-        # release this protection because the lexical target itself is still open.
         if not complete:
-            if capture_end - physical_risk_end < END_CONTEXT_MS:
-                return (UtteranceProgress(
+            # A located lexical prefix plus currently open human-vocal evidence
+            # is direct cut-risk.  Once both measurements are old, the result is
+            # unresolved rather than a permanent ACTIVE latch.
+            if any(_span_open(span, capture_end) for span in spans):
+                return UtteranceProgress(
                     state=UtteranceProgressState.ACTIVE,
-                    evidence_at_ms=capture_end), None)
-            return (UtteranceProgress(
+                    evidence_at_ms=capture_end), None
+            if closure_context and capture_end - aligned_end < closure_context:
+                return UtteranceProgress(
+                    state=UtteranceProgressState.ACTIVE,
+                    evidence_at_ms=capture_end), None
+            return UtteranceProgress(
                 state=UtteranceProgressState.UNKNOWN,
-                evidence_at_ms=capture_end), None)
+                evidence_at_ms=capture_end), None
 
-        # A committed lexical end establishes target relation, not physical EOF.
-        # Independent human-vocal support must have covered the target before its
-        # closure can establish a physical endpoint.
-        if connected_end is None:
-            return (UtteranceProgress(
+        target_end = int(lexical.target_end_ms)
+        # Lexical completion locates the text but is not physical EOF.  A
+        # physical completion requires independent human-vocal support in the
+        # located Presentation range.
+        if not spans:
+            return UtteranceProgress(
                 state=UtteranceProgressState.UNKNOWN,
-                evidence_at_ms=capture_end), None)
+                evidence_at_ms=capture_end), None
 
-        if capture_end - physical_risk_end >= END_CONTEXT_MS:
-            return (UtteranceProgress(
-                state=UtteranceProgressState.ENDED,
-                ended_at_ms=physical_risk_end,
-                evidence_at_ms=capture_end), None)
+        physical_risk_end = max(target_end, max(span.last_observed_ms for span in spans))
+        open_risk = any(_span_open(span, capture_end) for span in spans)
+        endpoint_context_open = bool(
+            closure_context and capture_end - physical_risk_end < closure_context)
+        if open_risk or endpoint_context_open:
+            recurrence = recurrence_if_needed(target_end)
+            if _stable_recurrence(
+                recurrence, start_ms=target_end, capture_end_ms=capture_end,
+            ):
+                # Repetition can release finite-risk protection, but it does not
+                # manufacture a physical endpoint for this target.
+                return UtteranceProgress(
+                    state=UtteranceProgressState.UNKNOWN,
+                    evidence_at_ms=capture_end), recurrence
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE,
+                evidence_at_ms=capture_end), recurrence
 
-        recurrence = recurrence_if_needed(int(lexical.target_end_ms))
-        if _stable_recurrence(
-                recurrence, start_ms=int(lexical.target_end_ms),
-                capture_end_ms=capture_end):
-            return (UtteranceProgress(
-                state=UtteranceProgressState.UNKNOWN,
-                evidence_at_ms=capture_end), recurrence)
-        return (UtteranceProgress(
-            state=UtteranceProgressState.ACTIVE,
-            evidence_at_ms=capture_end), recurrence)
+        return UtteranceProgress(
+            state=UtteranceProgressState.ENDED,
+            ended_at_ms=physical_risk_end,
+            evidence_at_ms=capture_end), None
 
-    # Without a lexical location, only a newly observed finite vocal change that
-    # follows a real timing fact can suppress fallback.  AutoAdv's own successful
-    # input is a strong lower bound; external inputs remain independent candidates.
-    boundary = causal_lower_bound_ms
-    if boundary is not None:
+    # Without a lexical location, only a finite human-vocal change following a
+    # real timing fact can suppress fallback.  It never manufactures ENDED.
+    if causal_lower_bound_ms is not None:
         candidate = _open_post_boundary_risk(
-            vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
+            vocal, boundary_ms=int(causal_lower_bound_ms), capture_end_ms=capture_end)
     else:
         candidate = _open_post_input_risk(
             vocal, candidates=input_candidates_ms, capture_end_ms=capture_end)
     if candidate is None:
-        return (UtteranceProgress(
+        return UtteranceProgress(
             state=UtteranceProgressState.UNKNOWN,
-            evidence_at_ms=capture_end), None)
+            evidence_at_ms=capture_end), None
 
     start_ms, _end_ms = candidate
     recurrence = recurrence_if_needed(start_ms)
-    if _stable_recurrence(
-            recurrence, start_ms=start_ms, capture_end_ms=capture_end):
-        return (UtteranceProgress(
+    if _stable_recurrence(recurrence, start_ms=start_ms, capture_end_ms=capture_end):
+        return UtteranceProgress(
             state=UtteranceProgressState.UNKNOWN,
-            evidence_at_ms=capture_end), recurrence)
-    return (UtteranceProgress(
+            evidence_at_ms=capture_end), recurrence
+    return UtteranceProgress(
         state=UtteranceProgressState.ACTIVE,
-        evidence_at_ms=capture_end), recurrence)
+        evidence_at_ms=capture_end), recurrence

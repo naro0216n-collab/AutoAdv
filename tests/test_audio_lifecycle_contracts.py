@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 import time
 
 import numpy as np
@@ -128,6 +128,40 @@ class BlockingPosterior(StaticPosterior):
         return self.logits
 
 
+class RecordingBlankPosterior:
+    """Record query sizes while deliberately finding no target."""
+
+    frame_stride_ms = 20.0
+    vocab = VOCAB
+
+    def __init__(self):
+        self.durations_ms = []
+
+    def infer(self, chunks):
+        duration_ms = sum(chunk.duration_ms for chunk in chunks)
+        self.durations_ms.append(duration_ms)
+        frames = max(30, int(duration_ms // self.frame_stride_ms))
+        logits = np.full((frames, len(VOCAB)), -4.0, dtype=np.float32)
+        logits[:, 0] = 5.0
+        return logits
+
+
+class BlockingVocalObserver:
+    """Make observation arbitrarily slow without changing capture semantics."""
+
+    def __init__(self):
+        self.started = Event()
+        self.release = Event()
+
+    def observe(self, chunk):
+        self.started.set()
+        self.release.wait(2)
+        return ()
+
+    def reset(self):
+        pass
+
+
 class StaticAudioEventModel:
     def __init__(self, *, class_index=19, score=.9):
         self.class_index = class_index
@@ -152,6 +186,11 @@ def stereo_chunk(end_ms: int, duration_ms: int = 600, value: float = 0.0) -> PCM
     return PCMChunk(end_ms, pcm, 48000, 2, 4)
 
 
+def compact_chunk(end_ms: int, duration_ms: int = 1000) -> PCMChunk:
+    """Tiny PCM for scheduler tests whose posterior does not inspect samples."""
+    return PCMChunk(end_ms, bytes(duration_ms), 1000, 1, 1)
+
+
 def tonal_chunk(end_ms: int, components: tuple[tuple[float, float], ...],
                 duration_ms: int = 400) -> PCMChunk:
     samples = int(48 * duration_ms)
@@ -165,13 +204,16 @@ def tonal_chunk(end_ms: int, components: tuple[tuple[float, float], ...],
 
 
 def wait_idle(native: NativeAudio) -> None:
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         with native._lock:
-            if not native._inflight and native._pending_inference is None:
+            if (not native._alignment_inflight
+                    and native._pending_alignment is None
+                    and not native._observer_inflight
+                    and not native._observer_queue):
                 return
         time.sleep(.002)
-    raise TimeoutError('alignment inference did not settle')
+    raise TimeoutError('native audio analysis did not settle')
 
 
 def make_native(model, observations, errors=None, reports=None, *, clock=lambda: 1000, vocal_observer=None):
@@ -197,10 +239,10 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
     finally:
         native.close()
 
-def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_snapshots():
-    observations = []
+def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_queries():
+    observations, reports = [], []
     model = BlockingPosterior()
-    native = make_native(model, observations)
+    native = make_native(model, observations, reports=reports)
     token = Token(1, 1)
     try:
         native.history.start(42)
@@ -221,14 +263,22 @@ def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_
         # available, the latest captured frontier must be evaluated directly
         # rather than draining every obsolete intermediate snapshot first.
         native.request_assessment_through(token, 3400)
+        with native._lock:
+            assert native._pending_alignment is not None
+            assert native._pending_alignment[2] == 3400
         model.release.set()
         wait_idle(native)
 
-        frontiers = [item.capture_end_ms for observed, item in observations
-                     if observed == token and item.kind == 'snapshot']
-        assert frontiers
-        assert frontiers[-1] == 3400
-        assert not ({2200, 2800} & set(frontiers))
+        # Continuous human-vocal observation may publish cheap progress while
+        # alignment is busy.  The expensive target query coalesces to one newest
+        # pending fence.  If the first query commits the lexical endpoint, that
+        # pending query becomes unnecessary rather than being drained anyway.
+        aligned_frontiers = [item['capture_end_ms'] for observed, item in reports
+                             if observed == token]
+        assert aligned_frontiers == [1600]
+        assert model.calls == 1
+        assert any(item.capture_end_ms == 3400 for observed, item in observations
+                   if observed == token)
     finally:
         model.release.set()
         native.close()
@@ -247,12 +297,13 @@ def test_replaced_target_cannot_publish_stale_alignment_result():
         native.feed(chunk)
         assert model.started.wait(1)
 
+        before_replacement = len(observations)
         native.begin(newest, 'other')
         model.release.set()
         wait_idle(native)
 
-        assert observations
-        assert all(token == newest for token, _ in observations)
+        assert observations[before_replacement:]
+        assert all(token == newest for token, _ in observations[before_replacement:])
     finally:
         model.release.set()
         native.close()
@@ -283,7 +334,7 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
         native.close()
 
 
-def test_pcm_history_replay_and_gap_mapping_preserve_wall_clock_provenance():
+def test_pcm_timeline_query_crops_causal_boundary_without_replaying_capture_state():
     observations = []
     native = make_native(StaticPosterior(), observations, clock=lambda: 2000)
     token = Token(4, 2)
@@ -291,11 +342,13 @@ def test_pcm_history_replay_and_gap_mapping_preserve_wall_clock_provenance():
         native.history.start(42)
         old = stereo_chunk(900, 200)
         # This packet starts before the known causal lower bound and ends after
-        # it. Replay must crop earlier frames instead of leaking them into the
-        # new target's alignment window.
+        # it.  The alignment query crops earlier frames directly from the PCM
+        # timeline; attaching the target does not replay capture state.
         kept = stereo_chunk(1400, 500)
         native.history.push(old, target_pid=42)
+        native.feed(old)
         native.history.push(kept, target_pid=42)
+        native.feed(kept)
         native.begin(token, 'target', causal_lower_bound_ms=1000)
         wait_idle(native)
         item = observations[-1][1]
@@ -390,16 +443,17 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
         # less than the alignment minimum it can still publish feature evidence
         # without inventing a lexical result.
         assert native.observation_fence(token) == 1200
-        assert native.request_assessment_through(token, 1200)
+        native.request_assessment_through(token, 1200)
+        wait_idle(native)
         snapshots = [item for _, item in observations if item.kind == 'snapshot']
-        assert len(snapshots) == 1 and snapshots[0].capture_end_ms == 1200
+        assert snapshots and snapshots[-1].capture_end_ms == 1200
+        before = len(snapshots)
 
-        # Heartbeat retains its original purpose: if no more PCM arrives, flush
-        # the last captured audio through the ordinary lexical scheduler. It
-        # does not publish a transport observation that the estimator discards.
+        # A heartbeat can request the newest already-captured frontier, but with
+        # no new PCM or measurement it must not manufacture another observation.
         native.health(CaptureHealth(1300, True, '', pcm_frames=0))
         wait_idle(native)
-        assert len([item for _, item in observations if item.kind == 'snapshot' and item.lexical is not None]) == 1
+        assert len([item for _, item in observations if item.kind == 'snapshot']) == before
         assert not any(item.kind == 'transport' for _, item in observations)
         status = native.capture_status()
         assert 'pcm_frames' in status and status['causal_lower_bound_ms'] == 1000
@@ -492,6 +546,77 @@ def test_causal_lower_bound_is_explicit_per_target_and_does_not_leak():
         native.close()
 
 
+def test_capture_callback_is_not_blocked_by_human_vocal_inference():
+    observations = []
+    observer = BlockingVocalObserver()
+    native = make_native(StaticPosterior(), observations, vocal_observer=observer)
+    chunk = stereo_chunk(1600)
+    try:
+        native.history.start(42)
+        native.history.push(chunk, target_pid=42)
+        feeder = Thread(target=native.feed, args=(chunk,))
+        feeder.start()
+        assert observer.started.wait(1)
+        feeder.join(.2)
+        assert not feeder.is_alive()
+        assert native.history.latest_ms == 1600
+    finally:
+        observer.release.set()
+        native.close()
+
+
+def test_alignment_never_compresses_pcm_gaps_into_one_acoustic_snapshot():
+    observations, reports = [], []
+    model = HistorySensitivePosterior()
+    native = make_native(model, observations, reports=reports)
+    token = Token(8, 1)
+    try:
+        native.history.start(42)
+        # Each 400 ms span is too short for this posterior to find the target;
+        # concatenating across the 400 ms capture gap would incorrectly create
+        # an 800 ms target-bearing snapshot.
+        native.history.push(stereo_chunk(1000, 400), target_pid=42)
+        native.history.push(stereo_chunk(1800, 400), target_pid=42)
+        native.begin(token, 'target')
+        wait_idle(native)
+
+        assert model.calls == 2
+        assert reports
+        assert reports[-1][1]['target_associated'] is False
+    finally:
+        native.close()
+
+
+def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
+    observations = []
+    model = RecordingBlankPosterior()
+    native = make_native(model, observations)
+    token = Token(9, 1)
+    try:
+        native.history.start(42)
+        for end_ms in range(1000, 60_001, 1000):
+            native.history.push(compact_chunk(end_ms), target_pid=42)
+
+        native.begin(token, 'target')
+        wait_idle(native)
+        initial = tuple(model.durations_ms)
+        assert 7_000 <= initial[0] <= 9_000
+        assert len(initial) <= 4
+
+        # Once the retained history has been exhausted, new PCM reopens only a
+        # bounded overlapping query.  It must not make every 500 ms frontier
+        # trigger another complete 60 s scan.
+        fresh = compact_chunk(60_500, 500)
+        native.history.push(fresh, target_pid=42)
+        native.feed(fresh)
+        wait_idle(native)
+        additional = tuple(model.durations_ms[len(initial):])
+        assert additional
+        assert max(additional) <= 10_000
+    finally:
+        native.close()
+
+
 def test_human_vocal_observers_keep_independent_score_series_and_time_support():
     observer = HumanVocalActivityObserver(
         StaticAudioEventModel(class_index=19, score=.9),
@@ -538,36 +663,34 @@ def test_vocal_history_is_a_queryable_measurement_cache_not_a_boundary_state_mac
     assert not hasattr(full, 'post_causal_onset_ms')
 
 
-def test_vocal_recurrence_keeps_structure_level_and_low_vocal_reference_separate():
-    def history_for(current_components):
+def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
+    def recurrence_for_cycles(cycles, *, cadence_ms=100):
         history = AcousticObservationHistory()
-        for at_ms in (600, 1000, 1400):
-            history.add_fingerprint(tonal_chunk(at_ms, ((440.0, 0.25),)))
-        for at_ms in (1800, 2200, 2600, 3000):
-            history.add_fingerprint(tonal_chunk(at_ms, current_components))
-            history.add_vocal((VocalActivityFrame(
-                at_ms=at_ms, score=.9, source='speech'),))
-        return history.recurrence(start_ms=1500, end_ms=3000)
+        frames = []
+        at = 1000
+        for pattern in cycles:
+            for score in pattern:
+                frames.append(VocalActivityFrame(
+                    at_ms=at, score=score, support_start_ms=at - cadence_ms, source='speech'))
+                at += cadence_ms
+        history.add_vocal(tuple(frames))
+        return history.recurrence(start_ms=1000, end_ms=at - cadence_ms)
 
-    same_as_low_vocal_reference = history_for(((440.0, 0.25),))
-    vocal_over_reference = history_for(((440.0, 0.25), (1000.0, 0.5)))
+    repeated = (.92, .88, .2, .1, .86, .9)
+    periodic = recurrence_for_cycles((repeated,) * 5)
+    flat_finite_risk = recurrence_for_cycles(((.9,) * 6,) * 5)
+    changing = recurrence_for_cycles((
+        repeated,
+        (.75, .25, .8, .15, .3, .9),
+        (.2, .9, .35, .8, .1, .4),
+        (.85, .15, .45, .9, .25, .7),
+        (.3, .75, .1, .55, .9, .2),
+    ))
 
-    assert same_as_low_vocal_reference.strength > 0.0
-    assert vocal_over_reference.strength > 0.0
-    assert same_as_low_vocal_reference.low_vocal_reference_similarity > \
-        vocal_over_reference.low_vocal_reference_similarity
-    assert vocal_over_reference.period_ms is not None
-
-    stable = AcousticObservationHistory()
-    decaying = AcousticObservationHistory()
-    times = (1800, 2200, 2600, 3000)
-    for at_ms, amplitude in zip(times, (0.5, 0.5, 0.5, 0.5)):
-        stable.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)))
-        stable.add_vocal((VocalActivityFrame(at_ms=at_ms, score=.9),))
-    for at_ms, amplitude in zip(times, (0.5, 0.41, 0.32, 0.24)):
-        decaying.add_fingerprint(tonal_chunk(at_ms, ((1000.0, amplitude),)))
-        decaying.add_vocal((VocalActivityFrame(at_ms=at_ms, score=.9),))
-    stable_recurrence = stable.recurrence(start_ms=1500, end_ms=3000)
-    decaying_recurrence = decaying.recurrence(start_ms=1500, end_ms=3000)
-    assert stable_recurrence.strength == pytest.approx(decaying_recurrence.strength, abs=.03)
-    assert stable_recurrence.level_consistency > decaying_recurrence.level_consistency
+    assert periodic.period_ms is not None
+    assert periodic.strength > .75
+    assert periodic.recent_strength > .75
+    # A sustained flat human-vocal score is persistence, not recurrence; this
+    # prevents a long finite cry from being released merely for being steady.
+    assert flat_finite_risk.period_ms is None
+    assert changing.strength < periodic.strength

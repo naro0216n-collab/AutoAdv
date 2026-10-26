@@ -1291,8 +1291,6 @@ class AutoAdvApplication:
             recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),
             recent_recurrence_strength=(recurrence.recent_strength if recurrence is not None else 0.0),
             recurrence_level_consistency=(recurrence.level_consistency if recurrence is not None else 0.0),
-            recurrence_low_vocal_reference_similarity=(
-                recurrence.low_vocal_reference_similarity if recurrence is not None else 0.0),
             pcm_last_frame_ms=observation.pcm_last_frame_ms,
             heartbeat_at_ms=observation.heartbeat_at_ms,
         )

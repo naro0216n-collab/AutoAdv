@@ -443,8 +443,7 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
                                'active_intervals': [[1072, 1312]]}],
              'recurrence_strength': .91, 'recurrence_period_ms': 640,
              'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-             'recurrence_level_consistency': .84,
-             'recurrence_low_vocal_reference_similarity': .17},
+             'recurrence_level_consistency': .84,},
         ]
         trace.extend({
             'event': 'alignment_inference', 'seq': i + 3, 'at_ns': 20 + i,
@@ -464,7 +463,6 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
             'recurrence_strength': .91, 'recurrence_period_ms': 640,
             'recurrence_stability': .82, 'recent_recurrence_strength': .88,
             'recurrence_level_consistency': .84,
-            'recurrence_low_vocal_reference_similarity': .17,
         })
         trace_text = ''.join(
             json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in trace)

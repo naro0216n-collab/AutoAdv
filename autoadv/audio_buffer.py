@@ -1,18 +1,26 @@
-"""Timestamped bounded PCM history shared by process-loopback and alignment adapters.
+"""Timestamped bounded PCM timeline for process-loopback audio.
 
-Ring buffer is intentionally independent of any audio library. It does not
-classify silence as 'native voice absent'. Upstream per-process loopback must
-supply timestamped PCM and health events; device loss clears continuity.
+The timeline is the raw acoustic source of truth.  It preserves packet capture
+provenance and wall-clock continuity without assigning speech, silence, source,
+or Presentation meaning.  Consumers query exact ranges; retention is only a
+resource bound and never an analysis window by itself.
 """
 from __future__ import annotations
+
 from collections import deque
 from dataclasses import dataclass
 from threading import RLock
 
 
+# Packet starts within this distance of the previous packet end are considered
+# one captured span.  This is a transport continuity tolerance, not an
+# utterance/endpoint threshold.  Every PCM consumer uses the same rule.
+PCM_CONTIGUITY_TOLERANCE_MS = 40.0
+
+
 @dataclass(frozen=True)
 class PCMChunk:
-    at_ms: int  # local receiver time at packet receipt (end of captured frames)
+    at_ms: int  # captured-frame end in the Controller monotonic clock domain
     frames: bytes
     sample_rate: int
     channels: int
@@ -23,12 +31,18 @@ class PCMChunk:
         count = len(self.frames) / (self.channels * self.sample_width_bytes)
         return count * 1000 / self.sample_rate
 
+    @property
+    def start_ms(self) -> float:
+        return float(self.at_ms) - self.duration_ms
+
 
 class AudioHistory:
+    """Finite raw PCM timeline with exact range and continuity queries."""
+
     def __init__(self, horizon_ms: int = 185000):
         if horizon_ms <= 0:
             raise ValueError("audio horizon must be positive")
-        self.horizon_ms = horizon_ms
+        self.horizon_ms = int(horizon_ms)
         self._lock = RLock()
         self._chunks: deque[PCMChunk] = deque()
         self.healthy = False
@@ -50,7 +64,7 @@ class AudioHistory:
             self.reset("not_yet_observed")
             self.target_pid = target_pid
 
-    def push(self, chunk: PCMChunk, *, target_pid: int) -> None:
+    def push(self, chunk: PCMChunk, *, target_pid: int) -> bool:
         if chunk.sample_rate <= 0 or chunk.channels <= 0 or chunk.sample_width_bytes not in (1, 2, 3, 4):
             raise ValueError("invalid PCM format")
         if len(chunk.frames) % (chunk.channels * chunk.sample_width_bytes):
@@ -59,15 +73,16 @@ class AudioHistory:
             if target_pid != self.target_pid:
                 self.reset("target_pid_changed")
                 self.target_pid = target_pid
-                return
+                return False
             if self._last_ms is not None and chunk.at_ms < self._last_ms:
                 self.reset("timestamp_regression")
-                return
-            self._last_ms = chunk.at_ms
+                return False
+            self._last_ms = int(chunk.at_ms)
             self._chunks.append(chunk)
             self._trim_locked()
             self.healthy = True
             self.fail_reason = None
+            return True
 
     def _trim_locked(self) -> None:
         if self._last_ms is None:
@@ -82,38 +97,86 @@ class AudioHistory:
         with self._lock:
             if not self._chunks:
                 return None
-            first = self._chunks[0]
-            return int(round(first.at_ms - first.duration_ms))
+            return int(round(self._chunks[0].start_ms))
 
-    def since(self, at_ms: int) -> tuple[PCMChunk, ...]:
-        """Return captured frames at or after an exact monotonic boundary.
-
-        ``PCMChunk.at_ms`` timestamps the end of a packet.  A Presentation Epoch
-        can therefore fall inside the first retained packet; returning that
-        packet whole would leak frames from the preceding utterance.
-        """
-        boundary = int(at_ms)
-        result: list[PCMChunk] = []
+    @property
+    def latest_ms(self) -> int | None:
+        """Wall-clock end of the newest retained PCM packet."""
         with self._lock:
+            return int(self._chunks[-1].at_ms) if self._chunks else None
+
+    @staticmethod
+    def _crop(chunk: PCMChunk, start_ms: int, end_ms: int) -> PCMChunk | None:
+        start = max(float(start_ms), chunk.start_ms)
+        end = min(float(end_ms), float(chunk.at_ms))
+        if end <= start:
+            return None
+        frame_width = chunk.channels * chunk.sample_width_bytes
+        total_frames = len(chunk.frames) // frame_width
+        first = max(0, min(
+            total_frames,
+            int(round((start - chunk.start_ms) * chunk.sample_rate / 1000.0)),
+        ))
+        last = max(first, min(
+            total_frames,
+            int(round((end - chunk.start_ms) * chunk.sample_rate / 1000.0)),
+        ))
+        if last <= first:
+            return None
+        frames = chunk.frames[first * frame_width:last * frame_width]
+        actual_end = chunk.start_ms + last * 1000.0 / chunk.sample_rate
+        return PCMChunk(
+            at_ms=int(round(actual_end)), frames=frames,
+            sample_rate=chunk.sample_rate, channels=chunk.channels,
+            sample_width_bytes=chunk.sample_width_bytes,
+        )
+
+    def slice(self, start_ms: int, end_ms: int | None = None) -> tuple[PCMChunk, ...]:
+        """Return captured PCM inside one exact monotonic wall-clock range."""
+        start = int(start_ms)
+        with self._lock:
+            if not self._chunks:
+                return ()
+            end = int(self._chunks[-1].at_ms if end_ms is None else end_ms)
+            if end <= start:
+                return ()
+            result: list[PCMChunk] = []
             for chunk in self._chunks:
-                if chunk.at_ms <= boundary:
+                if chunk.at_ms <= start:
                     continue
-                frame_width = chunk.channels * chunk.sample_width_bytes
-                total_frames = len(chunk.frames) // frame_width
-                retain_frames = min(
-                    total_frames,
-                    int((chunk.at_ms - boundary) * chunk.sample_rate / 1000),
-                )
-                if retain_frames <= 0:
-                    continue
-                if retain_frames == total_frames:
-                    result.append(chunk)
-                    continue
-                result.append(PCMChunk(
-                    at_ms=chunk.at_ms,
-                    frames=chunk.frames[-retain_frames * frame_width:],
-                    sample_rate=chunk.sample_rate,
-                    channels=chunk.channels,
-                    sample_width_bytes=chunk.sample_width_bytes,
-                ))
-        return tuple(result)
+                if chunk.start_ms >= end:
+                    break
+                cropped = self._crop(chunk, start, end)
+                if cropped is not None:
+                    result.append(cropped)
+            return tuple(result)
+
+    @staticmethod
+    def split_contiguous(
+        chunks: tuple[PCMChunk, ...], *,
+        tolerance_ms: float = PCM_CONTIGUITY_TOLERANCE_MS,
+    ) -> tuple[tuple[PCMChunk, ...], ...]:
+        """Partition PCM by observed transport continuity.
+
+        Missing PCM is not synthesized as silence and is not compressed into a
+        continuous model input.  Consumers therefore agree on the same captured
+        spans even when their model-specific preprocessing differs.
+        """
+        if not chunks:
+            return ()
+        spans: list[list[PCMChunk]] = [[chunks[0]]]
+        for chunk in chunks[1:]:
+            previous = spans[-1][-1]
+            gap = chunk.start_ms - float(previous.at_ms)
+            if gap > float(tolerance_ms):
+                spans.append([chunk])
+            else:
+                spans[-1].append(chunk)
+        return tuple(tuple(span) for span in spans)
+
+    def contiguous_slices(
+        self, start_ms: int, end_ms: int | None = None, *,
+        tolerance_ms: float = PCM_CONTIGUITY_TOLERANCE_MS,
+    ) -> tuple[tuple[PCMChunk, ...], ...]:
+        return self.split_contiguous(
+            self.slice(start_ms, end_ms), tolerance_ms=tolerance_ms)

@@ -272,17 +272,16 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         return progress
 
     # A known-text prefix is direct evidence that a finite target utterance is
-    # still in progress. A committed text end is not enough while connected
+    # still in progress. A committed text end is not enough while independent
     # human-vocal support is still physically continuing.
     prefix = evaluate(observation(
         lex=lexical(complete=False, committed=False),
         voc=vocal(intervals=((1100, 1580),)), end=1600))
     assert prefix.state == UtteranceProgressState.ACTIVE
 
-    # Prefix association is not a persistent event label.  Once the finite
-    # target-connected chain has endpoint-confirming context, the same partial
-    # lexical relation becomes unresolved rather than suppressing fallback
-    # forever.
+    # Prefix association is not a persistent event label.  Once both lexical
+    # and human-vocal measurements are old, the same partial lexical relation
+    # becomes unresolved rather than suppressing fallback forever.
     closed_prefix = evaluate(observation(
         lex=lexical(complete=False, committed=False),
         voc=vocal(intervals=((1100, 1340),), end=1800), end=1800))
@@ -293,6 +292,14 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         end=2000)
     continuing = evaluate(continuing_snapshot)
     assert continuing.state == UtteranceProgressState.ACTIVE
+
+    # Physical cut-risk is not required to sit inside an arbitrary time margin
+    # from the lexical endpoint.  A later finite human-vocal change in the same
+    # evaluated Presentation range still protects playback while it is open.
+    separated_tail = evaluate(observation(
+        lex=lexical(), voc=vocal(intervals=((1100, 1300), (1800, 1980)), end=2000),
+        end=2000))
+    assert separated_tail.state == UtteranceProgressState.ACTIVE
     # The evaluator has no inference history: identical evidence is identical
     # regardless of how many previous evaluations happened.
     assert evaluate(continuing_snapshot) == continuing
@@ -303,26 +310,23 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert ended.ended_at_ms == 1580
 
     stable_loop = VocalRecurrenceEvidence(
-        strength=.9, period_ms=600, period_stability=.85,
-        recent_strength=.86, level_consistency=.9,
-        low_vocal_reference_similarity=.2)
+        strength=.9, period_ms=500, period_stability=.85,
+        recent_strength=.86, level_consistency=.9)
     loop_released = evaluate(observation(
-        lex=lexical(), voc=vocal(intervals=((1100, 2980),), end=3000),
-        rec=stable_loop, end=3000))
+        lex=lexical(), voc=vocal(intervals=((1100, 3280),), end=3300),
+        rec=stable_loop, end=3300))
     # Repetition can release finite-risk protection, but it cannot manufacture
     # an ownership-bearing physical endpoint for the current target.
     assert loop_released.state == UtteranceProgressState.UNKNOWN
 
-    # Recurrence remains distinct evidence: a similar periodic structure already
-    # present where no vocal observer is positive cannot, by itself, terminate
-    # the finite target continuation.
-    explained_loop = VocalRecurrenceEvidence(
-        strength=.9, period_ms=600, period_stability=.85,
-        recent_strength=.86, level_consistency=.9,
-        low_vocal_reference_similarity=.88)
+    # Recurrence remains separate evidence.  Weak or unstable repetition cannot
+    # release an otherwise open finite human-vocal risk.
+    unstable_loop = VocalRecurrenceEvidence(
+        strength=.9, period_ms=500, period_stability=.3,
+        recent_strength=.86, level_consistency=.9)
     still_active = evaluate(observation(
-        lex=lexical(), voc=vocal(intervals=((1100, 2980),), end=3000),
-        rec=explained_loop, end=3000))
+        lex=lexical(), voc=vocal(intervals=((1100, 3280),), end=3300),
+        rec=unstable_loop, end=3300))
     assert still_active.state == UtteranceProgressState.ACTIVE
 
     # Lack of an observer measurement is not observed quiet.  A committed
@@ -332,8 +336,8 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         lex=lexical(), voc=HumanVocalEvidence(start_ms=900, end_ms=2100), end=2100))
     assert unmeasured.state == UtteranceProgressState.UNKNOWN
 
-    # A functioning observer that never supported a target-connected vocal risk
-    # is still not independent physical-EOF evidence.
+    # A functioning observer that never supported human-vocal risk in the
+    # located Presentation range is still not independent physical-EOF evidence.
     missed_voice = HumanVocalEvidence(
         start_ms=900, end_ms=2100,
         series=(VocalEvidenceSeries(
@@ -442,7 +446,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert nonlex_quiet.state == UtteranceProgressState.UNKNOWN
 
     nonlex_loop = evaluate(observation(
-        voc=vocal(intervals=((1120, 2980),), end=3000), rec=stable_loop, end=3000))
+        voc=vocal(intervals=((1120, 3280),), end=3300), rec=stable_loop, end=3300))
     assert nonlex_loop.state == UtteranceProgressState.UNKNOWN
 
     # Positive activity already present at the causal lower bound is not

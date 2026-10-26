@@ -67,9 +67,10 @@ class ProcessCapture:
     def _local_timestamp(self, helper_at_ms: int) -> int:
         """Map the helper's monotonic clock into the controller clock domain.
 
-        The helper timestamps packets when WASAPI hands them to the bridge.  The
-        Python reader may consume those packets later if downstream observation
-        is busy, so receipt time is not capture time.  A fixed offset preserves
+        PCM packets carry the captured-frame end derived from WASAPI's QPC
+        packet position; heartbeats use that same helper clock domain.  The
+        Python reader may consume them later, so receipt time is not capture
+        time.  A fixed offset preserves
         the helper's packet-to-packet chronology while keeping every timestamp in
         the same monotonic domain as Controller deadlines and input boundaries.
         """
@@ -110,7 +111,8 @@ class ProcessCapture:
                 if chunk is not None:
                     local_chunk = PCMChunk(now, chunk.frames, chunk.sample_rate,
                                            chunk.channels, chunk.sample_width_bytes)
-                    self.history.push(local_chunk, target_pid=self.pid)
+                    if not self.history.push(local_chunk, target_pid=self.pid):
+                        raise ValueError(self.history.fail_reason or 'PCM timeline rejected packet')
                     self.on_chunk(local_chunk)
                 self.on_health(CaptureHealth(now, True, 'helper_alive',
                                              len(chunk.frames) // 8 if chunk is not None else 0))
