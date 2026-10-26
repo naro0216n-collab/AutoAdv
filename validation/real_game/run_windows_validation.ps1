@@ -210,7 +210,15 @@ try {
                         '--voice-root',(Join-Path $runtime 'game\audio\voice'),
                         '--model',$managedHumanVocalModel,'--output',$vocalReport)
                 } catch {
-                    Write-Warning "Human-vocal observer diagnostic failed: $($_.Exception.Message)"
+                    $vocalError = [string]$_.Exception.Message
+                    Write-Warning "Human-vocal observer diagnostic failed: $vocalError"
+                    @{
+                        schema = 'autoadv-human-vocal-observer-diagnostic-v1'
+                        evidence_layer = 'isolated_fixture_observer_measurement'
+                        product_acceptance = $false
+                        files = @()
+                        error = $vocalError
+                    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $vocalReport -Encoding utf8
                 }
             } catch {
                 $phaseError = "Accuracy setup failed: $($_.Exception.Message)"
@@ -301,9 +309,9 @@ if (-not $finalError) {
     Write-Warning "Persistent log: $transcriptPath"
 }
 
-# Freeze the durable run evidence before sharing it. The Issue reporter reads
-# validation.log as part of the complete snapshot, so publication must not race
-# a live PowerShell transcript or copy a file that is still changing.
+# Freeze the durable run evidence before sharing it. validation.log is retained
+# locally on every run and is conditionally shared for launcher/runner failures,
+# so publication must never race a live PowerShell transcript.
 if ($transcriptStarted) {
     try {
         Stop-Transcript | Out-Null

@@ -1,8 +1,9 @@
-"""Publish complete persisted Windows-validation evidence to a GitHub Issue.
+"""Publish analysis-oriented Windows-validation evidence to a GitHub Issue.
 
-The Issue surface is a remotely readable copy of the run's durable evidence. It
-does not replace local retention and does not turn transport success into a
-validation verdict.
+The local run directory remains the durable, complete evidence store.  The Issue
+surface carries the evidence needed for normal remote analysis plus conditional
+runner/observer diagnostics, without duplicating every durable file on every
+run.  Transport success never becomes a validation verdict.
 """
 from __future__ import annotations
 
@@ -33,6 +34,12 @@ ARCHIVED_MARKER = "<!-- autoadv-validation-archived -->"
 PART_MARKER_RE = re.compile(
     r"<!--\s*autoadv-validation-part:(?P<run>\d{8}T\d{6}Z-[A-Za-z0-9_-]+):(?P<part>\d+)\s*-->"
 )
+DIAGNOSTIC_DIGEST_RE = re.compile(
+    r"<!--\s*autoadv-validation-diagnostic:(?P<name>[A-Za-z0-9_.-]+):"
+    r"(?P<digest>[0-9a-f]{64})\s*-->"
+)
+HUMAN_VOCAL_REPORT = "autoadv-human-vocal.result.json"
+TRACE_DELTA_EVENTS = frozenset({"native_audio_observation", "alignment_inference"})
 
 
 def history_marker(slot: int) -> str:
@@ -94,20 +101,35 @@ class Snapshot:
         return "\n\n".join(self.parts)
 
 
-def _evidence_paths(root: Path) -> tuple[Path, ...]:
-    """Return every persisted run-evidence file that can aid remote analysis.
+def _needs_validation_log(summary: dict[str, Any]) -> bool:
+    if summary.get("launcher_error"):
+        return True
+    for phase in summary.get("phases", ()):
+        if not isinstance(phase, dict):
+            continue
+        if phase.get("runner_error") or phase.get("report_present") is False:
+            return True
+    return False
 
-    Upload transport status is deliberately excluded: it describes the copy to
-    GitHub, not the validation run itself. Runtime/fixture build outputs are not
-    persistent evidence and are cleaned by the launcher.
+
+def _evidence_paths(root: Path, summary: dict[str, Any]) -> tuple[Path, ...]:
+    """Return evidence that belongs on every analysis surface for this run.
+
+    The transcript is a runner/setup diagnostic and is shared only when the
+    launcher or a phase runner failed.  The isolated human-vocal report has its
+    own digest/summary policy and is handled separately.
     """
     paths: list[Path] = []
     for path in root.iterdir():
         if not path.is_file():
             continue
         name = path.name
-        if name in {"validation-summary.json", "validation.log"}:
+        if name == "validation-summary.json":
             paths.append(path)
+        elif name == "validation.log" and _needs_validation_log(summary):
+            paths.append(path)
+        elif name == HUMAN_VOCAL_REPORT:
+            continue
         elif name.startswith("autoadv-") and (
             name.endswith(".jsonl") or name.endswith(".result.json")
         ):
@@ -135,6 +157,120 @@ def _evidence_language(path: Path) -> str:
 def _markdown_fence(content: str) -> str:
     longest = max((len(match.group(0)) for match in re.finditer(r"`+", content)), default=0)
     return "`" * max(3, longest + 1)
+
+
+def _compact_product_trace(content: str) -> tuple[str, str]:
+    """Losslessly delta-encode repeated acoustic snapshot payload fields.
+
+    Sequence/time envelopes remain on every event.  For the selected high-rate
+    events, omitted payload fields inherit from ``delta_from_seq``; explicit
+    ``delta_remove`` entries remove fields.  The first event for a token remains
+    a full snapshot, so the shared trace can be reconstructed without the local
+    file.  Invalid/non-trace JSONL is returned unchanged.
+    """
+    raw_lines = content.splitlines()
+    if not raw_lines:
+        return content, "full"
+    try:
+        records = [json.loads(line) for line in raw_lines if line.strip()]
+    except json.JSONDecodeError:
+        return content, "full"
+    if not records or not all(isinstance(item, dict) for item in records):
+        return content, "full"
+    if records[0].get("event") != "trace_started":
+        return content, "full"
+
+    encoded: list[dict[str, Any]] = []
+    previous: dict[tuple[str, Any, Any], tuple[Any, dict[str, Any]]] = {}
+    envelope_keys = ("event", "seq", "at_ns", "session", "line")
+    for index, item in enumerate(records):
+        if index == 0:
+            head = dict(item)
+            head["issue_encoding"] = "delta-jsonl-v1"
+            head["delta_events"] = sorted(TRACE_DELTA_EVENTS)
+            encoded.append(head)
+            continue
+
+        event = item.get("event")
+        if event not in TRACE_DELTA_EVENTS:
+            encoded.append(dict(item))
+            continue
+
+        key = (str(event), item.get("session"), item.get("line"))
+        payload = {name: value for name, value in item.items() if name not in envelope_keys}
+        prior = previous.get(key)
+        if prior is None:
+            encoded.append(dict(item))
+        else:
+            prior_seq, prior_payload = prior
+            delta = {name: value for name, value in payload.items()
+                     if name not in prior_payload or prior_payload[name] != value}
+            removed = [name for name in prior_payload if name not in payload]
+            compact = {name: item[name] for name in envelope_keys if name in item}
+            compact["delta_from_seq"] = prior_seq
+            if removed:
+                compact["delta_remove"] = removed
+            compact.update(delta)
+            encoded.append(compact)
+        previous[key] = (item.get("seq"), payload)
+
+    rendered = "".join(
+        json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for item in encoded
+    )
+    return rendered, "delta-jsonl-v1"
+
+
+def _shared_representation(path: Path, content: str) -> tuple[str, str]:
+    if path.name.endswith(".jsonl") and "fixture-evidence" not in path.name:
+        return _compact_product_trace(content)
+    return content, "full"
+
+
+def _human_vocal_summary(value: dict[str, Any]) -> dict[str, Any]:
+    files = value.get("files")
+    rows = files if isinstance(files, list) else []
+    observer_sources: set[str] = set()
+    structurally_empty = not rows
+    for row in rows:
+        if not isinstance(row, dict):
+            structurally_empty = True
+            continue
+        observers = row.get("observers")
+        if not isinstance(observers, dict) or not observers:
+            structurally_empty = True
+            continue
+        observer_sources.update(str(name) for name in observers)
+    explicit_error = value.get("error") or value.get("errors") or value.get("diagnostic_error")
+    return {
+        "schema": value.get("schema"),
+        "evidence_layer": value.get("evidence_layer"),
+        "product_acceptance": value.get("product_acceptance"),
+        "platform": value.get("platform"),
+        "model": value.get("model"),
+        "threshold_grid": value.get("threshold_grid"),
+        "file_count": len(rows),
+        "observer_sources": sorted(observer_sources),
+        "collection_anomaly": bool(structurally_empty or explicit_error),
+    }
+
+
+def _known_diagnostic_digests(
+    comments: Iterable[dict[str, Any]], name: str,
+) -> set[str]:
+    result: set[str] = set()
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        for match in DIAGNOSTIC_DIGEST_RE.finditer(body):
+            if match.group("name") == name:
+                result.add(match.group("digest"))
+        # Preserve continuity with the previous manifest format, which already
+        # published the sanitized SHA-256 but had no dedicated hidden marker.
+        for line in body.splitlines():
+            if name not in line:
+                continue
+            result.update(re.findall(r"`([0-9a-f]{64})`", line))
+    return result
 
 def _split_text(content: str, char_limit: int, byte_limit: int) -> list[str]:
     """Split text without dropping characters after sanitization.
@@ -178,24 +314,31 @@ def _fits_payload(content: str) -> bool:
     )
 
 
-def _evidence_blocks(root: Path) -> tuple[list[str], list[str]]:
-    """Build a manifest plus lossless, sanitized text blocks for all evidence."""
+def _evidence_blocks(
+    root: Path,
+    summary: dict[str, Any],
+    known_human_vocal_digests: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Build the normal analysis surface plus conditional diagnostics."""
     manifest = [
-        "", "**Complete persisted evidence**",
-        "", "| file | chars | sha256 (sanitized UTF-8) |",
-        "| --- | ---: | --- |",
+        "", "**Shared analysis evidence**",
+        "", "| file | source chars | shared chars | source sha256 (sanitized UTF-8) | representation |",
+        "| --- | ---: | ---: | --- | --- |",
     ]
     blocks: list[str] = []
     # Keep one block well below the physical comment budget so a file chunk can
     # always be wrapped with its label and Markdown delimiters.
     chunk_char_limit = COMMENT_BODY_TARGET_CHARS - COMMENT_METADATA_RESERVE_CHARS - 4_000
     chunk_byte_limit = COMMENT_BODY_TARGET_BYTES - COMMENT_METADATA_RESERVE_BYTES - 4_000
-    for path in _evidence_paths(root):
+    for path in _evidence_paths(root, summary):
         raw = path.read_text(encoding="utf-8-sig", errors="replace")
         content = sanitize_public_issue(raw)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        manifest.append(f"| `{path.name}` | {len(content)} | `{digest}` |")
-        chunks = _split_text(content, chunk_char_limit, chunk_byte_limit)
+        shared, representation = _shared_representation(path, content)
+        manifest.append(
+            f"| `{path.name}` | {len(content)} | {len(shared)} | `{digest}` | `{representation}` |"
+        )
+        chunks = _split_text(shared, chunk_char_limit, chunk_byte_limit)
         for index, chunk in enumerate(chunks, 1):
             label = path.name if len(chunks) == 1 else f"{path.name} · chunk {index}/{len(chunks)}"
             # Validation evidence is generated by this repository and does not
@@ -208,6 +351,44 @@ def _evidence_blocks(root: Path) -> tuple[list[str], list[str]]:
                 chunk,
                 fence, "</details>",
             )))
+
+    diagnostic_path = root / HUMAN_VOCAL_REPORT
+    if diagnostic_path.is_file():
+        raw = diagnostic_path.read_text(encoding="utf-8-sig", errors="replace")
+        content = sanitize_public_issue(raw)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError:
+            value = {"error": "invalid diagnostic JSON"}
+        if not isinstance(value, dict):
+            value = {"error": "diagnostic root is not an object"}
+        diagnostic_summary = _human_vocal_summary(value)
+        summary_text = json.dumps(
+            diagnostic_summary, ensure_ascii=False, indent=2, sort_keys=True,
+        ) + "\n"
+        known = known_human_vocal_digests or set()
+        include_detail = digest not in known or bool(diagnostic_summary["collection_anomaly"])
+        representation = "digest+summary+detail" if include_detail else "digest+summary"
+        manifest.extend((
+            f"<!-- autoadv-validation-diagnostic:{HUMAN_VOCAL_REPORT}:{digest} -->",
+            f"| `{HUMAN_VOCAL_REPORT}` | {len(content)} | {len(summary_text) if not include_detail else len(summary_text) + len(content)} | `{digest}` | `{representation}` |",
+        ))
+        fence = _markdown_fence(summary_text)
+        blocks.append("\n".join((
+            f"<details open><summary>{HUMAN_VOCAL_REPORT} · summary</summary>", "",
+            f"{fence}json", summary_text, fence, "</details>",
+        )))
+        if include_detail:
+            chunks = _split_text(content, chunk_char_limit, chunk_byte_limit)
+            for index, chunk in enumerate(chunks, 1):
+                label = (f"{HUMAN_VOCAL_REPORT} · detail" if len(chunks) == 1 else
+                         f"{HUMAN_VOCAL_REPORT} · detail chunk {index}/{len(chunks)}")
+                fence = _markdown_fence(chunk)
+                blocks.append("\n".join((
+                    f"<details><summary>{label}</summary>", "",
+                    f"{fence}json", chunk, fence, "</details>",
+                )))
     return manifest, blocks
 
 
@@ -234,7 +415,12 @@ def _partition_blocks(prefix: list[str], blocks: list[str]) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def format_snapshot(root: Path, sha: str) -> Snapshot:
+def format_snapshot(
+    root: Path,
+    sha: str,
+    *,
+    known_human_vocal_digests: set[str] | None = None,
+) -> Snapshot:
     summary = _read_json(root / "validation-summary.json")
     if summary is None:
         raise ValueError("No verification summary exists to upload")
@@ -271,7 +457,14 @@ def format_snapshot(root: Path, sha: str) -> Snapshot:
             lines.extend(("", "**Evidence issues**"))
             lines.extend(f"- {sanitize_public_issue(item)}" for item in issues[:12])
 
-    manifest, blocks = _evidence_blocks(root)
+    lines.extend((
+        "",
+        "Product trace sharing uses `delta-jsonl-v1` for repeated acoustic snapshots: "
+        "omitted payload fields inherit from `delta_from_seq`; `delta_remove` clears fields.",
+    ))
+    manifest, blocks = _evidence_blocks(
+        root, summary, known_human_vocal_digests=known_human_vocal_digests,
+    )
     lines.extend(manifest)
     return Snapshot(
         run=run,
@@ -376,8 +569,14 @@ def _comment_body(marker: str, run: str, part: int, total: int, payload: str) ->
 
 def build_upload_plan(root: Path, sha: str,
                       comments: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    snapshot = format_snapshot(root, sha)
     comments = list(comments)
+    snapshot = format_snapshot(
+        root,
+        sha,
+        known_human_vocal_digests=_known_diagnostic_digests(
+            comments, HUMAN_VOCAL_REPORT,
+        ),
+    )
     slots = _fixed_issue_surface(comments)
     history_slot, comment_id = _choose_history_slot(slots, snapshot.run)
     total = len(snapshot.parts)

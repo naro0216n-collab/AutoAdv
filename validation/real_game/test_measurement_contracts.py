@@ -415,7 +415,7 @@ def _comments():
     return result
 
 
-def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_comments_without_data_loss():
+def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diagnostics():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory) / '20261025T000000Z-runnew'; root.mkdir()
         summary = {
@@ -429,11 +429,15 @@ def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_co
         }
         (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
 
-        raw = 'case2\ncase3'
+        raw = 'case2\ncase3 C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl'
         trace = [
             {'event': 'trace_started', 'version': 3, 'at_ns': 1},
             {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'raw': raw},
             {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
+             'session': 1, 'line': 1, 'kind': 'snapshot', 'capture_end_ms': 1000,
+             'history_truncated': False, 'target_units': 8, 'aligned_target_units': 3,
+             'target_associated': True, 'complete_alignment': False,
+             'lexical_target_end_ms': None,
              'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
                                'active_count': 4, 'peak_score': .93,
                                'active_intervals': [[1072, 1312]]}],
@@ -444,16 +448,34 @@ def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_co
         ]
         trace.extend({
             'event': 'alignment_inference', 'seq': i + 3, 'at_ns': 20 + i,
-            'target_associated': bool(i % 2), 'padding': '音' * 180,
+            'session': 1, 'line': 1, 'target_associated': bool(i % 2),
+            'history_truncated': False, 'target_units': 8,
+            'padding': '音' * 180,
         } for i in range(220))
-        (root / 'autoadv-accuracy.jsonl').write_text(
-            ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in trace),
-            encoding='utf-8')
+        trace.append({
+            'event': 'native_audio_observation', 'seq': 223, 'at_ns': 300,
+            'session': 1, 'line': 1, 'kind': 'snapshot', 'capture_end_ms': 1500,
+            'history_truncated': False, 'target_units': 8, 'aligned_target_units': 3,
+            'target_associated': True, 'complete_alignment': False,
+            'lexical_target_end_ms': None,
+            'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
+                              'active_count': 4, 'peak_score': .93,
+                              'active_intervals': [[1072, 1312]]}],
+            'recurrence_strength': .91, 'recurrence_period_ms': 640,
+            'recurrence_stability': .82, 'recent_recurrence_strength': .88,
+            'recurrence_level_consistency': .84,
+            'recurrence_low_vocal_reference_similarity': .17,
+        })
+        trace_text = ''.join(
+            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in trace)
+        (root / 'autoadv-accuracy.jsonl').write_text(trace_text, encoding='utf-8')
 
         fixture = [
             {'event': 'fixture_started', 'version': 2, 'at_ns': 2},
             {'event': 'fixture_case', 'seq': 1, 'at_ns': 10, 'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
             {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': 10, 'case': 'case2', 'voice_file': 'jvs.wav'},
+            # Keep partitioning under contract even when the product trace becomes compact.
+            {'event': 'fixture_note', 'seq': 3, 'at_ns': 11, 'note': '証' * 65000},
         ]
         (root / 'autoadv-fixture-evidence.jsonl').write_text(
             ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in fixture),
@@ -471,35 +493,113 @@ def test_issue_reporting_publishes_complete_persisted_evidence_across_bounded_co
             'runtime C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl diagnostics\n',
             encoding='utf-8')
 
-        snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
-        assert len(snapshot.parts) >= 2
-        assert 'Complete persisted evidence' in snapshot.body
-        assert 'autoadv-accuracy.jsonl' in snapshot.body
-        assert 'autoadv-fixture-evidence.jsonl' in snapshot.body
-        assert 'autoadv-accuracy.result.json' in snapshot.body
-        assert 'validation-summary.json' in snapshot.body
-        assert 'validation.log' in snapshot.body
-        assert '"event":"native_audio_observation"' in snapshot.body
-        assert '"event":"alignment_inference"' in snapshot.body
-        assert '"source_endpoint_ms": 1234.5' in snapshot.body
-        assert '"raw":"case2\\ncase3"' in snapshot.body
-        assert '<USERPROFILE>' in snapshot.body and '<REDACTED-TOKEN>' in snapshot.body
-        assert 'analysis evidence timeline' not in snapshot.body
-        assert 'base64' not in snapshot.body
+        human_vocal = {
+            'schema': 'autoadv-human-vocal-observer-diagnostic-v1',
+            'evidence_layer': 'isolated_fixture_observer_measurement',
+            'product_acceptance': False, 'platform': 'Windows-test',
+            'model': 'C:\\Users\\alice\\AutoAdv\\human-vocal.onnx',
+            'threshold_grid': [0.05, 0.10],
+            'files': [{'file': 'speaker.wav', 'duration_ms': 1200,
+                       'observers': {'nonlexical': {'peak_score': .9,
+                                                   'detail_marker': 'observer-full-detail'}}}],
+        }
+        human_path = root / issue_reporting.HUMAN_VOCAL_REPORT
+        human_path.write_text(json.dumps(human_vocal, ensure_ascii=False, indent=2), encoding='utf-8')
+        sanitized_human = issue_reporting.sanitize_public_issue(human_path.read_text(encoding='utf-8'))
+        human_digest = hashlib.sha256(sanitized_human.encode('utf-8')).hexdigest()
 
-        plan = issue_reporting.build_upload_plan(root, 'a' * 40, _comments())
+        compact_trace, representation = issue_reporting._compact_product_trace(
+            issue_reporting.sanitize_public_issue(trace_text))
+        assert representation == 'delta-jsonl-v1'
+        assert len(compact_trace) < len(issue_reporting.sanitize_public_issue(trace_text))
+        compact_records = [json.loads(line) for line in compact_trace.splitlines()]
+        assert compact_records[0]['issue_encoding'] == 'delta-jsonl-v1'
+        assert any(record.get('delta_from_seq') for record in compact_records)
+
+        # Reconstruct delta events and prove that compaction changes representation,
+        # not the factual event stream.
+        state = {}
+        reconstructed = []
+        envelope = {'event', 'seq', 'at_ns', 'session', 'line'}
+        for record in compact_records:
+            item = dict(record)
+            if item.get('event') == 'trace_started':
+                item.pop('issue_encoding', None); item.pop('delta_events', None)
+                reconstructed.append(item)
+                continue
+            key = (item.get('event'), item.get('session'), item.get('line'))
+            if item.get('event') in issue_reporting.TRACE_DELTA_EVENTS:
+                previous = dict(state.get(key, {}))
+                delta_from = item.pop('delta_from_seq', None)
+                removed = item.pop('delta_remove', [])
+                if delta_from is not None:
+                    for name in removed:
+                        previous.pop(name, None)
+                    for name, value in item.items():
+                        if name not in envelope:
+                            previous[name] = value
+                    full = {name: item[name] for name in ('event', 'seq', 'at_ns', 'session', 'line') if name in item}
+                    full.update(previous)
+                    reconstructed.append(full)
+                    state[key] = previous
+                    continue
+                state[key] = {name: value for name, value in item.items() if name not in envelope}
+            reconstructed.append(item)
+        sanitized_source_records = [
+            json.loads(line) for line in issue_reporting.sanitize_public_issue(trace_text).splitlines()
+        ]
+        assert reconstructed == sanitized_source_records
+
+        first_snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
+        assert len(first_snapshot.parts) >= 2
+        assert 'Shared analysis evidence' in first_snapshot.body
+        assert 'autoadv-accuracy.jsonl' in first_snapshot.body
+        assert 'autoadv-fixture-evidence.jsonl' in first_snapshot.body
+        assert 'autoadv-accuracy.result.json' in first_snapshot.body
+        assert 'validation-summary.json' in first_snapshot.body
+        assert 'validation.log' not in first_snapshot.body
+        assert 'delta-jsonl-v1' in first_snapshot.body
+        assert '"source_endpoint_ms": 1234.5' in first_snapshot.body
+        assert 'case2\\ncase3 <USERPROFILE>\\\\AutoAdv <REDACTED-TOKEN>' in first_snapshot.body
+        assert 'observer-full-detail' in first_snapshot.body  # first unseen diagnostic digest is shared once
+        assert 'analysis evidence timeline' not in first_snapshot.body
+        assert 'base64' not in first_snapshot.body
+
+        repeated_snapshot = issue_reporting.format_snapshot(
+            root, 'a' * 40, known_human_vocal_digests={human_digest})
+        assert issue_reporting.HUMAN_VOCAL_REPORT in repeated_snapshot.body
+        assert human_digest in repeated_snapshot.body
+        assert '"file_count": 1' in repeated_snapshot.body
+        assert 'observer-full-detail' not in repeated_snapshot.body
+        assert 'digest+summary`' in repeated_snapshot.body
+
+        comments = _comments()
+        # Previous runs used a plain manifest row with the digest; the new reporter
+        # must reuse that evidence instead of forcing one transition-time resend.
+        comments[0]['body'] += (
+            f'\n| `{issue_reporting.HUMAN_VOCAL_REPORT}` | 239258 | `{human_digest}` |')
+        plan = issue_reporting.build_upload_plan(root, 'a' * 40, comments)
         history = [op for op in plan['operations'] if op['role'] == 'history']
         continuations = [op for op in plan['operations'] if op['role'] == 'continuation']
         assert len(history) == 1
-        assert len(continuations) == len(snapshot.parts) - 1
+        assert len(continuations) == plan['parts'] - 1
         assert history[0]['slot'] == 4
         assert plan['operations'].index(history[0]) == len(continuations)
         assert all(len(op['body']) <= issue_reporting.COMMENT_BODY_TARGET_CHARS
                    for op in history + continuations)
         assert all(len(op['body'].encode('utf-8')) <= issue_reporting.COMMENT_BODY_TARGET_BYTES
                    for op in history + continuations)
+        assert all('observer-full-detail' not in op['body'] for op in history + continuations)
         # Existing archived comments are recycled before any new comment is created.
         assert all(op['action'] == 'patch' for op in continuations[:2])
+
+        failed_summary = dict(summary)
+        failed_summary['phases'] = [{**summary['phases'][0], 'runner_error': 'runner failed'}]
+        (root / 'validation-summary.json').write_text(json.dumps(failed_summary), encoding='utf-8')
+        failure_snapshot = issue_reporting.format_snapshot(
+            root, 'a' * 40, known_human_vocal_digests={human_digest})
+        assert 'validation.log' in failure_snapshot.body
+        assert '<USERPROFILE>\\AutoAdv <REDACTED-TOKEN> diagnostics' in failure_snapshot.body
 
 
 def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_acceptance_proxy():

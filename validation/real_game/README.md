@@ -74,9 +74,11 @@ JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifa
 
 Windows実機計測のGitHub Issueは、チャット環境から解析できるリモート証拠面として使う。4個の固定履歴slotをリングとして扱い、通常runは同一runのslotまたは最古slotの1件だけをPATCHする。検証器が推論した「known-good baseline」は維持しない。
 
-各履歴commentには、run directoryに永続保存する解析証拠を選別せず掲載する。`validation-summary.json`、完全なproduct trace、完全なfixture evidence、offline verifier report、`validation.log`をファイル単位のsanitized SHA-256付きで直接掲載し、サイズ上限は複数commentへの分割だけで吸収する。ZIP/base64 bundleや検証器が作るcompact timelineを介さず、チャット環境から観測・推論telemetry・独立fixture/oracle照合結果までそのまま読めることを共有契約とする。
+Issueはローカルrun directoryの複製先ではなく、通常の原因解析に必要な証拠面とする。常時共有するのは`validation-summary.json`、offline verifier report、完全なfixture evidence、product traceである。product traceは失敗ケース周辺へ切り詰めずrun全体を共有する一方、高頻度の`native_audio_observation`と`alignment_inference`は`delta-jsonl-v1`で同一tokenの直前eventから変化したpayloadだけを記載する。各eventの`seq`と`at_ns`は残し、`delta_from_seq`で継承元を示し、値の消失は`delta_remove`で明示するため、元の事実列へ復元可能である。manifestにはsanitized sourceのSHA-256、source文字数、共有文字数、表現形式を記録する。
 
-同じ完全な証拠はローカルrun directoryにも残す。ローカル保存はIssue送信失敗時の耐障害正本であり、Issue更新は計測後の共有処理とする。GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
+`validation.log`はlauncher/runner/report収集異常の診断用であり、正常に計測が完了したrunではIssueへ送らない。`autoadv-human-vocal.result.json`はローカルには完全保存するが、Issueではdigestとobserver/file数等の要約を常時共有する。同じdigestが固定履歴内ですでに共有済みなら詳細を再送せず、未共有digestまたは診断収集自体が空・error等で成立していない場合だけ完全な詳細を添付する。これはobserver能力を製品合否へ昇格させる規則ではなく、同一診断結果の反復送信を避けるtransport契約である。
+
+完全なproduct trace、fixture evidence、report、summary、transcript、observer診断はローカルrun directoryに残す。ローカル保存はIssue送信失敗時にも失われない耐障害正本であり、Issue更新は計測後の共有処理とする。GitHub側の送信失敗だけでローカルに成立した精度計測を失敗へ変更しない。
 
 ## Alignment品質・stress計測
 
