@@ -434,13 +434,11 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
             {'event': 'trace_started', 'version': 3, 'at_ns': 1},
             {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'raw': raw},
             {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
-             'session': 1, 'line': 1, 'kind': 'snapshot', 'capture_end_ms': 1000,
-             'history_truncated': False, 'target_units': 8, 'aligned_target_units': 3,
+             'session': 1, 'line': 1, 'evidence_at_ms': 1000, 'target_units': 8, 'aligned_target_units': 3,
              'target_associated': True, 'complete_alignment': False,
              'lexical_target_end_ms': None,
-             'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
-                               'active_count': 4, 'peak_score': .93,
-                               'active_intervals': [[1072, 1312]]}],
+             'vocal_series': [{'observer': 'nonlexical', 'frame_count': 5,
+                               'active_count': 4, 'peak_score': .93}],
              'recurrence_strength': .91, 'recurrence_period_ms': 640,
              'recurrence_stability': .82, 'recent_recurrence_strength': .88,
              'recurrence_level_consistency': .84,},
@@ -448,18 +446,17 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         trace.extend({
             'event': 'alignment_inference', 'seq': i + 3, 'at_ns': 20 + i,
             'session': 1, 'line': 1, 'target_associated': bool(i % 2),
-            'history_truncated': False, 'target_units': 8,
+            'target_units': 8,
             'padding': '音' * 180,
         } for i in range(220))
         trace.append({
             'event': 'native_audio_observation', 'seq': 223, 'at_ns': 300,
-            'session': 1, 'line': 1, 'kind': 'snapshot', 'capture_end_ms': 1500,
-            'history_truncated': False, 'target_units': 8, 'aligned_target_units': 3,
+            'session': 1, 'line': 1, 'evidence_at_ms': 1500,
+            'target_units': 8, 'aligned_target_units': 3,
             'target_associated': True, 'complete_alignment': False,
             'lexical_target_end_ms': None,
-            'vocal_series': [{'source': 'nonlexical', 'frame_count': 5,
-                              'active_count': 4, 'peak_score': .93,
-                              'active_intervals': [[1072, 1312]]}],
+            'vocal_series': [{'observer': 'nonlexical', 'frame_count': 5,
+                              'active_count': 4, 'peak_score': .93}],
             'recurrence_strength': .91, 'recurrence_period_ms': 640,
             'recurrence_stability': .82, 'recent_recurrence_strength': .88,
             'recurrence_level_consistency': .84,
@@ -655,10 +652,10 @@ def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_
 
 def test_human_vocal_diagnostic_preserves_observer_scores_without_acceptance_verdict():
     frames = (
-        VocalActivityFrame(at_ms=100, score=0.08, support_start_ms=0, source="nonlexical"),
-        VocalActivityFrame(at_ms=340, score=0.22, support_start_ms=0, source="nonlexical"),
-        VocalActivityFrame(at_ms=580, score=0.51, support_start_ms=0, source="nonlexical"),
-        VocalActivityFrame(at_ms=116, score=0.72, support_start_ms=100, source="speech"),
+        VocalActivityFrame(at_ms=100, score=0.08, support_start_ms=0, observer="nonlexical"),
+        VocalActivityFrame(at_ms=340, score=0.22, support_start_ms=0, observer="nonlexical"),
+        VocalActivityFrame(at_ms=580, score=0.51, support_start_ms=0, observer="nonlexical"),
+        VocalActivityFrame(at_ms=116, score=0.72, support_start_ms=100, observer="speech"),
     )
     measured = summarize_vocal_frames(frames)
     assert set(measured) == {"nonlexical", "speech"}

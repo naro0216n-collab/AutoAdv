@@ -40,13 +40,11 @@ class _Assessment:
     token: Token
     generation: int
     boundary_ms: int
-    capture_start_ms: int | None
     feature_start_ms: int | None
     lexical: LexicalProgressEvidence | None
     causal_lower_bound_ms: int | None
     input_candidates_ms: tuple[int, ...]
     target_attached_ms: int | None
-    history_truncated: bool
     lexical_revision: int
 
 
@@ -103,7 +101,6 @@ class NativeAudio:
         self._search_start_ms = 0
         self._search_exhausted_at: int | None = None
         self._lexical: LexicalProgressEvidence | None = None
-        self._lexical_capture_start_ms: int | None = None
         self._lexical_revision = 0
         self._alignment_ready_through_ms: int | None = None
 
@@ -234,7 +231,6 @@ class NativeAudio:
             self.input_candidates_ms = input_candidates
             self.target_attached_ms = int(self.clock())
             self._lexical = None
-            self._lexical_capture_start_ms = None
             self._lexical_revision += 1
             self._alignment_ready_through_ms = None if aligner is not None else self.history.latest_ms
             self._last_alignment_query = None
@@ -272,7 +268,6 @@ class NativeAudio:
         self.input_candidates_ms = ()
         self.target_attached_ms = None
         self._lexical = None
-        self._lexical_capture_start_ms = None
         self._alignment_ready_through_ms = None
         self._required_assessment_ms = None
         self._last_progress_key = None
@@ -462,12 +457,6 @@ class NativeAudio:
             return None
         return ready
 
-    def _history_truncated_locked(self) -> bool:
-        if self.causal_lower_bound_ms is None:
-            return False
-        earliest = self.history.earliest_ms
-        return bool(earliest is not None and int(earliest) > int(self.causal_lower_bound_ms) + 1)
-
     def _feature_start_locked(self, lexical: LexicalProgressEvidence | None, end_ms: int) -> int | None:
         retained = self._retained_start_locked(end_ms)
         if lexical is not None and lexical.target_start_ms is not None:
@@ -480,10 +469,12 @@ class NativeAudio:
             # Once the target itself is located, its acoustic start is sufficient
             # context. No arbitrary pre-target lookback is a product requirement.
             return max(retained, target_start)
-        if self.causal_lower_bound_ms is not None:
-            return max(retained, int(self.causal_lower_bound_ms))
-        if self.input_candidates_ms:
-            return max(retained, min(self.input_candidates_ms))
+        if self.causal_lower_bound_ms is not None or self.input_candidates_ms:
+            # Target-independent vocal measurements before the timing fact are
+            # needed to distinguish an already-open observer score sequence from
+            # a new post-input rise. The compact measurement cache, not PCM, is
+            # queried across retained history.
+            return retained
         return None
 
     def _assessment_locked(self) -> _Assessment | None:
@@ -494,23 +485,16 @@ class NativeAudio:
         if key == self._last_progress_key:
             return None
         lexical = self._lexical
-        capture_start = (
-            int(self._lexical_capture_start_ms)
-            if lexical is not None and self._lexical_capture_start_ms is not None
-            else self._feature_start_locked(lexical, boundary)
-        )
         feature_start = self._feature_start_locked(lexical, boundary)
         return _Assessment(
             token=self.token,
             generation=self._generation,
             boundary_ms=int(boundary),
-            capture_start_ms=capture_start,
             feature_start_ms=feature_start,
             lexical=lexical,
             causal_lower_bound_ms=self.causal_lower_bound_ms,
             input_candidates_ms=self.input_candidates_ms,
             target_attached_ms=self.target_attached_ms,
-            history_truncated=self._history_truncated_locked(),
             lexical_revision=self._lexical_revision,
         )
 
@@ -537,15 +521,12 @@ class NativeAudio:
             recurrence_lookup=recurrence_lookup,
         )
         observation = NativeAudioObservation(
-            capture_start_ms=item.capture_start_ms,
-            capture_end_ms=item.boundary_ms,
             lexical=item.lexical,
             vocal=vocal,
             recurrence=recurrence,
             causal_lower_bound_ms=item.causal_lower_bound_ms,
             input_candidates_ms=item.input_candidates_ms,
             target_attached_ms=item.target_attached_ms,
-            history_truncated=item.history_truncated,
         )
 
         callback = None
@@ -738,7 +719,6 @@ class NativeAudio:
                     if lexical is not None:
                         if lexical != self._lexical:
                             self._lexical = lexical
-                            self._lexical_capture_start_ms = int(query[0])
                             self._lexical_revision += 1
                         if selection.alignment is not None:
                             self._narrow_search_locked(
@@ -772,7 +752,6 @@ class NativeAudio:
                             "causal_lower_bound_ms": self.causal_lower_bound_ms,
                             "input_candidates_ms": list(self.input_candidates_ms),
                             "target_attached_ms": self.target_attached_ms,
-                            "history_truncated": self._history_truncated_locked(),
                             "continuity_spans": len(segments),
                             "ambiguous_alignment_spans": bool(selection.ambiguous),
                         }

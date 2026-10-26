@@ -237,37 +237,32 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
                 target_start_ms=start, aligned_end_ms=aligned_end, target_end_ms=target_end,
                 reading_rank=0, path_margin=3.0, boundary_margin=2.0)
 
-    def vocal(*, intervals=(), start=900, end=2000, source='speech'):
+    def vocal(*, intervals=(), start=900, end=2000, observer='speech'):
         samples = tuple(
             VocalScoreSample(at_ms, .9, max(start, at_ms - 40))
             for interval_start, interval_end in intervals
             for at_ms in range(interval_start, interval_end + 1, 80)
         )
-        return HumanVocalEvidence(
-            start_ms=start, end_ms=end,
-            series=(VocalEvidenceSeries(
-                source=source, frame_count=max(1, len(samples)),
-                active_count=len(samples),
-                peak_score=.9 if samples else 0.0,
-                active_intervals=tuple(intervals), samples=samples),))
+        return HumanVocalEvidence(series=(VocalEvidenceSeries(
+            observer=observer, active_score_threshold=.45, samples=samples),))
 
     def observation(*, lex=None, voc=None, rec=None, end=1600, lower=1000,
                     inputs=(), attached=1050):
-        return NativeAudioObservation(
-            lexical=lex, vocal=voc,
-            recurrence=rec or VocalRecurrenceEvidence(),
-            capture_start_ms=900, capture_end_ms=end,
-            causal_lower_bound_ms=lower, input_candidates_ms=tuple(inputs),
-            target_attached_ms=attached)
+        return {
+            'lexical': lex, 'vocal': voc,
+            'recurrence': rec or VocalRecurrenceEvidence(),
+            'capture_end_ms': end, 'causal_lower_bound_ms': lower,
+            'input_candidates_ms': tuple(inputs), 'target_attached_ms': attached,
+        }
 
-    def evaluate(item: NativeAudioObservation):
+    def evaluate(item):
         progress, _recurrence = evaluate_utterance_progress(
-            capture_end_ms=item.capture_end_ms, lexical=item.lexical, vocal=item.vocal,
-            causal_lower_bound_ms=item.causal_lower_bound_ms,
-            input_candidates_ms=item.input_candidates_ms,
+            capture_end_ms=item['capture_end_ms'], lexical=item['lexical'], vocal=item['vocal'],
+            causal_lower_bound_ms=item['causal_lower_bound_ms'],
+            input_candidates_ms=item['input_candidates_ms'],
             recurrence_lookup=(
-                lambda _start, _end: item.recurrence
-                if item.recurrence is not None else VocalRecurrenceEvidence()),
+                lambda _start, _end: item['recurrence']
+                if item['recurrence'] is not None else VocalRecurrenceEvidence()),
         )
         return progress
 
@@ -307,7 +302,27 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     ended = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100), end=2100))
     assert ended.state == UtteranceProgressState.ENDED
-    assert ended.ended_at_ms == 1580
+
+    # Closure stays on the observer that produced the positive score. A wide
+    # receptive field from another observer with no positive support cannot be
+    # reinterpreted as extra endpoint delay for the speech measurement.
+    independent_scales = HumanVocalEvidence(series=(
+        VocalEvidenceSeries(
+            observer='speech', active_score_threshold=.45,
+            samples=(
+                VocalScoreSample(1400, .9, 1384),
+                VocalScoreSample(1416, .9, 1400),
+            )),
+        VocalEvidenceSeries(
+            observer='nonlexical', active_score_threshold=.45,
+            samples=(
+                VocalScoreSample(1000, .2, 40),
+                VocalScoreSample(1240, .2, 280),
+                VocalScoreSample(1480, .2, 520),
+            )),
+    ))
+    assert evaluate(observation(
+        lex=lexical(), voc=independent_scales, end=1500)).state == UtteranceProgressState.ENDED
 
     stable_loop = VocalRecurrenceEvidence(
         strength=.9, period_ms=500, period_stability=.85,
@@ -333,16 +348,14 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     # lexical end cannot become a physical endpoint merely because the vocal
     # measurement series is absent.
     unmeasured = evaluate(observation(
-        lex=lexical(), voc=HumanVocalEvidence(start_ms=900, end_ms=2100), end=2100))
+        lex=lexical(), voc=HumanVocalEvidence(), end=2100))
     assert unmeasured.state == UtteranceProgressState.UNKNOWN
 
     # A functioning observer that never supported human-vocal risk in the
     # located Presentation range is still not independent physical-EOF evidence.
     missed_voice = HumanVocalEvidence(
-        start_ms=900, end_ms=2100,
         series=(VocalEvidenceSeries(
-            source='speech', frame_count=20, active_count=0,
-            peak_score=.08, active_score_threshold=.45, active_intervals=(),
+            observer='speech', active_score_threshold=.45,
             samples=tuple(
                 VocalScoreSample(900 + index * 60, .08, 900 + index * 60)
                 for index in range(20)
@@ -389,10 +402,8 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     # sub-threshold observer scores.  Coverage failures stay UNKNOWN until an
     # observer actually supplies human-vocal support.
     subthreshold_vocal = HumanVocalEvidence(
-        start_ms=800, end_ms=1520,
         series=(VocalEvidenceSeries(
-            source='nonlexical', frame_count=5, active_count=0,
-            peak_score=.22, active_score_threshold=.45, active_intervals=(),
+            observer='nonlexical', active_score_threshold=.45,
             samples=(
                 VocalScoreSample(900, .04, 700),
                 VocalScoreSample(980, .05, 780),
@@ -410,10 +421,8 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     # rise on the same observer is enough to protect against cutting even though
     # the wide classifier cannot localize the physical onset exactly.
     inherited_support = HumanVocalEvidence(
-        start_ms=800, end_ms=1200,
         series=(VocalEvidenceSeries(
-            source='nonlexical', frame_count=4, active_count=0,
-            peak_score=.30, active_score_threshold=.45, active_intervals=(),
+            observer='nonlexical', active_score_threshold=.45,
             samples=(
                 VocalScoreSample(900, .30, 700),
                 VocalScoreSample(980, .30, 780),
@@ -426,10 +435,8 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=inherited_support, end=1200)).state == UtteranceProgressState.UNKNOWN
 
     crossing_rise = HumanVocalEvidence(
-        start_ms=800, end_ms=1200,
         series=(VocalEvidenceSeries(
-            source='nonlexical', frame_count=4, active_count=1,
-            peak_score=.55, active_score_threshold=.45, active_intervals=((1120, 1120),),
+            observer='nonlexical', active_score_threshold=.45,
             samples=(
                 VocalScoreSample(900, .30, 700),
                 VocalScoreSample(980, .30, 780),

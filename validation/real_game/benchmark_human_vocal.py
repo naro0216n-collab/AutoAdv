@@ -58,11 +58,11 @@ def _intervals(frames: list[VocalActivityFrame], threshold: float) -> list[list[
 
 
 def summarize_frames(frames: tuple[VocalActivityFrame, ...]) -> dict:
-    by_source: dict[str, list[VocalActivityFrame]] = {}
+    by_observer: dict[str, list[VocalActivityFrame]] = {}
     for frame in frames:
-        by_source.setdefault(frame.source, []).append(frame)
+        by_observer.setdefault(frame.observer, []).append(frame)
     result = {}
-    for source, items in sorted(by_source.items()):
+    for observer, items in sorted(by_observer.items()):
         scores = np.asarray([frame.score for frame in items], dtype=np.float64)
         thresholds = {}
         for threshold in THRESHOLDS:
@@ -83,7 +83,7 @@ def summarize_frames(frames: tuple[VocalActivityFrame, ...]) -> dict:
                     "mean_score": round(float(np.mean(values)), 6),
                     "p95_score": round(float(np.quantile(values, 0.95)), 6),
                 }
-        result[source] = {
+        result[observer] = {
             "frame_count": len(items),
             "peak_score": round(float(np.max(scores)), 6) if scores.size else 0.0,
             "mean_score": round(float(np.mean(scores)), 6) if scores.size else 0.0,

@@ -286,17 +286,14 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     active_app._native_audio = RetainedNative()
     active_app._consume_native_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.ACTIVE, evidence_at_ms=1500), NativeAudioObservation(
-        capture_start_ms=1000, capture_end_ms=1500,
         lexical=LexicalProgressEvidence(
             target_units=5, aligned_target_units=3, target_associated=True,
             complete_alignment=False, committed_target_end=False,
             target_start_ms=1050, aligned_end_ms=1300, target_end_ms=None,
             reading_rank=0, path_margin=3.0, boundary_margin=0.0),
         vocal=HumanVocalEvidence(
-            start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
-                source='speech', frame_count=4, active_count=4,
-                peak_score=.95, active_intervals=((1050, 1490),),
+                observer='speech', active_score_threshold=.45,
                 samples=(
                     VocalScoreSample(1100, .95, 1050),
                     VocalScoreSample(1250, .95, 1200),
@@ -309,8 +306,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     # not permission to replace the newer integrated judgment.
     active_app._consume_native_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
-        capture_start_ms=1000, capture_end_ms=1400,
-        vocal=HumanVocalEvidence(start_ms=1000, end_ms=1400),
+        vocal=HumanVocalEvidence(),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000))
     assert active_app.controller.native_progress.active
     active_app.set_auto_advance(True)
@@ -363,20 +359,16 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     # again.
     fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
-            capture_start_ms=1000, capture_end_ms=1400,
-            vocal=HumanVocalEvidence(start_ms=1000, end_ms=1400),
+            vocal=HumanVocalEvidence(),
             recurrence=VocalRecurrenceEvidence()))
     assert not fenced_app.runtime_state().completed
     assert fenced_native.requested == [(fenced_token, 1500)]
 
     fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1500), NativeAudioObservation(
-        capture_start_ms=1000, capture_end_ms=1500,
         vocal=HumanVocalEvidence(
-            start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
-                source='speech', frame_count=3, active_count=0,
-                peak_score=0.0, active_intervals=(),
+                observer='speech', active_score_threshold=.45,
                 samples=(
                     VocalScoreSample(1100, 0.0, 1050),
                     VocalScoreSample(1300, 0.0, 1250),

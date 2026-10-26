@@ -1267,23 +1267,21 @@ class AutoAdvApplication:
             lexical_target_start_ms=(lexical.target_start_ms if lexical is not None else None),
             lexical_aligned_end_ms=(lexical.aligned_end_ms if lexical is not None else None),
             lexical_target_end_ms=(lexical.target_end_ms if lexical is not None else None),
-            capture_start_ms=observation.capture_start_ms,
-            capture_end_ms=observation.capture_end_ms,
+            evidence_at_ms=progress.evidence_at_ms,
             causal_lower_bound_ms=observation.causal_lower_bound_ms,
             input_candidates_ms=list(observation.input_candidates_ms),
             target_attached_ms=observation.target_attached_ms,
-            history_truncated=observation.history_truncated,
             vocal_series=([{
-                'source': item.source,
-                'frame_count': item.frame_count,
-                'active_count': item.active_count,
-                'peak_score': item.peak_score,
+                'observer': item.observer,
+                'frame_count': len(item.samples),
+                'active_count': sum(
+                    sample.score >= item.active_score_threshold for sample in item.samples),
+                'peak_score': max((sample.score for sample in item.samples), default=0.0),
                 'active_score_threshold': item.active_score_threshold,
                 'measurement_support_start_ms': (
                     min((sample.support_start_ms for sample in item.samples), default=None)),
                 'measurement_support_end_ms': (
                     max((sample.at_ms for sample in item.samples), default=None)),
-                'active_intervals': list(item.active_intervals),
             } for item in vocal.series] if vocal is not None else []),
             recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
             recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
@@ -1305,14 +1303,7 @@ class AutoAdvApplication:
             self._emit_runtime_event(
                 'utterance_progress', token,
                 state=progress.state.value,
-                ended_at_ms=progress.ended_at_ms,
                 evidence_at_ms=progress.evidence_at_ms)
-        if progress.state == UtteranceProgressState.ENDED and progress.ended_at_ms is not None:
-            self._emit_telemetry(
-                'utterance_progress_end_estimate', token,
-                estimated_at_ns=progress.ended_at_ms * 1_000_000,
-                evidence='utterance_progress')
-
         # Controller consumes only the integrated ACTIVE / ENDED / UNKNOWN
         # judgment and never reinterprets individual acoustic evidence.
         completed = self.controller.apply_utterance_progress(token, progress)

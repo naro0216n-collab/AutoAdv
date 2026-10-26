@@ -26,7 +26,7 @@ class VocalActivityFrame:
     at_ms: int
     score: float
     support_start_ms: int | None = None
-    source: str = "speech"
+    observer: str = "speech"
     component_scores: tuple[float, ...] = ()
 
 
@@ -85,7 +85,7 @@ class TenVadActivityObserver:
                 at_ms=int(round(start_ms + (index + 1) * hop_ms)),
                 score=max(0.0, min(1.0, float(probability))),
                 support_start_ms=frame_start,
-                source="speech",
+                observer="speech",
             ))
 
         consumed = full * self.HOP_SIZE
@@ -191,7 +191,7 @@ class AudioSetHumanVocalObserver:
                 at_ms=at_ms,
                 score=max(human_scores, default=0.0),
                 support_start_ms=support_start,
-                source="nonlexical",
+                observer="nonlexical",
                 component_scores=human_scores,
             ))
             self._next_emit += self.HOP_SAMPLES
@@ -266,47 +266,18 @@ class AcousticObservationHistory:
             self._vocal.popleft()
 
     @classmethod
-    def _threshold(cls, source: str) -> float:
-        return float(cls.ACTIVE_SCORE_THRESHOLD.get(source, 0.45))
-
-    @staticmethod
-    def _series_intervals(
-        frames: list[VocalActivityFrame], *, start_ms: int, end_ms: int, threshold: float,
-    ) -> tuple[tuple[int, int], ...]:
-        active = [frame for frame in frames if frame.score >= threshold]
-        if not active:
-            return ()
-        gaps = [b.at_ms - a.at_ms for a, b in zip(frames, frames[1:]) if b.at_ms > a.at_ms]
-        nominal_gap = float(np.median(gaps)) if gaps else 16.0
-        # This grouping belongs to the observer measurement scale.  It is not a
-        # physical endpoint or lexical-association margin.
-        join_gap = max(32.0, nominal_gap * 2.0)
-        intervals: list[tuple[int, int]] = []
-        for frame in active:
-            observed_at = min(end_ms, max(start_ms, int(frame.at_ms)))
-            if intervals and observed_at - intervals[-1][1] <= join_gap:
-                intervals[-1] = (intervals[-1][0], max(intervals[-1][1], observed_at))
-            else:
-                intervals.append((observed_at, observed_at))
-        return tuple(intervals)
+    def _threshold(cls, observer: str) -> float:
+        return float(cls.ACTIVE_SCORE_THRESHOLD.get(observer, 0.45))
 
     def summarize_vocal(self, *, start_ms: int, end_ms: int) -> HumanVocalEvidence:
         selected = [frame for frame in self._vocal if start_ms <= frame.at_ms <= end_ms]
-        by_source: dict[str, list[VocalActivityFrame]] = {}
+        by_observer: dict[str, list[VocalActivityFrame]] = {}
         for frame in selected:
-            by_source.setdefault(frame.source, []).append(frame)
-        series: list[VocalEvidenceSeries] = []
-        for source, frames in sorted(by_source.items()):
-            threshold = self._threshold(source)
-            active_count = sum(frame.score >= threshold for frame in frames)
-            series.append(VocalEvidenceSeries(
-                source=source,
-                frame_count=len(frames),
-                active_count=active_count,
-                peak_score=max((frame.score for frame in frames), default=0.0),
-                active_score_threshold=threshold,
-                active_intervals=self._series_intervals(
-                    frames, start_ms=start_ms, end_ms=end_ms, threshold=threshold),
+            by_observer.setdefault(frame.observer, []).append(frame)
+        series = tuple(
+            VocalEvidenceSeries(
+                observer=observer,
+                active_score_threshold=self._threshold(observer),
                 samples=tuple(
                     VocalScoreSample(
                         at_ms=int(frame.at_ms),
@@ -318,9 +289,10 @@ class AcousticObservationHistory:
                     )
                     for frame in frames
                 ),
-            ))
-        return HumanVocalEvidence(
-            start_ms=int(start_ms), end_ms=int(end_ms), series=tuple(series))
+            )
+            for observer, frames in sorted(by_observer.items())
+        )
+        return HumanVocalEvidence(series=series)
 
     @classmethod
     def _series_recurrence(
@@ -396,18 +368,18 @@ class AcousticObservationHistory:
         """Measure repetition of human-vocal observer time series only.
 
         BGM-dominated full-mix fingerprints are deliberately absent.  Recurrence
-        remains target-independent and source-agnostic, but it must be carried by
+        remains target-independent and observer-agnostic, but it must be carried by
         a human-vocal measurement rather than by unrelated process-mix structure.
         """
         selected = [frame for frame in self._vocal if start_ms <= frame.at_ms <= end_ms]
-        by_source: dict[str, list[VocalActivityFrame]] = {}
+        by_observer: dict[str, list[VocalActivityFrame]] = {}
         for frame in selected:
-            by_source.setdefault(frame.source, []).append(frame)
+            by_observer.setdefault(frame.observer, []).append(frame)
         candidates = [
             candidate
-            for source, frames in by_source.items()
+            for observer, frames in by_observer.items()
             if (candidate := self._series_recurrence(
-                frames, threshold=self._threshold(source))) is not None
+                frames, threshold=self._threshold(observer))) is not None
         ]
         if not candidates:
             return VocalRecurrenceEvidence()
