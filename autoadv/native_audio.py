@@ -1,9 +1,11 @@
 """Continuous process-scoped acoustic observation for UtteranceProgress.
 
 Process Loopback is active for the monitoring session, not only after HOOK
-arrival.  Known text is attached retrospectively to retained PCM, while vocal
-activity and recurrence features are observed continuously.  This layer never
-decides presentation completion and never owns game input or fallback policy.
+arrival.  Known text is attached retrospectively to retained PCM, while cheap
+target-independent vocal/fingerprint measurements are cached continuously.
+Target alignment is narrowed as evidence arrives and recurrence is queried only
+when direct endpoint evidence remains ambiguous.  This layer never decides
+presentation completion and never owns game input or fallback policy.
 """
 from __future__ import annotations
 
@@ -21,14 +23,15 @@ from .conversation import Token
 from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from .g2p import PronunciationCandidate
 from .process_audio import ProcessCapture, CaptureHealth
-from .utterance_progress import LexicalProgressEvidence, NativeAudioObservation
+from .utterance_progress import (
+    LexicalProgressEvidence, NativeAudioObservation, recurrence_query_start,
+)
 
 
 class NativeAudio:
     """Own one process capture and continuous observations; never inject input."""
 
-    RAW_HISTORY_MS = 180_000
-    MAX_ALIGNMENT_WINDOW_MS = 60_000
+    RETENTION_MS = 60_000
     INFERENCE_INTERVAL_MS = 500
     MIN_AUDIO_MS = 300
 
@@ -46,8 +49,8 @@ class NativeAudio:
         self.on_inference = on_inference
         self.on_observation = on_observation
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
-        self.history = AudioHistory(horizon_ms=self.RAW_HISTORY_MS)
-        self.features = AcousticObservationHistory(horizon_ms=self.RAW_HISTORY_MS)
+        self.history = AudioHistory(horizon_ms=self.RETENTION_MS)
+        self.features = AcousticObservationHistory(horizon_ms=self.RETENTION_MS)
         if vocal_observer is not None:
             self.vocal_observer = vocal_observer
         else:
@@ -70,6 +73,7 @@ class NativeAudio:
         self.input_candidates_ms: tuple[int, ...] = ()
         self.target_attached_ms: int | None = None
         self.window_start_ms = 0
+        self._committed_lexical: LexicalProgressEvidence | None = None
         self._last_processed_ms = -1
         self._last_processed_chunk: PCMChunk | None = None
         # ``_inflight`` describes the physical single worker, not whether the
@@ -108,6 +112,7 @@ class NativeAudio:
         self.causal_lower_bound_ms = None
         self.input_candidates_ms = ()
         self.target_attached_ms = None
+        self._committed_lexical = None
         self._last_processed_ms = -1
         self._last_processed_chunk = None
 
@@ -118,23 +123,70 @@ class NativeAudio:
         self._last_pcm_end_ms = -1
         self._capture_stereo_peak = 0.0
 
-    def _semantic_history_start_locked(self) -> int:
-        if self.causal_lower_bound_ms is not None:
-            return int(self.causal_lower_bound_ms)
-        return int(self.features.earliest_ms or max(0, self.clock() - self.RAW_HISTORY_MS))
-
-    def _raw_analysis_start_locked(self, end_ms: int | None = None) -> tuple[int, bool]:
-        semantic_start = self._semantic_history_start_locked()
+    def _retained_start_locked(self, end_ms: int | None = None) -> int:
+        if self.history.earliest_ms is not None:
+            return int(self.history.earliest_ms)
+        if self.features.earliest_ms is not None:
+            return int(self.features.earliest_ms)
         if end_ms is None:
-            end_ms = self.features.latest_ms or self.clock()
-        resource_start = max(0, int(end_ms) - self.MAX_ALIGNMENT_WINDOW_MS)
-        start = max(semantic_start, resource_start)
-        return start, start > semantic_start
+            end_ms = self.clock()
+        return max(0, int(end_ms) - self.RETENTION_MS)
+
+    def _initial_analysis_start_locked(self, end_ms: int) -> int:
+        retained_start = self._retained_start_locked(end_ms)
+        if self.causal_lower_bound_ms is not None:
+            return max(retained_start, int(self.causal_lower_bound_ms))
+        usable_inputs = tuple(
+            value for value in self.input_candidates_ms
+            if retained_start <= value <= int(end_ms) - self.MIN_AUDIO_MS
+        )
+        if usable_inputs:
+            # External inputs are not promoted to a semantic boundary.  They
+            # merely give the first, cheapest search range after the text has
+            # actually been admitted.  If the target is not found there, the
+            # same retained history is widened on the next assessment.
+            return min(usable_inputs)
+        return retained_start
 
     def _history_truncated_locked(self, capture_start_ms: int | None) -> bool:
-        if capture_start_ms is None:
+        if capture_start_ms is None or self.causal_lower_bound_ms is None:
             return False
-        return int(capture_start_ms) > self._semantic_history_start_locked() + 1
+        return int(capture_start_ms) > int(self.causal_lower_bound_ms) + 1
+
+    def _narrow_alignment_start_locked(
+        self,
+        lexical: LexicalProgressEvidence,
+        *,
+        frame_ms: float,
+        capture_end_ms: int,
+    ) -> None:
+        """Keep later target assessments inside the smallest evidenced range.
+
+        A successful AutoAdv input is already a strong lower bound.  For
+        external inputs we wait until the known text has actually located
+        itself in PCM, then the latest stamp not later than that acoustic start
+        is safe as an analysis bound without claiming that the stamp caused the
+        transition.  With no usable stamp, the located acoustic start itself is
+        enough to avoid rescanning unrelated retained history.
+        """
+        if not lexical.target_associated or lexical.target_start_ms is None:
+            return
+        retained_start = self._retained_start_locked(capture_end_ms)
+        if self.causal_lower_bound_ms is not None:
+            desired = max(retained_start, int(self.causal_lower_bound_ms))
+        else:
+            target_start = int(lexical.target_start_ms)
+            usable = [
+                stamp for stamp in self.input_candidates_ms
+                if retained_start <= stamp <= target_start
+            ]
+            if usable:
+                desired = max(usable)
+            else:
+                # Keep one model frame of context so rounding the located onset
+                # cannot crop the first phone on the next assessment.
+                desired = max(retained_start, target_start - max(1, int(round(frame_ms))))
+        self.window_start_ms = max(int(self.window_start_ms), int(desired))
 
     def begin(self, token: Token, alignment_text: str, *,
               candidates: tuple[PronunciationCandidate, ...] | None = None,
@@ -168,7 +220,8 @@ class NativeAudio:
             self.start_ms = self.clock()
             self.target_attached_ms = self.start_ms
             analysis_end = self.features.latest_ms or self.start_ms
-            self.window_start_ms, _ = self._raw_analysis_start_locked(analysis_end)
+            self.window_start_ms = self._initial_analysis_start_locked(int(analysis_end))
+            self._committed_lexical = None
             self._last_processed_ms = -1
             self._last_processed_chunk = None
             self._reset_observation()
@@ -183,7 +236,8 @@ class NativeAudio:
                     "pcm", token, generation,
                     len(first.frames) // (first.channels * first.sample_width_bytes)))
             feature_end = self.features.latest_ms
-            if buffered and aligner is not None:
+            if (buffered and aligner is not None
+                    and buffered[-1].at_ms - self.window_start_ms >= self.MIN_AUDIO_MS):
                 item = self._request_alignment_locked(buffered[-1].at_ms)
                 if item is not None:
                     pending.append(item)
@@ -310,7 +364,7 @@ class NativeAudio:
         if (self._closed or token != self.token or generation != self._generation
                 or aligner is not self.aligner):
             return None
-        start, _ = self._raw_analysis_start_locked(boundary)
+        start = max(self._retained_start_locked(boundary), int(self.window_start_ms))
         samples = tuple(
             chunk for chunk in self.history.since(start)
             if chunk.at_ms <= boundary)
@@ -357,12 +411,11 @@ class NativeAudio:
             kind="snapshot",
             capture_start_ms=self.window_start_ms,
             capture_end_ms=boundary,
-            lexical=None,
+            lexical=self._committed_lexical,
             history_truncated=(
                 history_truncated or self._history_truncated_locked(self.window_start_ms)
             ),
             pcm_last_frame_ms=boundary,
-            include_recurrence=True,
         )
         self._observation_at = boundary
         return ("observe", token, generation, observation)
@@ -503,42 +556,39 @@ class NativeAudio:
                                   lexical: LexicalProgressEvidence | None,
                                   history_truncated: bool = False,
                                   pcm_last_frame_ms: int | None = None,
-                                  heartbeat_at_ms: int | None = None,
-                                  include_recurrence: bool = True) -> NativeAudioObservation:
+                                  heartbeat_at_ms: int | None = None) -> NativeAudioObservation:
         feature_end = capture_end_ms if capture_end_ms is not None else self.features.latest_ms
         vocal = None
-        recurrence = None
         if feature_end is not None:
-            if lexical is not None and lexical.target_associated and lexical.target_start_ms is not None:
-                feature_start = max(0, lexical.target_start_ms - 8_000)
+            if lexical is not None and lexical.target_start_ms is not None:
+                feature_start = int(lexical.target_start_ms)
             elif self.causal_lower_bound_ms is not None:
-                # Keep pre-boundary reference context so recurrence and continuity
-                # can be measured without labelling it as background/old audio.
-                feature_start = max(0, self.causal_lower_bound_ms - 8_000)
+                feature_start = int(self.causal_lower_bound_ms)
+            elif self.input_candidates_ms:
+                feature_start = int(min(self.input_candidates_ms))
             else:
-                feature_start = self.features.earliest_ms or max(0, feature_end - self.features.horizon_ms)
-            feature_start = min(int(feature_start), int(feature_end))
-            vocal = self.features.summarize_vocal(
-                start_ms=feature_start, end_ms=feature_end)
+                feature_start = None
+            if feature_start is not None:
+                feature_start = min(int(feature_start), int(feature_end))
+                vocal = self.features.summarize_vocal(
+                    start_ms=feature_start, end_ms=feature_end)
 
-            if include_recurrence:
-                if lexical is not None and lexical.target_end_ms is not None:
-                    recurrence_start = lexical.target_end_ms
-                elif lexical is not None and lexical.aligned_end_ms is not None:
-                    recurrence_start = lexical.aligned_end_ms
-                elif lexical is not None and lexical.target_start_ms is not None:
-                    recurrence_start = lexical.target_start_ms
-                elif self.causal_lower_bound_ms is not None:
-                    recurrence_start = self.causal_lower_bound_ms
-                else:
-                    # External inputs are timing observations, not an acoustic
-                    # boundary.  Recurrence is measured from retained acoustic
-                    # context; the reducer relates individual open vocal events
-                    # to every input stamp without selecting one here.
-                    recurrence_start = feature_start
-                recurrence_start = min(int(recurrence_start), int(feature_end))
-                recurrence = self.features.recurrence(
-                    start_ms=recurrence_start, end_ms=feature_end)
+        observation = NativeAudioObservation(
+            kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
+            lexical=lexical, vocal=vocal, recurrence=None,
+            causal_lower_bound_ms=self.causal_lower_bound_ms,
+            input_candidates_ms=self.input_candidates_ms,
+            target_attached_ms=self.target_attached_ms,
+            history_truncated=history_truncated,
+            pcm_last_frame_ms=pcm_last_frame_ms,
+            heartbeat_at_ms=heartbeat_at_ms,
+        )
+        recurrence_start = recurrence_query_start(observation)
+        if recurrence_start is None or feature_end is None:
+            return observation
+        recurrence = self.features.recurrence(
+            start_ms=min(int(recurrence_start), int(feature_end)),
+            end_ms=int(feature_end))
         return NativeAudioObservation(
             kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
             lexical=lexical, vocal=vocal, recurrence=recurrence,
@@ -559,6 +609,8 @@ class NativeAudio:
         alignment = None
         target_end_ms = None
         current_for_metrics = False
+        retry_wider_search = False
+        follow_up_item = None
         try:
             capture_start_ms = int(round(samples[0].at_ms - samples[0].duration_ms)) if samples else None
             capture_end_ms = int(samples[-1].at_ms) if samples else None
@@ -594,21 +646,62 @@ class NativeAudio:
                     current_for_metrics = False
                 else:
                     current_for_metrics = True
+                    retained_start = self._retained_start_locked(capture_end_ms)
+                    if (alignment is not None and not alignment.target_associated
+                            and self.causal_lower_bound_ms is None
+                            and self.input_candidates_ms
+                            and int(self.window_start_ms) > retained_start):
+                        # The cheap candidate-anchored search did not locate the
+                        # target.  Widen once to retained evidence instead of
+                        # declaring the candidate range authoritative.
+                        self.window_start_ms = retained_start
+                        retry_wider_search = True
+                        if capture_end_ms is not None:
+                            self._pending_inference = (
+                                token, generation, int(capture_end_ms), aligner,
+                                time.perf_counter_ns() if self.on_inference else 0,
+                            )
+                    elif lexical is not None and alignment is not None:
+                        self._narrow_alignment_start_locked(
+                            lexical, frame_ms=alignment.frame_ms,
+                            capture_end_ms=int(capture_end_ms or self.clock()))
                     # Keep every published assessment tied to the exact PCM
                     # snapshot used by its target-conditioned measurement. A
                     # newer feature snapshot is a separate query, not a reason
                     # to rewrite this result's time frontier.
-                    observation_end_ms = capture_end_ms
-                    history_truncated = self._history_truncated_locked(capture_start_ms)
-                    observation = self._build_observation_locked(
-                        kind="snapshot", capture_start_ms=capture_start_ms,
-                        capture_end_ms=observation_end_ms, lexical=lexical,
-                        history_truncated=history_truncated,
-                        pcm_last_frame_ms=observation_end_ms,
-                        include_recurrence=True,
-                    )
-                    if observation_end_ms is not None:
-                        self._observation_at = max(self._observation_at, observation_end_ms)
+                    if not retry_wider_search:
+                        observation_end_ms = capture_end_ms
+                        history_truncated = self._history_truncated_locked(capture_start_ms)
+                        observation = self._build_observation_locked(
+                            kind="snapshot", capture_start_ms=capture_start_ms,
+                            capture_end_ms=observation_end_ms, lexical=lexical,
+                            history_truncated=history_truncated,
+                            pcm_last_frame_ms=observation_end_ms,
+                        )
+                        if observation_end_ms is not None:
+                            self._observation_at = max(self._observation_at, observation_end_ms)
+                        if (lexical is not None and alignment is not None
+                                and alignment.committed_target_end):
+                            # A committed target end already contains the
+                            # aligner's right-context/boundary evidence.  Future
+                            # PCM changes only the physical tail assessment; do
+                            # not repeatedly remap the same known text over an
+                            # ever-growing window.
+                            self._committed_lexical = lexical
+                            pending_boundary = (
+                                self._pending_inference[2]
+                                if self._pending_inference is not None
+                                and self._pending_inference[0] == token
+                                and self._pending_inference[1] == generation
+                                else None
+                            )
+                            self.aligner = None
+                            self._pending_inference = None
+                            if (pending_boundary is not None and observation_end_ms is not None
+                                    and int(pending_boundary) > int(observation_end_ms)):
+                                follow_up_item = self._feature_observation_locked(
+                                    token, generation, int(pending_boundary),
+                                    history_truncated=False)
 
             if current_for_metrics and observation is not None and self.on_inference is not None:
                 metrics = {
@@ -664,6 +757,8 @@ class NativeAudio:
                     pass
             if current_for_metrics and observation is not None and self.on_observation is not None:
                 self.on_observation(token, observation)
+            if follow_up_item is not None:
+                self._dispatch(follow_up_item)
         except Exception as exc:
             self.on_error(token, "acoustic inference failure: " + str(exc))
         finally:

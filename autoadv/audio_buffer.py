@@ -76,6 +76,15 @@ class AudioHistory:
         while self._chunks and self._chunks[0].at_ms < cutoff:
             self._chunks.popleft()
 
+    @property
+    def earliest_ms(self) -> int | None:
+        """Wall-clock start of the oldest retained PCM packet."""
+        with self._lock:
+            if not self._chunks:
+                return None
+            first = self._chunks[0]
+            return int(round(first.at_ms - first.duration_ms))
+
     def since(self, at_ms: int) -> tuple[PCMChunk, ...]:
         """Return captured frames at or after an exact monotonic boundary.
 

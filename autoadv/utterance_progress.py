@@ -325,6 +325,71 @@ def _open_post_input_risk(
     return max(risks, key=lambda item: item[1]) if risks else None
 
 
+def recurrence_query_start(observation: NativeAudioObservation) -> int | None:
+    """Return the endpoint-local start that needs recurrence evidence, if any.
+
+    Recurrence is not a standing observer for every Presentation.  It is only
+    useful after direct evidence has located a finite vocal risk whose endpoint
+    is still open long enough that stable repetition could explain the apparent
+    continuation.  This keeps the ordinary path on alignment + vocal evidence
+    and asks the cached recurrence measurements only for genuine endpoint
+    ambiguity.
+    """
+    capture_end = observation.capture_end_ms
+    if capture_end is None:
+        return None
+
+    lexical = observation.lexical
+    lexical_span = bool(
+        lexical is not None
+        and lexical.aligned_target_units > 0
+        and lexical.target_start_ms is not None
+        and lexical.aligned_end_ms is not None
+    )
+    if lexical_span and lexical is not None:
+        complete = bool(
+            lexical.target_associated
+            and lexical.complete_alignment
+            and lexical.committed_target_end
+            and lexical.target_end_ms is not None
+        )
+        if not complete:
+            return None
+        target_start = int(lexical.target_start_ms)
+        target_end = int(lexical.target_end_ms)
+        reference_before = (
+            observation.causal_lower_bound_ms
+            if observation.causal_lower_bound_ms is not None
+            else target_start
+        )
+        chains = _series_risk_chains(
+            observation.vocal, reference_before_ms=reference_before)
+        connected_end = _connected_chain_end(chains, target_start, target_end)
+        if connected_end is None:
+            return None
+        physical_risk_end = max(target_end, connected_end)
+        if capture_end - physical_risk_end >= END_CONTEXT_MS:
+            return None
+        if capture_end - target_end < MIN_LOOP_OBSERVATION_MS:
+            return None
+        return target_end
+
+    boundary = observation.causal_lower_bound_ms
+    if boundary is not None:
+        candidate = _open_post_boundary_risk(
+            observation.vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
+    else:
+        candidate = _open_post_input_risk(
+            observation.vocal, candidates=observation.input_candidates_ms,
+            capture_end_ms=capture_end)
+    if candidate is None:
+        return None
+    start_ms, _ = candidate
+    if capture_end - start_ms < MIN_LOOP_OBSERVATION_MS:
+        return None
+    return start_ms
+
+
 def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtteranceProgress:
     """Evaluate one immutable measurement snapshot with no retained inference state."""
     capture_end = observation.capture_end_ms
