@@ -21,7 +21,7 @@ _PROFILE_KEYS = frozenset({
     'inserted_hooks', 'insert_pc_hooks', 'advance_mode', 'uncertain_text_fallback',
     'default_tts', 'default_voice', 'speaker_tts', 'speaker_voices', 'speaker_styles', 'replacements',
     'name_readings', 'source', 'ocr', 'native_helper', 'alignment_model',
-    'alignment_vocab', 'next_line_timeout_ms', 'inherit_common', 'reading_ms',
+    'alignment_vocab', 'inherit_common', 'reading_ms',
     'per_reading_unit_wait_ms', 'hook_flush_ms', 'hook_codepage', 'hook_max_buffer',
     'hook_max_history', 'repeat_rule', 'input_key',
 })
@@ -62,7 +62,6 @@ class CommonSettings:
     alignment_model: str = ''
     alignment_vocab: str = ''
     input_key: int = 13
-    next_line_timeout_ms: int = 8000
 
     def validate(self):
         template = Profile('_common', '_common')
@@ -149,7 +148,7 @@ def _profile_payload(p: Profile) -> dict:
         replacements=[vars(x) for x in p.replacements], name_readings=p.name_readings,
         source=p.source, ocr=vars(p.ocr), native_helper=p.native_helper,
         alignment_model=p.alignment_model, alignment_vocab=p.alignment_vocab,
-        next_line_timeout_ms=p.next_line_timeout_ms, inherit_common=p.inherit_common,
+        inherit_common=p.inherit_common,
         reading_ms=p.reading_ms, per_reading_unit_wait_ms=p.per_reading_unit_wait_ms,
         hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
         hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
@@ -205,7 +204,7 @@ def _read_profile(raw: object) -> Profile:
         name_readings=dict(raw['name_readings']), source=raw['source'],
         ocr=OCRSettings(**{**ocr_raw, 'region': tuple(region)}), native_helper=raw['native_helper'],
         alignment_model=raw['alignment_model'], alignment_vocab=raw['alignment_vocab'],
-        next_line_timeout_ms=raw['next_line_timeout_ms'], inherit_common=list(raw['inherit_common']),
+        inherit_common=list(raw['inherit_common']),
         reading_ms=raw['reading_ms'], per_reading_unit_wait_ms=raw['per_reading_unit_wait_ms'],
         hook_flush_ms=raw['hook_flush_ms'], hook_codepage=raw['hook_codepage'],
         hook_max_buffer=raw['hook_max_buffer'], hook_max_history=raw['hook_max_history'],

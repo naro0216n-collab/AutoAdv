@@ -238,13 +238,18 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
                 reading_rank=0, path_margin=3.0, boundary_margin=2.0)
 
     def vocal(*, intervals=(), start=900, end=2000, source='speech'):
+        samples = tuple(
+            VocalScoreSample(at_ms, .9, max(start, at_ms - 40))
+            for interval_start, interval_end in intervals
+            for at_ms in range(interval_start, interval_end + 1, 80)
+        )
         return HumanVocalEvidence(
             start_ms=start, end_ms=end,
             series=(VocalEvidenceSeries(
-                source=source, frame_count=max(1, len(intervals) * 4),
-                active_count=len(intervals) * 4,
-                peak_score=.9 if intervals else 0.0,
-                active_intervals=tuple(intervals)),))
+                source=source, frame_count=max(1, len(samples)),
+                active_count=len(samples),
+                peak_score=.9 if samples else 0.0,
+                active_intervals=tuple(intervals), samples=samples),))
 
     def observation(*, lex=None, voc=None, rec=None, end=1600, lower=1000,
                     inputs=(), attached=1050):

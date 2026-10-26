@@ -8,6 +8,7 @@ import pytest
 from autoadv.application import AutoAdvApplication
 from autoadv.utterance_progress import (
     HumanVocalEvidence, LexicalProgressEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence,
+    VocalScoreSample,
 )
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent
@@ -255,7 +256,10 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     token = runtime_hook(app, text, '本文', 2)
     assert token is not None
     app.set_auto_advance(True)
-    deadline = next(callback for delay, callback in scheduled if delay == app.runtime_state().utterance.text_wait_ms)
+    wait_ms = app.runtime_state().utterance.text_wait_ms
+    assert not any(delay == wait_ms for delay, _callback in scheduled)
+    state = app.runtime_state()
+    assert state.authorized and not state.sent and not state.completed
 
     class RetainedNative:
         pid = 101
@@ -263,11 +267,6 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         def observation_fence(self, _token): return None
         def request_assessment_through(self, _token, _through_ms): return False
         def finish_line(self, _token): raise AssertionError('inconclusive audio must remain active')
-    app._native_audio = RetainedNative()
-    deadline()
-    state = app.runtime_state()
-    assert state.pause_reason == 'audio_judgment_unknown_hold'
-    assert state.authorized and not state.sent
 
     # The Application must propagate non-terminal progress into Controller
     # state before the fallback deadline; otherwise an active finite voice
@@ -297,8 +296,14 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         vocal=HumanVocalEvidence(
             start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
-                source='speech', frame_count=20, active_count=16,
-                peak_score=.95, active_intervals=((1050, 1490),)),)),
+                source='speech', frame_count=4, active_count=4,
+                peak_score=.95, active_intervals=((1050, 1490),),
+                samples=(
+                    VocalScoreSample(1100, .95, 1050),
+                    VocalScoreSample(1250, .95, 1200),
+                    VocalScoreSample(1400, .95, 1350),
+                    VocalScoreSample(1490, .95, 1440),
+                )),)),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000,
         target_attached_ms=1100))
     # Query callbacks may complete out of order. An older snapshot is telemetry,
@@ -314,7 +319,7 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         if delay == active_app.runtime_state().utterance.text_wait_ms)
     active_deadline()
     active_state = active_app.runtime_state()
-    assert active_state.pause_reason == 'audio_judgment_active_hold'
+    assert active_state.pause_reason is None
     assert active_state.authorized and not active_state.sent and not active_state.completed
 
     # The policy boundary is not permission to decide from stale acoustic state.
@@ -359,8 +364,13 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         vocal=HumanVocalEvidence(
             start_ms=1000, end_ms=1500,
             series=(VocalEvidenceSeries(
-                source='speech', frame_count=20, active_count=0,
-                peak_score=0.0, active_intervals=()),)),
+                source='speech', frame_count=3, active_count=0,
+                peak_score=0.0, active_intervals=(),
+                samples=(
+                    VocalScoreSample(1100, 0.0, 1050),
+                    VocalScoreSample(1300, 0.0, 1250),
+                    VocalScoreSample(1500, 0.0, 1450),
+                )),)),
         recurrence=VocalRecurrenceEvidence()))
     assert fenced_app.runtime_state().completed
     assert fenced_app.runtime_state().presentation_reason == 'uncertain_text_fallback'
@@ -426,8 +436,7 @@ def test_play_view_exposes_only_actionable_runtime_holds():
     app.controller.authorized = True
     expected = {
         None: None,
-        'audio_judgment_unknown_hold': 'open_audio_policy',
-        'audio_judgment_active_hold': 'open_audio_policy',
+        'target_unavailable': None,
         'ocr_failure': 'open_capture',
         'presenting': None,
         'tts_playback_failed': 'open_voice',

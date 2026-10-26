@@ -255,7 +255,7 @@ def test_authored_game_input_uses_fixed_fixture_time_not_product_state(monkeypat
     monkeypatch.setattr(windows_input, 'WindowsAdvancementInput', TargetedKeyboard)
 
     runtime = SimpleNamespace(
-        token=SimpleNamespace(session=1, line=8), pause_reason='audio_judgment_active_hold', sent=True,
+        token=SimpleNamespace(session=1, line=8), pause_reason='irrelevant_runtime_reason', sent=True,
         target=SimpleNamespace(pid=50, hwnd=77), profile=SimpleNamespace(input_key=13))
     product = SimpleNamespace(runtime_state=lambda: runtime)
     driver = SessionDriver(
@@ -307,7 +307,7 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
         )
         driver.state = 'running'
         driver.tick()  # observe case-1
-        runtime.pause_reason = 'audio_judgment_active_hold'
+        runtime.pause_reason = 'irrelevant_runtime_reason'
         runtime.sent = True
         clock[0] = 13.1
         driver.tick()

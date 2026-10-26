@@ -50,7 +50,7 @@ class Controller:
         self.text_elapsed = False
         self.tts_finished = False
         self.native_progress = UtteranceProgress()
-        self.audio_deadline_elapsed = False
+        self.fallback_due = False
         self.sent = False
         self.hold_reason: str | None = None
         self.line_no = 0
@@ -87,7 +87,7 @@ class Controller:
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_progress = UtteranceProgress()
-        self.audio_deadline_elapsed = False
+        self.fallback_due = False
         self.hold_reason = reason
 
     def stage_profile(self, profile: Profile) -> None:
@@ -252,7 +252,7 @@ class Controller:
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_progress = UtteranceProgress()
-        self.audio_deadline_elapsed = False
+        self.fallback_due = False
         self.sent = False
         self.hold_reason = None
         return Token(self.session, self.line_no)
@@ -272,10 +272,11 @@ class Controller:
 
     def presentation_event(self, token: Token, event: str, *,
                            success: bool = True) -> bool:
-        """All presentation evidence is owned by this Controller, never by GUI callbacks.
+        """Record one presentation fact, then reconcile completion once.
 
-        A completion event returns True only on the first transition to ready.
-        Events from another line/session or after input are inert.
+        Device/runtime callbacks only update facts here.  The completion rule is
+        centralized in ``_reconcile_completion`` so asynchronous event order
+        cannot create a second progression policy.
         """
         if token != self.token or self.sent or self.completed or not self.utterance:
             return False
@@ -287,47 +288,18 @@ class Controller:
                 self.pause('tts_playback_failed')
                 return False
             self.tts_finished = True
-            if u.advance_mode == AdvanceMode.AUDIO or self.text_elapsed:
-                return self._presentation_done('tts' if u.advance_mode == AdvanceMode.AUDIO else 'tts_and_text')
-            return False
-        if event == 'text_elapsed':
+        elif event == 'text_elapsed':
             if u.advance_mode != AdvanceMode.TEXT:
                 return False
             self.text_elapsed = True
-            if not u.use_tts:
-                return self._presentation_done('text')
-            if self.tts_finished:
-                return self._presentation_done('tts_and_text')
-            return False
-        if event == 'audio_deadline_elapsed':
-            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
+        elif event == 'fallback_due':
+            if (u.advance_mode != AdvanceMode.AUDIO or u.use_tts or
+                    not u.uncertain_text_fallback):
                 return False
-            self.audio_deadline_elapsed = True
-            if self.native_progress.ended:
-                self._resolve_pause('audio_judgment_unknown_hold')
-                self._resolve_pause('audio_judgment_active_hold')
-                return self._presentation_done('utterance_progress')
-            if self.native_progress.active:
-                self.pause('audio_judgment_active_hold')
-                return False
-            if u.uncertain_text_fallback:
-                return self._presentation_done('uncertain_text_fallback')
-            self.pause('audio_judgment_unknown_hold')
-            return False
-        if event in ('native_unavailable', 'native_failed'):
-            if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
-                return False
-            # Loss of the acoustic path makes the current judgment unknown; it
-            # does not prove that an earlier ACTIVE target has ended.
-            self.native_progress = UtteranceProgress()
-            if u.uncertain_text_fallback and self.audio_deadline_elapsed:
-                return self._presentation_done('uncertain_text_fallback')
-            if not u.uncertain_text_fallback:
-                self.pause('native_audio_unavailable_hold' if event == 'native_unavailable'
-                           else 'native_audio_failure')
-            return False
-        raise ValueError(f'unknown presentation event: {event}')
-
+            self.fallback_due = True
+        else:
+            raise ValueError(f'unknown presentation event: {event}')
+        return self._reconcile_completion()
 
     def apply_utterance_progress(self, token: Token, progress: UtteranceProgress) -> bool:
         """Consume the unified audio judgment without reinterpreting evidence."""
@@ -337,35 +309,28 @@ class Controller:
         if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
             return False
         self.native_progress = progress
-        if progress.ended:
-            if self.hold_reason in {
-                    'audio_judgment_unknown_hold',
-                    'audio_judgment_active_hold',
-                    'native_audio_unavailable_hold',
-                    'native_audio_failure'}:
-                self.hold_reason = None
+        return self._reconcile_completion()
+
+    def _reconcile_completion(self) -> bool:
+        """Derive Presentation completion from the facts owned by Controller."""
+        u = self.utterance
+        if u is None or self.sent or self.completed:
+            return False
+        if u.use_tts:
+            if not self.tts_finished:
+                return False
+            if u.advance_mode == AdvanceMode.AUDIO:
+                return self._presentation_done('tts')
+            if self.text_elapsed:
+                return self._presentation_done('tts_and_text')
+            return False
+        if u.advance_mode == AdvanceMode.TEXT:
+            return self._presentation_done('text') if self.text_elapsed else False
+        if self.native_progress.ended:
             return self._presentation_done('utterance_progress')
-        if not self.audio_deadline_elapsed:
-            return False
-        if progress.active:
-            if self.hold_reason in {
-                    'audio_judgment_unknown_hold',
-                    'native_audio_unavailable_hold',
-                    'native_audio_failure'}:
-                self.hold_reason = None
-            self.pause('audio_judgment_active_hold')
-            return False
-        if u.uncertain_text_fallback:
-            if self.hold_reason in {
-                    'audio_judgment_unknown_hold',
-                    'audio_judgment_active_hold',
-                    'native_audio_unavailable_hold',
-                    'native_audio_failure'}:
-                self.hold_reason = None
+        if (self.fallback_due and u.uncertain_text_fallback and
+                not self.native_progress.active):
             return self._presentation_done('uncertain_text_fallback')
-        if self.hold_reason in {'audio_judgment_active_hold', 'native_audio_failure'}:
-            self.hold_reason = None
-        self.pause('audio_judgment_unknown_hold')
         return False
 
     def _presentation_done(self, reason: str) -> bool:
@@ -381,7 +346,7 @@ class Controller:
 
     @property
     def pause_reason(self) -> str | None:
-        """Runtime hold reason, independent of the user's AUTO ON/OFF choice."""
+        """Actionable runtime hold, independent of the user's AUTO choice."""
         return self.hold_reason
 
     def permit(self, allowed: bool) -> None:
@@ -393,13 +358,6 @@ class Controller:
         if self.hold_reason is None:
             self.hold_reason = reason
 
-    def _resolve_pause(self, reason: str) -> bool:
-        """Resolve one runtime hold only when its own recovery fact arrives."""
-        if self.hold_reason != reason:
-            return False
-        self.hold_reason = None
-        return True
-
     def try_advance(self) -> bool:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):
             return False
@@ -408,7 +366,7 @@ class Controller:
             ready = self.target_ready(self.target)
             if not ready:
                 return False
-            self._resolve_pause('target_unavailable')
+            self.hold_reason = None
         elif self.hold_reason is not None:
             return False
         if ready is None:

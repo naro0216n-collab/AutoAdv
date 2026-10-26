@@ -177,22 +177,6 @@ MIN_LOOP_OBSERVATION_MS = 1200
 LOOP_REFERENCE_MARGIN = 0.06
 
 
-def _vocal_chains(
-    intervals: tuple[tuple[int, int], ...],
-) -> tuple[tuple[int, int], ...]:
-    """Reconstruct finite continuity inside one observer series only."""
-    ordered = sorted(intervals)
-    if not ordered:
-        return ()
-    chains: list[tuple[int, int]] = [ordered[0]]
-    for start_ms, end_ms in ordered[1:]:
-        previous_start, previous_end = chains[-1]
-        if start_ms - previous_end < END_CONTEXT_MS:
-            chains[-1] = (previous_start, max(previous_end, end_ms))
-        else:
-            chains.append((start_ms, end_ms))
-    return tuple(chains)
-
 
 @dataclass(frozen=True)
 class _VocalRiskChain:
@@ -202,9 +186,7 @@ class _VocalRiskChain:
     last_observed_ms: int
 
 
-def _selected_risk_samples(
-    series: VocalEvidenceSeries, *, observed_after_ms: int | None,
-) -> tuple[VocalScoreSample, ...]:
+def _selected_risk_samples(series: VocalEvidenceSeries) -> tuple[VocalScoreSample, ...]:
     """Return this observer's own strong-positive measurements.
 
     Score scales stay observer-local.  Sub-threshold values remain factual
@@ -213,11 +195,7 @@ def _selected_risk_samples(
     than by a second adaptive detector hidden in integration logic.
     """
     threshold = float(series.active_score_threshold)
-    return tuple(
-        sample for sample in series.samples
-        if (observed_after_ms is None or sample.at_ms >= observed_after_ms)
-        and sample.score >= threshold
-    )
+    return tuple(sample for sample in series.samples if sample.score >= threshold)
 
 
 def _series_risk_chains(
@@ -227,18 +205,7 @@ def _series_risk_chains(
         return ()
     chains: list[_VocalRiskChain] = []
     for series in vocal.series:
-        selected = _selected_risk_samples(
-            series, observed_after_ms=reference_before_ms)
-        if not series.samples:
-            # Synthetic/domain observations may expose only strong-positive
-            # intervals. Preserve that measurement form while applying the same
-            # temporal lower bound used for score samples.
-            chains.extend(
-                _VocalRiskChain(series.source, start_ms, start_ms, end_ms)
-                for start_ms, end_ms in _vocal_chains(series.active_intervals)
-                if reference_before_ms is None or end_ms >= reference_before_ms
-            )
-            continue
+        selected = _selected_risk_samples(series)
         if not selected:
             continue
         all_times = [sample.at_ms for sample in series.samples]
@@ -263,6 +230,8 @@ def _series_risk_chains(
                 first_observed_ms=current[0].at_ms,
                 last_observed_ms=current[-1].at_ms,
             ))
+    if reference_before_ms is not None:
+        chains = [chain for chain in chains if chain.last_observed_ms >= reference_before_ms]
     return tuple(sorted(
         chains, key=lambda item: (item.first_observed_ms, item.last_observed_ms, item.source)))
 

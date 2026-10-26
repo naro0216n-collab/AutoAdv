@@ -190,8 +190,7 @@ class OCRSettings:
 
 COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
                  'default_voice', 'reading_ms', 'per_reading_unit_wait_ms',
-                 'native_helper', 'alignment_model', 'alignment_vocab', 'input_key',
-                 'next_line_timeout_ms')
+                 'native_helper', 'alignment_model', 'alignment_vocab', 'input_key')
 
 
 SPEAKER_STYLE_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -368,7 +367,6 @@ class Profile:
     hook_max_history: int = 1000000
     repeat_rule: str = 'distinct_only'
     input_key: int = 13
-    next_line_timeout_ms: int = 8000
     source: str = 'hook'
     ocr: OCRSettings = field(default_factory=OCRSettings)
     native_helper: str = ''
@@ -382,8 +380,7 @@ class Profile:
         if (not 0 <= self.hook_flush_ms <= 10000 or not 0 <= self.hook_codepage <= 65535
                 or not 1 <= self.hook_max_buffer <= 1000000 or not 1 <= self.hook_max_history <= 10000000):
             raise ValueError('invalid Luna capture settings')
-        if (self.repeat_rule not in ('distinct_only', 'each_flush') or not 1 <= self.input_key <= 254
-                or not 1000 <= self.next_line_timeout_ms <= 120000):
+        if self.repeat_rule not in ('distinct_only', 'each_flush') or not 1 <= self.input_key <= 254:
             raise ValueError('invalid advancement settings')
         identities = [hook.identity for hook in self.hooks]
         if len(identities) != len(set(identities)):

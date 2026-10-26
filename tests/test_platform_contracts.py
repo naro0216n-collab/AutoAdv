@@ -261,6 +261,8 @@ def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_stat
                 q.hook_max_history, q.insert_pc_hooks) == (850, 932, 7500, 500000, True)
         assert 'pid' not in path.read_text(encoding='utf-8')
         raw = json.loads(path.read_text(encoding='utf-8'))
+        assert 'next_line_timeout_ms' not in raw['common']
+        assert 'next_line_timeout_ms' not in raw['games'][game.id]['profiles'][p.id]
         path.write_text(json.dumps({**raw, 'schema_version': 3}), encoding='utf-8')
         with pytest.raises(ValueError, match='unsupported settings schema'):
             load(path)

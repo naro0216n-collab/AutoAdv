@@ -20,8 +20,8 @@ def test_progress_mode_state_model_has_one_completion_reason_and_one_send():
         (AdvanceMode.TEXT, False, False, ('text_elapsed',), False, 'text'),
         (AdvanceMode.TEXT, True, False, ('tts_finished', 'text_elapsed'), False, 'tts_and_text'),
         (AdvanceMode.TEXT, True, False, ('text_elapsed', 'tts_finished'), False, 'tts_and_text'),
-        (AdvanceMode.AUDIO, True, True, ('audio_deadline_elapsed', 'text_elapsed', 'tts_finished'), True, 'tts'),
-        (AdvanceMode.AUDIO, False, True, ('audio_deadline_elapsed',), False, 'uncertain_text_fallback'),
+        (AdvanceMode.AUDIO, True, True, ('tts_finished',), True, 'tts'),
+        (AdvanceMode.AUDIO, False, True, ('fallback_due',), False, 'uncertain_text_fallback'),
         (AdvanceMode.AUDIO, False, False, (), True, 'utterance_progress'),
     )
     for mode, tts, fallback, events, native, expected in scenarios:
@@ -54,9 +54,10 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     ctrl, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=False)
     token = observe(ctrl, '「本文」')
     assert token is not None
-    assert not ctrl.presentation_event(token, 'audio_deadline_elapsed')
-    assert ctrl.pause_reason == 'audio_judgment_unknown_hold'
-    assert ctrl.presentation_reason is None
+    # Strict audio mode has no fallback deadline at all; unresolved audio simply
+    # remains incomplete until integrated progress reaches ENDED.
+    assert not ctrl.presentation_event(token, 'fallback_due')
+    assert not ctrl.fallback_due and ctrl.presentation_reason is None
     assert ctrl.apply_utterance_progress(token, UtteranceProgress(state=UtteranceProgressState.ENDED))
     assert ctrl.presentation_reason == 'utterance_progress'
     assert ctrl.pause_reason is None
@@ -64,9 +65,10 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     ctrl, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=True)
     token = observe(ctrl, '「本文」')
     assert token is not None
-    assert not ctrl.presentation_event(token, 'native_failed')
+    assert not ctrl.apply_utterance_progress(
+        token, UtteranceProgress(state=UtteranceProgressState.UNKNOWN))
     assert ctrl.pause_reason is None
-    assert ctrl.presentation_event(token, 'audio_deadline_elapsed')
+    assert ctrl.presentation_event(token, 'fallback_due')
     assert ctrl.presentation_reason == 'uncertain_text_fallback'
 
     # The text deadline never cuts a target that the integrated audio judgment
@@ -77,9 +79,8 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     assert active_token is not None
     assert not active.apply_utterance_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.ACTIVE))
-    assert not active.presentation_event(active_token, 'audio_deadline_elapsed')
-    assert active.pause_reason == 'audio_judgment_active_hold'
-    assert active.presentation_reason is None
+    assert not active.presentation_event(active_token, 'fallback_due')
+    assert active.presentation_reason is None and not active.completed
     assert active.apply_utterance_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN))
     assert active.presentation_reason == 'uncertain_text_fallback'
@@ -87,10 +88,11 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     strict, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=False)
     strict_token = observe(strict, '「本文」')
     assert strict_token is not None
-    assert not strict.presentation_event(strict_token, 'native_unavailable')
-    assert strict.pause_reason == 'native_audio_unavailable_hold'
+    assert not strict.apply_utterance_progress(
+        strict_token, UtteranceProgress(state=UtteranceProgressState.UNKNOWN))
+    assert strict.presentation_reason is None and not strict.completed
     assert strict.apply_utterance_progress(strict_token, UtteranceProgress(state=UtteranceProgressState.ENDED))
-    assert strict.pause_reason is None and strict.presentation_reason == 'utterance_progress'
+    assert strict.presentation_reason == 'utterance_progress'
 
 
 def test_user_authorization_runtime_holds_and_input_failure_are_independent_state():
