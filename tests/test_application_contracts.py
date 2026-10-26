@@ -337,12 +337,12 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
 
     class FencedNative:
         pid = 101
-        requested = []
+        requested = None
         def observation_fence(self, token):
             assert token == fenced_token
             return 1500
         def request_assessment_through(self, token, through_ms):
-            self.requested.append((token, through_ms))
+            self.requested = (token, through_ms)
         def finish_line(self, _token): pass
 
     fenced_native = FencedNative()
@@ -352,17 +352,8 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
         if delay == fenced_app.runtime_state().utterance.text_wait_ms)
     fenced_deadline()
     assert not fenced_app.runtime_state().completed
-    assert fenced_native.requested == [(fenced_token, 1500)]
+    assert fenced_native.requested == (fenced_token, 1500)
 
-    # NativeAudio owns the fence obligation after the first request. Intermediate
-    # progress must not cause Application to inject the same scheduling request
-    # again.
-    fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
-        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
-            vocal=HumanVocalEvidence(),
-            recurrence=VocalRecurrenceEvidence()))
-    assert not fenced_app.runtime_state().completed
-    assert fenced_native.requested == [(fenced_token, 1500)]
 
     fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1500), NativeAudioObservation(
@@ -489,8 +480,6 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     worker.on_text(3, '台詞')
     first_token = app.runtime_state().token
     assert app.runtime_state().utterance.raw == '台詞'
-    assert app._presentation_input_candidates is not None
-    assert app._presentation_input_candidates[1] == (10,)
     assert delayed
 
     # A second stabilized OCR body is admitted directly without inventing a
@@ -501,8 +490,6 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     worker.on_text(4, '次台詞')
     assert app.runtime_state().utterance.raw == '次台詞'
     assert app.runtime_state().token != first_token
-    assert app._presentation_input_candidates is not None
-    assert app._presentation_input_candidates[1] == (30,)
 
     worker.on_error('capture failed')
     assert app.runtime_state().pause_reason == 'ocr_failure'

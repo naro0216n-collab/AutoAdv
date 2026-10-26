@@ -80,13 +80,21 @@ def prepare(repo: Path, *, require_native: bool) -> dict:
     native = None
     native_error = None
     try:
-        completed = subprocess.run(command, cwd=repo, check=True, capture_output=True, text=True)
-        native = json.loads(completed.stdout.strip().splitlines()[-1])
-    except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError) as exc:
+        completed = subprocess.run(command, cwd=repo, check=True, capture_output=True)
+        # The child contract is one UTF-8 JSON line.  Keep subprocess output as
+        # bytes so Windows' active code page never decodes unrelated child CLI
+        # diagnostics before we select that machine-readable line.
+        line = completed.stdout.strip().splitlines()[-1]
+        native = json.loads(line.decode("utf-8"))
+    except (subprocess.CalledProcessError, UnicodeDecodeError, json.JSONDecodeError, IndexError) as exc:
         if require_native:
             raise
         if isinstance(exc, subprocess.CalledProcessError):
-            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raw = exc.stderr or exc.stdout
+            if isinstance(raw, bytes):
+                detail = raw.decode("utf-8", errors="replace").strip()
+            else:
+                detail = (raw or str(exc)).strip()
         else:
             detail = str(exc)
         native_error = detail or type(exc).__name__

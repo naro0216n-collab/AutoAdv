@@ -33,7 +33,7 @@ from autoadv.windows_input import (
     WindowsAdvancementInput, WindowsGameInputObserver, WM_KEYDOWN, WM_KEYUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters,
 )
-from scripts import adopt_luna_release
+from scripts import adopt_luna_release, prepare_windows_runtime
 from tests.g2p_support import TEST_G2P
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -282,6 +282,22 @@ def test_running_target_discovery_uses_real_windows_and_exact_executable_identit
         from autoadv.game_windows import list_running_processes, list_running_windows
         with pytest.raises(OSError): list_running_processes()
         with pytest.raises(OSError): list_running_windows()
+
+
+def test_managed_runtime_machine_output_is_independent_of_child_diagnostic_encoding():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        python = root / "python.exe"
+        machine = {"native": "ready"}
+        completed = SimpleNamespace(
+            stdout=b"\x83diagnostic\n" + json.dumps(machine).encode("utf-8") + b"\n",
+            stderr=b"",
+        )
+        with patch.object(prepare_windows_runtime, "runtime_root", return_value=root / "runtime"), \
+             patch.object(prepare_windows_runtime, "ensure_environment", return_value=python), \
+             patch.object(prepare_windows_runtime.subprocess, "run", return_value=completed):
+            result = prepare_windows_runtime.prepare(root, require_native=True)
+        assert result["native"] == machine
 
 
 def test_managed_native_alignment_asset_is_verified_before_use():

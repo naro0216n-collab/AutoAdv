@@ -282,47 +282,48 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1100, 1340),), end=1800), end=1800))
     assert closed_prefix.state == UtteranceProgressState.UNKNOWN
 
-    continuing_snapshot = observation(
-        lex=lexical(), voc=vocal(intervals=((1100, 1580), (1700, 1980)), end=2000),
-        end=2000)
+    # Once the target is located, an open finite human-vocal change in the same
+    # evaluated Presentation remains protective regardless of its distance from
+    # the lexical endpoint.  The gap is an input dimension, not a special case.
+    continuing_snapshot = None
+    for tail_gap_ms in range(0, 1201, 240):
+        tail_start = 1400 + tail_gap_ms
+        capture_end = tail_start + 240
+        snapshot = observation(
+            lex=lexical(),
+            voc=vocal(intervals=((1100, 1300), (tail_start, capture_end - 20)), end=capture_end),
+            end=capture_end)
+        assert evaluate(snapshot).state == UtteranceProgressState.ACTIVE
+        continuing_snapshot = snapshot
+    # The evaluator has no inference history: identical evidence is identical.
+    assert continuing_snapshot is not None
     continuing = evaluate(continuing_snapshot)
-    assert continuing.state == UtteranceProgressState.ACTIVE
-
-    # Physical cut-risk is not required to sit inside an arbitrary time margin
-    # from the lexical endpoint.  A later finite human-vocal change in the same
-    # evaluated Presentation range still protects playback while it is open.
-    separated_tail = evaluate(observation(
-        lex=lexical(), voc=vocal(intervals=((1100, 1300), (1800, 1980)), end=2000),
-        end=2000))
-    assert separated_tail.state == UtteranceProgressState.ACTIVE
-    # The evaluator has no inference history: identical evidence is identical
-    # regardless of how many previous evaluations happened.
     assert evaluate(continuing_snapshot) == continuing
 
     ended = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100), end=2100))
     assert ended.state == UtteranceProgressState.ENDED
 
-    # Closure stays on the observer that produced the positive score. A wide
-    # receptive field from another observer with no positive support cannot be
-    # reinterpreted as extra endpoint delay for the speech measurement.
-    independent_scales = HumanVocalEvidence(series=(
-        VocalEvidenceSeries(
-            observer='speech', active_score_threshold=.45,
-            samples=(
-                VocalScoreSample(1400, .9, 1384),
-                VocalScoreSample(1416, .9, 1400),
-            )),
-        VocalEvidenceSeries(
-            observer='nonlexical', active_score_threshold=.45,
-            samples=(
-                VocalScoreSample(1000, .2, 40),
-                VocalScoreSample(1240, .2, 280),
-                VocalScoreSample(1480, .2, 520),
-            )),
-    ))
-    assert evaluate(observation(
-        lex=lexical(), voc=independent_scales, end=1500)).state == UtteranceProgressState.ENDED
+    # Closure belongs to the observer that produced the positive score.  The
+    # receptive-field width of an unrelated sub-threshold observer cannot extend
+    # another observer's endpoint delay.
+    for secondary_support_ms in (16, 240, 960):
+        independent_scales = HumanVocalEvidence(series=(
+            VocalEvidenceSeries(
+                observer='speech', active_score_threshold=.45,
+                samples=(
+                    VocalScoreSample(1400, .9, 1384),
+                    VocalScoreSample(1416, .9, 1400),
+                )),
+            VocalEvidenceSeries(
+                observer='nonlexical', active_score_threshold=.45,
+                samples=tuple(
+                    VocalScoreSample(at_ms, .2, at_ms - secondary_support_ms)
+                    for at_ms in (1000, 1240, 1480)
+                )),
+        ))
+        assert evaluate(observation(
+            lex=lexical(), voc=independent_scales, end=1500)).state == UtteranceProgressState.ENDED
 
     stable_loop = VocalRecurrenceEvidence(
         strength=.9, period_ms=500, period_stability=.85,
@@ -512,7 +513,7 @@ def test_onnx_boundary_accepts_only_single_batch_posterior_shape():
         model.output_name = 'logits'
         return model
 
-    waveform = np.zeros(16000, dtype=np.float32)
-    assert adapter(np.zeros((1, 4, 3), dtype=np.float32))._infer_waveform(waveform).shape == (4, 3)
+    pcm = chunks(frames=10)
+    assert adapter(np.zeros((1, 4, 3), dtype=np.float32)).infer(pcm).shape == (4, 3)
     with pytest.raises(ValueError, match='unsupported logits shape'):
-        adapter(np.zeros((2, 4, 3), dtype=np.float32))._infer_waveform(waveform)
+        adapter(np.zeros((2, 4, 3), dtype=np.float32)).infer(pcm)

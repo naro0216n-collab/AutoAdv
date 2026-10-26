@@ -240,10 +240,14 @@ def prepare_helper(*, repo_root: Path | None = None,
         raise OSError("Process Loopback helper build requires Windows")
     if shutil.which("dotnet") is None:
         raise FileNotFoundError(".NET 9 SDK is required for AutoAdv.ProcessLoopback")
-    probe = subprocess.run(["dotnet", "--list-sdks"], capture_output=True, text=True, check=True)
-    if not any(line.lstrip().startswith("9.") for line in probe.stdout.splitlines()):
+    probe = subprocess.run(["dotnet", "--list-sdks"], capture_output=True, check=True)
+    if not any(line.lstrip().startswith(b"9.") for line in probe.stdout.splitlines()):
         raise RuntimeError(".NET 9 SDK is required for AutoAdv.ProcessLoopback")
-    subprocess.run(_dotnet_build_command(repo_root), cwd=repo_root, check=True)
+    # dotnet diagnostics are not part of this module's machine-readable stdout
+    # contract.  Keep them inside the helper preparation boundary so a localized
+    # or UTF-8 CLI cannot corrupt the parent process' JSON transport.
+    subprocess.run(
+        _dotnet_build_command(repo_root), cwd=repo_root, check=True, capture_output=True)
     output = repo_root / "integrations/windows-loopback/bin/Release/net9.0-windows"
     missing = [name for name in HELPER_REQUIRED_OUTPUTS if not (output / name).is_file()]
     if missing:
