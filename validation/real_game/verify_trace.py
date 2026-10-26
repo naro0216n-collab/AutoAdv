@@ -270,9 +270,15 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
         'validation_game_inputs': sum(r.get('event') == 'validation_game_input' for r in records),
         'game_input_observations': sum(
             r.get('event') == 'game_input_observed' for r in records),
-        'external_input_lower_bounds': sum(
-            r.get('event') == 'audio_input_lower_bound'
-            and r.get('source') == 'external_input' for r in records),
+        'external_input_candidate_attachments': sum(
+            r.get('event') == 'game_input_candidates_attached' for r in records),
+        'external_input_candidates': sum(
+            len(r.get('input_candidates_ms', ()))
+            for r in records
+            if r.get('event') == 'game_input_candidates_attached'
+            and isinstance(r.get('input_candidates_ms'), list)),
+        'auto_input_causal_bounds': sum(
+            r.get('event') == 'audio_causal_lower_bound' for r in records),
         'validation_recovery_inputs': sum(r.get('event') == 'validation_recovery_input' for r in records),
         'driver_failures': sum(r.get('event') == 'validation_driver_failure' for r in records),
     }

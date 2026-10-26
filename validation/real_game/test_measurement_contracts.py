@@ -206,8 +206,10 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
          'at_ms': 1234},
         {'event': 'validation_game_input', 'seq': 3, 'at_ns': voice_ns + 100_000_000,
          'case': ACCURACY_SCENARIO[0]['id'], 'scheduled_after_ms': 100},
-        {'event': 'audio_input_lower_bound', 'seq': 4, 'at_ns': voice_ns + 150_000_000,
-         'at_ms': 1234, 'source': 'external_input'},
+        {'event': 'game_input_candidates_attached', 'seq': 4,
+         'at_ns': voice_ns + 150_000_000,
+         'text_received_ns': voice_ns + 140_000_000,
+         'input_candidates_ms': [1234]},
     ]
     authored_fixture = [
         {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': start_ns, 'pid': 50},
@@ -230,7 +232,9 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
     # Posted keyboard messages are not low-level input. Even a coincident
     # observation must not be attributed to this driver stimulus by time alone.
     assert authored['facts']['game_input_observations'] == 1
-    assert authored['facts']['external_input_lower_bounds'] == 1
+    assert authored['facts']['external_input_candidate_attachments'] == 1
+    assert authored['facts']['external_input_candidates'] == 1
+    assert authored['facts']['auto_input_causal_bounds'] == 0
     assert 'authored_input_observed_at_ns' not in first_result
     assert 'authored_input_causal_bound_ms' not in first_result
     assert not any('authored game input was not observed' in issue

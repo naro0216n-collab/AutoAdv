@@ -67,7 +67,7 @@ class NativeAudio:
         self.aligner: TargetConditionedAligner | None = None
         self.start_ms = 0
         self.causal_lower_bound_ms: int | None = None
-        self._next_causal_lower_bound_ms: int | None = None
+        self.input_candidates_ms: tuple[int, ...] = ()
         self.target_attached_ms: int | None = None
         self.window_start_ms = 0
         self._last_processed_ms = -1
@@ -97,35 +97,6 @@ class NativeAudio:
         # progression input; monitoring start is never one.
         self._capture.start()
 
-    def set_causal_lower_bound(self, at_ms: int | None = None) -> None:
-        """Record an observed input lower bound for the next target's audio.
-
-        The bound limits retained-audio identification; it does not assert the
-        exact voice start time. AutoAdv-owned input installs it only after the
-        targeted Windows input call succeeds.
-        """
-        lower_bound_ms = self.clock() if at_ms is None else int(at_ms)
-        if lower_bound_ms <= 0:
-            raise ValueError("audio causal lower bound must be a positive monotonic timestamp")
-        with self._lock:
-            # The successful input belongs to the transition *after* the line
-            # that just completed. Recording that fact must not mutate worker
-            # state or create an intermediate target generation.
-            self._next_causal_lower_bound_ms = lower_bound_ms
-
-    def external_transition(self) -> None:
-        """Record that the new target has no observed input lower bound.
-
-        HOOK arrival remains a separate factual timestamp and is never promoted
-        to the missing bound. Retained audio stays available for known-text
-        association where that association can be established independently.
-        """
-        with self._lock:
-            # A replacement HOOK without an observed input invalidates any
-            # pending AutoAdv lower bound. ``begin`` performs the one actual
-            # target-generation transition.
-            self._next_causal_lower_bound_ms = None
-
     def _retire_target_locked(self) -> None:
         # In-flight ONNX work cannot be cancelled here. Only its result becomes
         # stale. At most one not-yet-started request is retained and it belongs
@@ -135,6 +106,7 @@ class NativeAudio:
         self.token = None
         self.aligner = None
         self.causal_lower_bound_ms = None
+        self.input_candidates_ms = ()
         self.target_attached_ms = None
         self._last_processed_ms = -1
         self._last_processed_chunk = None
@@ -165,8 +137,16 @@ class NativeAudio:
         return int(capture_start_ms) > self._semantic_history_start_locked() + 1
 
     def begin(self, token: Token, alignment_text: str, *,
-              candidates: tuple[PronunciationCandidate, ...] | None = None) -> None:
+              candidates: tuple[PronunciationCandidate, ...] | None = None,
+              causal_lower_bound_ms: int | None = None,
+              input_candidates_ms: tuple[int, ...] = ()) -> None:
         """Attach delayed known text to the current Presentation Epoch history."""
+        lower_bound = int(causal_lower_bound_ms) if causal_lower_bound_ms is not None else None
+        if lower_bound is not None and lower_bound <= 0:
+            raise ValueError("audio causal lower bound must be a positive monotonic timestamp")
+        input_candidates = tuple(sorted({
+            int(value) for value in input_candidates_ms if int(value) > 0
+        }))
         aligner: TargetConditionedAligner | None = None
         try:
             candidate = TargetConditionedAligner(self.model, g2p=self.g2p)
@@ -183,8 +163,8 @@ class NativeAudio:
             self._pending_inference = None
             self.token = token
             self.aligner = aligner
-            self.causal_lower_bound_ms = self._next_causal_lower_bound_ms
-            self._next_causal_lower_bound_ms = None
+            self.causal_lower_bound_ms = lower_bound
+            self.input_candidates_ms = input_candidates
             self.start_ms = self.clock()
             self.target_attached_ms = self.start_ms
             analysis_end = self.features.latest_ms or self.start_ms
@@ -231,7 +211,6 @@ class NativeAudio:
         with self._lock:
             if self.token is not None or self.aligner is not None or self._pending_inference is not None:
                 self._retire_target_locked()
-            self._next_causal_lower_bound_ms = None
             # Do not erase the Presentation Epoch: a delayed/replacement HOOK may
             # still need the same continuous history.
             self._reset_observation()
@@ -551,6 +530,8 @@ class NativeAudio:
                     recurrence_start = lexical.target_start_ms
                 elif self.causal_lower_bound_ms is not None:
                     recurrence_start = self.causal_lower_bound_ms
+                elif self.input_candidates_ms:
+                    recurrence_start = self.input_candidates_ms[0]
                 else:
                     recurrence_start = feature_start
                 recurrence_start = min(int(recurrence_start), int(feature_end))
@@ -560,6 +541,7 @@ class NativeAudio:
             kind=kind, capture_start_ms=capture_start_ms, capture_end_ms=capture_end_ms,
             lexical=lexical, vocal=vocal, recurrence=recurrence,
             causal_lower_bound_ms=self.causal_lower_bound_ms,
+            input_candidates_ms=self.input_candidates_ms,
             target_attached_ms=self.target_attached_ms,
             history_truncated=history_truncated,
             pcm_last_frame_ms=pcm_last_frame_ms,
@@ -635,6 +617,7 @@ class NativeAudio:
                     "capture_end_ms": capture_end_ms,
                     "observation_end_ms": observation.capture_end_ms,
                     "causal_lower_bound_ms": self.causal_lower_bound_ms,
+                    "input_candidates_ms": list(self.input_candidates_ms),
                     "target_attached_ms": self.target_attached_ms,
                     "history_truncated": observation.history_truncated,
                     "vocal_series": ([{

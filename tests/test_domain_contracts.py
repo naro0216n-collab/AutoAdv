@@ -247,12 +247,13 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
                 active_intervals=tuple(intervals)),))
 
     def observation(*, lex=None, voc=None, rec=None, end=1600, lower=1000,
-                    attached=1050):
+                    inputs=(), attached=1050):
         return NativeAudioObservation(
             kind='snapshot', lexical=lex, vocal=voc,
             recurrence=rec or VocalRecurrenceEvidence(),
             capture_start_ms=900, capture_end_ms=end,
-            causal_lower_bound_ms=lower, target_attached_ms=attached)
+            causal_lower_bound_ms=lower, input_candidates_ms=tuple(inputs),
+            target_attached_ms=attached)
 
     # A known-text prefix is direct evidence that a finite target utterance is
     # still in progress. A committed text end is not enough while connected
@@ -338,6 +339,18 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     nonlex_active = evaluate_audio_snapshot(observation(
         voc=vocal(intervals=((1120, 1380),), end=1400), end=1400))
     assert nonlex_active.state == UtteranceProgressState.ACTIVE
+
+    # External user input is weaker than AutoAdv's own advancement input.  With
+    # no causal lower bound it can still provide a candidate interval for
+    # protecting a post-input finite vocal change, but it never certifies an
+    # endpoint or rewrites the candidate into a causal fact.
+    without_input_candidate = evaluate_audio_snapshot(observation(
+        voc=vocal(intervals=((1120, 1380),), end=1400), end=1400, lower=None))
+    assert without_input_candidate.state == UtteranceProgressState.UNKNOWN
+    with_input_candidate = evaluate_audio_snapshot(observation(
+        voc=vocal(intervals=((1120, 1380),), end=1400), end=1400,
+        lower=None, inputs=(1100,)))
+    assert with_input_candidate.state == UtteranceProgressState.ACTIVE
 
     # Integration does not create a second adaptive vocal detector from
     # sub-threshold observer scores.  Coverage failures stay UNKNOWN until an

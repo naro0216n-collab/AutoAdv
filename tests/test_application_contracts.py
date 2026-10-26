@@ -167,7 +167,7 @@ def test_runtime_publishes_selected_provenance_and_utterance_before_presentation
 
 
 
-def test_unsent_hook_replacement_uses_only_nearby_observed_game_input_as_causal_bound():
+def test_admitted_text_keeps_auto_input_bound_distinct_from_external_input_candidates(monkeypatch):
     app, _ = app_with_game()
     p = app.current_profile()
     src = source('INPUTBOUND', 4)
@@ -187,12 +187,11 @@ def test_unsent_hook_replacement_uses_only_nearby_observed_game_input_as_causal_
 
     class Native:
         def __init__(self):
-            self.bounds = []
-            self.external = 0
             self.begun = []
-        def set_causal_lower_bound(self, at_ms=None): self.bounds.append(at_ms)
-        def external_transition(self): self.external += 1
-        def begin(self, token, text, candidates=()): self.begun.append((token, text))
+        def begin(self, token, text, candidates=(), causal_lower_bound_ms=None,
+                  input_candidates_ms=()):
+            self.begun.append((token, text, causal_lower_bound_ms,
+                               tuple(input_candidates_ms)))
         def cancel(self): pass
         def finish_line(self, _token): pass
         def observation_fence(self, _token): return None
@@ -202,27 +201,43 @@ def test_unsent_hook_replacement_uses_only_nearby_observed_game_input_as_causal_
     app._native_audio = native
 
     # Input observation itself is only timestamp history and does not mutate the
-    # current presentation. The latest nearby input is selected when a later
-    # HOOK actually replaces that unsent presentation.
+    # current presentation. Once new text is actually admitted, all preceding
+    # inputs since the prior admitted body are attached as weak timing
+    # candidates; none is upgraded to AutoAdv's causal lower-bound contract.
     before = app.runtime_state()
     app._record_game_input(1200)
     app._record_game_input(1400)
     assert app.runtime_state() == before
     second = runtime_hook(app, src, '二つ目', 3, received_ns=1_500_000_000)
     assert second == Token(first.session, first.line + 1)
-    assert native.bounds == [1400]
-    assert native.external == 0
-    assert any(name == 'audio_input_lower_bound' and detail['at_ms'] == 1400
-               for name, _, detail in events)
+    assert native.begun[-1][2] is None
+    assert native.begun[-1][3] == (1200, 1400)
 
-    # A stale external input is not stretched to explain a later HOOK. With no
-    # nearby observed input, the new target remains unbounded rather than using
-    # HOOK time as an invented start.
+    # Candidate retention is delimited by admitted text, not an arbitrary
+    # HOOK-proximity threshold. A later body consumes the inputs observed since
+    # the preceding admitted body, and no candidate is reused across bodies.
     app._record_game_input(2000)
     third = runtime_hook(app, src, '三つ目', 4, received_ns=4_500_000_000)
     assert third == Token(second.session, second.line + 1)
-    assert native.bounds == [1400]
-    assert native.external == 1
+    assert native.begun[-1][2] is None
+    assert native.begun[-1][3] == (2000,)
+
+    # AutoAdv owns the meaning of its own advancement input, so that successful
+    # send is a strong lower bound even when NativeAudio is temporarily absent.
+    # Application retains the fact until the next admitted body and passes it
+    # separately from any external-input candidates.
+    app._native_audio = None
+    monkeypatch.setattr('autoadv.application.time.monotonic_ns', lambda: 5_000_000_000)
+    target = app.runtime_state().target
+    assert target is not None
+    app._send_runtime_input(target, 13)
+    app._record_game_input(5200)
+    next_native = Native()
+    app._native_audio = next_native
+    fourth = runtime_hook(app, src, '四つ目', 5, received_ns=5_500_000_000)
+    assert fourth == Token(third.session, third.line + 1)
+    assert next_native.begun[-1][2] == 5000
+    assert next_native.begun[-1][3] == (5200,)
 
 def test_application_owns_audio_fallback_deadline_without_gui_policy():
     app, _ = app_with_game()
@@ -456,8 +471,12 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     assert app.activate_selected_target() == 'monitoring'
     worker = FakeWorker.instances[-1]
     assert worker.started
+    app._record_game_input(10)
+    monkeypatch.setattr(application_module.time, 'monotonic_ns', lambda: 20_000_000)
     worker.on_text(3, '台詞')
     assert app.runtime_state().utterance.raw == '台詞'
+    assert app._presentation_input_candidates is not None
+    assert app._presentation_input_candidates[1] == (10,)
     assert delayed
     worker.on_error('capture failed')
     assert app.runtime_state().pause_reason == 'ocr_failure'

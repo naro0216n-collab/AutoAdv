@@ -56,7 +56,7 @@ class Controller:
         self.line_no = 0
         self.awaiting_next = False
         self.ocr_blank = False
-        self.external_transition_ns = 0
+        self.utterance_received_ns = 0
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
         profile.validate()
@@ -85,7 +85,7 @@ class Controller:
         self.completed = self.sent = False
         self.awaiting_next = False
         self.ocr_blank = False
-        self.external_transition_ns = 0
+        self.utterance_received_ns = 0
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_progress = UtteranceProgress()
@@ -201,7 +201,8 @@ class Controller:
         self.highest_sequence = max(self.highest_sequence, ordered[-1].sequence)
         return result
 
-    def observe_ocr(self, *, sequence: int, text: str, pid: int, session: int) -> Token | None:
+    def observe_ocr(self, *, sequence: int, text: str, pid: int, session: int,
+                    received_ns: int = 0) -> Token | None:
         if (not self.profile or self.profile.source != 'ocr' or not self.target
                 or pid != self.target.pid or session != self.session
                 or sequence <= self.highest_sequence):
@@ -229,14 +230,12 @@ class Controller:
             body = fields.body
         return self._accept_line(sequence=sequence, raw=text, body=body,
                                  speaker=speaker, origin='ocr',
-                                 verified_boundary=had_blank)
+                                 verified_boundary=had_blank,
+                                 received_ns=received_ns)
 
     def _accept_line(self, *, sequence: int, raw: str, body: str, speaker: str, origin: str,
                      verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
         old = self.utterance
-        external_transition = bool(
-            old and not self.sent and received_ns > 0 and
-            (verified_boundary or raw != old.raw or self.profile.repeat_rule == 'each_flush'))
         if (old and not self.sent and old.raw == raw and not verified_boundary and
                 self.profile.repeat_rule != 'each_flush'):
             return None
@@ -247,7 +246,7 @@ class Controller:
                 self.profile.repeat_rule != 'each_flush'):
             self.pause('ambiguous_identical_line')
             return None
-        self.external_transition_ns = received_ns if external_transition else 0
+        self.utterance_received_ns = max(0, int(received_ns))
         self.line_no += 1
         self.utterance = interpret(
             raw, self.profile, session=self.session, line=self.line_no, source=origin,
@@ -262,16 +261,17 @@ class Controller:
         self.hold_reason = None
         return Token(self.session, self.line_no)
 
-    def take_external_transition(self, token: Token) -> int:
-        """Return the HOOK arrival time that replaced an unsent line once.
+    def take_utterance_received_ns(self, token: Token) -> int:
+        """Return the acquisition timestamp for the admitted Utterance once.
 
-        The Controller intentionally does not infer whether the game advanced
-        because of a click, key, script, or the game's own auto mode.
+        This is only the time at which the text observation reached AutoAdv.
+        It is not an acoustic boundary and says nothing about which earlier
+        game input, if any, caused the dialogue transition.
         """
-        if token != self.token or self.external_transition_ns <= 0:
+        if token != self.token or self.utterance_received_ns <= 0:
             return 0
-        value = self.external_transition_ns
-        self.external_transition_ns = 0
+        value = self.utterance_received_ns
+        self.utterance_received_ns = 0
         return value
 
     def presentation_event(self, token: Token, event: str, *,

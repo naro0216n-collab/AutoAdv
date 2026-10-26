@@ -171,8 +171,7 @@ def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_
     token = Token(1, 1)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
-        native.begin(token, 'target')
+        native.begin(token, 'target', causal_lower_bound_ms=1000)
         first = stereo_chunk(1600)
         native.history.push(first, target_pid=42)
         native.feed(first)
@@ -209,14 +208,12 @@ def test_replaced_target_cannot_publish_stale_alignment_result():
     old, newest = Token(1, 1), Token(1, 2)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
-        native.begin(old, 'target')
+        native.begin(old, 'target', causal_lower_bound_ms=1000)
         chunk = stereo_chunk(1600)
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
         assert model.started.wait(1)
 
-        native.external_transition()
         native.begin(newest, 'other')
         model.release.set()
         wait_idle(native)
@@ -234,8 +231,7 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
     token = Token(2, 1)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
-        native.begin(token, 'target')
+        native.begin(token, 'target', causal_lower_bound_ms=1000)
         chunk = stereo_chunk(2000, 1000)
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
@@ -260,7 +256,6 @@ def test_pcm_history_replay_and_gap_mapping_preserve_wall_clock_provenance():
     token = Token(4, 2)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
         old = stereo_chunk(900, 200)
         # This packet starts before the known causal lower bound and ends after
         # it. Replay must crop earlier frames instead of leaking them into the
@@ -268,11 +263,30 @@ def test_pcm_history_replay_and_gap_mapping_preserve_wall_clock_provenance():
         kept = stereo_chunk(1400, 500)
         native.history.push(old, target_pid=42)
         native.history.push(kept, target_pid=42)
-        native.begin(token, 'target')
+        native.begin(token, 'target', causal_lower_bound_ms=1000)
         wait_idle(native)
         item = observations[-1][1]
         assert (item.capture_start_ms, item.capture_end_ms) == (1000, 1400)
         assert item.causal_lower_bound_ms == 1000
+    finally:
+        native.close()
+
+
+def test_external_input_candidates_do_not_crop_retained_pcm_or_become_causal_bounds():
+    observations = []
+    native = make_native(StaticPosterior(), observations, clock=lambda: 2000)
+    token = Token(4, 3)
+    try:
+        native.history.start(42)
+        for chunk in (stereo_chunk(1000, 300), stereo_chunk(1500, 500)):
+            native.history.push(chunk, target_pid=42)
+            native.feed(chunk)
+        native.begin(token, 'target', input_candidates_ms=(1200, 1400))
+        wait_idle(native)
+        item = observations[-1][1]
+        assert item.causal_lower_bound_ms is None
+        assert item.input_candidates_ms == (1200, 1400)
+        assert item.capture_start_ms is not None and item.capture_start_ms < 1200
     finally:
         native.close()
 
@@ -284,14 +298,13 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
         token = Token(6, 1)
         try:
             native.history.start(42)
-            native.set_causal_lower_bound(1000)
             # Process Loopback and compact observers run before the HOOK/text is
             # attached. The same captured series must mean the same thing even
             # if the HOOK arrives much later.
             for chunk in (stereo_chunk(1300, 300), stereo_chunk(1600, 300)):
                 native.history.push(chunk, target_pid=42)
                 native.feed(chunk)
-            native.begin(token, 'target')
+            native.begin(token, 'target', causal_lower_bound_ms=1000)
             wait_idle(native)
             return observations[-1][1]
         finally:
@@ -340,8 +353,7 @@ def test_heartbeat_can_flush_pending_pcm_but_never_becomes_voice_completion_evid
     token = Token(8, 1)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
-        native.begin(token, 'target')
+        native.begin(token, 'target', causal_lower_bound_ms=1000)
         short = stereo_chunk(1200, 200)
         native.history.push(short, target_pid=42)
         native.feed(short)
@@ -374,8 +386,7 @@ def test_new_pcm_snapshot_recomputes_target_conditioned_measurement():
     token = Token(9, 1)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
-        native.begin(token, 'target')
+        native.begin(token, 'target', causal_lower_bound_ms=1000)
         first = stereo_chunk(2000, 1000)
         native.history.push(first, target_pid=42)
         native.feed(first)
@@ -398,22 +409,22 @@ def test_new_pcm_snapshot_recomputes_target_conditioned_measurement():
         native.close()
 
 
-def test_causal_lower_bound_is_consumed_by_next_target_and_external_replacement_clears_it():
+def test_causal_lower_bound_is_explicit_per_target_and_does_not_leak():
     observations = []
     native = make_native(StaticPosterior(), observations)
-    first, second = Token(10, 1), Token(10, 2)
+    first, second, third = Token(10, 1), Token(10, 2), Token(10, 3)
     try:
         native.history.start(42)
-        native.set_causal_lower_bound(1000)
-        assert native.causal_lower_bound_ms is None
-        native.begin(first, 'target')
+        native.begin(first, 'target', causal_lower_bound_ms=1000)
         assert native.causal_lower_bound_ms == 1000
         native.finish_line(first)
 
-        native.set_causal_lower_bound(2000)
-        native.external_transition()
         native.begin(second, 'target')
         assert native.causal_lower_bound_ms is None
+        native.finish_line(second)
+
+        native.begin(third, 'target', causal_lower_bound_ms=2000)
+        assert native.causal_lower_bound_ms == 2000
     finally:
         native.close()
 

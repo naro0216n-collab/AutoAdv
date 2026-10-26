@@ -124,8 +124,12 @@ class NativeAudioObservation:
     """Measurements for one explicit audio snapshot/query.
 
     ``causal_lower_bound_ms`` is an observed game-input lower bound when one is
-    available. ``target_attached_ms`` is retained only as factual telemetry for
-    when the known text became available; it is never an acoustic boundary.
+    available from AutoAdv's own successful advancement input.
+    ``input_candidates_ms`` are earlier external game-input observations that
+    may or may not have advanced dialogue; they are only timing candidates and
+    never become a causal boundary by themselves. ``target_attached_ms`` is
+    retained only as factual telemetry for when the known text became
+    available; it is never an acoustic boundary.
     """
 
     kind: str
@@ -135,6 +139,7 @@ class NativeAudioObservation:
     vocal: HumanVocalEvidence | None = None
     recurrence: VocalRecurrenceEvidence | None = None
     causal_lower_bound_ms: int | None = None
+    input_candidates_ms: tuple[int, ...] = ()
     target_attached_ms: int | None = None
     history_truncated: bool = False
     pcm_last_frame_ms: int | None = None
@@ -327,6 +332,21 @@ def _open_post_boundary_risk(
     return max(candidates, key=lambda item: item[1]) if candidates else None
 
 
+def _input_candidate_before(
+    candidates: tuple[int, ...], *, not_after_ms: int,
+) -> int | None:
+    """Return the earliest external-input candidate not later than an anchor.
+
+    External input is deliberately weaker than AutoAdv-owned advancement: a
+    menu click can be unrelated to dialogue.  Using the earliest compatible
+    candidate only broadens the pre-target acoustic context relative to using
+    the lexical target start itself; it never truncates the target to the most
+    recent click/key event.
+    """
+    eligible = [int(value) for value in candidates if 0 < int(value) <= not_after_ms]
+    return min(eligible) if eligible else None
+
+
 def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtteranceProgress:
     """Evaluate one immutable measurement snapshot with no retained inference state."""
     capture_end = observation.capture_end_ms
@@ -351,9 +371,12 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
             and lexical.target_end_ms is not None
         )
         anchor_end = int(lexical.target_end_ms) if complete else aligned_end
+        input_candidate = _input_candidate_before(
+            observation.input_candidates_ms, not_after_ms=target_start)
         reference_before = (
             observation.causal_lower_bound_ms
             if observation.causal_lower_bound_ms is not None
+            else input_candidate if input_candidate is not None
             else target_start
         )
         chains = _series_risk_chains(
@@ -413,6 +436,9 @@ def evaluate_audio_snapshot(observation: NativeAudioObservation) -> UtterancePro
     # after an observed input lower bound.  Evaluate every currently open chain;
     # do not consume the first chain and ignore a later one.
     boundary = observation.causal_lower_bound_ms
+    if boundary is None:
+        boundary = _input_candidate_before(
+            observation.input_candidates_ms, not_after_ms=capture_end)
     if boundary is not None:
         candidate = _open_post_boundary_risk(
             observation.vocal, boundary_ms=int(boundary), capture_end_ms=capture_end)
