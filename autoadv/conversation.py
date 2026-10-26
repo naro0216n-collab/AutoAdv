@@ -54,7 +54,6 @@ class Controller:
         self.sent = False
         self.hold_reason: str | None = None
         self.line_no = 0
-        self.awaiting_next = False
         self.ocr_blank = False
         self.utterance_received_ns = 0
 
@@ -83,7 +82,6 @@ class Controller:
         self.utterance = None
         self.line_no = 0
         self.completed = self.sent = False
-        self.awaiting_next = False
         self.ocr_blank = False
         self.utterance_received_ns = 0
         self.presentation_reason = None
@@ -256,7 +254,6 @@ class Controller:
         self.native_progress = UtteranceProgress()
         self.audio_deadline_elapsed = False
         self.sent = False
-        self.awaiting_next = False
         self.hold_reason = None
         return Token(self.session, self.line_no)
 
@@ -403,18 +400,6 @@ class Controller:
         self.hold_reason = None
         return True
 
-    def expire_next_line(self, token: Token) -> bool:
-        """Hold further input after an unanswered advance.
-
-        The user's auto-mode choice remains ON; a later valid line may resume
-        it without fabricating another input for the timed-out utterance.
-        """
-        if token != self.token or not self.sent or not self.awaiting_next:
-            return False
-        self.awaiting_next = False
-        self.pause('next_line_timeout')
-        return True
-
     def try_advance(self) -> bool:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):
             return False
@@ -439,5 +424,4 @@ class Controller:
         except Exception:
             self.pause('input_failure_no_retry')
             return False
-        self.awaiting_next = True
         return True

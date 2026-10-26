@@ -379,12 +379,13 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     presentation_delay, presentation = scheduled.pop(0)
     assert presentation_delay == text_app.runtime_state().utterance.text_wait_ms
     presentation()
-    timeout_delay, timeout = scheduled.pop(0)
-    assert timeout_delay == tp.next_line_timeout_ms
-    timeout()
     assert text_app.runtime_state().token == text_token
     assert text_app.runtime_state().authorized
-    assert text_app.runtime_state().pause_reason == 'next_line_timeout'
+    assert text_app.runtime_state().sent
+    assert text_app.runtime_state().pause_reason is None
+    # Sending a line must not create a timer-driven judgment for a Presentation
+    # whose body has not arrived yet.
+    assert not scheduled
 
 
 def test_persistence_commands_are_atomic_and_user_settings_hide_storage_mechanics():

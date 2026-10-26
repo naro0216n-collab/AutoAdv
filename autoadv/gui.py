@@ -462,9 +462,8 @@ def run_gui() -> int:
             self.reading_ms=QSpinBox(); self.reading_ms.setRange(1,600000); self.reading_ms.setSuffix(' ms')
             self.wait_preview=QLabel('')
             self.input_key=QSpinBox(); self.input_key.setRange(1,254)
-            self.next_line_timeout=QSpinBox(); self.next_line_timeout.setRange(1000,120000)
             self.repeat=QComboBox(); self.repeat.addItem('連続同文は重複として扱う','distinct_only'); self.repeat.addItem('連続同文は各flushを別台詞として扱う','each_flush')
-            game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('1読み単位待機',setting_row('per_reading_unit_wait_ms', self.per_reading_unit_wait_ms)); game_settings.addRow('本文待機の最低時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('次台詞待ち',setting_row('next_line_timeout_ms', self.next_line_timeout)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
+            game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('1読み単位待機',setting_row('per_reading_unit_wait_ms', self.per_reading_unit_wait_ms)); game_settings.addRow('本文待機の最低時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
 
             target_details = group('別プロセスを使う作品', page='game', section='target_details', detail=True)
             self.game_exe=QLineEdit(); self.audio_exe=QLineEdit(); self.input_exe=QLineEdit()
@@ -491,15 +490,15 @@ def run_gui() -> int:
 
             common = group('共通の既定値', page='settings', section='common_advance')
             self.common_controls={}
-            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき本文時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'本文待機の最低時間 (ms)','per_reading_unit_wait_ms':'1読み単位あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード','next_line_timeout_ms':'次台詞待ち (ms)'}
-            for key in COMMON_FIELDS:
+            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき本文時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'本文待機の最低時間 (ms)','per_reading_unit_wait_ms':'1読み単位あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード'}
+            for key in common_titles:
                 value=getattr(self.catalog.common,key)
                 if key=='advance_mode':
                     control=QWidget(); lay=QHBoxLayout(control); lay.setContentsMargins(0,0,0,0); mode_group=QButtonGroup(self); mode_group.setExclusive(True); text_button=QPushButton('文字のみ判断'); audio_button=QPushButton('音声判断')
                     for button,mode in ((text_button,AdvanceMode.TEXT),(audio_button,AdvanceMode.AUDIO)): button.setCheckable(True); button.setProperty('advanceMode',mode.value); mode_group.addButton(button); lay.addWidget(button,1)
                     (audio_button if value==AdvanceMode.AUDIO else text_button).setChecked(True); self.common_advance_mode_group=mode_group; self.common_advance_text_button=text_button; self.common_advance_audio_button=audio_button
                 elif isinstance(value,bool): control=QCheckBox('有効'); control.setChecked(value)
-                elif isinstance(value,int): control=QSpinBox(); control.setRange(1,254 if key=='input_key' else 120000 if key=='next_line_timeout_ms' else 600000); control.setValue(value)
+                elif isinstance(value,int): control=QSpinBox(); control.setRange(1,254 if key=='input_key' else 600000); control.setValue(value)
                 else: control=QLineEdit(value)
                 self.common_controls[key]=control; common.addRow(common_titles[key],control)
             for key, control in self.common_controls.items():
@@ -539,7 +538,7 @@ def run_gui() -> int:
             diagnostics.addRow(self.btn_host)
             self.section_toggles['diagnostics'].toggled.connect(lambda checked: checked and self.refresh_diagnostics())
 
-            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_reading_unit_wait_ms':self.per_reading_unit_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key,'next_line_timeout_ms':self.next_line_timeout}
+            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_reading_unit_wait_ms':self.per_reading_unit_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key}
 
             for button in (self.advance_text_button,self.advance_audio_button): button.toggled.connect(lambda checked,key='advance_mode': checked and self.profile_setting_changed(key))
             for button in (self.source_hook_button,self.source_ocr_button): button.toggled.connect(lambda checked: checked and self.profile_setting_changed('source'))
@@ -873,7 +872,6 @@ def run_gui() -> int:
             self.native_helper.setText(effective.native_helper)
             self.alignment_model.setText(effective.alignment_model)
             self.alignment_vocab.setText(effective.alignment_vocab)
-            self.next_line_timeout.setValue(effective.next_line_timeout_ms)
             for field in COMMON_FIELDS:
                 self.refresh_inherited_control(field)
             self.refresh_rules()
@@ -2004,8 +2002,6 @@ def run_gui() -> int:
                 self.on_host_closed(detail.get('reason', ''))
             elif event == 'hook_error':
                 self.on_host_error_from_host(detail.get('reason', ''))
-            elif event == 'next_line_timeout' and token is not None:
-                self.note('送り後に次の台詞を取得できません。自動送りはONのまま入力を保留します。')
             elif event == 'native_ready':
                 if detail.get('ready'):
                     self.note('Process audio helper started; waiting for actual captured PCM')

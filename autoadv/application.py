@@ -198,7 +198,6 @@ class HookEventOutcome:
 
 _PLAY_ISSUES = {
     'target_unavailable': ('自動送り先のゲームウィンドウを確認できないため、この台詞の自動送りを保留しています。', None),
-    'next_line_timeout': ('送り後に次の台詞を取得できません。会話取得を確認してください。', 'open_capture'),
     'ambiguous_identical_line': ('同じ本文が続き、次の台詞か判断できないため自動送りを保留しています。', 'open_capture'),
     'ambiguous_multihook_lines': ('同じ本文取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
     'ambiguous_multihook_speakers': ('同じ話者取得元から複数候補が届き、対応を確定できないため自動送りを保留しています。', 'open_capture'),
@@ -807,22 +806,10 @@ class AutoAdvApplication:
 
     def _attempt_advance(self) -> bool:
         sent = self.controller.try_advance()
-        state = self.runtime_state()
-        if sent and state.token is not None and state.profile is not None:
-            token = state.token
-            if self._capture_transition_pending:
-                self._schedule(0, self._apply_capture_transition)
-            self._schedule(state.profile.next_line_timeout_ms,
-                           lambda t=token: self._expire_next_line(t))
+        if sent and self._capture_transition_pending:
+            self._schedule(0, self._apply_capture_transition)
         self._notify_runtime()
         return sent
-
-    def _expire_next_line(self, token: Token) -> bool:
-        expired = self.controller.expire_next_line(token)
-        if expired:
-            self._emit_runtime_event('next_line_timeout', token)
-        self._notify_runtime()
-        return expired
 
     def _finish_presentation_transition(self, token: Token, completed: bool) -> bool:
         if completed:

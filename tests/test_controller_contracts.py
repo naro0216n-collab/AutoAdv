@@ -234,7 +234,7 @@ def test_multisource_dialogue_is_composed_only_inside_one_synchronized_group():
     assert (ctrl.utterance.speaker, ctrl.utterance.text) == ('', '次')
 
 
-def test_external_progress_timeout_and_stale_presentation_evidence_preserve_state_ownership():
+def test_external_progress_and_stale_presentation_evidence_preserve_state_ownership():
     ctrl, sent, _ = controller()
     ctrl.permit(True)
     first = observe(ctrl, '「一つ目」', 1)
@@ -248,13 +248,15 @@ def test_external_progress_timeout_and_stale_presentation_evidence_preserve_stat
     assert ctrl.authorized and ctrl.presentation_reason is None
     assert not ctrl.presentation_event(first, 'text_elapsed')
 
-    # Only evidence for the active token can reserve an input. After one send,
-    # the unanswered-next-line timer creates a hold without changing AUTO.
+    # Only evidence for the active token can reserve an input.  After one send,
+    # no new Presentation state exists until another body is actually admitted.
     assert ctrl.presentation_event(second, 'text_elapsed')
     assert ctrl.try_advance() and len(sent) == 1
-    assert not ctrl.expire_next_line(first)
-    assert ctrl.expire_next_line(second)
-    assert ctrl.authorized and ctrl.pause_reason == 'next_line_timeout'
+    assert ctrl.authorized and ctrl.pause_reason is None
+    assert not ctrl.presentation_event(second, 'text_elapsed')
+    assert not ctrl.apply_utterance_progress(
+        second, UtteranceProgress(state=UtteranceProgressState.ENDED))
+    assert not ctrl.try_advance() and len(sent) == 1
 
     # Presentation failure is likewise a runtime hold, not an AUTO mutation.
     tts, _, _ = controller(tts=True)
