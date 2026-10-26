@@ -39,8 +39,7 @@ DIAGNOSTIC_DIGEST_RE = re.compile(
     r"(?P<digest>[0-9a-f]{64})\s*-->"
 )
 HUMAN_VOCAL_REPORT = "autoadv-human-vocal.result.json"
-TRACE_DELTA_EVENTS = frozenset({"native_audio_observation", "alignment_inference", "hook_event"})
-TRACE_ENCODING = "causal-delta-jsonl-v2"
+TRACE_ENCODING = "presentation-analysis-jsonl-v1"
 
 
 def history_marker(slot: int) -> str:
@@ -160,269 +159,305 @@ def _markdown_fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _trace_envelope(item: dict[str, Any]) -> dict[str, Any]:
-    return {
-        name: item[name]
-        for name in ("event", "seq", "at_ns", "session", "line")
-        if name in item
-    }
-
-
-def _trace_payload(item: dict[str, Any]) -> dict[str, Any]:
-    envelope = {"event", "seq", "at_ns", "session", "line"}
-    return {name: value for name, value in item.items() if name not in envelope}
-
-
-def _normalize_trace_payload(event: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize repeated measurement collections into provenance-keyed facts."""
-    normalized = dict(payload)
-    if event != "native_audio_observation":
-        return normalized
-    series = normalized.pop("vocal_series", None)
-    if not isinstance(series, list):
-        if series is not None:
-            normalized["vocal_series"] = series
-        return normalized
-    by_observer: dict[str, Any] = {}
-    for entry in series:
-        if not isinstance(entry, dict) or not isinstance(entry.get("observer"), str):
-            normalized["vocal_series"] = series
-            return normalized
-        observer = entry["observer"]
-        by_observer[observer] = {
-            name: value for name, value in entry.items() if name != "observer"
-        }
-    normalized["vocal_by_observer"] = by_observer
-    return normalized
-
-
-def _deep_delta(
-    current: dict[str, Any], previous: dict[str, Any], *, prefix: str = "",
-) -> tuple[dict[str, Any], list[str]]:
-    """Return a recursive merge delta plus explicit removed field paths."""
-    changed: dict[str, Any] = {}
-    removed: list[str] = []
-    for name, value in current.items():
-        path = f"{prefix}.{name}" if prefix else name
-        if name not in previous:
-            changed[name] = value
-            continue
-        old = previous[name]
-        if isinstance(value, dict) and isinstance(old, dict):
-            nested, nested_removed = _deep_delta(value, old, prefix=path)
-            if nested:
-                changed[name] = nested
-            removed.extend(nested_removed)
-        elif value != old:
-            changed[name] = value
-    for name in previous:
-        if name not in current:
-            removed.append(f"{prefix}.{name}" if prefix else name)
-    return changed, removed
-
-
-def _hook_signature_from_event(record: dict[str, Any]) -> tuple[Any, ...] | None:
-    value = record.get("hook_event")
-    if not isinstance(value, dict) or value.get("kind") != "output":
-        return None
-    source = value.get("source")
-    if not isinstance(source, dict):
-        return None
-    identity = f"{source.get('hook_code', '')}|{source.get('context')}|{source.get('context2')}"
-    return (
-        value.get("host_generation"), value.get("connection_generation"),
-        value.get("sequence"), value.get("received_ns"), value.get("process_id"),
-        source.get("address"), source.get("context"), source.get("context2"),
-        identity, value.get("text"),
-    )
-
-
-def _hook_signature_from_selection(record: dict[str, Any]) -> tuple[Any, ...] | None:
-    if record.get("event") != "hook_output":
-        return None
-    return (
-        record.get("generation"), record.get("connection"), record.get("hook_sequence"),
-        record.get("received_ns"), record.get("pid"), record.get("address"),
-        record.get("context"), record.get("context2"), record.get("source"), record.get("raw"),
-    )
-
-
-def _observation_index(records: list[dict[str, Any]]) -> dict[tuple[Any, Any, Any], list[int]]:
-    result: dict[tuple[Any, Any, Any], list[int]] = {}
-    for record in records:
-        if record.get("event") != "native_audio_observation":
-            continue
-        key = (record.get("session"), record.get("line"), record.get("evidence_at_ms"))
-        seq = record.get("seq")
-        if isinstance(seq, int):
-            result.setdefault(key, []).append(seq)
-    return result
-
-
-def _referenced_observation_seq(
-    index: dict[tuple[Any, Any, Any], list[int]], record: dict[str, Any],
-    evidence_at_ms: Any, *, before: bool,
-) -> int | None:
-    seq = record.get("seq")
-    if not isinstance(seq, int):
-        return None
-    values = index.get((record.get("session"), record.get("line"), evidence_at_ms), ())
-    candidates = [value for value in values if (value < seq if before else value > seq)]
-    if not candidates:
-        return None
-    return max(candidates) if before else min(candidates)
-
-
-def _compact_alignment_reference(
-    record: dict[str, Any], observation_records: dict[int, dict[str, Any]],
-    observation_index: dict[tuple[Any, Any, Any], list[int]],
-) -> dict[str, Any]:
-    """Keep inference work facts and reference equal product-observation results."""
-    compact = dict(record)
-    boundary = compact.get("capture_end_ms")
-    observation_seq = _referenced_observation_seq(
-        observation_index, compact, boundary, before=False)
-    if observation_seq is None:
-        return compact
-    observation = observation_records.get(observation_seq)
-    if observation is None:
-        return compact
-    compact["observation_seq"] = observation_seq
-    if observation.get("evidence_at_ms") == boundary:
-        compact.pop("capture_end_ms", None)
-    for name in (
-        "causal_lower_bound_ms", "input_candidates_ms", "target_attached_ms",
-        "target_units", "aligned_target_units", "target_associated",
-        "complete_alignment", "committed_target_end", "lexical_target_end_ms",
-    ):
-        if name in compact and observation.get(name) == compact[name]:
-            compact.pop(name, None)
-    return compact
-
-
 def _compact_product_trace(content: str) -> tuple[str, str]:
-    """Build a causal, analysis-complete Issue representation of product trace.
+    """Keep causal events, summarize only cadence-level acoustic telemetry.
 
-    The local JSONL remains the durable complete event stream.  The Issue copy
-    preserves every upstream observation and one-time action while removing
-    state heartbeats and repeated snapshot fields.  High-rate measurement
-    records use recursive deltas, selected Hook outputs reference their upstream
-    Hook event, and alignment work references the product observation carrying
-    equal result facts.
+    The local JSONL is the complete trace.  The Issue copy keeps all low-rate
+    product/runtime events and every Presentation, but replaces repeated native
+    observations/alignment inferences with transition snapshots and factual
+    per-Presentation rollups.  Remote size therefore follows actual state change
+    rather than polling cadence.
     """
-    raw_lines = content.splitlines()
-    if not raw_lines:
-        return content, "full"
     try:
-        records = [json.loads(line) for line in raw_lines if line.strip()]
+        records = [json.loads(line) for line in content.splitlines() if line.strip()]
     except json.JSONDecodeError:
         return content, "full"
-    if not records or not all(isinstance(item, dict) for item in records):
+    if not records or not all(isinstance(record, dict) for record in records):
         return content, "full"
     if records[0].get("event") != "trace_started":
         return content, "full"
 
-    hook_event_seqs: dict[tuple[Any, ...], list[int]] = {}
-    for record in records:
-        if record.get("event") != "hook_event":
-            continue
-        signature = _hook_signature_from_event(record)
-        seq = record.get("seq")
-        if signature is not None and isinstance(seq, int):
-            hook_event_seqs.setdefault(signature, []).append(seq)
-
-    observations = _observation_index(records)
-    observation_records = {
-        int(record["seq"]): record
-        for record in records
-        if record.get("event") == "native_audio_observation"
-        and isinstance(record.get("seq"), int)
+    header = dict(records[0])
+    header["issue_encoding"] = TRACE_ENCODING
+    header["source_record_count"] = len(records)
+    header["analysis_columns"] = {
+        "observation": ["seq", "evidence_at_ms", "aligned_units", "associated", "complete",
+                        "committed", "target_start_ms", "aligned_end_ms", "target_end_ms",
+                        "causal_lower_bound_ms", "input_candidates_ms", "target_attached_ms",
+                        "vocal", "recurrence"],
+        "vocal": ["frames", "active", "peak", "threshold", "support_start_ms", "support_end_ms"],
+        "alignment_state": ["seq", "capture_end_ms", "rejection", "associated", "complete",
+                            "committed", "reading_rank", "ambiguous_spans", "aligned_units",
+                            "coverage", "path_margin", "boundary_margin"],
+        "stats": ["count", "p50", "p95", "max"],
     }
+    output: list[dict[str, Any]] = [header]
+    observations: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    alignments: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    presentation_events: dict[tuple[Any, Any], list[list[Any]]] = {}
+    last_progress_state: dict[tuple[Any, Any], str] = {}
+    hook_sources: dict[tuple[Any, ...], int] = {}
+    hook_source_rows: list[list[Any]] = []
+    hook_output_rows: list[list[Any]] = []
+    hook_lifecycle_rows: list[list[Any]] = []
+    selected_hook_rows: list[list[Any]] = []
 
-    semantic_records: list[dict[str, Any]] = []
-    progress_state: dict[tuple[Any, Any], str] = {}
-    for index, source in enumerate(records):
-        if index == 0:
-            head = dict(source)
-            head["issue_encoding"] = TRACE_ENCODING
-            head["delta_events"] = sorted(TRACE_DELTA_EVENTS)
-            head["normalized_fields"] = {
-                "native_audio_observation.vocal_series": "vocal_by_observer"
-            }
-            head["causal_references"] = ["hook_output", "alignment_inference", "utterance_progress"]
-            head["elided_repetition"] = ["utterance_progress_same_state"]
-            semantic_records.append(head)
-            continue
+    def hook_source_id(hook: dict[str, Any]) -> int | None:
+        source = hook.get("source") if isinstance(hook.get("source"), dict) else None
+        if source is None:
+            return None
+        source_key = (
+            hook.get("host_generation"), hook.get("connection_generation"),
+            hook.get("process_id"), source.get("address"), source.get("context"),
+            source.get("context2"), source.get("hook_code"), source.get("hook_name"),
+        )
+        source_id = hook_sources.get(source_key)
+        if source_id is None:
+            source_id = len(hook_source_rows) + 1
+            hook_sources[source_key] = source_id
+            hook_source_rows.append([source_id, *source_key])
+        return source_id
 
-        record = dict(source)
+    presentation_fields = {
+        "utterance": ["source", "hook_sequence", "raw", "body", "speaker", "advance_mode",
+                      "use_tts", "uncertain_text_fallback", "reading_units", "text_wait_ms"],
+        "utterance_progress": ["state", "evidence_at_ms"],
+        "advance_attempt": [],
+        "audio_causal_lower_bound": ["at_ms", "after_line"],
+        "advance_input": ["presentation_reason"],
+        "presentation_complete": ["reason"],
+        "uncertainty_fallback_due": ["text_wait_ms"],
+        "game_input_candidates_attached": ["text_received_ns", "input_candidates_ms"],
+        "game_input_observed": ["at_ms"],
+        "tts_result": ["success", "reason"],
+        "native_audio_error": ["reason"],
+        "hook_group_flushed": [],
+    }
+    header["presentation_event_fields"] = presentation_fields
+
+    def presentation_event(record: dict[str, Any]) -> list[Any]:
+        event = str(record.get("event") or "")
+        fields = presentation_fields.get(event)
+        detail = {name: value for name, value in record.items()
+                  if name not in {"event", "seq", "at_ns", "session", "line"}}
+        if fields is None:
+            return [event, record.get("seq"), record.get("at_ns"), detail]
+        extra = {name: value for name, value in detail.items() if name not in fields}
+        return [event, record.get("seq"), record.get("at_ns"),
+                *[detail.get(name) for name in fields], extra or None]
+
+    for record in records[1:]:
         event = record.get("event")
-        if event == "utterance_progress":
-            key = (record.get("session"), record.get("line"))
-            state = str(record.get("state") or "unknown")
-            prior_state = progress_state.get(key, "unknown")
-            progress_state[key] = state
-            if state == prior_state:
-                continue
-            observation_seq = _referenced_observation_seq(
-                observations, record, record.get("evidence_at_ms"), before=True)
-            if observation_seq is not None:
-                record["observation_seq"] = observation_seq
-                record.pop("evidence_at_ms", None)
-            semantic_records.append(record)
+        key = (record.get("session"), record.get("line"))
+        if event == "native_audio_observation":
+            observations.setdefault(key, []).append(record)
             continue
-
-        if event == "hook_output":
-            signature = _hook_signature_from_selection(record)
-            matches = hook_event_seqs.get(signature, ()) if signature is not None else ()
-            if len(matches) == 1:
-                compact = _trace_envelope(record)
-                compact["hook_event_seq"] = matches[0]
-                semantic_records.append(compact)
-                continue
-
         if event == "alignment_inference":
-            record = _compact_alignment_reference(record, observation_records, observations)
-        semantic_records.append(record)
-
-    encoded: list[dict[str, Any]] = []
-    previous: dict[tuple[Any, ...], tuple[Any, dict[str, Any]]] = {}
-    for record in semantic_records:
-        event = str(record.get("event"))
-        if event not in TRACE_DELTA_EVENTS:
-            encoded.append(record)
+            alignments.setdefault(key, []).append(record)
             continue
-
+        if event == "utterance_progress":
+            state = str(record.get("state") or "unknown")
+            prior = last_progress_state.get(key, "unknown")
+            last_progress_state[key] = state
+            if state == prior:
+                continue
+            presentation_events.setdefault(key, []).append(presentation_event(record))
+            continue
+        if event == "hook_output":
+            selected_hook_rows.append([
+                record.get("seq"), record.get("at_ns"), record.get("session"),
+                record.get("generation"), record.get("connection"),
+                record.get("hook_sequence"), record.get("received_ns"),
+                record.get("pid"), record.get("source"),
+            ])
+            continue
         if event == "hook_event":
-            key = (event,)
+            hook = record.get("hook_event")
+            if not isinstance(hook, dict):
+                output.append(dict(record))
+                continue
+            source_id = hook_source_id(hook)
+            outcome = record.get("outcome") if isinstance(record.get("outcome"), dict) else {}
+            capture = outcome.get("capture") if isinstance(outcome.get("capture"), dict) else {}
+            token = outcome.get("token") if isinstance(outcome.get("token"), dict) else {}
+            common = [
+                record.get("seq"), record.get("at_ns"), source_id, hook.get("sequence"),
+                hook.get("received_ns"), outcome.get("connection_transition"),
+                capture.get("changed"), capture.get("new_ambiguity"),
+                capture.get("active_source_removed"), capture.get("monitor_started"),
+                token.get("session"), token.get("line"), outcome.get("flush_delay_ms"),
+            ]
+            if hook.get("kind") == "output":
+                hook_output_rows.append([*common, hook.get("text")])
+            else:
+                hook_lifecycle_rows.append([
+                    *common, hook.get("kind"), hook.get("process_id"),
+                    hook.get("text"), hook.get("detail"), outcome.get("note"),
+                ])
+            continue
+        if key[0] is not None and key[1] is not None:
+            presentation_events.setdefault(key, []).append(presentation_event(record))
         else:
-            key = (event, record.get("session"), record.get("line"))
-        payload = _normalize_trace_payload(event, _trace_payload(record))
-        prior = previous.get(key)
-        if prior is None:
-            first = _trace_envelope(record)
-            first.update(payload)
-            encoded.append(first)
-        else:
-            prior_seq, prior_payload = prior
-            delta, removed = _deep_delta(payload, prior_payload)
-            compact = _trace_envelope(record)
-            compact["delta_from_seq"] = prior_seq
-            if removed:
-                compact["delta_remove"] = removed
-            compact.update(delta)
-            encoded.append(compact)
-        previous[key] = (record.get("seq"), payload)
+            output.append(dict(record))
 
-    rendered = "".join(
-        json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-        for item in encoded
-    )
-    return rendered, TRACE_ENCODING
+    if hook_output_rows or hook_lifecycle_rows or selected_hook_rows:
+        output.append({
+            "event": "hook_analysis",
+            "source_columns": ["id", "generation", "connection", "pid", "address",
+                               "context", "context2", "hook_code", "hook_name"],
+            "common_columns": ["seq", "at_ns", "source_id", "hook_sequence", "received_ns",
+                               "connection_transition", "capture_changed", "new_ambiguity",
+                               "active_source_removed", "monitor_started", "token_session",
+                               "token_line", "flush_delay_ms"],
+            "output_suffix": ["text"],
+            "lifecycle_suffix": ["kind", "pid", "text", "detail", "note"],
+            "selected_columns": ["seq", "at_ns", "session", "generation", "connection",
+                                 "hook_sequence", "received_ns", "pid", "source"],
+            "sources": hook_source_rows, "outputs": hook_output_rows,
+            "lifecycle": hook_lifecycle_rows, "selected": selected_hook_rows,
+        })
 
+    def stats(rows: list[dict[str, Any]], name: str) -> list[Any] | None:
+        values = sorted(float(row[name]) for row in rows
+                        if isinstance(row.get(name), (int, float)))
+        if not values:
+            return None
+        pick = lambda q: round(values[min(len(values) - 1, int(round((len(values) - 1) * q)))], 3)
+        return [len(values), pick(.5), pick(.95), round(values[-1], 3)]
+
+    for key in dict.fromkeys((*observations.keys(), *alignments.keys(), *presentation_events.keys())):
+        obs = observations.get(key, [])
+        events = presentation_events.get(key, [])
+        prog = [row for row in events if row[0] == "utterance_progress"]
+        wanted: set[int] = set()
+        if obs and isinstance(obs[-1].get("seq"), int):
+            wanted.add(obs[-1]["seq"])
+        for transition in prog:
+            evidence_at_ms = transition[4]
+            candidates = [row for row in obs
+                          if row.get("evidence_at_ms") == evidence_at_ms
+                          and isinstance(row.get("seq"), int)
+                          and row["seq"] < (transition[1] if isinstance(transition[1], int) else -1)]
+            if not candidates:
+                candidates = [row for row in obs
+                              if isinstance(row.get("seq"), int)
+                              and row["seq"] < (transition[1] if isinstance(transition[1], int) else -1)]
+            if candidates:
+                wanted.add(candidates[-1]["seq"])
+
+        sampled = []
+        vocal_rollup: dict[str, list[Any]] = {}
+        last_active: dict[str, int] = {}
+        for row in obs:
+            vocal = {}
+            for item in row.get("vocal_series", ()) if isinstance(row.get("vocal_series"), list) else ():
+                if not isinstance(item, dict) or not isinstance(item.get("observer"), str):
+                    continue
+                name = item["observer"]
+                frames, active = item.get("frame_count"), item.get("active_count")
+                prior_active = last_active.get(name, 0)
+                if isinstance(active, int) and active > prior_active:
+                    last_active[name] = active
+                summary = vocal_rollup.setdefault(name, [0, 0, 0, 0.0, None])
+                summary[0] += 1
+                summary[1], summary[2] = frames, active
+                if isinstance(item.get("peak_score"), (int, float)):
+                    summary[3] = round(max(summary[3], float(item["peak_score"])), 6)
+                if isinstance(active, int) and active > prior_active:
+                    summary[4] = row.get("evidence_at_ms")
+                vocal[name] = [frames, active, item.get("peak_score"), item.get("active_score_threshold"),
+                               item.get("measurement_support_start_ms"), item.get("measurement_support_end_ms")]
+            if row.get("seq") in wanted:
+                sampled.append([
+                    row.get("seq"), row.get("evidence_at_ms"), row.get("aligned_target_units"),
+                    row.get("target_associated"), row.get("complete_alignment"),
+                    row.get("committed_target_end"), row.get("lexical_target_start_ms"),
+                    row.get("lexical_aligned_end_ms"), row.get("lexical_target_end_ms"),
+                    row.get("causal_lower_bound_ms"), row.get("input_candidates_ms"),
+                    row.get("target_attached_ms"), vocal,
+                    [row.get("recurrence_strength"), row.get("recurrence_period_ms"),
+                     row.get("recurrence_stability"), row.get("recent_recurrence_strength"),
+                     row.get("recurrence_level_consistency")],
+                ])
+
+        recurrence_rows = [row for row in obs
+                           if isinstance(row.get("recurrence_strength"), (int, float))]
+        strongest = (max(recurrence_rows, key=lambda row: float(row.get("recurrence_strength") or 0.0))
+                     if recurrence_rows else None)
+        recurrence_rollup = ([
+            len(recurrence_rows), strongest.get("recurrence_strength"), strongest.get("evidence_at_ms"),
+            strongest.get("recurrence_period_ms"),
+            max(float(row.get("recurrence_stability") or 0.0) for row in recurrence_rows),
+            max(float(row.get("recent_recurrence_strength") or 0.0) for row in recurrence_rows),
+            max(float(row.get("recurrence_level_consistency") or 0.0) for row in recurrence_rows),
+        ] if strongest is not None else None)
+
+        alignment_rows = alignments.get(key, [])
+        state_rows, prior = [], None
+        for row in alignment_rows:
+            state = (row.get("rejection") or "", bool(row.get("target_associated")),
+                     bool(row.get("complete_alignment")), bool(row.get("committed_target_end")),
+                     row.get("reading_rank"), bool(row.get("ambiguous_alignment_spans")))
+            if state == prior:
+                continue
+            prior = state
+            state_rows.append([
+                row.get("seq"), row.get("capture_end_ms"), *state,
+                row.get("aligned_target_units"), row.get("target_coverage"),
+                row.get("path_margin"), row.get("boundary_margin"),
+            ])
+        final = alignment_rows[-1] if alignment_rows else {}
+        coverage_rows = [row for row in alignment_rows
+                         if isinstance(row.get("target_coverage"), (int, float))]
+        best_coverage = (max(coverage_rows, key=lambda row: float(row["target_coverage"]))
+                         if coverage_rows else None)
+        output.append({
+            "event": "presentation_analysis", "session": key[0], "line": key[1],
+            "events": events, "observation_count": len(obs), "observations": sampled, "vocal_rollup": vocal_rollup,
+            "recurrence_rollup": recurrence_rollup,
+            "alignment": {
+                "count": len(alignment_rows), "queue_ms": stats(alignment_rows, "queue_ms"),
+                "align_ms": stats(alignment_rows, "align_ms"),
+                "audio_ms": stats(alignment_rows, "audio_ms"), "state_changes": state_rows,
+                "max_coverage": [best_coverage.get("target_coverage"),
+                                 best_coverage.get("capture_end_ms"),
+                                 best_coverage.get("aligned_target_units")]
+                if best_coverage is not None else None,
+                "final": [final.get("capture_end_ms"), final.get("target_units"),
+                          final.get("aligned_target_units"), final.get("target_coverage"),
+                          final.get("lexical_target_end_ms"), final.get("path_margin"),
+                          final.get("boundary_margin")],
+            } if alignment_rows else None,
+        })
+
+    return "".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+                   for item in output), TRACE_ENCODING
 
 def _shared_representation(path: Path, content: str) -> tuple[str, str]:
     if path.name.endswith(".jsonl") and "fixture-evidence" not in path.name:
         return _compact_product_trace(content)
+    if path.name.endswith(".json"):
+        try:
+            value = json.loads(content)
+            case_rows = value.get("case_results") if isinstance(value, dict) else None
+            if (isinstance(value, dict)
+                    and value.get("schema") == "autoadv-offline-verification-v1"
+                    and isinstance(case_rows, list)
+                    and all(isinstance(row, dict) for row in case_rows)):
+                columns = list(case_rows[0]) if case_rows else []
+                if all(list(row) == columns for row in case_rows):
+                    value = dict(value)
+                    value["case_result_columns"] = columns
+                    value["case_results"] = [[row[name] for name in columns] for row in case_rows]
+                    representation = "verifier-table-json"
+                else:
+                    representation = "compact-json"
+            else:
+                representation = "compact-json"
+            return (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
+                    representation)
+        except json.JSONDecodeError:
+            pass
     return content, "full"
 
 
@@ -658,8 +693,8 @@ def format_snapshot(
 
     lines.extend((
         "",
-        "Product trace sharing uses `delta-jsonl-v1` for repeated acoustic snapshots: "
-        "omitted payload fields inherit from `delta_from_seq`; `delta_remove` clears fields.",
+        "Product trace sharing uses `presentation-analysis-jsonl-v1`: all Presentations are retained, "
+        "while cadence-level acoustic samples are summarized by transition evidence.",
     ))
     manifest, blocks = _evidence_blocks(
         root, summary, known_human_vocal_digests=known_human_vocal_digests,

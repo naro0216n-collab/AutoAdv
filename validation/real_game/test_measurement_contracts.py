@@ -458,8 +458,10 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         for i in range(220):
             row = {
                 'event': 'alignment_inference', 'seq': i + 5, 'at_ns': 20 + i,
-                'session': 1, 'line': 1, 'target_associated': bool(i % 2),
-                'target_units': 8, 'padding': '音' * 180,
+                'session': 1, 'line': 1, 'target_associated': True,
+                'target_units': 8, 'queue_ms': float(i % 7), 'align_ms': 10.0 + (i % 5),
+                'capture_start_ms': 900, 'capture_end_ms': 1000 + i,
+                'padding': '音' * 180,
             }
             if i == 219:
                 row.update({
@@ -555,36 +557,56 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         compact_trace, representation = issue_reporting._compact_product_trace(
             issue_reporting.sanitize_public_issue(trace_text))
         assert representation == issue_reporting.TRACE_ENCODING
-        assert len(compact_trace) < len(issue_reporting.sanitize_public_issue(trace_text))
+        assert len(compact_trace) < len(issue_reporting.sanitize_public_issue(trace_text)) // 4
         compact_records = [json.loads(line) for line in compact_trace.splitlines()]
-        assert compact_records[0]['issue_encoding'] == issue_reporting.TRACE_ENCODING
-        assert any(record.get('delta_from_seq') for record in compact_records)
+        header = compact_records[0]
+        assert header['issue_encoding'] == issue_reporting.TRACE_ENCODING
+        assert header['source_record_count'] == len(trace)
 
-        by_seq = {record.get('seq'): record for record in compact_records if 'seq' in record}
-        assert by_seq[1]['hook_event_seq'] == 228
-        assert 'raw' not in by_seq[1] and 'source' not in by_seq[1]
-        assert 3 not in by_seq and 226 not in by_seq  # unchanged UNKNOWN/ACTIVE heartbeats
-        assert by_seq[4]['state'] == 'active' and by_seq[4]['observation_seq'] == 2
-        assert 'evidence_at_ms' not in by_seq[4]
-        assert by_seq[227]['state'] == 'unknown' and by_seq[227]['observation_seq'] == 225
+        hook_analysis = next(record for record in compact_records
+                             if record['event'] == 'hook_analysis')
+        assert hook_analysis['selected'][0][5] == 11
+        assert 'raw' not in hook_analysis['selected_columns']
+        assert [row[13] for row in hook_analysis['outputs']] == [
+            'case2\ncase3 <USERPROFILE>\\AutoAdv <REDACTED-TOKEN>', 'other']
 
-        second_observation = by_seq[225]
-        assert second_observation['delta_from_seq'] == 2
-        vocal_delta = second_observation['vocal_by_observer']['nonlexical']
-        assert vocal_delta == {
-            'frame_count': 7, 'active_count': 5, 'measurement_support_end_ms': 1500}
-        assert 'active_score_threshold' not in vocal_delta
+        presentation = next(record for record in compact_records
+                            if record['event'] == 'presentation_analysis')
+        assert presentation['session'] == 1 and presentation['line'] == 1
+        progress = [row for row in presentation['events'] if row[0] == 'utterance_progress']
+        assert [row[1] for row in progress] == [4, 227]
+        assert [row[3] for row in progress] == ['active', 'unknown']
+        assert presentation['observation_count'] == 2
+        assert [row[0] for row in presentation['observations']] == [2, 225]
+        assert presentation['observations'][-1][9:12] == [900, [920], 940]
+        assert presentation['vocal_rollup']['nonlexical'][-1] == 1500
+        assert presentation['recurrence_rollup'][1] == .91
+        assert presentation['alignment']['count'] == 220
+        assert len(presentation['alignment']['state_changes']) <= 2
+        assert presentation['alignment']['queue_ms'][0] == 220
+        assert presentation['alignment']['final'][0] == 1500
+        assert presentation['alignment']['final'][-2:] == [2.5, None]
+        assert 'delta_from_seq' not in compact_trace
 
-        paired_alignment = by_seq[224]
-        assert paired_alignment['observation_seq'] == 225
-        assert 'capture_end_ms' not in paired_alignment
-        assert 'target_units' not in paired_alignment
-        assert paired_alignment['queue_ms'] == 3.0 and paired_alignment['path_margin'] == 2.5
-
-        second_hook_event = by_seq[229]
-        assert second_hook_event['delta_from_seq'] == 228
-        assert second_hook_event['hook_event'] == {
-            'sequence': 12, 'received_ns': 101, 'text': 'other'}
+        # Polling cadence is not a transport dimension: adding many identical
+        # high-rate inference samples changes only aggregate counts/statistics.
+        insert_at = next(index for index, row in enumerate(trace)
+                         if row.get('event') == 'native_audio_observation'
+                         and row.get('seq') == 225)
+        repeated_alignment = [
+            dict(row, seq=1000 + index)
+            for index, row in enumerate(trace) if row.get('event') == 'alignment_inference'
+        ]
+        repeated_observations = [
+            dict(trace[2], seq=2000 + index) for index in range(220)
+        ]
+        doubled = (trace[:insert_at] + repeated_alignment + repeated_observations
+                   + trace[insert_at:])
+        doubled_text = ''.join(
+            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in doubled)
+        doubled_compact, _ = issue_reporting._compact_product_trace(
+            issue_reporting.sanitize_public_issue(doubled_text))
+        assert len(doubled_compact) < len(compact_trace) + 1500
 
         first_snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
         assert len(first_snapshot.parts) >= 2
@@ -595,7 +617,9 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         assert 'validation-summary.json' in first_snapshot.body
         assert 'validation.log' not in first_snapshot.body
         assert issue_reporting.TRACE_ENCODING in first_snapshot.body
-        assert '"source_endpoint_ms": 1234.5' in first_snapshot.body
+        assert '"source_endpoint_ms"' in first_snapshot.body
+        assert '1234.5' in first_snapshot.body
+        assert 'verifier-table-json' in first_snapshot.body
         assert 'case2\\ncase3 <USERPROFILE>\\\\AutoAdv <REDACTED-TOKEN>' in first_snapshot.body
         assert 'observer-full-detail' in first_snapshot.body  # first unseen diagnostic digest is shared once
         assert 'analysis evidence timeline' not in first_snapshot.body
