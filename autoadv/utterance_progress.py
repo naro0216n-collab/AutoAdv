@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from statistics import median
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -134,92 +133,82 @@ LOOP_STRENGTH = 0.78
 LOOP_STABILITY = 0.60
 RECENT_LOOP_STRENGTH = 0.72
 LOOP_LEVEL_CONSISTENCY = 0.55
-MIN_LOOP_OBSERVATION_MS = 1200
 
 
-def _series_timing(series: VocalEvidenceSeries) -> tuple[float, float]:
-    """Return observer-local cadence and receptive support width."""
-    if not series.samples:
-        return 16.0, 16.0
-    times = [sample.at_ms for sample in series.samples]
-    gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
-    cadence = float(median(gaps)) if gaps else 16.0
-    widths = [max(0, sample.at_ms - sample.support_start_ms) for sample in series.samples]
-    support = float(median(widths)) if widths else cadence
-    return max(1.0, cadence), max(1.0, support)
+def _ordered_samples(series: VocalEvidenceSeries) -> tuple[VocalScoreSample, ...]:
+    """Return one observer's factual measurements in acoustic time order."""
+    return tuple(sorted(
+        series.samples,
+        key=lambda sample: (int(sample.at_ms), int(sample.support_start_ms)),
+    ))
 
 
-def _series_closure_context_ms(series: VocalEvidenceSeries) -> int:
-    """Observer-local evidence horizon needed after its last positive score."""
-    cadence, support = _series_timing(series)
-    return max(1, int(round(max(cadence * 2.0, support * 0.5))))
-
-
-def _latest_positive_ms(
+def _latest_positive(
     series: VocalEvidenceSeries, *, not_before_ms: int,
-) -> int | None:
+) -> VocalScoreSample | None:
     threshold = float(series.active_score_threshold)
-    times = [
-        int(sample.at_ms)
-        for sample in series.samples
+    positives = [
+        sample for sample in _ordered_samples(series)
         if int(sample.at_ms) >= int(not_before_ms) and float(sample.score) >= threshold
     ]
-    return max(times) if times else None
+    return positives[-1] if positives else None
 
 
-def _has_recent_positive(
-    series: VocalEvidenceSeries, *, last_positive_ms: int,
-    evidence_end_ms: int, not_before_ms: int | None = None,
+def _observed_closed_after(
+    series: VocalEvidenceSeries, *, last_positive: VocalScoreSample,
+    not_before_ms: int | None = None,
 ) -> bool:
-    reference = int(last_positive_ms)
-    if not_before_ms is not None:
-        reference = max(reference, int(not_before_ms))
-    return int(evidence_end_ms) - reference < _series_closure_context_ms(series)
+    """Whether this observer explicitly measured quiet after the positive support.
 
-
-def _current_positive_run_after(
-    series: VocalEvidenceSeries, *, timing_ms: tuple[int, ...], evidence_end_ms: int,
-) -> tuple[int, int] | None:
-    """Return current threshold-positive run only when it began after a timing fact."""
-    facts = tuple(sorted({int(value) for value in timing_ms if int(value) > 0}))
-    if not facts:
-        return None
+    Passage of time and absence of samples are not closure evidence.  A low score
+    closes the risk only when the acoustic support that produced it begins after
+    both the last positive observation and any additional factual lower bound.
+    """
     threshold = float(series.active_score_threshold)
-    positives = sorted(
-        int(sample.at_ms) for sample in series.samples if float(sample.score) >= threshold)
-    if not positives:
-        return None
-    closure = _series_closure_context_ms(series)
-    first = last = positives[0]
-    for at_ms in positives[1:]:
-        if at_ms - last >= closure:
-            first = at_ms
-        last = at_ms
-    if not any(fact <= first for fact in facts):
-        return None
-    if int(evidence_end_ms) - last >= closure:
-        return None
-    return first, last
+    boundary = int(last_positive.at_ms)
+    if not_before_ms is not None:
+        boundary = max(boundary, int(not_before_ms))
+    return any(
+        int(sample.at_ms) > int(last_positive.at_ms)
+        and int(sample.support_start_ms) >= boundary
+        and float(sample.score) < threshold
+        for sample in _ordered_samples(series)
+    )
 
 
-def _stable_recurrence(
-    recurrence: VocalRecurrenceEvidence | None,
-    *,
-    start_ms: int | None,
-    capture_end_ms: int,
-) -> bool:
-    if recurrence is None or start_ms is None or recurrence.period_ms is None:
+def _open_activity_start(series: VocalEvidenceSeries) -> int | None:
+    """Return the observer's currently open threshold-supported activity.
+
+    Activity is split only by an observed sub-threshold support window that no
+    longer overlaps the preceding positive observation.  No wall-clock closure
+    or inferred silence is introduced here.
+    """
+    threshold = float(series.active_score_threshold)
+    start_ms: int | None = None
+    last_positive: VocalScoreSample | None = None
+    for sample in _ordered_samples(series):
+        if float(sample.score) >= threshold:
+            if start_ms is None:
+                start_ms = int(sample.at_ms)
+            last_positive = sample
+            continue
+        if (last_positive is not None
+                and int(sample.support_start_ms) >= int(last_positive.at_ms)):
+            start_ms = None
+            last_positive = None
+    if start_ms is None or last_positive is None:
+        return None
+    return start_ms
+
+
+def _stable_recurrence(recurrence: VocalRecurrenceEvidence | None) -> bool:
+    if recurrence is None or recurrence.period_ms is None:
         return False
-    observed_ms = capture_end_ms - start_ms
     return bool(
         recurrence.strength >= LOOP_STRENGTH
         and recurrence.period_stability >= LOOP_STABILITY
         and recurrence.recent_strength >= RECENT_LOOP_STRENGTH
         and recurrence.level_consistency >= LOOP_LEVEL_CONSISTENCY
-        and observed_ms >= max(
-            MIN_LOOP_OBSERVATION_MS,
-            recurrence.period_ms * 3,
-        )
     )
 
 
@@ -237,8 +226,8 @@ def evaluate_utterance_progress(
         return UtteranceProgress(evidence_at_ms=None), None
     capture_end = int(capture_end_ms)
 
-    def recurrence_if_needed(start_ms: int) -> VocalRecurrenceEvidence | None:
-        if recurrence_lookup is None or capture_end - int(start_ms) < MIN_LOOP_OBSERVATION_MS:
+    def recurrence_for(start_ms: int) -> VocalRecurrenceEvidence | None:
+        if recurrence_lookup is None:
             return None
         return recurrence_lookup(int(start_ms), capture_end)
 
@@ -257,51 +246,46 @@ def evaluate_utterance_progress(
             and lexical.committed_target_end
             and lexical.target_end_ms is not None
         )
-        measured: list[tuple[VocalEvidenceSeries, int]] = []
+        measured: list[tuple[VocalEvidenceSeries, VocalScoreSample]] = []
         for series in vocal.series if vocal is not None else ():
-            last_positive = _latest_positive_ms(series, not_before_ms=target_start)
+            last_positive = _latest_positive(series, not_before_ms=target_start)
             if last_positive is not None:
                 measured.append((series, last_positive))
 
-        if not complete:
-            if any(
-                _has_recent_positive(
-                    series, last_positive_ms=last, evidence_end_ms=capture_end)
-                for series, last in measured
-            ):
-                return UtteranceProgress(
-                    state=UtteranceProgressState.ACTIVE,
-                    evidence_at_ms=capture_end), None
-            return UtteranceProgress(
-                state=UtteranceProgressState.UNKNOWN,
-                evidence_at_ms=capture_end), None
-
-        target_end = int(lexical.target_end_ms)
         if not measured:
             return UtteranceProgress(
                 state=UtteranceProgressState.UNKNOWN,
                 evidence_at_ms=capture_end), None
 
-        still_open = any(
-            _has_recent_positive(
-                series, last_positive_ms=last, evidence_end_ms=capture_end,
-                not_before_ms=target_end)
-            for series, last in measured
-        )
-        if still_open:
-            recurrence = recurrence_if_needed(target_end)
-            if _stable_recurrence(
-                recurrence, start_ms=target_end, capture_end_ms=capture_end,
-            ):
+        if complete:
+            target_end = int(lexical.target_end_ms)
+            open_risk = any(
+                not _observed_closed_after(
+                    series, last_positive=last_positive, not_before_ms=target_end)
+                for series, last_positive in measured
+            )
+            if open_risk:
+                recurrence = recurrence_for(target_end)
+                if _stable_recurrence(recurrence):
+                    return UtteranceProgress(
+                        state=UtteranceProgressState.UNKNOWN,
+                        evidence_at_ms=capture_end), recurrence
                 return UtteranceProgress(
-                    state=UtteranceProgressState.UNKNOWN,
+                    state=UtteranceProgressState.ACTIVE,
                     evidence_at_ms=capture_end), recurrence
             return UtteranceProgress(
-                state=UtteranceProgressState.ACTIVE,
-                evidence_at_ms=capture_end), recurrence
+                state=UtteranceProgressState.ENDED,
+                evidence_at_ms=capture_end), None
 
+        if any(
+            not _observed_closed_after(series, last_positive=last_positive)
+            for series, last_positive in measured
+        ):
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE,
+                evidence_at_ms=capture_end), None
         return UtteranceProgress(
-            state=UtteranceProgressState.ENDED,
+            state=UtteranceProgressState.UNKNOWN,
             evidence_at_ms=capture_end), None
 
     timing_facts = (int(causal_lower_bound_ms),) if causal_lower_bound_ms is not None else tuple(
@@ -311,21 +295,20 @@ def evaluate_utterance_progress(
             state=UtteranceProgressState.UNKNOWN,
             evidence_at_ms=capture_end), None
 
-    open_measurements: list[tuple[VocalEvidenceSeries, int, int]] = []
+    open_starts: list[int] = []
     for series in vocal.series if vocal is not None else ():
-        current = _current_positive_run_after(
-            series, timing_ms=timing_facts, evidence_end_ms=capture_end)
-        if current is not None:
-            open_measurements.append((series, current[0], current[1]))
+        start_ms = _open_activity_start(series)
+        if start_ms is not None and any(fact <= start_ms for fact in timing_facts):
+            open_starts.append(start_ms)
 
-    if not open_measurements:
+    if not open_starts:
         return UtteranceProgress(
             state=UtteranceProgressState.UNKNOWN,
             evidence_at_ms=capture_end), None
 
-    recurrence_start = min(first for _series, first, _last in open_measurements)
-    recurrence = recurrence_if_needed(recurrence_start)
-    if _stable_recurrence(recurrence, start_ms=recurrence_start, capture_end_ms=capture_end):
+    recurrence_start = min(open_starts)
+    recurrence = recurrence_for(recurrence_start)
+    if _stable_recurrence(recurrence):
         return UtteranceProgress(
             state=UtteranceProgressState.UNKNOWN,
             evidence_at_ms=capture_end), recurrence

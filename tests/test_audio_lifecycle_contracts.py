@@ -491,7 +491,7 @@ def test_recurrence_remains_optional_evidence_when_direct_endpoint_risk_stays_op
         assert first_snapshot.lexical.committed_target_end
         assert first_snapshot.recurrence is None
 
-        tail = stereo_chunk(3800, 1800, value=.05)
+        tail = stereo_chunk(4000, 2000, value=.05)
         native.history.push(tail, target_pid=42)
         native.feed(tail)
         wait_until(lambda: any(

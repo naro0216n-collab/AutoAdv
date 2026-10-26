@@ -77,10 +77,23 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     active, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=True)
     active_token = observe(active, '「短い本文」')
     assert active_token is not None
-    assert not active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.ACTIVE))
+    # Audio progress is not a one-way latch.  Repeated acoustic evidence may
+    # reopen and release cut risk any number of times before the fallback policy
+    # boundary; none of those transitions completes the Presentation itself.
+    for state in (
+        UtteranceProgressState.ACTIVE,
+        UtteranceProgressState.UNKNOWN,
+        UtteranceProgressState.ACTIVE,
+        UtteranceProgressState.UNKNOWN,
+        UtteranceProgressState.ACTIVE,
+    ):
+        assert not active.apply_utterance_progress(
+            active_token, UtteranceProgress(state=state))
     assert not active.presentation_event(active_token, 'fallback_due')
     assert active.presentation_reason is None and not active.completed
+    # Once the explicit fallback deadline has elapsed, the next unresolved
+    # audio judgment may complete by fallback.  This is the only time-driven
+    # completion path; UNKNOWN itself is never an audio endpoint.
     assert active.apply_utterance_progress(active_token, UtteranceProgress(
         state=UtteranceProgressState.UNKNOWN))
     assert active.presentation_reason == 'uncertain_text_fallback'
