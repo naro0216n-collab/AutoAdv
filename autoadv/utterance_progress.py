@@ -8,9 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from statistics import median
 from typing import TYPE_CHECKING, Callable
-
-import numpy as np
 
 if TYPE_CHECKING:
     from .forced_alignment import TargetTimeAlignment
@@ -166,9 +165,9 @@ def _series_timing(series: VocalEvidenceSeries) -> tuple[float, float]:
         return 16.0, 16.0
     times = [sample.at_ms for sample in series.samples]
     gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
-    cadence = float(np.median(gaps)) if gaps else 16.0
+    cadence = float(median(gaps)) if gaps else 16.0
     widths = [max(0, sample.at_ms - sample.support_start_ms) for sample in series.samples]
-    support = float(np.median(widths)) if widths else cadence
+    support = float(median(widths)) if widths else cadence
     return max(1.0, cadence), max(1.0, support)
 
 
