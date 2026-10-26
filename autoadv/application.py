@@ -1299,7 +1299,7 @@ class AutoAdvApplication:
                 and progress.evidence_at_ms < previous.evidence_at_ms):
             return False
 
-        if progress != previous:
+        if progress.state != previous.state:
             self._emit_runtime_event(
                 'utterance_progress', token,
                 state=progress.state.value,

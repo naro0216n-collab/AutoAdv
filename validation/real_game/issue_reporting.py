@@ -39,7 +39,8 @@ DIAGNOSTIC_DIGEST_RE = re.compile(
     r"(?P<digest>[0-9a-f]{64})\s*-->"
 )
 HUMAN_VOCAL_REPORT = "autoadv-human-vocal.result.json"
-TRACE_DELTA_EVENTS = frozenset({"native_audio_observation", "alignment_inference"})
+TRACE_DELTA_EVENTS = frozenset({"native_audio_observation", "alignment_inference", "hook_event"})
+TRACE_ENCODING = "causal-delta-jsonl-v2"
 
 
 def history_marker(slot: int) -> str:
@@ -159,14 +160,155 @@ def _markdown_fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _compact_product_trace(content: str) -> tuple[str, str]:
-    """Losslessly delta-encode repeated acoustic snapshot payload fields.
+def _trace_envelope(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        name: item[name]
+        for name in ("event", "seq", "at_ns", "session", "line")
+        if name in item
+    }
 
-    Sequence/time envelopes remain on every event.  For the selected high-rate
-    events, omitted payload fields inherit from ``delta_from_seq``; explicit
-    ``delta_remove`` entries remove fields.  The first event for a token remains
-    a full snapshot, so the shared trace can be reconstructed without the local
-    file.  Invalid/non-trace JSONL is returned unchanged.
+
+def _trace_payload(item: dict[str, Any]) -> dict[str, Any]:
+    envelope = {"event", "seq", "at_ns", "session", "line"}
+    return {name: value for name, value in item.items() if name not in envelope}
+
+
+def _normalize_trace_payload(event: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize repeated measurement collections into provenance-keyed facts."""
+    normalized = dict(payload)
+    if event != "native_audio_observation":
+        return normalized
+    series = normalized.pop("vocal_series", None)
+    if not isinstance(series, list):
+        if series is not None:
+            normalized["vocal_series"] = series
+        return normalized
+    by_observer: dict[str, Any] = {}
+    for entry in series:
+        if not isinstance(entry, dict) or not isinstance(entry.get("observer"), str):
+            normalized["vocal_series"] = series
+            return normalized
+        observer = entry["observer"]
+        by_observer[observer] = {
+            name: value for name, value in entry.items() if name != "observer"
+        }
+    normalized["vocal_by_observer"] = by_observer
+    return normalized
+
+
+def _deep_delta(
+    current: dict[str, Any], previous: dict[str, Any], *, prefix: str = "",
+) -> tuple[dict[str, Any], list[str]]:
+    """Return a recursive merge delta plus explicit removed field paths."""
+    changed: dict[str, Any] = {}
+    removed: list[str] = []
+    for name, value in current.items():
+        path = f"{prefix}.{name}" if prefix else name
+        if name not in previous:
+            changed[name] = value
+            continue
+        old = previous[name]
+        if isinstance(value, dict) and isinstance(old, dict):
+            nested, nested_removed = _deep_delta(value, old, prefix=path)
+            if nested:
+                changed[name] = nested
+            removed.extend(nested_removed)
+        elif value != old:
+            changed[name] = value
+    for name in previous:
+        if name not in current:
+            removed.append(f"{prefix}.{name}" if prefix else name)
+    return changed, removed
+
+
+def _hook_signature_from_event(record: dict[str, Any]) -> tuple[Any, ...] | None:
+    value = record.get("hook_event")
+    if not isinstance(value, dict) or value.get("kind") != "output":
+        return None
+    source = value.get("source")
+    if not isinstance(source, dict):
+        return None
+    identity = f"{source.get('hook_code', '')}|{source.get('context')}|{source.get('context2')}"
+    return (
+        value.get("host_generation"), value.get("connection_generation"),
+        value.get("sequence"), value.get("received_ns"), value.get("process_id"),
+        source.get("address"), source.get("context"), source.get("context2"),
+        identity, value.get("text"),
+    )
+
+
+def _hook_signature_from_selection(record: dict[str, Any]) -> tuple[Any, ...] | None:
+    if record.get("event") != "hook_output":
+        return None
+    return (
+        record.get("generation"), record.get("connection"), record.get("hook_sequence"),
+        record.get("received_ns"), record.get("pid"), record.get("address"),
+        record.get("context"), record.get("context2"), record.get("source"), record.get("raw"),
+    )
+
+
+def _observation_index(records: list[dict[str, Any]]) -> dict[tuple[Any, Any, Any], list[int]]:
+    result: dict[tuple[Any, Any, Any], list[int]] = {}
+    for record in records:
+        if record.get("event") != "native_audio_observation":
+            continue
+        key = (record.get("session"), record.get("line"), record.get("evidence_at_ms"))
+        seq = record.get("seq")
+        if isinstance(seq, int):
+            result.setdefault(key, []).append(seq)
+    return result
+
+
+def _referenced_observation_seq(
+    index: dict[tuple[Any, Any, Any], list[int]], record: dict[str, Any],
+    evidence_at_ms: Any, *, before: bool,
+) -> int | None:
+    seq = record.get("seq")
+    if not isinstance(seq, int):
+        return None
+    values = index.get((record.get("session"), record.get("line"), evidence_at_ms), ())
+    candidates = [value for value in values if (value < seq if before else value > seq)]
+    if not candidates:
+        return None
+    return max(candidates) if before else min(candidates)
+
+
+def _compact_alignment_reference(
+    record: dict[str, Any], observation_records: dict[int, dict[str, Any]],
+    observation_index: dict[tuple[Any, Any, Any], list[int]],
+) -> dict[str, Any]:
+    """Keep inference work facts and reference equal product-observation results."""
+    compact = dict(record)
+    boundary = compact.get("capture_end_ms")
+    observation_seq = _referenced_observation_seq(
+        observation_index, compact, boundary, before=False)
+    if observation_seq is None:
+        return compact
+    observation = observation_records.get(observation_seq)
+    if observation is None:
+        return compact
+    compact["observation_seq"] = observation_seq
+    if observation.get("evidence_at_ms") == boundary:
+        compact.pop("capture_end_ms", None)
+    for name in (
+        "causal_lower_bound_ms", "input_candidates_ms", "target_attached_ms",
+        "target_units", "aligned_target_units", "target_associated",
+        "complete_alignment", "committed_target_end", "lexical_target_end_ms",
+    ):
+        if name in compact and observation.get(name) == compact[name]:
+            compact.pop(name, None)
+    return compact
+
+
+def _compact_product_trace(content: str) -> tuple[str, str]:
+    """Build a causal, analysis-complete Issue representation of product trace.
+
+    The local JSONL remains the durable complete event stream.  The Issue copy
+    preserves every upstream observation and one-time action while removing
+    state heartbeats and repeated snapshot fields.  High-rate measurement
+    records use recursive deltas, selected Hook outputs reference their upstream
+    Hook event, and alignment work references the product observation carrying
+    equal result facts.
     """
     raw_lines = content.splitlines()
     if not raw_lines:
@@ -180,45 +322,102 @@ def _compact_product_trace(content: str) -> tuple[str, str]:
     if records[0].get("event") != "trace_started":
         return content, "full"
 
-    encoded: list[dict[str, Any]] = []
-    previous: dict[tuple[str, Any, Any], tuple[Any, dict[str, Any]]] = {}
-    envelope_keys = ("event", "seq", "at_ns", "session", "line")
-    for index, item in enumerate(records):
+    hook_event_seqs: dict[tuple[Any, ...], list[int]] = {}
+    for record in records:
+        if record.get("event") != "hook_event":
+            continue
+        signature = _hook_signature_from_event(record)
+        seq = record.get("seq")
+        if signature is not None and isinstance(seq, int):
+            hook_event_seqs.setdefault(signature, []).append(seq)
+
+    observations = _observation_index(records)
+    observation_records = {
+        int(record["seq"]): record
+        for record in records
+        if record.get("event") == "native_audio_observation"
+        and isinstance(record.get("seq"), int)
+    }
+
+    semantic_records: list[dict[str, Any]] = []
+    progress_state: dict[tuple[Any, Any], str] = {}
+    for index, source in enumerate(records):
         if index == 0:
-            head = dict(item)
-            head["issue_encoding"] = "delta-jsonl-v1"
+            head = dict(source)
+            head["issue_encoding"] = TRACE_ENCODING
             head["delta_events"] = sorted(TRACE_DELTA_EVENTS)
-            encoded.append(head)
+            head["normalized_fields"] = {
+                "native_audio_observation.vocal_series": "vocal_by_observer"
+            }
+            head["causal_references"] = ["hook_output", "alignment_inference", "utterance_progress"]
+            head["elided_repetition"] = ["utterance_progress_same_state"]
+            semantic_records.append(head)
             continue
 
-        event = item.get("event")
+        record = dict(source)
+        event = record.get("event")
+        if event == "utterance_progress":
+            key = (record.get("session"), record.get("line"))
+            state = str(record.get("state") or "unknown")
+            prior_state = progress_state.get(key, "unknown")
+            progress_state[key] = state
+            if state == prior_state:
+                continue
+            observation_seq = _referenced_observation_seq(
+                observations, record, record.get("evidence_at_ms"), before=True)
+            if observation_seq is not None:
+                record["observation_seq"] = observation_seq
+                record.pop("evidence_at_ms", None)
+            semantic_records.append(record)
+            continue
+
+        if event == "hook_output":
+            signature = _hook_signature_from_selection(record)
+            matches = hook_event_seqs.get(signature, ()) if signature is not None else ()
+            if len(matches) == 1:
+                compact = _trace_envelope(record)
+                compact["hook_event_seq"] = matches[0]
+                semantic_records.append(compact)
+                continue
+
+        if event == "alignment_inference":
+            record = _compact_alignment_reference(record, observation_records, observations)
+        semantic_records.append(record)
+
+    encoded: list[dict[str, Any]] = []
+    previous: dict[tuple[Any, ...], tuple[Any, dict[str, Any]]] = {}
+    for record in semantic_records:
+        event = str(record.get("event"))
         if event not in TRACE_DELTA_EVENTS:
-            encoded.append(dict(item))
+            encoded.append(record)
             continue
 
-        key = (str(event), item.get("session"), item.get("line"))
-        payload = {name: value for name, value in item.items() if name not in envelope_keys}
+        if event == "hook_event":
+            key = (event,)
+        else:
+            key = (event, record.get("session"), record.get("line"))
+        payload = _normalize_trace_payload(event, _trace_payload(record))
         prior = previous.get(key)
         if prior is None:
-            encoded.append(dict(item))
+            first = _trace_envelope(record)
+            first.update(payload)
+            encoded.append(first)
         else:
             prior_seq, prior_payload = prior
-            delta = {name: value for name, value in payload.items()
-                     if name not in prior_payload or prior_payload[name] != value}
-            removed = [name for name in prior_payload if name not in payload]
-            compact = {name: item[name] for name in envelope_keys if name in item}
+            delta, removed = _deep_delta(payload, prior_payload)
+            compact = _trace_envelope(record)
             compact["delta_from_seq"] = prior_seq
             if removed:
                 compact["delta_remove"] = removed
             compact.update(delta)
             encoded.append(compact)
-        previous[key] = (item.get("seq"), payload)
+        previous[key] = (record.get("seq"), payload)
 
     rendered = "".join(
         json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
         for item in encoded
     )
-    return rendered, "delta-jsonl-v1"
+    return rendered, TRACE_ENCODING
 
 
 def _shared_representation(path: Path, content: str) -> tuple[str, str]:

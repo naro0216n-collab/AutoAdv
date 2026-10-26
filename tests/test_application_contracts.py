@@ -280,6 +280,9 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     active_scheduled = []
     active_app.configure_runtime_loop(
         schedule=lambda delay, callback: active_scheduled.append((delay, callback)))
+    active_telemetry = []
+    active_app.configure_telemetry(
+        lambda name, token, detail: active_telemetry.append((name, token, dict(detail))))
     connect_hook(active_app)
     active_token = runtime_hook(active_app, active_source, '短い本文', 2)
     assert active_token is not None
@@ -302,6 +305,14 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
                 )),)),
         recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000,
         target_attached_ms=1100))
+    active_app._consume_native_progress(active_token, UtteranceProgress(
+        state=UtteranceProgressState.ACTIVE, evidence_at_ms=1600), NativeAudioObservation(
+        vocal=HumanVocalEvidence(), recurrence=VocalRecurrenceEvidence(),
+        causal_lower_bound_ms=1000))
+    progress_events = [item for item in active_telemetry if item[0] == 'utterance_progress']
+    observation_events = [item for item in active_telemetry if item[0] == 'native_audio_observation']
+    assert len(progress_events) == 1 and progress_events[0][2]['state'] == 'active'
+    assert len(observation_events) == 2
     # Query callbacks may complete out of order. An older snapshot is telemetry,
     # not permission to replace the newer integrated judgment.
     active_app._consume_native_progress(active_token, UtteranceProgress(

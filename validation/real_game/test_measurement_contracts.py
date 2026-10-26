@@ -432,35 +432,84 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         raw = 'case2\ncase3 C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl'
         trace = [
             {'event': 'trace_started', 'version': 3, 'at_ns': 1},
-            {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'raw': raw},
+            {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'session': 1,
+             'generation': 'g', 'connection': 1, 'hook_sequence': 11, 'received_ns': 100,
+             'pid': 5, 'address': 0x1234, 'context': 1, 'context2': 2,
+             'source': 'H|1|2', 'raw': raw},
             {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
-             'session': 1, 'line': 1, 'evidence_at_ms': 1000, 'target_units': 8, 'aligned_target_units': 3,
-             'target_associated': True, 'complete_alignment': False,
-             'lexical_target_end_ms': None,
+             'session': 1, 'line': 1, 'evidence_at_ms': 1000, 'target_units': 8,
+             'aligned_target_units': 3, 'target_associated': True,
+             'complete_alignment': False, 'committed_target_end': False,
+             'causal_lower_bound_ms': 900, 'input_candidates_ms': [920],
+             'target_attached_ms': 940, 'lexical_target_end_ms': None,
              'vocal_series': [{'observer': 'nonlexical', 'frame_count': 5,
-                               'active_count': 4, 'peak_score': .93}],
+                               'active_count': 4, 'peak_score': .93,
+                               'active_score_threshold': .45,
+                               'measurement_support_start_ms': 900,
+                               'measurement_support_end_ms': 1000}],
              'recurrence_strength': .91, 'recurrence_period_ms': 640,
              'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-             'recurrence_level_consistency': .84,},
+             'recurrence_level_consistency': .84},
+            {'event': 'utterance_progress', 'seq': 3, 'at_ns': 13,
+             'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1000},
+            {'event': 'utterance_progress', 'seq': 4, 'at_ns': 14,
+             'session': 1, 'line': 1, 'state': 'active', 'evidence_at_ms': 1000},
         ]
-        trace.extend({
-            'event': 'alignment_inference', 'seq': i + 3, 'at_ns': 20 + i,
-            'session': 1, 'line': 1, 'target_associated': bool(i % 2),
-            'target_units': 8,
-            'padding': '音' * 180,
-        } for i in range(220))
-        trace.append({
-            'event': 'native_audio_observation', 'seq': 223, 'at_ns': 300,
-            'session': 1, 'line': 1, 'evidence_at_ms': 1500,
-            'target_units': 8, 'aligned_target_units': 3,
-            'target_associated': True, 'complete_alignment': False,
-            'lexical_target_end_ms': None,
-            'vocal_series': [{'observer': 'nonlexical', 'frame_count': 5,
-                              'active_count': 4, 'peak_score': .93}],
-            'recurrence_strength': .91, 'recurrence_period_ms': 640,
-            'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-            'recurrence_level_consistency': .84,
-        })
+        for i in range(220):
+            row = {
+                'event': 'alignment_inference', 'seq': i + 5, 'at_ns': 20 + i,
+                'session': 1, 'line': 1, 'target_associated': bool(i % 2),
+                'target_units': 8, 'padding': '音' * 180,
+            }
+            if i == 219:
+                row.update({
+                    'capture_end_ms': 1500, 'aligned_target_units': 3,
+                    'target_associated': True, 'complete_alignment': False,
+                    'committed_target_end': False, 'causal_lower_bound_ms': 900,
+                    'input_candidates_ms': [920], 'target_attached_ms': 940,
+                    'lexical_target_end_ms': None, 'queue_ms': 3.0, 'align_ms': 10.0,
+                    'path_margin': 2.5,
+                })
+            trace.append(row)
+        trace.extend([
+            {'event': 'native_audio_observation', 'seq': 225, 'at_ns': 300,
+             'session': 1, 'line': 1, 'evidence_at_ms': 1500,
+             'target_units': 8, 'aligned_target_units': 3,
+             'target_associated': True, 'complete_alignment': False,
+             'committed_target_end': False, 'causal_lower_bound_ms': 900,
+             'input_candidates_ms': [920], 'target_attached_ms': 940,
+             'lexical_target_end_ms': None,
+             'vocal_series': [{'observer': 'nonlexical', 'frame_count': 7,
+                               'active_count': 5, 'peak_score': .93,
+                               'active_score_threshold': .45,
+                               'measurement_support_start_ms': 900,
+                               'measurement_support_end_ms': 1500}],
+             'recurrence_strength': .91, 'recurrence_period_ms': 640,
+             'recurrence_stability': .82, 'recent_recurrence_strength': .88,
+             'recurrence_level_consistency': .84},
+            {'event': 'utterance_progress', 'seq': 226, 'at_ns': 301,
+             'session': 1, 'line': 1, 'state': 'active', 'evidence_at_ms': 1500},
+            {'event': 'utterance_progress', 'seq': 227, 'at_ns': 302,
+             'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1500},
+            {'event': 'hook_event', 'seq': 228, 'at_ns': 303,
+             'hook_event': {
+                 'kind': 'output', 'host_generation': 'g', 'connection_generation': 1,
+                 'sequence': 11, 'received_ns': 100, 'process_id': 5,
+                 'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
+                            'context2': 2, 'hook_code': 'H', 'hook_name': 'name'},
+                 'text': raw, 'detail': ''},
+             'outcome': {'connection_transition': None, 'capture': {'changed': False},
+                         'token': None, 'flush_delay_ms': None, 'note': ''}},
+            {'event': 'hook_event', 'seq': 229, 'at_ns': 304,
+             'hook_event': {
+                 'kind': 'output', 'host_generation': 'g', 'connection_generation': 1,
+                 'sequence': 12, 'received_ns': 101, 'process_id': 5,
+                 'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
+                            'context2': 2, 'hook_code': 'H', 'hook_name': 'name'},
+                 'text': 'other', 'detail': ''},
+             'outcome': {'connection_transition': None, 'capture': {'changed': False},
+                         'token': None, 'flush_delay_ms': None, 'note': ''}},
+        ])
         trace_text = ''.join(
             json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in trace)
         (root / 'autoadv-accuracy.jsonl').write_text(trace_text, encoding='utf-8')
@@ -505,45 +554,37 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
 
         compact_trace, representation = issue_reporting._compact_product_trace(
             issue_reporting.sanitize_public_issue(trace_text))
-        assert representation == 'delta-jsonl-v1'
+        assert representation == issue_reporting.TRACE_ENCODING
         assert len(compact_trace) < len(issue_reporting.sanitize_public_issue(trace_text))
         compact_records = [json.loads(line) for line in compact_trace.splitlines()]
-        assert compact_records[0]['issue_encoding'] == 'delta-jsonl-v1'
+        assert compact_records[0]['issue_encoding'] == issue_reporting.TRACE_ENCODING
         assert any(record.get('delta_from_seq') for record in compact_records)
 
-        # Reconstruct delta events and prove that compaction changes representation,
-        # not the factual event stream.
-        state = {}
-        reconstructed = []
-        envelope = {'event', 'seq', 'at_ns', 'session', 'line'}
-        for record in compact_records:
-            item = dict(record)
-            if item.get('event') == 'trace_started':
-                item.pop('issue_encoding', None); item.pop('delta_events', None)
-                reconstructed.append(item)
-                continue
-            key = (item.get('event'), item.get('session'), item.get('line'))
-            if item.get('event') in issue_reporting.TRACE_DELTA_EVENTS:
-                previous = dict(state.get(key, {}))
-                delta_from = item.pop('delta_from_seq', None)
-                removed = item.pop('delta_remove', [])
-                if delta_from is not None:
-                    for name in removed:
-                        previous.pop(name, None)
-                    for name, value in item.items():
-                        if name not in envelope:
-                            previous[name] = value
-                    full = {name: item[name] for name in ('event', 'seq', 'at_ns', 'session', 'line') if name in item}
-                    full.update(previous)
-                    reconstructed.append(full)
-                    state[key] = previous
-                    continue
-                state[key] = {name: value for name, value in item.items() if name not in envelope}
-            reconstructed.append(item)
-        sanitized_source_records = [
-            json.loads(line) for line in issue_reporting.sanitize_public_issue(trace_text).splitlines()
-        ]
-        assert reconstructed == sanitized_source_records
+        by_seq = {record.get('seq'): record for record in compact_records if 'seq' in record}
+        assert by_seq[1]['hook_event_seq'] == 228
+        assert 'raw' not in by_seq[1] and 'source' not in by_seq[1]
+        assert 3 not in by_seq and 226 not in by_seq  # unchanged UNKNOWN/ACTIVE heartbeats
+        assert by_seq[4]['state'] == 'active' and by_seq[4]['observation_seq'] == 2
+        assert 'evidence_at_ms' not in by_seq[4]
+        assert by_seq[227]['state'] == 'unknown' and by_seq[227]['observation_seq'] == 225
+
+        second_observation = by_seq[225]
+        assert second_observation['delta_from_seq'] == 2
+        vocal_delta = second_observation['vocal_by_observer']['nonlexical']
+        assert vocal_delta == {
+            'frame_count': 7, 'active_count': 5, 'measurement_support_end_ms': 1500}
+        assert 'active_score_threshold' not in vocal_delta
+
+        paired_alignment = by_seq[224]
+        assert paired_alignment['observation_seq'] == 225
+        assert 'capture_end_ms' not in paired_alignment
+        assert 'target_units' not in paired_alignment
+        assert paired_alignment['queue_ms'] == 3.0 and paired_alignment['path_margin'] == 2.5
+
+        second_hook_event = by_seq[229]
+        assert second_hook_event['delta_from_seq'] == 228
+        assert second_hook_event['hook_event'] == {
+            'sequence': 12, 'received_ns': 101, 'text': 'other'}
 
         first_snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
         assert len(first_snapshot.parts) >= 2
@@ -553,7 +594,7 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         assert 'autoadv-accuracy.result.json' in first_snapshot.body
         assert 'validation-summary.json' in first_snapshot.body
         assert 'validation.log' not in first_snapshot.body
-        assert 'delta-jsonl-v1' in first_snapshot.body
+        assert issue_reporting.TRACE_ENCODING in first_snapshot.body
         assert '"source_endpoint_ms": 1234.5' in first_snapshot.body
         assert 'case2\\ncase3 <USERPROFILE>\\\\AutoAdv <REDACTED-TOKEN>' in first_snapshot.body
         assert 'observer-full-detail' in first_snapshot.body  # first unseen diagnostic digest is shared once
