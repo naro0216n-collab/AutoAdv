@@ -237,7 +237,7 @@ class AcousticObservationHistory:
         "nonlexical": 0.45,
     }
     MIN_RECURRENCE_LAG_MS = 300
-    MIN_RECURRENCE_CYCLES = 3
+    MIN_RECURRENCE_CYCLES = 4
 
     def __init__(self, *, horizon_ms: int = 10 * 60 * 1000):
         self.horizon_ms = int(horizon_ms)
@@ -345,63 +345,61 @@ class AcousticObservationHistory:
         if maximum_lag < minimum_lag:
             return ()
 
-        candidates: list[VocalRecurrenceEvidence] = []
+        measured: list[tuple[int, float]] = []
         for lag in range(minimum_lag, maximum_lag + 1):
-            # Recurrence describes structure that is still present now, not how
-            # well the entire lifetime of an activity run fits one period.  Use
-            # only the most recent evidence required to compare several cycles
-            # for each candidate lag.  Old onset transients and independent
-            # periodic modulation (for example BGM leaking into a vocal score)
-            # therefore cannot accumulate indefinitely and erase an otherwise
-            # continuing recurrent component.
-            local_count = min(
-                values.shape[0],
-                lag * (cls.MIN_RECURRENCE_CYCLES + 1),
-            )
+            # A recurrent source must reproduce the same *shape* over several
+            # consecutive cycles, including the cycle ending at the current
+            # frontier.  Compare adjacent recent cycles rather than averaging
+            # unrelated notions of level, recency and stability into separate
+            # acceptance gates.  Center every cycle independently so a steady
+            # vocal level is persistence, not recurrence.
+            local_count = lag * cls.MIN_RECURRENCE_CYCLES
+            if values.shape[0] < local_count:
+                continue
             local = values[-local_count:]
-            left = local[:-lag]
-            right = local[lag:]
-            if left.shape[0] < lag * (cls.MIN_RECURRENCE_CYCLES - 1):
-                continue
-            # Remove each feature's own temporal mean.  A steady vocal/class
-            # profile is persistence, not recurrence, even when different class
-            # dimensions have different absolute levels.
-            left_centered = left - left.mean(axis=0, keepdims=True)
-            right_centered = right - right.mean(axis=0, keepdims=True)
-            denom = float(np.linalg.norm(left_centered) * np.linalg.norm(right_centered))
-            if denom <= 1e-8:
-                # A sustained flat vocal score is persistence, not evidence of
-                # recurrence.  Releasing it as a loop would cut long finite cries.
-                continue
-            correlation = max(0.0, min(1.0, float(
-                np.vdot(left_centered, right_centered) / denom)))
-            pair_similarity = np.clip(
-                1.0 - np.mean(np.abs(left - right), axis=1), 0.0, 1.0)
-            level_consistency = float(pair_similarity.mean())
-            recent_count = min(lag, pair_similarity.size)
-            recent_strength = float(pair_similarity[-recent_count:].mean())
-
-            cycle_scores: list[float] = []
-            for offset in range(0, pair_similarity.size, lag):
-                part = pair_similarity[offset:offset + lag]
-                if part.size:
-                    cycle_scores.append(float(part.mean()))
-            if len(cycle_scores) < cls.MIN_RECURRENCE_CYCLES - 1:
-                continue
-            spread = float(np.std(cycle_scores))
-            period_stability = max(0.0, min(1.0, 1.0 - spread / 0.25))
-            evidence = VocalRecurrenceEvidence(
-                strength=correlation,
-                period_ms=int(round(lag * cadence)),
-                period_stability=period_stability,
-                recent_strength=recent_strength,
-                level_consistency=level_consistency,
+            cycles = tuple(
+                local[index * lag:(index + 1) * lag]
+                for index in range(cls.MIN_RECURRENCE_CYCLES)
             )
-            candidates.append(evidence)
+            correlations: list[float] = []
+            for earlier, later in zip(cycles, cycles[1:]):
+                earlier_centered = earlier - earlier.mean(axis=0, keepdims=True)
+                later_centered = later - later.mean(axis=0, keepdims=True)
+                denom = float(
+                    np.linalg.norm(earlier_centered) * np.linalg.norm(later_centered))
+                if denom <= 1e-8:
+                    correlations = []
+                    break
+                correlations.append(max(0.0, min(1.0, float(
+                    np.vdot(earlier_centered, later_centered) / denom))))
+            if len(correlations) != cls.MIN_RECURRENCE_CYCLES - 1:
+                continue
+            # The weakest adjacent transition is the repeatability of this lag.
+            # This makes a broken latest cycle immediately stop being recurrent
+            # without retaining a sticky historical loop state.
+            measured.append((lag, min(correlations)))
 
-        # Progression owns the acceptance contract.  Keep every measured period
-        # candidate so the observer layer never discards a valid recurrence
-        # merely because another lag ranks better under a different reduction.
+        if not measured:
+            return ()
+
+        # High self-similarity alone is not periodicity: a slowly changing finite
+        # sound can correlate at almost every lag.  Period prominence measures
+        # whether this lag stands out from the other admissible lags in the same
+        # observer/query.  It therefore distinguishes a period from generic
+        # temporal smoothness without introducing source or loop labels.
+        candidates: list[VocalRecurrenceEvidence] = []
+        for lag, strength in measured:
+            other_strengths = [value for other_lag, value in measured if other_lag != lag]
+            baseline = float(np.median(other_strengths)) if other_strengths else strength
+            candidates.append(VocalRecurrenceEvidence(
+                strength=float(strength),
+                period_ms=int(round(lag * cadence)),
+                prominence=max(0.0, float(strength) - baseline),
+            ))
+
+        # Progression owns the acceptance contract. Keep every measured period
+        # candidate so one stronger but non-specific lag cannot hide another
+        # genuinely periodic candidate.
         return tuple(candidates)
 
     def recurrences(
@@ -441,10 +439,4 @@ class AcousticObservationHistory:
         )
         if not candidates:
             return VocalRecurrenceEvidence()
-        return max(
-            candidates,
-            key=lambda item: min(
-                item.strength, item.period_stability,
-                item.recent_strength, item.level_consistency,
-            ),
-        )
+        return max(candidates, key=lambda item: (item.prominence, item.strength))

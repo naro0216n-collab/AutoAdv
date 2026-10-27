@@ -243,8 +243,27 @@ def test_offline_verifier_keeps_authored_external_input_separate_from_product_ad
         [row for row in authored_records if row.get('event') != 'game_input_observed'],
         phase='accuracy', fixture_records=authored_fixture)
     assert missing_observation['verdict'] == 'incomplete'
-    assert any('authored validation input was not observed' in issue
+    assert any('validation external input was not observed' in issue
                for issue in missing_observation['evidence_issues'])
+
+    # Recovery is a separate validation fact, but it now uses the same real
+    # external-input path and therefore must be observed by the product too.
+    with_recovery = authored_records + [
+        {'event': 'game_input_observed', 'seq': 5, 'at_ns': voice_ns + 160_000_000,
+         'at_ms': 1240},
+        {'event': 'validation_recovery_input', 'seq': 6, 'at_ns': voice_ns + 170_000_000,
+         'case': ACCURACY_SCENARIO[1]['id'], 'watchdog_seconds': 12.0},
+    ]
+    observed_recovery = validate(
+        with_recovery, phase='accuracy', fixture_records=authored_fixture)
+    assert not any('validation external input was not observed' in issue
+                   for issue in observed_recovery['evidence_issues'])
+    missing_recovery_observation = validate(
+        [row for row in with_recovery
+         if not (row.get('event') == 'game_input_observed' and row.get('seq') == 5)],
+        phase='accuracy', fixture_records=authored_fixture)
+    assert any('validation external input was not observed' in issue
+               for issue in missing_recovery_observation['evidence_issues'])
 
 
 def test_authored_game_input_activates_game_and_uses_low_level_keyboard_stimulus(monkeypatch):
@@ -369,7 +388,7 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
             {'timeout_seconds': 60, 'phase': 'accuracy', 'dialogues': 3,
              'continue_collection': True, 'evidence': str(evidence),
              'case_watchdog_seconds': 12.0, 'final_observation_seconds': 12.0},
-            trace, clock=lambda: clock[0], recovery_send=lambda state: recoveries.append(state.target.hwnd),
+            trace, clock=lambda: clock[0], game_input_send=lambda state: recoveries.append(state.target.hwnd),
         )
         driver.state = 'running'
         driver.tick()  # observe case-1
@@ -540,8 +559,7 @@ def _write_issue_run(root: Path, *, runner_error: str | None = None, large_fixtu
                            'measurement_support_start_ms': 900,
                            'measurement_support_end_ms': 1000}],
          'recurrence_strength': .91, 'recurrence_period_ms': 640,
-         'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-         'recurrence_level_consistency': .84},
+         'recurrence_prominence': .24},
         {'event': 'utterance_progress', 'seq': 4, 'at_ns': 14,
          'session': 1, 'line': 1, 'state': 'active', 'evidence_at_ms': 1000},
     ]
@@ -569,8 +587,7 @@ def _write_issue_run(root: Path, *, runner_error: str | None = None, large_fixtu
                            'measurement_support_start_ms': 900,
                            'measurement_support_end_ms': 1500}],
          'recurrence_strength': .91, 'recurrence_period_ms': 640,
-         'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-         'recurrence_level_consistency': .84},
+         'recurrence_prominence': .24},
         {'event': 'utterance_progress', 'seq': 61, 'at_ns': 301,
          'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1500},
         {'event': 'hook_event', 'seq': 62, 'at_ns': 302,

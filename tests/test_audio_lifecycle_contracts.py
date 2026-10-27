@@ -787,7 +787,16 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     # prevents a long finite cry from being released merely for being steady.
     assert flat_finite_risk.period_ms is None
     assert changing.strength < periodic.strength
-    assert changing.recent_strength < periodic.recent_strength
+    assert changing.prominence < periodic.prominence
+
+    # Slow finite change can be highly self-similar at many lags. It is not a
+    # period unless one lag stands out from that generic temporal smoothness.
+    smooth = recurrence_for_cycles(tuple(
+        tuple(.5 + .01 * (cycle * 6 + index) for index in range(6))
+        for cycle in range(6)
+    ))
+    assert smooth.strength > .9
+    assert smooth.prominence == 0.0
 
     # Recurrence is a current measurement, not whole-run conformity.  Earlier
     # non-periodic activity must age out once enough recent cycles repeat.  A
@@ -815,12 +824,8 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     history.add_vocal(tuple(frames))
     current = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
     assert current.period_ms is not None
-    assert min(
-        current.strength,
-        current.period_stability,
-        current.recent_strength,
-        current.level_consistency,
-    ) > .85
+    assert current.strength > .85
+    assert current.prominence > 0.0
 
     # The same cache must also stop reporting the old recurrence after the
     # recent score structure changes; no sticky loop state is retained.
@@ -837,7 +842,7 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     history.add_vocal(tuple(later_frames))
     later = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
     assert later.strength < current.strength
-    assert later.recent_strength < current.recent_strength
+    assert later.prominence < current.prominence
 
     # Human-vocal event observers expose class structure that a scalar maximum
     # cannot retain.  A loop can keep the same peak activity level while its

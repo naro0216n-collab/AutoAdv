@@ -42,13 +42,11 @@ class HumanVocalEvidence:
 
 @dataclass(frozen=True)
 class VocalRecurrenceEvidence:
-    """Repeated structure measured from a human-vocal observer time series."""
+    """Current periodic repetition measured from one human-vocal observer."""
 
     strength: float = 0.0
     period_ms: int | None = None
-    period_stability: float = 0.0
-    recent_strength: float = 0.0
-    level_consistency: float = 0.0
+    prominence: float = 0.0
 
 
 class UtteranceProgressState(str, Enum):
@@ -131,10 +129,8 @@ class UtteranceProgress:
         return self.state == UtteranceProgressState.UNKNOWN
 
 
-LOOP_STRENGTH = 0.78
-LOOP_STABILITY = 0.60
-RECENT_LOOP_STRENGTH = 0.72
-LOOP_LEVEL_CONSISTENCY = 0.55
+LOOP_REPEATABILITY = 0.60
+LOOP_PERIOD_PROMINENCE = 0.10
 
 # A threshold crossing is a measurement, not an endpoint. Releasing an already
 # observed finite-vocal risk requires a contiguous span of explicitly measured
@@ -257,10 +253,8 @@ def _stable_recurrence(recurrence: VocalRecurrenceEvidence | None) -> bool:
     if recurrence is None or recurrence.period_ms is None:
         return False
     return bool(
-        recurrence.strength >= LOOP_STRENGTH
-        and recurrence.period_stability >= LOOP_STABILITY
-        and recurrence.recent_strength >= RECENT_LOOP_STRENGTH
-        and recurrence.level_consistency >= LOOP_LEVEL_CONSISTENCY
+        recurrence.strength >= LOOP_REPEATABILITY
+        and recurrence.prominence >= LOOP_PERIOD_PROMINENCE
     )
 
 
@@ -271,13 +265,7 @@ def _representative_recurrence(
         return None
     stable = tuple(candidate for candidate in candidates if _stable_recurrence(candidate))
     pool = stable or candidates
-    return max(
-        pool,
-        key=lambda item: min(
-            item.strength, item.period_stability,
-            item.recent_strength, item.level_consistency,
-        ),
-    )
+    return max(pool, key=lambda item: (item.prominence, item.strength))
 
 
 def evaluate_utterance_progress(

@@ -394,11 +394,9 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
         assert same_run_with_valley.state == UtteranceProgressState.UNKNOWN
 
     stable = VocalRecurrenceEvidence(
-        strength=.9, period_ms=500, period_stability=.85,
-        recent_strength=.86, level_consistency=.9)
+        strength=.9, period_ms=500, prominence=.3)
     unstable = VocalRecurrenceEvidence(
-        strength=.9, period_ms=500, period_stability=.3,
-        recent_strength=.86, level_consistency=.9)
+        strength=.9, period_ms=500, prominence=.02)
     two_open = _vocal_evidence(
         ('speech', ((1120, .9, 1080), (1700, .9, 1660), (2300, .9, 2260))),
         ('nonlexical', ((1180, .9, 1140), (1800, .9, 1760), (2400, .9, 2360))),
@@ -419,22 +417,19 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     )
     assert released.state == UtteranceProgressState.UNKNOWN
 
-    # Recurrence is an existence claim over measured period candidates.  A
-    # different lag with a better scalar minimum cannot hide a candidate that
-    # satisfies every product recurrence dimension.
-    higher_min_but_invalid = VocalRecurrenceEvidence(
-        strength=.77, period_ms=700, period_stability=.9,
-        recent_strength=.9, level_consistency=.9)
-    valid_low_margin = VocalRecurrenceEvidence(
-        strength=.79, period_ms=1800, period_stability=.61,
-        recent_strength=.73, level_consistency=.56)
+    # Recurrence is an existence claim over measured period candidates. Generic
+    # self-similarity at one lag cannot hide a weaker but period-specific lag.
+    self_similar_not_periodic = VocalRecurrenceEvidence(
+        strength=.95, period_ms=700, prominence=.01)
+    periodic = VocalRecurrenceEvidence(
+        strength=.8, period_ms=1800, prominence=.3)
     released, measured = _progress(
         lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
-        recurrence=(higher_min_but_invalid, valid_low_margin),
+        recurrence=(self_similar_not_periodic, periodic),
     )
     assert released.state == UtteranceProgressState.UNKNOWN
-    assert measured == valid_low_margin
+    assert measured == periodic
 
     # Reading amount is deliberately a rough gate. Before excess, a committed
     # textual endpoint keeps recurrence scoped to the post-target tail. Once

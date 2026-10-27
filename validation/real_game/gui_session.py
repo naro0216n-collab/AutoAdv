@@ -84,8 +84,8 @@ class SessionDriver:
         self.w, self.qt_app, self.options, self.trace = window, qt_app, options, trace
         self.product = window.application
         self.clock = clock
-        self.recovery_send = recovery_send or self._send_validation_recovery
         self.game_input_send = game_input_send or self._send_validation_game_input
+        self.recovery_send = recovery_send or self.game_input_send
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.audio_deadline = None
@@ -234,20 +234,6 @@ class SessionDriver:
         self.game_input_cases.add(case_id)
         return True
 
-    @staticmethod
-    def _send_validation_recovery(runtime):
-        """Advance only the validation fixture after the fixed watchdog expires.
-
-        This bypasses the normal AutoAdv input path and is never exposed as a
-        product send.  The validation profile uses the ordinary per-flush repeat
-        rule, so an identical next Hook follows the same product path as any other line.
-        """
-        from autoadv.windows_input import WindowsAdvancementInput
-        if runtime.target is None or runtime.profile is None:
-            raise RuntimeError('validation recovery has no bound game target')
-        WindowsAdvancementInput(
-            runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
-
     def _fixture_cases(self):
         """Return authored fixture-case facts without interpreting game state."""
         if self.evidence_path is None or not self.evidence_path.is_file():
@@ -297,6 +283,12 @@ class SessionDriver:
         self.product.set_profile_setting('default_tts', self.options['phase'] == 'tts')
         fallback = True if self.options['phase'] == 'accuracy' else bool(self.options.get('fallback', False))
         self.product.set_profile_setting('uncertain_text_fallback', fallback)
+        if self.options['phase'] == 'accuracy':
+            force_seconds = int(self.options.get('force_advance_seconds', 10))
+            if force_seconds <= 0 or force_seconds >= self.case_watchdog_seconds:
+                raise ValueError(
+                    'accuracy force_advance_seconds must be positive and shorter than case watchdog')
+            self.product.set_profile_setting('force_advance_seconds', force_seconds)
         self.product.set_profile_setting('repeat_rule', 'each_flush')
 
         profile = self.product.current_profile()
@@ -387,6 +379,9 @@ class SessionDriver:
                         dialogues=int(self.options.get('dialogues', 0)),
                         continue_collection=bool(
                             self.options.get('continue_collection', False)),
+                        force_advance_seconds=(
+                            int(self.options.get('force_advance_seconds', 10))
+                            if self.options['phase'] == 'accuracy' else None),
                         case_watchdog_seconds=self.case_watchdog_seconds,
                         final_observation_seconds=self.final_observation_seconds)
                     self.collection_target_emitted = True

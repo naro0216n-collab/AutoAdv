@@ -1261,9 +1261,7 @@ class AutoAdvApplication:
             } for item in vocal.series] if vocal is not None else []),
             recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
             recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
-            recurrence_stability=(recurrence.period_stability if recurrence is not None else 0.0),
-            recent_recurrence_strength=(recurrence.recent_strength if recurrence is not None else 0.0),
-            recurrence_level_consistency=(recurrence.level_consistency if recurrence is not None else 0.0),
+            recurrence_prominence=(recurrence.prominence if recurrence is not None else 0.0),
         )
 
         # Alignment work and endpoint observation may complete out of order. An

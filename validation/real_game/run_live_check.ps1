@@ -137,6 +137,7 @@ try {
                 continue_collection = ($Phase -eq 'accuracy');
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool](($Phase -eq 'accuracy') -or $UncertainFallback);
+                force_advance_seconds = $(if ($Phase -eq 'accuracy') { 10 } else { 30 });
                 case_watchdog_seconds = 12.0; final_observation_seconds = 12.0
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress

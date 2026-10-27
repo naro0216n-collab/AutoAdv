@@ -433,20 +433,21 @@ def _compact_product_trace(
                     row.get("causal_lower_bound_ms"), row.get("input_candidates_ms"),
                     row.get("target_attached_ms"), vocal,
                     [row.get("recurrence_strength"), row.get("recurrence_period_ms"),
-                     row.get("recurrence_stability"), row.get("recent_recurrence_strength"),
-                     row.get("recurrence_level_consistency")],
+                     row.get("recurrence_prominence")],
                 ])
 
         recurrence_rows = [row for row in obs
                            if isinstance(row.get("recurrence_strength"), (int, float))]
-        strongest = (max(recurrence_rows, key=lambda row: float(row.get("recurrence_strength") or 0.0))
-                     if recurrence_rows else None)
+        strongest = (max(
+            recurrence_rows,
+            key=lambda row: (
+                float(row.get("recurrence_prominence") or 0.0),
+                float(row.get("recurrence_strength") or 0.0),
+            ),
+        ) if recurrence_rows else None)
         recurrence_rollup = ([
             len(recurrence_rows), strongest.get("recurrence_strength"), strongest.get("evidence_at_ms"),
-            strongest.get("recurrence_period_ms"),
-            max(float(row.get("recurrence_stability") or 0.0) for row in recurrence_rows),
-            max(float(row.get("recent_recurrence_strength") or 0.0) for row in recurrence_rows),
-            max(float(row.get("recurrence_level_consistency") or 0.0) for row in recurrence_rows),
+            strongest.get("recurrence_period_ms"), strongest.get("recurrence_prominence"),
         ] if strongest is not None else None)
 
         alignment_rows = alignments.get(key, [])
