@@ -1,10 +1,9 @@
 """Prepare and observe the ordinary AutoAdv GUI for live validation.
 
 Normal progression is owned entirely by the product Controller. The validation
-driver does not interpret product state. For the continuous Windows accuracy
-fixture it only watches the fixture's authored case-start evidence and, after a
-fixed wall-clock watchdog, may send one explicitly traced recovery input so a
-non-advancing case does not hide later cases.
+driver does not interpret product state and never advances the fixture to
+recover a stalled Presentation. The outer live-run timeout only terminates a
+collection that the product failed to progress.
 """
 from __future__ import annotations
 
@@ -14,41 +13,28 @@ from pathlib import Path
 import time
 
 CALIBRATION = 'AutoAdvフック校正専用'
+# The pinned Ren'Py fixture exposes stable Luna sources for body text and the
+# speaker-bearing aggregate. This is fixture configuration, not a
+# validation-side Hook inference rule: if either known source is absent, the
+# fixture/runtime contract is broken and the run must fail rather than select a
+# different candidate.
+FIXTURE_BODY_HOOK_IDENTITY = 'EXHQXFN0@E81D0:libpython3.12.dll|0|0'
+FIXTURE_SPEAKER_HOOK_IDENTITY = 'ENHQXFN-1C:-24@53680:LunaHook64.dll|0|2'
+FIXTURE_SPEAKER_RULE = (
+    r'^\s*(?P<speaker>[^\n]{1,40})\n?(?P<body>.+)\n(?P=body)\s*$'
+)
 ACCURACY_SCENARIO = json.loads(
     (Path(__file__).with_name('ADVANCEMENT_ACCURACY_SCENARIO.json')).read_text(encoding='utf-8'))['lines']
 ACCURACY_GAME_INPUTS_MS = {
     str(line['id']): int(line['game_input_after_ms'])
     for line in ACCURACY_SCENARIO if 'game_input_after_ms' in line
 }
-def calibration_candidates(candidates):
-    """Use the product's extraction preview, not raw substring matching.
-
-    The fixture deliberately emits calibration with a speaker.  A source is
-    usable only when AutoAdv's ordinary ``auto`` extraction resolves its body
-    to the calibration text.  This rejects speaker-only/noisy outputs while
-    keeping both body-only and structured speaker+body Hook sources usable.
-    """
-    return [candidate for candidate in candidates
-            if not candidate.ambiguous
-            and any(sample.body == CALIBRATION for sample in candidate.samples)]
-
-
-def choose_calibration_source(candidates):
-    """Pick one product-previewed candidate deterministically.
-
-    Prefer a source whose raw output already is the body.  If an engine only
-    exposes speaker+body together, the product's structural extraction preview
-    is sufficient and remains the recipe used for later dialogue.
-    """
-    matches = calibration_candidates(candidates)
-    if not matches:
-        return None
-    return min(matches, key=lambda candidate: (
-        not any(sample.body == CALIBRATION and sample.raw.strip() == CALIBRATION
-                for sample in candidate.samples),
-        candidate.identity,
-        candidate.address,
-    ))
+def fixture_source(candidates, identity):
+    """Return one preconfigured Hook source of the bundled fixture."""
+    matches = [candidate for candidate in candidates
+               if not candidate.ambiguous
+               and candidate.identity == identity]
+    return matches[0] if len(matches) == 1 else None
 
 
 def load_session(environment=None):
@@ -62,9 +48,6 @@ def load_session(environment=None):
         raise ValueError('invalid validation phase')
     if int(options['timeout_seconds']) < 10:
         raise ValueError('validation session must have a finite reasonable timeout')
-    if ('continue_collection' in options and
-            type(options['continue_collection']) is not bool):
-        raise ValueError('continue_collection must be boolean')
     return options
 
 
@@ -80,23 +63,20 @@ def select_game_window(windows, class_name):
 
 class SessionDriver:
     def __init__(self, window, qt_app, options, trace, *, clock=time.monotonic,
-                 recovery_send=None, game_input_send=None):
+                 game_input_send=None):
         self.w, self.qt_app, self.options, self.trace = window, qt_app, options, trace
         self.product = window.application
         self.clock = clock
         self.game_input_send = game_input_send or self._send_validation_game_input
-        self.recovery_send = recovery_send or self.game_input_send
         self.deadline = clock() + int(options['timeout_seconds'])
         self.state = 'select_target'
         self.audio_deadline = None
         evidence = str(options.get('evidence') or '').strip()
         self.evidence_path = Path(evidence) if evidence else None
-        self.case_watchdog_seconds = float(options.get('case_watchdog_seconds', 12.0))
         self.final_observation_seconds = float(options.get('final_observation_seconds', 12.0))
         self.current_case = None
         self.current_case_seen_at = None
         self.collection_target_seen_at = None
-        self.recovered_cases = set()
         self.game_input_cases = set()
         self.collection_target_emitted = False
         self.non_evidence_done_at = None
@@ -251,24 +231,6 @@ class SessionDriver:
                     records.append(item)
         return records
 
-    def _continue_collection_by_watchdog(self, runtime, case, now):
-        if not self.options.get('continue_collection'):
-            return False
-        case_id = str(case.get('case') or '')
-        if not case_id or case_id in self.recovered_cases:
-            return False
-        if self.current_case_seen_at is None or now - self.current_case_seen_at < self.case_watchdog_seconds:
-            return False
-        # This is deliberately ignorant of pause_reason, UtteranceProgress,
-        # playback state, Hook state and inferred completion. It is only a
-        # bounded fixture escape hatch after a long unchanged authored case.
-        self.recovery_send(runtime)
-        self.trace.emit(
-            'validation_recovery_input', case=case_id,
-            watchdog_seconds=self.case_watchdog_seconds)
-        self.recovered_cases.add(case_id)
-        return True
-
     def _configure_product(self, target):
         from autoadv.model import AdvanceMode
 
@@ -284,10 +246,9 @@ class SessionDriver:
         fallback = True if self.options['phase'] == 'accuracy' else bool(self.options.get('fallback', False))
         self.product.set_profile_setting('uncertain_text_fallback', fallback)
         if self.options['phase'] == 'accuracy':
-            force_seconds = int(self.options.get('force_advance_seconds', 10))
-            if force_seconds <= 0 or force_seconds >= self.case_watchdog_seconds:
-                raise ValueError(
-                    'accuracy force_advance_seconds must be positive and shorter than case watchdog')
+            force_seconds = int(self.options.get('force_advance_seconds', 12))
+            if force_seconds <= 0:
+                raise ValueError('accuracy force_advance_seconds must be positive')
             self.product.set_profile_setting('force_advance_seconds', force_seconds)
         self.product.set_profile_setting('repeat_rule', 'each_flush')
 
@@ -321,22 +282,37 @@ class SessionDriver:
         return state
 
     def _select_calibration_source(self):
-        candidate = choose_calibration_source(self.product.capture_view().candidates)
-        if candidate is None:
+        candidates = self.product.capture_view().candidates
+        body_candidate = fixture_source(candidates, FIXTURE_BODY_HOOK_IDENTITY)
+        speaker_candidate = fixture_source(candidates, FIXTURE_SPEAKER_HOOK_IDENTITY)
+        if body_candidate is None or speaker_candidate is None:
             return False
-        source = self.product.capture_source(
-            candidate.identity, candidate.address, require_unique=False)
-        if source is None:
+        body_source = self.product.capture_source(
+            body_candidate.identity, body_candidate.address, require_unique=False)
+        speaker_source = self.product.capture_source(
+            speaker_candidate.identity, speaker_candidate.address, require_unique=False)
+        if body_source is None or speaker_source is None:
             return False
-        # Keep the same product extraction semantics that proved the calibration
-        # body.  Forcing the raw string to ``body`` would later fold a speaker
-        # line into the acoustic alignment target and invalidate native-audio attribution.
-        self.product.set_capture_extraction_preset(source.identity, source.address, 'auto')
-        self.product.set_capture_field_source('body', source.identity, source.address)
-        self.product.set_capture_field_source('speaker', None)
+        from autoadv.model import StructureRule
+        self.product.set_capture_extraction_preset(
+            body_source.identity, body_source.address, 'body')
+        self.product.save_capture_source_rule(
+            speaker_source.identity, speaker_source.address, 0,
+            StructureRule(FIXTURE_SPEAKER_RULE))
+        body_preview = self.product.capture_candidate(body_source.identity, body_source.address)
+        speaker_preview = self.product.capture_candidate(speaker_source.identity, speaker_source.address)
+        if (body_preview is None
+                or not any(sample.body == CALIBRATION for sample in body_preview.samples)
+                or speaker_preview is None
+                or not any(sample.body == CALIBRATION and bool(sample.speaker.strip())
+                           for sample in speaker_preview.samples)):
+            raise RuntimeError('preconfigured RenPy Hooks did not expose calibration body and speaker')
+        self.product.set_capture_field_source('body', body_source.identity, body_source.address)
+        self.product.set_capture_field_source('speaker', speaker_source.identity, speaker_source.address)
         saved = self.product.commit_capture()
-        if not saved.body_source:
-            raise RuntimeError('real selected Hook was not saved as the dialogue body source')
+        if (saved.body_source != FIXTURE_BODY_HOOK_IDENTITY
+                or saved.speaker_source != FIXTURE_SPEAKER_HOOK_IDENTITY):
+            raise RuntimeError('preconfigured RenPy body/speaker Hooks were not saved')
         if self.product.runtime_state().profile is None:
             raise RuntimeError('monitor could not start from the committed capture recipe')
         return True
@@ -377,12 +353,9 @@ class SessionDriver:
                     self.trace.emit(
                         'validation_collection_target', phase=self.options['phase'],
                         dialogues=int(self.options.get('dialogues', 0)),
-                        continue_collection=bool(
-                            self.options.get('continue_collection', False)),
                         force_advance_seconds=(
-                            int(self.options.get('force_advance_seconds', 10))
+                            int(self.options.get('force_advance_seconds', 12))
                             if self.options['phase'] == 'accuracy' else None),
-                        case_watchdog_seconds=self.case_watchdog_seconds,
                         final_observation_seconds=self.final_observation_seconds)
                     self.collection_target_emitted = True
                 if self.options['phase'] != 'hook':
@@ -430,7 +403,6 @@ class SessionDriver:
                         self.w.close()
                         self.qt_app.quit()
                     return
-                self._continue_collection_by_watchdog(runtime, latest, now)
         except Exception as error:
             self.fail(str(error))
 

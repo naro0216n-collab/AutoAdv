@@ -28,7 +28,7 @@ python -m pytest -q validation/real_game/test_measurement_contracts.py
 
 ### 3. Hosted WindowsのHOOK・文字送り経路
 
-AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phaseだけを実行する。ゲームPID/HWND検出、実LunaHost接続、実Hook候補からの校正、Controllerの本文時間判断、実Windows入力、次Hookを確認する。Process Loopback、target-conditioned alignment、NativeAudioはこのHosted経路の合否条件に含めない。
+AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phaseだけを実行する。ゲームPID/HWND検出、実LunaHost接続、fixtureで既知のRen'Py body/speaker Hookの成立、Controllerの本文時間判断、実Windows入力、次Hookを確認する。fixtureは既知Hook identityと既知の構造抽出規則を設定するだけで、出力内容から別Hookを推測・自動選択しない。Process Loopback、target-conditioned alignment、NativeAudioはこのHosted経路の合否条件に含めない。
 
 ```powershell
 .\validation\real_game\run_live_check.ps1 -Phase reading `
@@ -44,11 +44,11 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
   -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated
 ```
 
-標準ケースは**件数を固定契約にせず、一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで全ケースを連続実行**する。fixtureは音源役割ではなく、`text_correspondence`、`finite_vocal_activity`、`finite_vocal_repetition`、`vocal_loop`、`vocal_crosses_boundary`、`delayed_vocal_onset`という別個のfixture事実の組合せで入力同値クラスを表す。同一ケースで複数軸が同時に成立してよく、これらはAutoAdvへ入力しない。加えて実発声開始より遅いHOOK、同一本文を異なる時間で演じるpaired case等の外部時間条件を組み合わせる。場面境界でゲーム再起動、HOOK再選択、NativeAudio/`UtteranceProgress`再初期化、profile再設定、検証用状態clearは行わない。HOOK遅延はゲーム側でvoiceを先に再生してから通常のLunaHook経路へ台詞を出し、製品へ固定HOOK通知を注入しない。
+標準ケースは**件数を固定契約にせず、一つのゲームプロセス・一組の選択HOOK・一つのAutoAdvセッションで全ケースを連続実行**する。本文はbundled fixtureで既知の`EXHQXFN0@E81D0:libpython3.12.dll|0|0`、speakerは`ENHQXFN-1C:-24@53680:LunaHook64.dll|0|2`から通常のCapture/Application経路へ渡す。speaker側はfixtureが出す「speaker + body + 改行 + body」という既知構造を既存のsource ruleで分解する。fixtureは音源役割ではなく、`text_correspondence`、`finite_vocal_activity`、`finite_vocal_repetition`、`vocal_loop`、`vocal_crosses_boundary`、`delayed_vocal_onset`という別個のfixture事実の組合せで入力同値クラスを表す。同一ケースで複数軸が同時に成立してよく、これらはAutoAdvへ入力しない。加えて実発声開始より遅いHOOK、同一本文を異なる時間で演じるpaired case等の外部時間条件を組み合わせる。場面境界でゲーム再起動、HOOK再選択、NativeAudio/`UtteranceProgress`再初期化、profile再設定、検証用状態clearは行わない。HOOK遅延はゲーム側でvoiceを先に再生してから通常のLunaHook経路へ台詞を出し、製品へ固定HOOK通知を注入しない。
 
 通常短文・長文、複数話者、囁き、泣き・叫び・喘ぎ相当、BGM、群衆会話、本文非対応の日本語人声、同文連続、ボイス途中から開始するSE、SE残響、機械環境音、本文量と原音durationが相関しない条件を組み合わせる。これらは上記fixture事実と外部刺激の条件であり、検証側が「どの音源が現在台詞か」「音声終了したか」を再推論するoracleには使用しない。
 
-accuracy scenarioが`game_input_after_ms`を持つケースでは、validation driverはfixture case開始から固定時間後に対象ゲームをforegroundへ移し、Windowsの低レベルキーボード入力を送り、`validation_game_input`として記録する。これは実利用者がactiveなゲームへキー入力する条件を再現する検証刺激であり、製品状態を直接変更しない。刺激が実際に対象ゲームへ配送されたかは`WindowsGameInputObserver`の`game_input_observed`とfixture側の進行事実から独立に確認する。authored input数に対して製品observerの観測数が不足するrunは証拠不成立として扱う。製品の外部入力検出、保持音響、ゲーム側での実際の進行は独立した事実としてのみ扱い、外部入力を音響区間下限へ昇格させたり近接時刻から対応を捏造したりしない。製品の進行状態・音声判断・HOOK状態を参照して刺激時刻を変えない。accuracyでは製品の`force_advance_seconds`を10秒に固定し、12秒のfixture watchdogより先に製品自身の最大待機を成立させる。なお製品がそれでも次ケースへ到達しない場合の`validation_recovery_input`は、authored inputと同じ低レベルキーボード経路から実際の外部入力として送り、製品の通常`WindowsGameInputObserver`にも観測させる。これにより回復でゲームだけを先へ進めたまま旧Presentationを残留させない一方、回復入力自体は`validation_recovery_input`として別記録し、製品成功やauthored inputへ算入しない。回復入力は同じfixture caseが12秒変化しない場合だけ一度送るwatchdogで、`pause_reason`、`UtteranceProgress`、Hook状態、voice channel等を参照しない。runnerが失敗とするのはtrace/evidence破損や要求fixture case未到達等の証拠収集不成立だけである。
+accuracy scenarioが`game_input_after_ms`を持つケースでは、validation driverはfixture case開始から固定時間後に対象ゲームをforegroundへ移し、Windowsの低レベルキーボード入力を送り、`validation_game_input`として記録する。これは実利用者がactiveなゲームへキー入力する条件を再現する検証刺激であり、製品状態を直接変更しない。刺激が実際に対象ゲームへ配送されたかは`WindowsGameInputObserver`の`game_input_observed`とfixture側の進行事実から独立に確認する。authored input数に対して製品observerの観測数が不足するrunは証拠不成立として扱う。製品の外部入力検出、保持音響、ゲーム側での実際の進行は独立した事実としてのみ扱い、外部入力を音響区間下限へ昇格させたり近接時刻から対応を捏造したりしない。製品の進行状態・音声判断・HOOK状態を参照して刺激時刻を変えない。accuracyでは製品の`force_advance_seconds`を12秒に固定し、各Presentationの最大待機と強制進行を通常Controllerに所有させる。validation driverは停滞したcaseを進めるrecovery入力を送らない。製品が12秒の最大待機を経ても進行しない場合は外側の有限live-run timeoutで計測自体を失敗終了し、その停止を製品側の不具合として残す。最終case後の`final_observation_seconds`は証拠収集の終端待機であり、ゲームを進行させるdeadlineではない。
 
 自動進行精度実機計測はFast CI、Windows Adapter Validation、AutoAdv Live Advancement、その他の一括／Fullテストへ含めない。
 

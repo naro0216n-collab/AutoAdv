@@ -123,7 +123,9 @@ try {
     $env:AUTOADV_VALIDATION_TRACE = $Trace
     Push-Location $repo
     try {
-        # Normal advancement remains in the production GUI Controller. Accuracy may add fixed-time authored Windows game inputs; watchdog recovery remains a separate escape hatch only when the fixture case does not change.
+        # Normal advancement remains in the production GUI Controller. Accuracy
+        # may add fixed-time authored Windows game inputs, but validation never
+        # advances a stalled case on the product's behalf.
         if ($Automated) {
             $gameExe = $resolvedGameExe
             $config = @{
@@ -134,11 +136,10 @@ try {
                     'accuracy' { @((Get-Content -LiteralPath (Join-Path $repo 'validation\real_game\ADVANCEMENT_ACCURACY_SCENARIO.json') -Raw -Encoding UTF8 | ConvertFrom-Json).lines).Count };
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
-                continue_collection = ($Phase -eq 'accuracy');
                 voice = $Voice; irodori_url = $IrodoriUrl;
                 fallback = [bool](($Phase -eq 'accuracy') -or $UncertainFallback);
-                force_advance_seconds = $(if ($Phase -eq 'accuracy') { 10 } else { 30 });
-                case_watchdog_seconds = 12.0; final_observation_seconds = 12.0
+                force_advance_seconds = $(if ($Phase -eq 'accuracy') { 12 } else { 30 });
+                final_observation_seconds = 12.0
             }
             $env:AUTOADV_VALIDATION_SESSION = ConvertTo-Json -InputObject $config -Compress
         }

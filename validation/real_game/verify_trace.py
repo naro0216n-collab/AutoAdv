@@ -125,7 +125,6 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
     voice_rows = [r for r in fixture_records if r.get('event') == 'fixture_voice_commanded']
     product_inputs = _successful_product_inputs(records, issues)
     authored_inputs = [r for r in records if r.get('event') == 'validation_game_input' and type(r.get('at_ns')) is int]
-    recoveries = [r for r in records if r.get('event') == 'validation_recovery_input' and type(r.get('at_ns')) is int]
     oracle = _endpoint_oracle_by_path()
     trace_times = [r.get('at_ns') for r in records if type(r.get('at_ns')) is int]
     trace_end = max(trace_times) if trace_times else None
@@ -175,10 +174,6 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             row for row in authored_inputs
             if row.get('case') == case_id and in_case_window(row)
         ]
-        case_recoveries = [
-            row for row in recoveries
-            if row.get('case') == case_id and in_case_window(row)
-        ]
         voice = next((row for row in voice_rows
                       if row.get('case') == case_id and in_case_window(row)), None)
 
@@ -197,8 +192,8 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             if advance_ns is not None:
                 early_input = advance_ns < earliest_end_ns
 
-        stopped = bool(case_recoveries)
-        if (not stopped and advance_ns is None and next_ns is None and trace_end is not None
+        stopped = False
+        if (advance_ns is None and next_ns is None and trace_end is not None
                 and final_observation_seconds is not None):
             stopped = trace_end - start_ns >= int(final_observation_seconds * 1_000_000_000)
 
@@ -232,7 +227,6 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             'product_input_count': len(case_inputs),
             'authored_game_input_at_ns': authored_input_ns,
             'authored_game_input_count': len(case_authored_inputs),
-            'recovery_input_at_ns': case_recoveries[0].get('at_ns') if case_recoveries else None,
             'audio_facts': dict(audio_facts),
             'authored_voice_endpoint_status': endpoint_status,
             'known_authored_voice_end_earliest_ns': earliest_end_ns,
@@ -281,14 +275,14 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
             and isinstance(r.get('input_candidates_ms'), list)),
         'auto_input_causal_bounds': sum(
             r.get('event') == 'audio_causal_lower_bound' for r in records),
-        'validation_recovery_inputs': sum(r.get('event') == 'validation_recovery_input' for r in records),
         'driver_failures': sum(r.get('event') == 'validation_driver_failure' for r in records),
     }
 
     case_results: list[dict] = []
     if phase == 'accuracy':
-        intentional_external_inputs = (
-            facts['validation_game_inputs'] + facts['validation_recovery_inputs'])
+        if any(r.get('event') == 'validation_recovery_input' for r in records):
+            issues.append('obsolete validation recovery input observed')
+        intentional_external_inputs = facts['validation_game_inputs']
         if facts['game_input_observations'] < intentional_external_inputs:
             issues.append(
                 'validation external input was not observed through the product input observer: '

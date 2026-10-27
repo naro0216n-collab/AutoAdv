@@ -779,8 +779,8 @@ def format_snapshot(
         f"Requested: `{summary.get('phase_requested', '-')}` · "
         f"{summary.get('started_utc', '-')} → {summary.get('ended_utc', '-')}",
         "",
-        "| phase | fixture/requested | hook outputs | utterances | presentations | inputs | game input | recovery | report | error |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| phase | fixture/requested | hook outputs | utterances | presentations | inputs | game input | report | error |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for phase in summary.get("phases", ()):
         facts = phase.get("facts") if isinstance(phase.get("facts"), dict) else {}
@@ -790,7 +790,6 @@ def format_snapshot(
             f"{_metric(facts.get('hook_outputs'))} | {_metric(facts.get('utterances'))} | "
             f"{_metric(facts.get('presentation_completions'))} | {_metric(facts.get('advance_inputs'))} | "
             f"{_metric(facts.get('validation_game_inputs'))} | "
-            f"{_metric(facts.get('validation_recovery_inputs'))} | "
             f"{_metric(phase.get('report_present'))} | {_cell(phase.get('runner_error'))} |"
         )
     if summary.get("launcher_error"):

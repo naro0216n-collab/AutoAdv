@@ -22,7 +22,9 @@ from validation.real_game.benchmark_alignment import run as run_alignment_benchm
 from validation.real_game.benchmark_human_vocal import summarize_frames as summarize_vocal_frames
 from autoadv.acoustic_observers import VocalActivityFrame
 from validation.real_game.gui_session import (
-    ACCURACY_GAME_INPUTS_MS, CALIBRATION, SessionDriver, calibration_candidates, choose_calibration_source, load_session,
+    ACCURACY_GAME_INPUTS_MS, CALIBRATION, FIXTURE_BODY_HOOK_IDENTITY,
+    FIXTURE_SPEAKER_HOOK_IDENTITY, FIXTURE_SPEAKER_RULE,
+    SessionDriver, fixture_source, load_session,
 )
 from validation.real_game.renpy.prepare_derived_audio import build as build_derived_audio
 from validation.real_game.trace import ProductTraceObserver, ValidationTrace
@@ -246,24 +248,15 @@ def test_offline_verifier_keeps_authored_external_input_separate_from_product_ad
     assert any('validation external input was not observed' in issue
                for issue in missing_observation['evidence_issues'])
 
-    # Recovery is a separate validation fact, but it now uses the same real
-    # external-input path and therefore must be observed by the product too.
-    with_recovery = authored_records + [
-        {'event': 'game_input_observed', 'seq': 5, 'at_ns': voice_ns + 160_000_000,
-         'at_ms': 1240},
-        {'event': 'validation_recovery_input', 'seq': 6, 'at_ns': voice_ns + 170_000_000,
-         'case': ACCURACY_SCENARIO[1]['id'], 'watchdog_seconds': 12.0},
-    ]
-    observed_recovery = validate(
-        with_recovery, phase='accuracy', fixture_records=authored_fixture)
-    assert not any('validation external input was not observed' in issue
-                   for issue in observed_recovery['evidence_issues'])
-    missing_recovery_observation = validate(
-        [row for row in with_recovery
-         if not (row.get('event') == 'game_input_observed' and row.get('seq') == 5)],
-        phase='accuracy', fixture_records=authored_fixture)
-    assert any('validation external input was not observed' in issue
-               for issue in missing_recovery_observation['evidence_issues'])
+    obsolete_recovery = authored_records + [{
+        'event': 'validation_recovery_input', 'seq': 5,
+        'at_ns': voice_ns + 170_000_000,
+        'case': ACCURACY_SCENARIO[1]['id'], 'watchdog_seconds': 12.0,
+    }]
+    obsolete_result = validate(
+        obsolete_recovery, phase='accuracy', fixture_records=authored_fixture)
+    assert obsolete_result['verdict'] == 'incomplete'
+    assert 'obsolete validation recovery input observed' in obsolete_result['evidence_issues']
 
 
 def test_authored_game_input_activates_game_and_uses_low_level_keyboard_stimulus(monkeypatch):
@@ -364,8 +357,8 @@ def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
         driver.tick()
         assert sent == [runtime]
 
-def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpretation():
-    actions, recoveries, traces = [], [], []
+def test_validation_never_advances_a_stalled_case_and_outer_timeout_only_fails_collection():
+    actions, inputs, traces = [], [], []
     clock = [1.0]
     runtime = SimpleNamespace(
         token=SimpleNamespace(session=1, line=99), pause_reason='', sent=False,
@@ -386,9 +379,8 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
             window, SimpleNamespace(quit=lambda: actions.append('quit'),
                                     exit=lambda code: actions.append(('exit', code))),
             {'timeout_seconds': 60, 'phase': 'accuracy', 'dialogues': 3,
-             'continue_collection': True, 'evidence': str(evidence),
-             'case_watchdog_seconds': 12.0, 'final_observation_seconds': 12.0},
-            trace, clock=lambda: clock[0], game_input_send=lambda state: recoveries.append(state.target.hwnd),
+             'evidence': str(evidence), 'final_observation_seconds': 12.0},
+            trace, clock=lambda: clock[0], game_input_send=lambda state: inputs.append(state.target.hwnd),
         )
         driver.state = 'running'
         driver.tick()  # observe case-1
@@ -396,11 +388,11 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
         runtime.sent = True
         clock[0] = 13.1
         driver.tick()
-        assert recoveries == [77]
+        assert inputs == []
         runtime.pause_reason = 'different_reason'
         clock[0] = 30.0
         driver.tick()
-        assert recoveries == [77]
+        assert inputs == []
 
         write(['case-1', 'case-2'])
         clock[0] = 31.0
@@ -409,8 +401,8 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
         runtime.sent = False
         clock[0] = 43.1
         driver.tick()
-        assert recoveries == [77, 77]
-        assert [fields['case'] for name, fields in traces if name == 'validation_recovery_input'] == ['case-1', 'case-2']
+        assert inputs == []
+        assert not any(name == 'validation_recovery_input' for name, _fields in traces)
 
         write(['case-1', 'case-2', 'case-3'])
         clock[0] = 44.0
@@ -426,6 +418,16 @@ def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpreta
         assert actions[-2:] == ['close', ('exit', 3)]
         assert traces[-1][0] == 'validation_driver_failure'
         assert 'additional case records' in traces[-1][1]['reason']
+
+        # A stalled run is terminated by the outer collection timeout without
+        # injecting any input to make the game continue.
+        write(['case-1'])
+        driver.current_case = None
+        driver.collection_target_seen_at = None
+        clock[0] = 61.1
+        driver.tick()
+        assert actions[-2:] == ['close', ('exit', 3)]
+        assert inputs == []
 
 
 def test_trace_keeps_raw_hook_and_utterance_instead_of_hash_only_evidence():
@@ -472,17 +474,96 @@ def test_trace_keeps_raw_hook_and_utterance_instead_of_hash_only_evidence():
         assert recorded_hook_event['hook_event']['text'] == 'raw'
 
 
-def test_calibration_uses_product_preview_and_session_contract_is_finite_and_bound():
-    exact = SimpleNamespace(identity='a', address=20, ambiguous=False, history=(CALIBRATION,),
-                            samples=(SimpleNamespace(raw=CALIBRATION, speaker='', body=CALIBRATION),))
-    structured = SimpleNamespace(identity='b', address=10, ambiguous=False,
-                                 history=('明日香\n' + CALIBRATION,),
-                                 samples=(SimpleNamespace(raw='明日香\n' + CALIBRATION,
-                                                          speaker='明日香', body=CALIBRATION),))
-    noisy = SimpleNamespace(identity='c', address=30, ambiguous=False, history=('prefix ' + CALIBRATION,),
-                            samples=(SimpleNamespace(raw='prefix ' + CALIBRATION, speaker='', body='prefix ' + CALIBRATION),))
-    assert calibration_candidates((exact, structured, noisy)) == [exact, structured]
-    assert choose_calibration_source((structured, exact)) is exact
+def test_calibration_uses_preconfigured_fixture_hook_for_body_and_speaker():
+    from autoadv.model import StructureRule, extract_fields
+
+    rule = StructureRule(FIXTURE_SPEAKER_RULE)
+    for raw, speaker, body in (
+            ('明日香\nえっ嘘でしょ。\nえっ嘘でしょ。', '明日香', 'えっ嘘でしょ。'),
+            ('栞……ふぅ……\n……ふぅ……', '栞', '……ふぅ……'),
+            ('主人公\nこれは音声のない台詞です。\nこれは音声のない台詞です。',
+             '主人公', 'これは音声のない台詞です。')):
+        fields = extract_fields(raw, (rule,))
+        assert (fields.speaker, fields.body) == (speaker, body)
+
+    body_candidate = SimpleNamespace(
+        identity=FIXTURE_BODY_HOOK_IDENTITY, address=10, ambiguous=False)
+    speaker_candidate = SimpleNamespace(
+        identity=FIXTURE_SPEAKER_HOOK_IDENTITY, address=20, ambiguous=False)
+    other = SimpleNamespace(identity='other|0|0', address=20, ambiguous=False)
+    assert fixture_source((other, body_candidate), FIXTURE_BODY_HOOK_IDENTITY) is body_candidate
+    assert fixture_source((other,), FIXTURE_BODY_HOOK_IDENTITY) is None
+
+    calls = []
+    sources = {
+        (FIXTURE_BODY_HOOK_IDENTITY, 10): SimpleNamespace(
+            identity=FIXTURE_BODY_HOOK_IDENTITY, address=10),
+        (FIXTURE_SPEAKER_HOOK_IDENTITY, 20): SimpleNamespace(
+            identity=FIXTURE_SPEAKER_HOOK_IDENTITY, address=20),
+    }
+    previews = {
+        (FIXTURE_BODY_HOOK_IDENTITY, 10): SimpleNamespace(
+            samples=(SimpleNamespace(speaker='', body=CALIBRATION),)),
+        (FIXTURE_SPEAKER_HOOK_IDENTITY, 20): SimpleNamespace(
+            samples=(SimpleNamespace(speaker='明日香', body=CALIBRATION),)),
+    }
+
+    class Product:
+        def capture_view(self):
+            return SimpleNamespace(candidates=(body_candidate, speaker_candidate, other))
+        def capture_source(self, identity, address, require_unique=True):
+            calls.append(('source', identity, address, require_unique)); return sources[(identity, address)]
+        def set_capture_extraction_preset(self, identity, address, preset):
+            calls.append(('preset', identity, address, preset))
+        def save_capture_source_rule(self, identity, address, index, rule):
+            calls.append(('rule', identity, address, index, rule.pattern))
+        def capture_candidate(self, identity, address):
+            calls.append(('preview', identity, address)); return previews[(identity, address)]
+        def set_capture_field_source(self, field, identity, address):
+            calls.append(('field', field, identity, address))
+        def commit_capture(self):
+            return SimpleNamespace(
+                body_source=FIXTURE_BODY_HOOK_IDENTITY,
+                speaker_source=FIXTURE_SPEAKER_HOOK_IDENTITY)
+        def runtime_state(self): return SimpleNamespace(profile=object())
+
+    driver = SessionDriver(
+        SimpleNamespace(application=Product()), SimpleNamespace(),
+        {'timeout_seconds': 60, 'phase': 'accuracy'}, SimpleNamespace(emit=lambda *_a, **_k: None),
+        clock=lambda: 1.0)
+    assert driver._select_calibration_source()
+    assert ('preset', FIXTURE_BODY_HOOK_IDENTITY, 10, 'body') in calls
+    assert ('rule', FIXTURE_SPEAKER_HOOK_IDENTITY, 20, 0, FIXTURE_SPEAKER_RULE) in calls
+    assert ('field', 'body', FIXTURE_BODY_HOOK_IDENTITY, 10) in calls
+    assert ('field', 'speaker', FIXTURE_SPEAKER_HOOK_IDENTITY, 20) in calls
+
+
+def test_accuracy_config_uses_product_force_advance_as_the_only_case_progress_deadline():
+    settings = []
+    profile = SimpleNamespace(
+        ocr=SimpleNamespace(executable='tesseract', language='jpn', region=(0, 0, 1, 1), stable_samples=2),
+        insert_pc_hooks=False, hook_flush_ms=100, hook_codepage=932,
+        hook_max_buffer=1000, hook_max_history=100)
+
+    class Product:
+        catalog = SimpleNamespace(irodori_root='')
+        def create_game(self, _name, _exe): return SimpleNamespace(id='g', default_profile='p')
+        def select_profile(self, *_args): pass
+        def select_primary_target(self, *_args): pass
+        def set_profile_setting(self, key, value): settings.append((key, value))
+        def current_profile(self): return profile
+        def set_capture_environment(self, **_kwargs): pass
+        def activate_selected_target(self): return 'connecting'
+
+    driver = SessionDriver(
+        SimpleNamespace(application=Product()), SimpleNamespace(),
+        {'timeout_seconds': 60, 'phase': 'accuracy', 'executable': 'fixture.exe'},
+        SimpleNamespace(emit=lambda *_a, **_k: None), clock=lambda: 1.0)
+    driver._configure_product(SimpleNamespace(pid=50, hwnd=77))
+    assert ('force_advance_seconds', 12) in settings
+
+
+def test_session_contract_is_finite():
     valid = dict(gate='session-gate', executable='validation-game.exe', phase='accuracy', timeout_seconds=120)
     assert load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(valid)})['phase'] == 'accuracy'
     with pytest.raises(ValueError):
@@ -530,8 +611,7 @@ def _write_issue_run(root: Path, *, runner_error: str | None = None, large_fixtu
         'phases': [{'phase': 'accuracy', 'report_present': True, 'runner_error': runner_error,
                     'facts': {'requested_cases': 2, 'fixture_cases': 2, 'hook_outputs': 2,
                               'utterances': 2, 'presentation_completions': 1,
-                              'advance_inputs': 1, 'validation_game_inputs': 1,
-                              'validation_recovery_inputs': 0}}],
+                              'advance_inputs': 1, 'validation_game_inputs': 1}}],
         'launcher_error': None,
     }
     (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
