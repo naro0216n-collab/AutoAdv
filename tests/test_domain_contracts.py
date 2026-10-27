@@ -377,10 +377,13 @@ def test_vocal_risk_uses_observed_time_changes_and_observer_local_recurrence():
     for lower, inputs in ((1000, ()), (None, (1000,))):
         stable_context, _ = _progress(
             vocal=unchanged, end=1720, lower=lower, inputs=inputs)
-        new_change, _ = _progress(
+        same_run_with_valley, _ = _progress(
             vocal=changed, end=1720, lower=lower, inputs=inputs)
         assert stable_context.state == UtteranceProgressState.UNKNOWN
-        assert new_change.state == UtteranceProgressState.ACTIVE
+        # Presentation timing relates already-segmented physical activity. A
+        # score valley too short to close that activity cannot be reinterpreted
+        # as a second post-input onset by another state machine.
+        assert same_run_with_valley.state == UtteranceProgressState.UNKNOWN
 
     stable = VocalRecurrenceEvidence(
         strength=.9, period_ms=500, period_stability=.85,
@@ -392,11 +395,14 @@ def test_vocal_risk_uses_observed_time_changes_and_observer_local_recurrence():
         ('speech', ((1120, .9, 1080), (1700, .9, 1660), (2300, .9, 2260))),
         ('nonlexical', ((1180, .9, 1140), (1800, .9, 1760), (2400, .9, 2360))),
     )
+    recurrence_starts = []
     progress, _ = _progress(
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable, 'nonlexical': unstable},
+        recurrence_starts=recurrence_starts,
     )
     assert progress.state == UtteranceProgressState.ACTIVE
+    assert recurrence_starts == [('speech', 1120), ('nonlexical', 1180)]
     released, _ = _progress(
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable, 'nonlexical': stable},

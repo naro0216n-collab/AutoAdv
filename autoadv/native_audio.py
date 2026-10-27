@@ -40,7 +40,6 @@ class _Assessment:
     token: Token
     generation: int
     boundary_ms: int
-    feature_start_ms: int | None
     lexical: LexicalProgressEvidence | None
     causal_lower_bound_ms: int | None
     input_candidates_ms: tuple[int, ...]
@@ -473,27 +472,6 @@ class NativeAudio:
                 return None
         return ready
 
-    def _feature_start_locked(self, lexical: LexicalProgressEvidence | None, end_ms: int) -> int | None:
-        retained = self._retained_start_locked(end_ms)
-        if (lexical is not None and lexical.target_associated
-                and lexical.target_start_ms is not None):
-            target_start = int(lexical.target_start_ms)
-            if self.causal_lower_bound_ms is not None:
-                return max(retained, int(self.causal_lower_bound_ms))
-            earlier_inputs = [stamp for stamp in self.input_candidates_ms if stamp <= target_start]
-            if earlier_inputs:
-                return max(retained, max(earlier_inputs))
-            # Once the target itself is located, its acoustic start is sufficient
-            # context. No arbitrary pre-target lookback is a product requirement.
-            return max(retained, target_start)
-        if self.causal_lower_bound_ms is not None or self.input_candidates_ms:
-            # Target-independent vocal measurements before the timing fact are
-            # needed to distinguish an already-open observer score sequence from
-            # a new post-input rise. The compact measurement cache, not PCM, is
-            # queried across retained history.
-            return retained
-        return None
-
     def _assessment_locked(self) -> _Assessment | None:
         boundary = self._ready_boundary_locked()
         if boundary is None or self.token is None:
@@ -506,12 +484,10 @@ class NativeAudio:
         if key == self._last_progress_key and self._required_assessment_ms is None:
             return None
         lexical = self._lexical
-        feature_start = self._feature_start_locked(lexical, boundary)
         return _Assessment(
             token=self.token,
             generation=self._generation,
             boundary_ms=int(boundary),
-            feature_start_ms=feature_start,
             lexical=lexical,
             causal_lower_bound_ms=self.causal_lower_bound_ms,
             input_candidates_ms=self.input_candidates_ms,
@@ -521,9 +497,21 @@ class NativeAudio:
 
     def _run_assessment(self, item: _Assessment) -> None:
         vocal = None
-        if item.feature_start_ms is not None:
+        needs_vocal = bool(
+            item.causal_lower_bound_ms is not None
+            or item.input_candidates_ms
+            or (item.lexical is not None
+                and item.lexical.target_associated
+                and item.lexical.target_start_ms is not None)
+        )
+        feature_start = self.features.earliest_ms if needs_vocal else None
+        if feature_start is not None:
+            # Alignment may narrow its PCM queries after locating the text, but
+            # target-independent activity keeps one meaning over the retained
+            # measurement timeline. Cropping that cache at a Presentation fact
+            # would recreate an old run as a synthetic post-fact onset.
             vocal = self.features.summarize_vocal(
-                start_ms=int(item.feature_start_ms), end_ms=int(item.boundary_ms))
+                start_ms=int(feature_start), end_ms=int(item.boundary_ms))
 
         recurrence = None
 

@@ -428,14 +428,17 @@ def test_external_input_candidates_narrow_initial_search_without_becoming_causal
 def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
     def observe_at(hook_clock: int):
         observations = []
-        native = make_native(StaticPosterior(), observations, clock=lambda: hook_clock)
+        native = make_native(
+            StaticPosterior(), observations, clock=lambda: hook_clock,
+            vocal_observer=ActiveVocalObserver())
         token = Token(6, 1)
         try:
             native.history.start(42)
-            # Process Loopback and compact observers run before the HOOK/text is
-            # attached. The same captured series must mean the same thing even
-            # if the HOOK arrives much later.
-            for chunk in (stereo_chunk(1300, 300), stereo_chunk(1600, 300)):
+            # Target-independent observation starts before the causal bound.
+            # Alignment may crop raw PCM at that bound, but locating the text
+            # must not crop the already-measured activity series and recreate
+            # the same physical run as a post-boundary onset.
+            for chunk in (stereo_chunk(1300, 500), stereo_chunk(1600, 300)):
                 native.history.push(chunk, target_pid=42)
                 native.feed(chunk)
             native.begin(token, 'target', causal_lower_bound_ms=1000)
@@ -449,6 +452,10 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
     assert early.lexical == late.lexical
     assert early.vocal == late.vocal
     assert early.recurrence == late.recurrence
+    assert early.vocal is not None
+    assert min(
+        sample.at_ms for series in early.vocal.series for sample in series.samples
+    ) < early.causal_lower_bound_ms
 
 
 def test_candidate_search_widens_only_until_target_context_is_located():
