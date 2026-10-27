@@ -117,7 +117,8 @@ class NativeAudio:
         self._observer_revision = 0
 
         # A fallback fence is just an assessment obligation. Progress is emitted
-        # only when both lexical (when required) and observer measurements reach it.
+        # when observer measurements and one completed lexical query have reached it;
+        # wider retained-history searches may continue and revise later evidence.
         self._required_assessment_ms: int | None = None
         self._last_progress_key: tuple[int, int] | None = None
 
@@ -454,21 +455,15 @@ class NativeAudio:
             required = int(required)
             if ready < required:
                 return None
-            # A previously-ready lexical frontier is not a settled fallback
-            # assessment while an expanded/same-boundary alignment query can
-            # still revise the target evidence through this fence.  Wait for
-            # all such already-captured work; never wait for future PCM.
-            if self._alignment_inflight_generation is not None:
-                query = self._last_alignment_query
-                if query is not None and int(query[1]) <= required:
-                    return None
-            if (self._pending_alignment_boundary is not None
-                    and int(self._pending_alignment_boundary) <= required):
-                return None
+            # A completed bounded query is the lexical evidence currently
+            # available at this fence. Search widening is capacity for later
+            # revisions, not a fourth progress state that blocks UNKNOWN/fallback.
             return required
-        previous = self._last_progress_key[0] if self._last_progress_key is not None else None
-        if previous is not None and ready - int(previous) < self.INFERENCE_INTERVAL_MS:
-            return None
+        if self._last_progress_key is not None:
+            previous, revision = self._last_progress_key
+            if (revision == self._lexical_revision
+                    and ready - int(previous) < self.INFERENCE_INTERVAL_MS):
+                return None
         return ready
 
     def _feature_start_locked(self, lexical: LexicalProgressEvidence | None, end_ms: int) -> int | None:
@@ -726,14 +721,12 @@ class NativeAudio:
                     if not associated and not selection.ambiguous:
                         retry_same_boundary = self._expand_search_locked(boundary)
                         if retry_same_boundary:
-                            # Search widening changes the next query, but a newer
-                            # captured frontier already pending subsumes this older
-                            # snapshot and must not be discarded.
-                            self._pending_alignment_boundary = max(
-                                boundary,
-                                self._pending_alignment_boundary
-                                if self._pending_alignment_boundary is not None else boundary,
-                            )
+                            # Widen the failed snapshot itself. Letting a newer
+                            # frontier inherit this expanded start turns retained
+                            # history back into the routine work unit. New PCM is
+                            # already in AudioHistory and is scheduled after this
+                            # bounded historical search settles or the target moves.
+                            self._pending_alignment_boundary = boundary
                     if lexical is not None:
                         if lexical != self._lexical:
                             self._lexical = lexical
@@ -748,14 +741,25 @@ class NativeAudio:
                             self.aligner = None
                             self._pending_alignment_boundary = None
                             self._alignment_ready_through_ms = boundary
-                    if self.aligner is not None and not retry_same_boundary:
-                        # This complete query is the lexical evidence available at
-                        # this frontier, including unresolved/ambiguous results.
+                    if self.aligner is not None:
+                        # Every completed bounded query is factual lexical evidence
+                        # at this frontier, including unresolved/ambiguous results.
+                        # A wider retry can revise it later without withholding the
+                        # current UNKNOWN/ACTIVE assessment from Controller.
                         self._alignment_ready_through_ms = max(
                             boundary,
                             self._alignment_ready_through_ms
                             if self._alignment_ready_through_ms is not None else boundary,
                         )
+                        if not retry_same_boundary:
+                            latest = self.history.latest_ms
+                            if latest is not None and int(latest) > boundary:
+                                self._prepare_new_audio_search_locked(int(latest))
+                                self._pending_alignment_boundary = max(
+                                    int(latest),
+                                    self._pending_alignment_boundary
+                                    if self._pending_alignment_boundary is not None else int(latest),
+                                )
                     wake_observer = self._wake_observer_locked()
 
                     if self.on_inference is not None:

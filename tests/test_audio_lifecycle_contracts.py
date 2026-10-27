@@ -141,6 +141,19 @@ class BlockingBlankPosterior(BlockingPosterior):
         super().__init__()
         self.logits[:] = -4.0
         self.logits[:, 0] = 5.0
+        self.calls = 0
+        self.widened_started = Event()
+        self.widened_release = Event()
+
+    def infer(self, chunks):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            self.release.wait(2)
+        elif self.calls == 2:
+            self.widened_started.set()
+            self.widened_release.wait(2)
+        return self.logits
 
 
 class RecordingBlankPosterior:
@@ -222,7 +235,7 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
     finally:
         native.close()
 
-def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_queries():
+def test_completed_bounded_alignment_can_satisfy_fallback_fence_while_search_widens():
     observations = []
     model = BlockingBlankPosterior()
     observer = RecordingVocalObserver()
@@ -234,34 +247,30 @@ def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_
         native.history.push(retained, target_pid=42)
         native.begin(token, 'target', causal_lower_bound_ms=1000)
         assert model.started.wait(1)
+        wait_until(lambda: observer.observed_until and observer.observed_until[-1] >= 20_000)
 
-        # Capture can outrun an expensive search. Intermediate frontiers are not
-        # separate Application obligations; the newest fence supersedes them.
-        for end_ms in (21_000, 22_000):
-            chunk = compact_chunk(end_ms, 1000)
-            native.history.push(chunk, target_pid=42)
-            native.feed(chunk)
+        # UNKNOWN is not published before any lexical query has completed.
+        assert not observations
 
-        native.request_assessment_through(token, 22_000)
-        wait_until(lambda: observer.observed_until and observer.observed_until[-1] >= 22_000)
-        assert not any(
-            observed == token and progress.evidence_at_ms is not None
-            and progress.evidence_at_ms >= 22_000
-            for observed, progress, _item in observations)
-
+        # The first bounded query is a complete factual measurement even though
+        # retained-history search can widen after it finds no target. Controller
+        # must be able to consume that UNKNOWN assessment without waiting for the
+        # widened query to finish.
         model.release.set()
+        assert model.widened_started.wait(1)
         wait_until(lambda: any(
-            observed == token and progress.evidence_at_ms == 22_000
+            observed == token and progress.evidence_at_ms == 20_000
             for observed, progress, _item in observations))
 
-        # The same already-settled fence is an idempotent barrier, not a request
-        # for future PCM; it must acknowledge without another capture packet.
+        # The same already-assessed fence remains an idempotent obligation while
+        # widening is still in flight; no future capture packet is required.
         before = len(observations)
-        native.request_assessment_through(token, 22_000)
+        native.request_assessment_through(token, 20_000)
         wait_until(lambda: len(observations) > before)
-        assert observations[-1][1].evidence_at_ms == 22_000
+        assert observations[-1][1].evidence_at_ms == 20_000
     finally:
         model.release.set()
+        model.widened_release.set()
         native.close()
 
 
@@ -409,17 +418,21 @@ def test_candidate_search_widens_to_retained_pcm_only_when_target_is_not_found()
             native.history.push(chunk, target_pid=42)
             native.feed(chunk)
         native.begin(token, 'target', input_candidates_ms=(1200,))
-        wait_until(lambda: bool(observations) and observations[-1][2].lexical is not None
-                   and observations[-1][2].lexical.target_associated)
+        wait_until(lambda: any(
+            item.lexical is not None and item.lexical.target_associated
+            for _observed, _progress, item in observations))
 
+        associated = next(
+            item for _observed, _progress, item in reversed(observations)
+            if item.lexical is not None and item.lexical.target_associated)
         assert native.causal_lower_bound_ms is None
         # External input is only a search seed.  If that narrower range lacks
         # the target, retained PCM may be consulted without upgrading the input
         # candidate into a causal boundary.
         assert reports[0][1]["capture_start_ms"] == 1200
         assert any(item["capture_start_ms"] < 1200 for _token, item in reports[1:])
-        assert observations[-1][2].lexical is not None
-        assert observations[-1][2].lexical.target_associated
+        assert associated.lexical is not None
+        assert associated.lexical.target_associated
     finally:
         native.close()
 
@@ -584,9 +597,9 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
             native.history.push(compact_chunk(end_ms), target_pid=42)
 
         native.begin(token, 'target')
-        wait_until(lambda: bool(observations))
-        initial = tuple(model.durations_ms)
         retained_ms = 60_000
+        wait_until(lambda: model.durations_ms and max(model.durations_ms) >= retained_ms)
+        initial = tuple(model.durations_ms)
         assert initial
         # Retention is available search capacity, not the first work unit.
         assert initial[0] < retained_ms

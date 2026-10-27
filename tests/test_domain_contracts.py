@@ -327,6 +327,43 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         end=2040)
     assert evaluate(later_process_voice).state == UtteranceProgressState.ENDED
 
+    # A located target can continue physically on another observer scale. The
+    # scores remain independent; only temporal continuity before the first
+    # observer has measured enough quiet relates the later activity to the same
+    # finite episode. A later voice after that separation stays unrelated.
+    speech = VocalEvidenceSeries(
+        observer='speech', active_score_threshold=.45,
+        samples=(
+            VocalScoreSample(1120, .9, 1080),
+            VocalScoreSample(1240, .9, 1200),
+            VocalScoreSample(1320, .9, 1280),
+            VocalScoreSample(1440, .1, 1320),
+            VocalScoreSample(1560, .1, 1440),
+            VocalScoreSample(1680, .1, 1560),
+        ))
+    nonlex_tail = VocalEvidenceSeries(
+        observer='nonlexical', active_score_threshold=.45,
+        samples=(
+            VocalScoreSample(1400, .9, 1360),
+            VocalScoreSample(1520, .9, 1480),
+            VocalScoreSample(1640, .9, 1600),
+        ))
+    cross_observer = HumanVocalEvidence(series=(speech, nonlex_tail))
+    assert evaluate(observation(
+        lex=lexical(), voc=cross_observer, end=1680
+    )).state == UtteranceProgressState.ACTIVE
+
+    closed_tail = VocalEvidenceSeries(
+        observer='nonlexical', active_score_threshold=.45,
+        samples=nonlex_tail.samples + (
+            VocalScoreSample(1760, .1, 1640),
+            VocalScoreSample(1880, .1, 1760),
+            VocalScoreSample(2000, .1, 1880),
+        ))
+    assert evaluate(observation(
+        lex=lexical(), voc=HumanVocalEvidence(series=(speech, closed_tail)), end=2000
+    )).state == UtteranceProgressState.ENDED
+
     ended = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100), end=2100))
     assert ended.state == UtteranceProgressState.ENDED
@@ -481,6 +518,20 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         assert evaluate(observation(
             voc=restarted, end=1720, lower=lower, inputs=inputs
         )).state == UtteranceProgressState.ACTIVE
+
+    # When a post-boundary rise occurs inside an already-open physical run,
+    # recurrence is measured over that run's existing structure rather than
+    # cropping away the pre-boundary cycles at the rise.
+    recurrence_starts = []
+    recurrent_progress, _ = evaluate_utterance_progress(
+        capture_end_ms=1720, lexical=None, vocal=restarted, causal_lower_bound_ms=1000,
+        recurrence_lookup=lambda start, _end: (
+            recurrence_starts.append(start) or
+            (stable_loop if start <= 960 else VocalRecurrenceEvidence())
+        ),
+    )
+    assert recurrent_progress.state == UtteranceProgressState.UNKNOWN
+    assert recurrence_starts == [960]
 
     post_boundary_unclosed = vocal(
         intervals=((1120, 1380),), end=1380, observer='nonlexical')
