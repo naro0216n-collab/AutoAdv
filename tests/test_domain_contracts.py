@@ -292,18 +292,23 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
                 lex=direct_relation, voc=unclosed, end=later_end
             )).state == UtteranceProgressState.ACTIVE
 
-    # A partial target is not released by the first quiet window after its
-    # latest aligned unit.  The existing incremental aligner gets a bounded
-    # amount of additional observed PCM; lack of further target progress then
-    # releases the result to UNKNOWN rather than inventing an endpoint.
-    short_quiet_prefix = evaluate(observation(
+    # Once measured quiet closes a partial target's activity run, remaining
+    # pronunciation-unit count cannot manufacture an ACTIVE hold. Incremental
+    # alignment may later provide new evidence, but the same acoustic snapshot
+    # has the same progression meaning for short and long remaining text.
+    closed_prefix_vocal = vocal(intervals=((1100, 1340),), end=1800)
+    closed_prefix = evaluate(observation(
         lex=lexical(complete=False, committed=False),
-        voc=vocal(intervals=((1100, 1340),), end=1800), end=1800))
-    assert short_quiet_prefix.state == UtteranceProgressState.ACTIVE
-    exhausted_prefix = evaluate(observation(
-        lex=lexical(complete=False, committed=False),
-        voc=vocal(intervals=((1100, 1340),), end=1900), end=1900))
-    assert exhausted_prefix.state == UtteranceProgressState.UNKNOWN
+        voc=closed_prefix_vocal, end=1800))
+    longer_target = LexicalProgressEvidence(
+        target_units=40, aligned_target_units=2, target_associated=True,
+        complete_alignment=False, committed_target_end=False,
+        target_start_ms=1100, aligned_end_ms=1320, target_end_ms=1320,
+        reading_rank=0, path_margin=3.0, boundary_margin=2.0)
+    assert closed_prefix.state == UtteranceProgressState.UNKNOWN
+    assert evaluate(observation(
+        lex=longer_target, voc=closed_prefix_vocal, end=1800
+    )).state == UtteranceProgressState.UNKNOWN
 
     # Once the target is located, a vocal continuation that remains in the same
     # measured activity run stays protective.  After enough measured quiet has

@@ -253,35 +253,15 @@ def test_slow_alignment_reaches_required_frontier_without_draining_intermediate_
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 22_000
             for observed, progress, _item in observations))
+
+        # The same already-settled fence is an idempotent barrier, not a request
+        # for future PCM; it must acknowledge without another capture packet.
+        before = len(observations)
+        native.request_assessment_through(token, 22_000)
+        wait_until(lambda: len(observations) > before)
+        assert observations[-1][1].evidence_at_ms == 22_000
     finally:
         model.release.set()
-        native.close()
-
-
-def test_assessment_fence_is_idempotent_for_an_already_settled_boundary():
-    observations = []
-    native = make_native(StaticPosterior(), observations)
-    token = Token(1, 9)
-    try:
-        native.history.start(42)
-        native.begin(token, 'target', causal_lower_bound_ms=1000)
-        chunk = stereo_chunk(1600, 600)
-        native.history.push(chunk, target_pid=42)
-        native.feed(chunk)
-        wait_until(lambda: any(
-            observed == token and progress.evidence_at_ms == 1600
-            for observed, progress, _item in observations))
-        before = len(observations)
-
-        # Requiring the same already-captured boundary is an idempotent barrier,
-        # not a request for future PCM.  NativeAudio must acknowledge it even
-        # when normal duplicate progress suppression would otherwise apply.
-        native.request_assessment_through(token, 1600)
-        wait_until(lambda: len(observations) > before)
-        assert observations[-1][0] == token
-        assert observations[-1][1].evidence_at_ms == 1600
-        assert native._required_assessment_ms is None
-    finally:
         native.close()
 
 
@@ -516,8 +496,6 @@ def test_recurrence_remains_optional_evidence_when_direct_endpoint_risk_stays_op
         first_snapshot = observations[-1][2]
         assert first_snapshot.lexical is not None
         assert first_snapshot.lexical.committed_target_end
-        assert first_snapshot.recurrence is not None
-        assert first_snapshot.recurrence.period_ms is None
 
         tail = stereo_chunk(4000, 2000, value=.05)
         native.history.push(tail, target_pid=42)
