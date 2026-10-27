@@ -789,10 +789,11 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     assert changing.strength < periodic.strength
     assert changing.prominence < periodic.prominence
 
-    # Recurrence describes the structure present at the current frontier, not
-    # uninterrupted conformity of every intervening cycle. A bounded local mix
-    # disturbance may obscure one cycle without erasing repeated evidence on
-    # both sides of it.
+    # Recurrence is a property of the structure that still reaches the current
+    # frontier. A disturbance inside the latest required cycles must suppress the
+    # old period rather than allowing matching cycles from further back to vote it
+    # through. Once enough consecutive cycles are observed again, the same broad
+    # history can establish the period without resetting or relabelling the source.
     interrupted_history = AcousticObservationHistory()
     interrupted_frames = []
     at = 1000
@@ -805,12 +806,24 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     interrupted_history.add_vocal(tuple(interrupted_frames))
     interrupted = interrupted_history.recurrence(
         start_ms=900, end_ms=at - 100, observer='speech')
-    assert interrupted.period_ms == 600
-    assert interrupted.strength > .9
-    assert interrupted.prominence > .1
+    assert interrupted.strength < periodic.strength
+    assert interrupted.prominence < periodic.prominence
+
+    recovered_frames = []
+    for pattern in (repeated, repeated, repeated):
+        for score in pattern:
+            recovered_frames.append(VocalActivityFrame(
+                at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
+            at += 100
+    interrupted_history.add_vocal(tuple(recovered_frames))
+    recovered = interrupted_history.recurrence(
+        start_ms=900, end_ms=at - 100, observer='speech')
+    assert recovered.period_ms == periodic.period_ms
+    assert recovered.strength > interrupted.strength
+    assert recovered.prominence > interrupted.prominence
 
     # Slow finite change can be highly self-similar at many lags. It is not a
-    # period unless one lag stands out from neighbouring lags.
+    # period unless one lag stands out from the other admissible lags.
     smooth = recurrence_for_cycles(tuple(
         tuple(.5 + .01 * (cycle * 6 + index) for index in range(6))
         for cycle in range(6)

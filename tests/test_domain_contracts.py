@@ -420,10 +420,16 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
         recurrence={'speech': unstable, 'nonlexical': unstable},
     )
     assert progress.state == UtteranceProgressState.ACTIVE
-    released, _ = _progress(
+    partially_recurrent, _ = _progress(
         lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable, 'nonlexical': unstable},
+    )
+    assert partially_recurrent.state == UtteranceProgressState.ACTIVE
+    released, _ = _progress(
+        lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable, 'nonlexical': stable},
     )
     assert released.state == UtteranceProgressState.UNKNOWN
 
@@ -448,14 +454,14 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     before_excess, _ = _progress(
         lexical=_lexical_evidence(target_end=1320, observed_units=4),
         vocal=two_open, end=2500, lower=1000,
-        recurrence={'speech': stable},
+        recurrence={'speech': stable, 'nonlexical': stable},
         recurrence_starts=starts_without_excess,
     )
     starts_with_excess = []
     after_excess, _ = _progress(
         lexical=_lexical_evidence(target_end=1320, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
-        recurrence={'speech': stable},
+        recurrence={'speech': stable, 'nonlexical': stable},
         recurrence_starts=starts_with_excess,
     )
     assert before_excess.state == after_excess.state == UtteranceProgressState.UNKNOWN

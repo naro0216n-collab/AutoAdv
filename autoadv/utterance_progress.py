@@ -334,6 +334,7 @@ def evaluate_utterance_progress(
         )
 
         candidates: tuple[VocalRecurrenceEvidence, ...] = ()
+        recurrent_observers: set[str] = set()
         if recurrence_eligible and recurrence_lookup is not None:
             # Recurrence describes structure around a Presentation relation, not
             # the lifetime of the latest threshold-positive run.  Look equally
@@ -346,11 +347,21 @@ def evaluate_utterance_progress(
             recurrence_start = max(0, int(anchor) - max(0, capture_end - int(anchor)))
             collected: list[VocalRecurrenceEvidence] = []
             for observer in sorted({observer for observer, _run in open_runs}):
-                collected.extend(recurrence_lookup(
-                    observer, recurrence_start, capture_end))
+                observer_candidates = recurrence_lookup(
+                    observer, recurrence_start, capture_end)
+                collected.extend(observer_candidates)
+                if any(_stable_recurrence(candidate)
+                       for candidate in observer_candidates):
+                    recurrent_observers.add(observer)
             candidates = tuple(collected)
         measured_recurrence = _representative_recurrence(candidates)
-        if not any(_stable_recurrence(candidate) for candidate in candidates):
+        # Observer series are independent measurements of the same process mix,
+        # not interchangeable proof about one owned source.  Repetition measured
+        # by one observer cannot erase a still-open finite-vocal risk measured by
+        # another.  Every observer that currently contributes an open risk must
+        # itself show stable recurrence before recurrence can release protection.
+        open_observers = {observer for observer, _run in open_runs}
+        if not open_observers.issubset(recurrent_observers):
             return UtteranceProgress(
                 state=UtteranceProgressState.ACTIVE,
                 evidence_at_ms=capture_end), measured_recurrence
