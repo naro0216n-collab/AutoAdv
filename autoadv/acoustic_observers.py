@@ -14,7 +14,7 @@ import numpy as np
 
 from .audio_buffer import PCMChunk
 from .forced_alignment import _downsample_48k_to_16k
-from .utterance_progress import (
+from .audio_evidence import (
     HumanVocalEvidence, VocalActivityInterval, VocalEvidenceSeries,
     VocalRecurrenceEvidence, VocalScoreSample,
 )
@@ -381,7 +381,7 @@ class AcousticObservationHistory:
 
     @classmethod
     def _series_recurrence_candidates(
-        cls, frames: list[VocalActivityFrame], *, threshold: float,
+        cls, frames: list[VocalActivityFrame], *, observer: str, threshold: float,
     ) -> tuple[VocalRecurrenceEvidence, ...]:
         if len(frames) < cls.MIN_RECURRENCE_CYCLES * 2:
             return ()
@@ -477,6 +477,7 @@ class AcousticObservationHistory:
             other_strengths = [value for other_lag, value in measured if other_lag != lag]
             baseline = float(np.median(other_strengths)) if other_strengths else strength
             candidates.append(VocalRecurrenceEvidence(
+                observer=observer,
                 strength=float(strength),
                 period_ms=int(round(lag * cadence)),
                 prominence=max(0.0, float(strength) - baseline),
@@ -504,7 +505,7 @@ class AcousticObservationHistory:
         candidates: list[VocalRecurrenceEvidence] = []
         for observer, frames in by_observer.items():
             candidates.extend(self._series_recurrence_candidates(
-                frames, threshold=self._threshold(observer)))
+                frames, observer=observer, threshold=self._threshold(observer)))
         return tuple(candidates)
 
     def recurrence(
@@ -513,9 +514,8 @@ class AcousticObservationHistory:
         """Measure repetition without crossing observer score provenance.
 
         With ``observer`` set, only that measurement series is considered. The
-        unfiltered form remains useful for diagnostics and standalone cache tests,
-        but product progression requests recurrence for the open observer risk it
-        is evaluating.
+        unfiltered form preserves observer provenance on every candidate instead
+        of merging independent score scales.
         """
         candidates = self.recurrences(
             start_ms=start_ms,

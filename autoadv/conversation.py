@@ -59,9 +59,7 @@ class Controller:
         self.text_elapsed = False
         self.tts_finished = False
         self.native_progress = UtteranceProgress()
-        self.native_available = True
         self.fallback_due = False
-        self.fallback_required_evidence_ms: int | None = None
         self.sent = False
         self.hold_reason: str | None = None
         self.line_no = 0
@@ -104,9 +102,7 @@ class Controller:
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_progress = UtteranceProgress()
-        self.native_available = True
         self.fallback_due = False
-        self.fallback_required_evidence_ms: int | None = None
         self.hold_reason = reason
 
     def stage_profile(self, profile: Profile) -> None:
@@ -302,9 +298,7 @@ class Controller:
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_progress = UtteranceProgress()
-        self.native_available = True
         self.fallback_due = False
-        self.fallback_required_evidence_ms: int | None = None
         self.sent = False
         self.hold_reason = None
         self._presentation_timing = timing
@@ -336,7 +330,6 @@ class Controller:
 
     def presentation_event(
         self, token: Token, event: str, *, success: bool = True,
-        evidence_through_ms: int | None = None,
     ) -> bool:
         """Record one presentation fact, then reconcile completion once.
 
@@ -363,15 +356,6 @@ class Controller:
                     not u.uncertain_text_fallback):
                 return False
             self.fallback_due = True
-            if evidence_through_ms is not None:
-                boundary = int(evidence_through_ms)
-                if boundary <= 0:
-                    raise ValueError('fallback evidence boundary must be positive')
-                self.fallback_required_evidence_ms = max(
-                    boundary,
-                    self.fallback_required_evidence_ms
-                    if self.fallback_required_evidence_ms is not None else boundary,
-                )
         elif event == 'force_due':
             return self._presentation_done('force_timeout')
         else:
@@ -379,16 +363,15 @@ class Controller:
         return self._reconcile_completion()
 
     def apply_utterance_progress(
-        self, token: Token, progress: UtteranceProgress, *, available: bool = True,
+        self, token: Token, progress: UtteranceProgress,
     ) -> bool:
-        """Consume one unified audio judgment and its assessment availability."""
+        """Consume one unified audio judgment without reinterpreting evidence."""
         if token != self.token or self.sent or self.completed or not self.utterance:
             return False
         u = self.utterance
         if u.advance_mode != AdvanceMode.AUDIO or u.use_tts:
             return False
         self.native_progress = progress
-        self.native_available = bool(available)
         return self._reconcile_completion()
 
     def _reconcile_completion(self) -> bool:
@@ -408,12 +391,9 @@ class Controller:
             return self._presentation_done('text') if self.text_elapsed else False
         if self.native_progress.ended:
             return self._presentation_done('utterance_progress')
-        if self.fallback_due and u.uncertain_text_fallback and not self.native_progress.active:
-            required = self.fallback_required_evidence_ms
-            settled = self.native_progress.settled_through_ms
-            if (not self.native_available or required is None or
-                    (settled is not None and settled >= required)):
-                return self._presentation_done('uncertain_text_fallback')
+        if (self.fallback_due and u.uncertain_text_fallback
+                and not self.native_progress.active):
+            return self._presentation_done('uncertain_text_fallback')
         return False
 
     def _presentation_done(self, reason: str) -> bool:

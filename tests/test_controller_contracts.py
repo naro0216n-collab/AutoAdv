@@ -90,20 +90,13 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     ):
         assert not active.apply_utterance_progress(
             active_token, UtteranceProgress(state=state))
-    # A fallback boundary may require NativeAudio to settle measurements through
-    # PCM already captured at that instant. Controller owns that policy wait but
-    # never reinterprets the underlying alignment/VAD/recurrence evidence.
-    assert not active.presentation_event(
-        active_token, 'fallback_due', evidence_through_ms=1500)
+    # Measurement settlement is not Controller state. Once Application publishes
+    # the policy deadline, ACTIVE suppresses it; a later UNKNOWN lets the same
+    # explicit fallback policy complete without relabeling audio as ended.
+    assert not active.presentation_event(active_token, 'fallback_due')
     assert active.presentation_reason is None and not active.completed
-    assert not active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1600))
-    assert not active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.ACTIVE, evidence_at_ms=1600, settled_through_ms=1500))
-    # Once the required measurement frontier is settled and cut risk is no longer
-    # active, completion is explicitly the configured fallback, never audio EOF.
     assert active.apply_utterance_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1700, settled_through_ms=1500))
+        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1700))
     assert active.presentation_reason == 'uncertain_text_fallback'
 
     strict, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=False)

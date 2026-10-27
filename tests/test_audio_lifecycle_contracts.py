@@ -227,9 +227,11 @@ def wait_until(predicate, message='native audio result did not arrive') -> None:
 def make_native(model, observations, errors=None, reports=None, *, clock=lambda: 1000, vocal_observer=None):
     return NativeAudio(
         42, Path('unused-helper.dll'), Path('unused.onnx'), Path('unused.json'),
-        lambda token, reason: (errors if errors is not None else []).append((token, reason)),
+        lambda token, reason, policy_failed: (errors if errors is not None else []).append(
+            (token, reason, policy_failed)),
         model_backend=model, g2p=StaticG2P(), clock=clock, vocal_observer=vocal_observer or StaticVocalObserver(),
-        on_progress=lambda token, progress, item: observations.append((token, progress, item)),
+        on_progress=lambda token, progress, item, policy_settled: observations.append(
+            (token, progress, item, policy_settled)),
         on_inference=(lambda token, item: reports.append((token, item))) if reports is not None else None,
     )
 
@@ -284,7 +286,7 @@ def test_alignment_scheduler_synchronizes_only_explicit_assessment_fences(monkey
         model.release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_000
-            for observed, progress, _item in observations))
+            for observed, progress, _item, _settled in observations))
         assert model.widened_started.wait(1)
 
         # Optional retained-history discovery can remain busy, but it does not
@@ -294,7 +296,7 @@ def test_alignment_scheduler_synchronizes_only_explicit_assessment_fences(monkey
         native.feed(fresh)
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_600
-            for observed, progress, _item in observations))
+            for observed, progress, _item, _settled in observations))
 
         # A fence can race an ordinary assessment already in progress. That
         # pre-fence work cannot acknowledge the fence while alignment is stale.
@@ -315,23 +317,23 @@ def test_alignment_scheduler_synchronizes_only_explicit_assessment_fences(monkey
         native.feed(fenced)
         assert assessment_started.wait(1)
         before = len(observations)
-        native.request_assessment_through(token, 21_200)
+        assert native.request_policy_assessment(token)
         assessment_release.set()
         time.sleep(.02)
         assert not any(progress.evidence_at_ms == 21_200
-                       for _observed, progress, _item in observations[before:])
+                       for _observed, progress, _item, _settled in observations[before:])
 
         model.widened_release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 21_200
-            for observed, progress, _item in observations[before:]))
+            for observed, progress, _item, _settled in observations[before:]))
 
         # An already-settled fence remains an idempotent obligation.
         before = len(observations)
-        native.request_assessment_through(token, 20_000)
+        assert native.request_policy_assessment(token)
         wait_until(lambda: any(
-            progress.evidence_at_ms == 20_000
-            for _observed, progress, _item in observations[before:]))
+            progress.evidence_at_ms == 21_200 and policy_settled
+            for _observed, progress, _item, policy_settled in observations[before:]))
     finally:
         model.release.set()
         model.widened_release.set()
@@ -357,7 +359,7 @@ def test_replaced_target_cannot_publish_stale_alignment_result():
         wait_until(lambda: bool(observations[before_replacement:]))
 
         assert observations[before_replacement:]
-        assert all(token == newest for token, _progress, _item in observations[before_replacement:])
+        assert all(token == newest for token, _progress, _item, _settled in observations[before_replacement:])
     finally:
         model.release.set()
         native.close()
@@ -463,8 +465,8 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
                 native.history.push(chunk, target_pid=42)
                 native.feed(chunk)
             native.begin(token, 'target', causal_lower_bound_ms=1000)
-            wait_until(lambda: any(progress.evidence_at_ms == 1600 for _token, progress, _item in observations))
-            return [item for _token, progress, item in observations if progress.evidence_at_ms == 1600][-1]
+            wait_until(lambda: any(progress.evidence_at_ms == 1600 for _token, progress, _item, _settled in observations))
+            return [item for _token, progress, item, _settled in observations if progress.evidence_at_ms == 1600][-1]
         finally:
             native.close()
 
@@ -494,7 +496,7 @@ def test_candidate_search_widens_only_until_target_context_is_located():
         )
         wait_until(lambda: any(
             item.lexical is not None and item.lexical.target_associated
-            for _observed, _progress, item in observations))
+            for _observed, _progress, item, _settled in observations))
 
         associated_report = next(
             item for _token, item in reports if item.get('target_associated'))
@@ -533,16 +535,15 @@ def test_heartbeat_is_transport_health_only_and_never_advances_acoustic_evidence
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
         assert model.started.wait(1)
-        assert native.observation_fence(token) == 1600
+        assert native.request_policy_assessment(token)
 
         # Transport liveness at a later wall-clock time is not new PCM and cannot
         # become a later acoustic-evidence frontier.
         native.health(CaptureHealth(1700, True, ''))
-        assert native.observation_fence(token) == 1600
         model.release.set()
         wait_until(lambda: bool(observations))
         assert all(progress.evidence_at_ms is None or progress.evidence_at_ms <= 1600
-                   for observed, progress, _item in observations if observed == token)
+                   for observed, progress, _item, _settled in observations if observed == token)
     finally:
         model.release.set()
         native.close()
@@ -598,11 +599,13 @@ def test_recurrence_remains_optional_evidence_when_direct_endpoint_risk_stays_op
         native.history.push(tail, target_pid=42)
         native.feed(tail)
         wait_until(lambda: any(
-            item.recurrence is not None and item.recurrence.period_ms is not None
-            for _observed, _progress, item in observations))
+            any(candidate.period_ms is not None for candidate in item.recurrence)
+            for _observed, _progress, item, _settled in observations))
         recurrent = next(
-            item.recurrence for _observed, _progress, item in reversed(observations)
-            if item.recurrence is not None and item.recurrence.period_ms is not None)
+            candidate
+            for _observed, _progress, item, _settled in reversed(observations)
+            for candidate in item.recurrence
+            if candidate.period_ms is not None)
         assert recurrent.period_ms is not None
     finally:
         native.close()
@@ -684,12 +687,12 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
         native.begin(token, 'target')
         wait_until(lambda: reports and min(
             item['capture_start_ms'] for _token, item in reports) <= 1000
-            and any(item.lexical is not None for _token, _progress, item in observations))
+            and any(item.lexical is not None for _token, _progress, item, _settled in observations))
         initial = tuple(model.durations_ms)
         initial_reports = len(reports)
         weak_starts = [
             item.lexical.target_start_ms
-            for _token, _progress, item in observations
+            for _token, _progress, item, _settled in observations
             if item.lexical is not None and item.lexical.aligned_target_units > 0
             and not item.lexical.target_associated and item.lexical.target_start_ms is not None
         ]
@@ -801,7 +804,7 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
         (.3, .75, .1, .55, .9, .2),
     ))
 
-    assert periodic.period_ms is not None
+    assert periodic.period_ms is not None and periodic.observer == 'speech'
     # A sustained flat human-vocal score is persistence, not recurrence; this
     # prevents a long finite cry from being released merely for being steady.
     assert flat_finite_risk.period_ms is None
@@ -922,7 +925,7 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     component_history.add_vocal(tuple(component_frames))
     structured = component_history.recurrence(
         start_ms=1000, end_ms=at - 100, observer='nonlexical')
-    assert structured.period_ms == 400
+    assert structured.period_ms == 400 and structured.observer == 'nonlexical'
     assert structured.strength > .95
 
     changing_components = (

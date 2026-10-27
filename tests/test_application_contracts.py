@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from autoadv.application import AutoAdvApplication
+from autoadv.audio_evidence import NativeAudioObservation
 from autoadv.utterance_progress import (
-    UtteranceProgress, UtteranceProgressState, NativeAudioObservation,
+    UtteranceProgress, UtteranceProgressState,
 )
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent
@@ -59,20 +60,19 @@ class _FakeNativeAudio:
     def clock(self):
         return self.clock_ms
 
-    def observation_fence(self, _token):
-        return self.fence_ms
+    def request_policy_assessment(self, token):
+        if self.fence_ms is None:
+            return False
+        self.requests.append(token)
+        return True
 
-    def request_assessment_through(self, token, through_ms):
-        self.requests.append((token, through_ms))
-
-    def publish_progress(self, token, state, evidence_at_ms, *, settled_through_ms=None):
+    def publish_progress(self, token, state, evidence_at_ms, *, policy_settled=False):
         callback = self.callbacks['on_progress']
         callback(
             token,
-            UtteranceProgress(
-                state=state, evidence_at_ms=evidence_at_ms,
-                settled_through_ms=settled_through_ms),
+            UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
             NativeAudioObservation(),
+            policy_settled,
         )
 
 
@@ -385,7 +385,7 @@ def test_audio_mode_without_uncertainty_fallback_has_no_text_timer_completion(mo
     assert state.sent and state.presentation_reason == 'force_timeout'
 
 
-def test_application_keeps_newest_native_progress_at_the_fallback_boundary(monkeypatch):
+def test_application_applies_policy_only_after_integrated_audio_judgment_allows_it(monkeypatch):
     Native, _InputObserver = _install_audio_runtime_fakes(monkeypatch)
     app, _ = app_with_game()
     profile = app.current_profile()
@@ -403,9 +403,6 @@ def test_application_keeps_newest_native_progress_at_the_fallback_boundary(monke
     native = Native.instances[-1]
 
     native.publish_progress(token, UtteranceProgressState.ACTIVE, 1600)
-    # Completion work can finish out of order. Older evidence must not replace
-    # the newer integrated frontier merely because its callback arrives later.
-    native.publish_progress(token, UtteranceProgressState.UNKNOWN, 1400)
     app.set_auto_advance(True)
     deadline = next(
         callback for delay, callback in scheduled
@@ -415,8 +412,14 @@ def test_application_keeps_newest_native_progress_at_the_fallback_boundary(monke
     assert state.pause_reason is None
     assert state.authorized and not state.sent and not state.completed
 
+    # Application does not reorder or reinterpret acoustic evidence. Once the
+    # integrated judgment later becomes UNKNOWN, Controller applies the already
+    # elapsed fallback policy.
+    native.publish_progress(token, UtteranceProgressState.UNKNOWN, 1700)
+    state = app.runtime_state()
+    assert state.sent and state.presentation_reason == 'uncertain_text_fallback'
 
-def test_audio_fallback_fences_already_captured_pcm_before_policy_completion(monkeypatch):
+def test_audio_fallback_settles_already_captured_pcm_before_policy_completion(monkeypatch):
     Native, _InputObserver = _install_audio_runtime_fakes(monkeypatch)
     app, _ = app_with_game()
     profile = app.current_profile()
@@ -443,10 +446,10 @@ def test_audio_fallback_fences_already_captured_pcm_before_policy_completion(mon
         if delay == app.runtime_state().utterance.text_wait_ms)
     deadline()
     assert not app.runtime_state().completed
-    assert native.requests == [(token, 1500)]
+    assert native.requests == [token]
 
     native.publish_progress(
-        token, UtteranceProgressState.UNKNOWN, 1500, settled_through_ms=1500)
+        token, UtteranceProgressState.UNKNOWN, 1500, policy_settled=True)
     state = app.runtime_state()
     assert state.completed
     assert state.presentation_reason == 'uncertain_text_fallback'

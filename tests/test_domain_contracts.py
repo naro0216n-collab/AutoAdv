@@ -6,10 +6,12 @@ import numpy as np
 import pytest
 
 from autoadv.audio_buffer import PCMChunk
+from autoadv.audio_evidence import (
+    HumanVocalEvidence, LexicalProgressEvidence, VocalActivityInterval,
+    VocalEvidenceSeries, VocalRecurrenceEvidence,
+)
 from autoadv.utterance_progress import (
-    HumanVocalEvidence, LexicalProgressEvidence, NativeAudioObservation,
-    VocalActivityInterval, VocalEvidenceSeries, VocalRecurrenceEvidence, UtteranceProgressState,
-    evaluate_utterance_progress,
+    UtteranceProgressState, evaluate_utterance_progress,
 )
 from autoadv.forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner
 from autoadv.g2p import HaqumeiG2P, PronunciationCandidate, count_reading_units, reading_units_from_candidates
@@ -353,6 +355,14 @@ def test_audio_progress_uses_temporal_evidence_without_assigning_human_vocal_own
     progress, _ = _progress(lexical=lexical, vocal=independent, end=1800)
     assert progress.state == UtteranceProgressState.ACTIVE
 
+    # Located known text is an independent relation fact. Activity that already
+    # began just before the aligned target onset can overlap that target without
+    # being rewritten into a synthetic post-onset interval.
+    overlapping = _vocal_evidence(('speech', ((1040, 1280),)))
+    progress, _ = _progress(
+        lexical=lexical, vocal=overlapping, end=1400, lower=None)
+    assert progress.state == UtteranceProgressState.ACTIVE
+
 
 def test_vocal_risk_uses_presentation_relation_and_optional_recurrence_without_observer_release_policy():
     post_input_voice = _vocal_evidence(('nonlexical', ((1120, 1380),)))
@@ -400,7 +410,7 @@ def test_vocal_risk_uses_presentation_relation_and_optional_recurrence_without_o
         vocal=two_open, end=2500, lower=1000, recurrence=(unstable, stable))
     assert still_finite.state == UtteranceProgressState.ACTIVE
     assert released.state == UtteranceProgressState.UNKNOWN
-    assert measured == stable
+    assert stable in measured
 
     # The measurement layer may expose several candidate periods. Progression
     # chooses a stable current recurrence; it does not require every observer to
@@ -415,7 +425,7 @@ def test_vocal_risk_uses_presentation_relation_and_optional_recurrence_without_o
         recurrence=(self_similar_not_periodic, periodic),
     )
     assert released.state == UtteranceProgressState.UNKNOWN
-    assert measured == periodic
+    assert periodic in measured
 
     starts_without_excess = []
     before_excess, _ = _progress(

@@ -20,8 +20,9 @@ from collections.abc import Sequence
 
 from .conversation import Controller, Target, Token
 from .g2p import G2PBackend, default_g2p
+from .audio_evidence import NativeAudioObservation
 from .utterance_progress import (
-    NativeAudioObservation, UtteranceProgress, UtteranceProgressState,
+    UtteranceProgress, UtteranceProgressState,
 )
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
@@ -798,10 +799,8 @@ class AutoAdvApplication:
         else:
             self._notify_runtime()
 
-    def _apply_fallback_due(
-        self, token: Token, *, evidence_through_ms: int | None = None,
-    ) -> bool:
-        """Record the fallback policy boundary without reinterpreting audio."""
+    def _apply_fallback_due(self, token: Token) -> bool:
+        """Apply the configured uncertainty policy after audio is settled."""
         state = self.runtime_state()
         utterance = state.utterance
         if (token != state.token or utterance is None or utterance.use_tts or
@@ -810,18 +809,12 @@ class AutoAdvApplication:
             return False
         self._emit_runtime_event('uncertainty_fallback_due', token,
                                  text_wait_ms=utterance.text_wait_ms)
-        completed = self.controller.presentation_event(
-            token, 'fallback_due', evidence_through_ms=evidence_through_ms)
+        completed = self.controller.presentation_event(token, 'fallback_due')
         self._finish_presentation_transition(token, completed)
         return completed
 
     def _fallback_due(self, token: Token) -> None:
-        """Settle already captured PCM before fallback may complete.
-
-        The policy deadline remains in Controller. NativeAudio owns synchronization
-        of observer/alignment work through the captured frontier; Application only
-        orders the policy fact and the requested measurement fence.
-        """
+        """Ask NativeAudio to settle the PCM captured at the policy deadline."""
         state = self.runtime_state()
         utterance = state.utterance
         if (token != state.token or utterance is None or utterance.use_tts or
@@ -829,10 +822,9 @@ class AutoAdvApplication:
                 not utterance.uncertain_text_fallback or state.completed or state.sent):
             return
         native = self._native_audio
-        fence_ms = native.observation_fence(token) if native is not None else None
-        completed = self._apply_fallback_due(token, evidence_through_ms=fence_ms)
-        if fence_ms is not None and not completed:
-            native.request_assessment_through(token, fence_ms)
+        if native is not None and native.request_policy_assessment(token):
+            return
+        self._apply_fallback_due(token)
 
     def _start_presentation(self, token: Token) -> None:
         """Start every presentation effect for the current immutable Utterance.
@@ -1213,6 +1205,7 @@ class AutoAdvApplication:
 
     def _consume_native_progress(
         self, token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+        *, policy_settled: bool = False,
     ) -> bool:
         """Apply one current-generation integrated acoustic result to product state."""
         state = self.runtime_state()
@@ -1223,6 +1216,10 @@ class AutoAdvApplication:
         lexical = observation.lexical
         vocal = observation.vocal
         recurrence = observation.recurrence
+        representative_recurrence = (
+            max(recurrence, key=lambda item: (item.prominence, item.strength))
+            if recurrence else None
+        )
         self._emit_telemetry(
             'native_audio_observation', token,
             target_units=(lexical.target_units if lexical is not None else 0),
@@ -1250,19 +1247,22 @@ class AutoAdvApplication:
                 'measurement_support_end_ms': (
                     max((sample.at_ms for sample in item.samples), default=None)),
             } for item in vocal.series] if vocal is not None else []),
-            recurrence_strength=(recurrence.strength if recurrence is not None else 0.0),
-            recurrence_period_ms=(recurrence.period_ms if recurrence is not None else None),
-            recurrence_prominence=(recurrence.prominence if recurrence is not None else 0.0),
+            recurrence_strength=(
+                representative_recurrence.strength
+                if representative_recurrence is not None else 0.0),
+            recurrence_period_ms=(
+                representative_recurrence.period_ms
+                if representative_recurrence is not None else None),
+            recurrence_prominence=(
+                representative_recurrence.prominence
+                if representative_recurrence is not None else 0.0),
+            recurrence_candidates=[{
+                'observer': item.observer,
+                'strength': item.strength,
+                'period_ms': item.period_ms,
+                'prominence': item.prominence,
+            } for item in recurrence],
         )
-
-        # Alignment work and endpoint observation may complete out of order. An
-        # older result remains useful telemetry but cannot replace a newer audio
-        # frontier in Controller state. Equal frontiers remain eligible because
-        # stronger evidence can be produced for the same captured PCM.
-        if (previous.evidence_at_ms is not None
-                and progress.evidence_at_ms is not None
-                and progress.evidence_at_ms < previous.evidence_at_ms):
-            return False
 
         if progress.state != previous.state:
             self._emit_runtime_event(
@@ -1275,6 +1275,8 @@ class AutoAdvApplication:
         if completed:
             self._finish_presentation_transition(token, True)
             return True
+        if policy_settled:
+            return self._apply_fallback_due(token)
         return False
 
     def _start_native_audio(self, profile: Profile) -> bool:
@@ -1301,28 +1303,38 @@ class AutoAdvApplication:
             return (epoch == self._native_audio_epoch and now.session == session and
                     now.target is not None and (now.target.audio_pid or now.target.pid) == pid)
 
-        def consume_error(token: Token | None, detail: str) -> None:
+        def consume_error(
+            token: Token | None, detail: str, policy_settlement_failed: bool,
+        ) -> None:
             if not current():
                 return
             self._emit_runtime_event('native_audio_error', token, reason=detail)
-            self._handle_native_error(token)
+            self._handle_native_error(
+                token, policy_settlement_failed=policy_settlement_failed)
 
-        def publish_error(token: Token | None, detail: str) -> None:
-            if current():
-                self._dispatch_runtime(lambda: consume_error(token, detail))
-
-        def consume_progress(
-            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
-        ) -> None:
-            if current():
-                self._consume_native_progress(token, progress, observation)
-
-        def publish_progress(
-            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+        def publish_error(
+            token: Token | None, detail: str, policy_settlement_failed: bool,
         ) -> None:
             if current():
                 self._dispatch_runtime(
-                    lambda: consume_progress(token, progress, observation))
+                    lambda: consume_error(token, detail, policy_settlement_failed))
+
+        def consume_progress(
+            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+            policy_settled: bool,
+        ) -> None:
+            if current():
+                self._consume_native_progress(
+                    token, progress, observation, policy_settled=policy_settled)
+
+        def publish_progress(
+            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+            policy_settled: bool,
+        ) -> None:
+            if current():
+                self._dispatch_runtime(
+                    lambda: consume_progress(
+                        token, progress, observation, policy_settled))
 
         def publish_inference(token: Token, metrics: dict) -> None:
             if current():
@@ -1394,17 +1406,23 @@ class AutoAdvApplication:
             return False
         return True
 
-    def _handle_native_error(self, token: Token | None) -> bool:
-        """Route acquisition/recognition failure through Controller policy."""
+    def _handle_native_error(
+        self, token: Token | None, *, policy_settlement_failed: bool = False,
+    ) -> bool:
+        """Route unavailable native audio through the existing uncertainty policy."""
         state = self.runtime_state()
         if token is None or token != state.token or state.utterance is None:
             return False
         utterance = state.utterance
         if utterance.advance_mode.value != 'audio' or utterance.use_tts:
             return False
-        completed = self.controller.apply_utterance_progress(
-            token, UtteranceProgress(), available=False)
-        return self._finish_presentation_transition(token, completed)
+        completed = self.controller.apply_utterance_progress(token, UtteranceProgress())
+        if completed:
+            return self._finish_presentation_transition(token, True)
+        if policy_settlement_failed:
+            return self._apply_fallback_due(token)
+        self._notify_runtime()
+        return False
 
     def _start_ocr(self, profile: Profile) -> bool:
         """Own OCR acquisition, Controller admission and presentation dispatch."""
