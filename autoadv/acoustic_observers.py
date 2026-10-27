@@ -364,14 +364,21 @@ class AcousticObservationHistory:
                 best = (rank, evidence)
         return best[1] if best is not None else None
 
-    def recurrence(self, *, start_ms: int, end_ms: int) -> VocalRecurrenceEvidence:
-        """Measure repetition of human-vocal observer time series only.
+    def recurrence(
+        self, *, start_ms: int, end_ms: int, observer: str | None = None,
+    ) -> VocalRecurrenceEvidence:
+        """Measure repetition without crossing observer score provenance.
 
-        BGM-dominated full-mix fingerprints are deliberately absent.  Recurrence
-        remains target-independent and observer-agnostic, but it must be carried by
-        a human-vocal measurement rather than by unrelated process-mix structure.
+        With ``observer`` set, only that measurement series is considered. The
+        unfiltered form remains useful for diagnostics and standalone cache tests,
+        but product progression requests recurrence for the open observer risk it
+        is evaluating.
         """
-        selected = [frame for frame in self._vocal if start_ms <= frame.at_ms <= end_ms]
+        selected = [
+            frame for frame in self._vocal
+            if start_ms <= frame.at_ms <= end_ms
+            and (observer is None or frame.observer == observer)
+        ]
         by_observer: dict[str, list[VocalActivityFrame]] = {}
         for frame in selected:
             by_observer.setdefault(frame.observer, []).append(frame)

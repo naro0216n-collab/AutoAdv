@@ -513,10 +513,13 @@ class NativeAudio:
 
         recurrence = None
 
-        def recurrence_lookup(start_ms: int, end_ms: int):
+        def recurrence_lookup(observer: str, start_ms: int, end_ms: int):
             nonlocal recurrence
             recurrence = self.features.recurrence(
-                start_ms=min(int(start_ms), int(end_ms)), end_ms=int(end_ms))
+                start_ms=min(int(start_ms), int(end_ms)),
+                end_ms=int(end_ms),
+                observer=observer,
+            )
             return recurrence
 
         progress, recurrence = evaluate_utterance_progress(

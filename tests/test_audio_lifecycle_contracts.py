@@ -597,10 +597,11 @@ def test_capture_callback_is_not_blocked_by_acoustic_analysis():
     recurrence_release = Event()
     original_recurrence = native.features.recurrence
 
-    def blocking_recurrence(*, start_ms, end_ms):
+    def blocking_recurrence(*, start_ms, end_ms, observer=None):
         recurrence_started.set()
         recurrence_release.wait(2)
-        return original_recurrence(start_ms=start_ms, end_ms=end_ms)
+        return original_recurrence(
+            start_ms=start_ms, end_ms=end_ms, observer=observer)
 
     try:
         native.history.start(42)

@@ -249,9 +249,11 @@ def _vocal_evidence(*series):
 
 def _progress(*, lexical=None, vocal=None, end=2000, lower=1000, inputs=(), recurrence=None,
               recurrence_starts=None):
-    def lookup(start, _end):
+    def lookup(observer, start, _end):
         if recurrence_starts is not None:
-            recurrence_starts.append(start)
+            recurrence_starts.append((observer, start))
+        if isinstance(recurrence, dict):
+            return recurrence.get(observer)
         return recurrence
     result, measured_recurrence = evaluate_utterance_progress(
         capture_end_ms=end,
@@ -306,7 +308,7 @@ def test_audio_progress_needs_measured_acoustic_relation_and_never_uses_elapsed_
         assert progress.state == UtteranceProgressState.UNKNOWN
 
 
-def test_target_vocal_relation_preserves_observer_provenance_and_uses_recurrence_only_to_release_risk():
+def test_audio_progress_uses_temporal_evidence_without_assigning_human_vocal_ownership():
     lexical = _lexical_evidence()
     speech = (
         (1120, .9, 1080), (1240, .9, 1200), (1320, .9, 1280),
@@ -318,6 +320,9 @@ def test_target_vocal_relation_preserves_observer_provenance_and_uses_recurrence
     closed_tail = continuing_tail + (
         (1800, .1, 1640), (2100, .1, 1800),
     )
+
+    # Different observers need no cross-observer episode label. Any new open
+    # finite-vocal activity after the Presentation anchor keeps cut risk active.
     active, _ = _progress(
         lexical=lexical,
         vocal=_vocal_evidence(('speech', speech), ('nonlexical', continuing_tail)),
@@ -331,8 +336,15 @@ def test_target_vocal_relation_preserves_observer_provenance_and_uses_recurrence
     assert active.state == UtteranceProgressState.ACTIVE
     assert ended.state == UtteranceProgressState.ENDED
 
-    # Quiet from a different observer never closes another observer's positive
-    # run. Observer scores remain independent measurements rather than one mean.
+    # Activity already present before the causal lower bound is not promoted to
+    # current-Presentation risk merely because it overlaps the aligned text.
+    preexisting = _vocal_evidence(('speech', (
+        (900, .9, 860), (1120, .9, 1080), (1480, .9, 1440),
+    )))
+    progress, _ = _progress(lexical=lexical, vocal=preexisting, end=1600, lower=1000)
+    assert progress.state == UtteranceProgressState.UNKNOWN
+
+    # Quiet on another observer never closes this observer's open measurement.
     independent = _vocal_evidence(
         ('speech', ((1280, .9, 1260), (1480, .9, 1460))),
         ('nonlexical', ((1200, .1, 0), (1500, .1, 300), (1800, .1, 600))),
@@ -340,25 +352,8 @@ def test_target_vocal_relation_preserves_observer_provenance_and_uses_recurrence
     progress, _ = _progress(lexical=lexical, vocal=independent, end=1800)
     assert progress.state == UtteranceProgressState.ACTIVE
 
-    stable = VocalRecurrenceEvidence(
-        strength=.9, period_ms=500, period_stability=.85,
-        recent_strength=.86, level_consistency=.9)
-    unstable = VocalRecurrenceEvidence(
-        strength=.9, period_ms=500, period_stability=.3,
-        recent_strength=.86, level_consistency=.9)
-    looping = _vocal_evidence(('speech', (
-        (1120, .9, 1080), (1700, .9, 1660), (2300, .9, 2260), (2900, .9, 2860),
-    )))
-    stable_progress, stable_evidence = _progress(
-        lexical=lexical, vocal=looping, end=3000, recurrence=stable)
-    unstable_progress, _ = _progress(
-        lexical=lexical, vocal=looping, end=3000, recurrence=unstable)
-    assert stable_progress.state == UtteranceProgressState.UNKNOWN
-    assert stable_evidence == stable
-    assert unstable_progress.state == UtteranceProgressState.ACTIVE
 
-
-def test_nonlexical_progress_uses_observed_timing_facts_without_promoting_them_to_boundaries():
+def test_vocal_risk_uses_observed_time_changes_and_observer_local_recurrence():
     post_input_voice = _vocal_evidence(('nonlexical', (
         (1120, .9, 1080), (1240, .9, 1200), (1380, .9, 1340),
     )))
@@ -373,27 +368,48 @@ def test_nonlexical_progress_uses_observed_timing_facts_without_promoting_them_t
     assert from_external_candidate.state == UtteranceProgressState.ACTIVE
     assert only_late_candidates.state == UtteranceProgressState.UNKNOWN
 
-    # A run that already spans a timing fact stays inherited activity. Score
-    # chatter does not create a second onset or promote the fact into a boundary.
-    boundary_spanning = _vocal_evidence(('nonlexical', (
-        (960, .9, 0),
-        (1240, .1, 280), (1480, .1, 520),
-        (1720, .9, 760),
+    unchanged = _vocal_evidence(('nonlexical', (
+        (960, .9, 0), (1240, .9, 280), (1480, .9, 520), (1720, .9, 760),
+    )))
+    changed = _vocal_evidence(('nonlexical', (
+        (960, .9, 0), (1240, .1, 280), (1480, .1, 520), (1720, .9, 760),
     )))
     for lower, inputs in ((1000, ()), (None, (1000,))):
-        progress, _ = _progress(
-            vocal=boundary_spanning, end=1720, lower=lower, inputs=inputs)
-        assert progress.state == UtteranceProgressState.UNKNOWN
+        stable_context, _ = _progress(
+            vocal=unchanged, end=1720, lower=lower, inputs=inputs)
+        new_change, _ = _progress(
+            vocal=changed, end=1720, lower=lower, inputs=inputs)
+        assert stable_context.state == UtteranceProgressState.UNKNOWN
+        assert new_change.state == UtteranceProgressState.ACTIVE
 
-    # Once a post-fact run exists, elapsed time without a new measurement cannot
-    # close it. The same measured episode remains a present cut risk.
+    stable = VocalRecurrenceEvidence(
+        strength=.9, period_ms=500, period_stability=.85,
+        recent_strength=.86, level_consistency=.9)
+    unstable = VocalRecurrenceEvidence(
+        strength=.9, period_ms=500, period_stability=.3,
+        recent_strength=.86, level_consistency=.9)
+    two_open = _vocal_evidence(
+        ('speech', ((1120, .9, 1080), (1700, .9, 1660), (2300, .9, 2260))),
+        ('nonlexical', ((1180, .9, 1140), (1800, .9, 1760), (2400, .9, 2360))),
+    )
+    progress, _ = _progress(
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable, 'nonlexical': unstable},
+    )
+    assert progress.state == UtteranceProgressState.ACTIVE
+    released, _ = _progress(
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable, 'nonlexical': stable},
+    )
+    assert released.state == UtteranceProgressState.UNKNOWN
+
+    # Advancing only wall-clock evaluation time cannot close a measured open run.
     for frontier in (1400, 2400, 5200):
         progress, _ = _progress(vocal=post_input_voice, end=frontier, lower=1000)
         assert progress.state == UtteranceProgressState.ACTIVE
 
 
-
-def test_unassociated_lexical_fragments_do_not_create_target_ownership():
+def test_unassociated_lexical_fragments_do_not_change_temporal_vocal_evidence():
     weak = _lexical_evidence(
         start=1400, aligned_end=1530, target_end=1530,
         associated=False, complete=False, committed=False, aligned_units=2)
@@ -408,6 +424,7 @@ def test_unassociated_lexical_fragments_do_not_create_target_ownership():
     assert with_fragment == timing_only
     assert timing_only.state == UtteranceProgressState.ACTIVE
     assert unbounded.state == UtteranceProgressState.UNKNOWN
+
 
 def test_short_score_valleys_do_not_become_endpoints_but_measured_quiet_can_close_a_run():
     samples = (
