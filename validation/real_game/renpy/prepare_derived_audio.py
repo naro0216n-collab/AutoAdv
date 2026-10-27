@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 from array import array
+import os
 from pathlib import Path
+import shutil
 import wave
 
 RATE = 48_000
@@ -123,12 +125,26 @@ def verify(voice_dir: Path) -> None:
             raise ValueError(f"derived fixture WAV is empty: {path}")
 
 
+def _stage_japanese_font(voice_dir: Path) -> None:
+    """Stage Ren'Py's pinned CJK font when constructing the distributable fixture."""
+    sdk = os.environ.get("RENPY_SDK")
+    if not sdk:
+        return
+    source = Path(sdk) / "launcher" / "game" / "fonts" / "SourceHanSansLite.ttf"
+    if not source.is_file():
+        raise FileNotFoundError(f"Ren'Py CJK font is missing: {source}")
+    target = voice_dir.parent.parent / "fonts" / source.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("voice_dir", type=Path)
     args = parser.parse_args()
     build(args.voice_dir)
     verify(args.voice_dir)
+    _stage_japanese_font(args.voice_dir)
     return 0
 
 

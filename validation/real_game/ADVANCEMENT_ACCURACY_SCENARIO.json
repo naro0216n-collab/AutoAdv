@@ -645,8 +645,8 @@
       }
     },
     {
-      "id": "machine-transition-jvs003",
-      "text": "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。",
+      "id": "machine-transition-voiced",
+      "text": "ゼロという概念は、ヒンドゥー文化に由来している。",
       "advance_mode": "audio",
       "use_tts": false,
       "scene": "machine_room",
@@ -655,7 +655,7 @@
         "music",
         "adv_ambient"
       ],
-      "voice_file": "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
+      "voice_file": "audio/voice/normal_012.wav",
       "audio_facts": {
         "text_correspondence": true,
         "finite_vocal_activity": true,

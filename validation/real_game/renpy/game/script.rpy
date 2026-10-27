@@ -66,7 +66,6 @@ label advancement_accuracy:
         _adv_runtime_assets = [
             "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
             "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
-            "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
             "audio/runtime/music/Heavenly Loop_0.ogg",
             "audio/runtime/music/LofiLoop_2.ogg",
             "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg",
@@ -262,10 +261,10 @@ label advancement_accuracy:
     # lines without any session reset.
     scene bg adv_machine with fade
     play adv_ambient "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg" loop fadein 0.4 volume 0.25
-    $ _adv_evidence_case("machine-transition-jvs003", "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。", "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav")
-    voice "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
+    $ _adv_evidence_case("machine-transition-voiced", "ゼロという概念は、ヒンドゥー文化に由来している。", "audio/voice/normal_012.wav")
+    voice "audio/voice/normal_012.wav"
     $ _adv_evidence_voice_commanded()
-    c "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
+    c "ゼロという概念は、ヒンドゥー文化に由来している。"
     stop music fadeout 1.2
     $ _adv_evidence_case("machine-fading-bgm-whisper", "あっベルが鳴ってる。", "audio/voice/whisper_017.wav")
     voice "audio/voice/whisper_017.wav"
