@@ -800,6 +800,20 @@ def test_vocal_history_derives_observer_local_activity_intervals_from_score_supp
     assert streamed.summarize_vocal(start_ms=1000, end_ms=2200) == history.summarize_vocal(
         start_ms=1000, end_ms=2200)
 
+    # Observer support may widen while a stream warms up. A later wider
+    # receptive field must revise the still-open interval directly instead of
+    # leaving a narrower quiet requirement in a parallel cache state.
+    widening = AcousticObservationHistory()
+    for frame in (
+        VocalActivityFrame(at_ms=1120, score=.9, support_start_ms=1000, observer='speech'),
+        VocalActivityFrame(at_ms=1360, score=.1, support_start_ms=1120, observer='speech'),
+        VocalActivityFrame(at_ms=1480, score=.9, support_start_ms=520, observer='speech'),
+    ):
+        widening.add_vocal((frame,))
+    widened = widening.summarize_vocal(start_ms=500, end_ms=1480).series[0].activity
+    assert len(widened) == 1
+    assert widened[0].ongoing
+
 
 def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     def strongest(candidates):

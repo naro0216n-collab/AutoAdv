@@ -248,14 +248,10 @@ class AcousticObservationHistory:
         # for every Presentation assessment.
         self._vocal: deque[VocalActivityFrame] = deque()
         self._activity: dict[str, deque[VocalActivityInterval]] = {}
-        self._activity_required: dict[str, int] = {}
-        self._quiet_support: dict[str, tuple[int, int] | None] = {}
 
     def reset(self) -> None:
         self._vocal.clear()
         self._activity.clear()
-        self._activity_required.clear()
-        self._quiet_support.clear()
 
     @property
     def latest_ms(self) -> int | None:
@@ -275,34 +271,53 @@ class AcousticObservationHistory:
         start = int(frame.support_start_ms if frame.support_start_ms is not None else end)
         return start, end
 
-    def _record_activity(self, frame: VocalActivityFrame, *, required: int) -> None:
-        """Advance one observer-local activity measurement exactly once."""
+    def _record_activity(self, frame: VocalActivityFrame) -> None:
+        """Advance one observer-local activity timeline exactly once."""
         observer = frame.observer
         threshold = self._threshold(observer)
         support_start, at_ms = self._support(frame)
+        frame_required = max(self.MIN_INACTIVE_SUPPORT_MS, at_ms - support_start)
         intervals = self._activity.setdefault(observer, deque())
-
-        if float(frame.score) >= threshold:
-            if not intervals or not intervals[-1].ongoing:
-                intervals.append(VocalActivityInterval(
-                    start_ms=at_ms, last_active_ms=at_ms,
-                    inactive_required_ms=required,
-                ))
-                self._quiet_support[observer] = None
-                return
-            current = intervals[-1]
-            intervals[-1] = VocalActivityInterval(
-                start_ms=current.start_ms,
-                last_active_ms=at_ms,
-                inactive_required_ms=required,
-            )
-            self._quiet_support[observer] = None
-            return
+        positive = float(frame.score) >= threshold
 
         if not intervals:
+            if positive:
+                intervals.append(VocalActivityInterval(
+                    start_ms=at_ms, last_active_ms=at_ms,
+                    inactive_required_ms=frame_required,
+                ))
             return
-        if not intervals[-1].ongoing:
-            current = intervals[-1]
+
+        current = intervals[-1]
+        required = max(current.inactive_required_ms, frame_required)
+        if required != current.inactive_required_ms:
+            current = VocalActivityInterval(
+                start_ms=current.start_ms,
+                last_active_ms=current.last_active_ms,
+                inactive_required_ms=required,
+                inactive_start_ms=current.inactive_start_ms,
+                inactive_end_ms=current.inactive_end_ms,
+            )
+            intervals[-1] = current
+
+        if positive:
+            if current.ongoing:
+                intervals[-1] = VocalActivityInterval(
+                    start_ms=current.start_ms,
+                    last_active_ms=at_ms,
+                    inactive_required_ms=required,
+                )
+            else:
+                intervals.append(VocalActivityInterval(
+                    start_ms=at_ms, last_active_ms=at_ms,
+                    inactive_required_ms=frame_required,
+                ))
+            return
+
+        if not current.ongoing:
+            # Once disappearance is established, later disjoint silence does not
+            # redefine that endpoint. Overlapping support may only extend the
+            # already-established measurement.
             if (current.inactive_start_ms is not None
                     and current.inactive_end_ms is not None
                     and support_start <= current.inactive_end_ms):
@@ -314,21 +329,27 @@ class AcousticObservationHistory:
                     inactive_end_ms=max(current.inactive_end_ms, at_ms),
                 )
             return
-        current = intervals[-1]
-        quiet = self._quiet_support.get(observer)
-        if quiet is None or support_start > quiet[1]:
+
+        # A sub-threshold receptive field that still begins before the last
+        # positive measurement cannot establish post-activity quiet. Once its
+        # complete support lies after the last positive measurement, keep that
+        # contiguous support directly on the interval; no parallel quiet state is
+        # needed.
+        if support_start < current.last_active_ms:
+            return
+        quiet_start = current.inactive_start_ms
+        quiet_end = current.inactive_end_ms
+        if quiet_start is None or quiet_end is None or support_start > quiet_end:
             quiet_start, quiet_end = support_start, at_ms
         else:
-            quiet_start, quiet_end = quiet[0], max(quiet[1], at_ms)
-        self._quiet_support[observer] = (quiet_start, quiet_end)
-        if quiet_start >= current.last_active_ms and quiet_end - quiet_start >= required:
-            intervals[-1] = VocalActivityInterval(
-                start_ms=current.start_ms,
-                last_active_ms=current.last_active_ms,
-                inactive_required_ms=required,
-                inactive_start_ms=quiet_start,
-                inactive_end_ms=quiet_end,
-            )
+            quiet_end = max(int(quiet_end), at_ms)
+        intervals[-1] = VocalActivityInterval(
+            start_ms=current.start_ms,
+            last_active_ms=current.last_active_ms,
+            inactive_required_ms=required,
+            inactive_start_ms=int(quiet_start),
+            inactive_end_ms=int(quiet_end),
+        )
 
     def add_vocal(self, frames: tuple[VocalActivityFrame, ...]) -> None:
         if not frames:
@@ -339,20 +360,7 @@ class AcousticObservationHistory:
         ))
         for frame in ordered:
             self._vocal.append(frame)
-            observer = frame.observer
-            support_start, at_ms = self._support(frame)
-            previous = self._activity_required.get(observer, self.MIN_INACTIVE_SUPPORT_MS)
-            required = max(previous, self.MIN_INACTIVE_SUPPORT_MS, at_ms - support_start)
-            self._activity_required[observer] = required
-            intervals = self._activity.get(observer)
-            if required > previous and intervals and intervals[-1].ongoing:
-                current = intervals[-1]
-                intervals[-1] = VocalActivityInterval(
-                    start_ms=current.start_ms,
-                    last_active_ms=current.last_active_ms,
-                    inactive_required_ms=required,
-                )
-            self._record_activity(frame, required=required)
+            self._record_activity(frame)
         self._trim(ordered[-1].at_ms)
 
     def _trim(self, now_ms: int) -> None:

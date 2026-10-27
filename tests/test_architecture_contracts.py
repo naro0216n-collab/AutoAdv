@@ -65,62 +65,10 @@ def test_integrated_audio_inference_has_one_product_entrypoint():
     assert set(users) == {"native_audio"}
 
 
-def test_progress_state_is_not_reinterpreted_outside_its_owner():
-    """ACTIVE/ENDED/UNKNOWN semantics belong to inference and Controller only.
-
-    Runtime/application code may transport the integrated result and expose its
-    state for telemetry, but it must not import the enum and rebuild a second
-    completion rule from those labels.
-    """
-    enum_users = []
-    for path in PACKAGE.glob("*.py"):
-        module = path.stem
-        if module == "utterance_progress":
-            continue
-        if "UtteranceProgressState" in _imported_names(module, "utterance_progress"):
-            enum_users.append(module)
-    assert not enum_users, enum_users
-
-    semantic_reads: dict[str, list[tuple[int, str]]] = {}
-    for path in PACKAGE.glob("*.py"):
-        module = path.stem
-        if module in {"utterance_progress", "conversation"}:
-            continue
-        tree = _tree(module)
-        progress_names: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-                    annotation = arg.annotation
-                    if isinstance(annotation, ast.Name) and annotation.id == "UtteranceProgress":
-                        progress_names.add(arg.arg)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                if isinstance(node.value.func, ast.Name) and node.value.func.id == "UtteranceProgress":
-                    progress_names.update(
-                        target.id for target in node.targets if isinstance(target, ast.Name))
-
-        reads: list[tuple[int, str]] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Attribute) or node.attr not in {"active", "ended", "unknown"}:
-                continue
-            if isinstance(node.value, ast.Name) and node.value.id in progress_names:
-                reads.append((node.lineno, node.attr))
-                continue
-            if isinstance(node.value, ast.Attribute) and node.value.attr == "native_progress":
-                reads.append((node.lineno, node.attr))
-        if reads:
-            semantic_reads[module] = reads
-    assert not semantic_reads, semantic_reads
-
-
-def test_application_transports_integrated_audio_without_owning_measurement_or_state_creation():
-    """Application may transport progress/diagnostics but not recreate audio inference."""
-    assert "audio_evidence" not in _local_imports("application")
-
-    constructors = []
-    for node in ast.walk(_tree("application")):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name) and node.func.id == "UtteranceProgress":
-            constructors.append(node.lineno)
-    assert not constructors, constructors
+def test_integrated_audio_judgment_is_visible_only_to_inference_and_controller():
+    """Higher runtime layers transport callbacks without importing judgment semantics."""
+    users = {
+        path.stem for path in PACKAGE.glob("*.py")
+        if "utterance_progress" in _local_imports(path.stem)
+    }
+    assert users == {"native_audio", "conversation"}

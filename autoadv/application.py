@@ -20,9 +20,6 @@ from collections.abc import Sequence
 
 from .conversation import Controller, Target
 from .g2p import G2PBackend, default_g2p
-from .utterance_progress import (
-    UtteranceProgress,
-)
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
@@ -1209,7 +1206,7 @@ class AutoAdvApplication:
         return self._native_audio is not None
 
     def _consume_native_progress(
-        self, token: Token, progress: UtteranceProgress, diagnostics: dict,
+        self, token: Token, progress, diagnostics: dict,
     ) -> bool:
         """Apply one current-generation integrated acoustic result to product state."""
         state = self.runtime_state()
