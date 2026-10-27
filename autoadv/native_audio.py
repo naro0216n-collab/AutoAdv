@@ -54,9 +54,11 @@ class NativeAudio:
     RETENTION_MS = 60_000
     INFERENCE_INTERVAL_MS = 500
     MIN_AUDIO_MS = 300
-    # Alignment work budget only. Failure expands geometrically toward the
-    # retained/causal floor; this value never means utterance duration.
+    # Unassociated target discovery is always bounded. Retention is search
+    # capacity, not one inference unit; older PCM is visited by overlapping
+    # windows while current-frontier assessment remains independently usable.
     INITIAL_SEARCH_WINDOW_MS = 8_000
+    HISTORICAL_SEARCH_OVERLAP_MS = INITIAL_SEARCH_WINDOW_MS // 2
 
     def __init__(self, pid: int, helper: Path, model: Path, vocab: Path,
                  on_error: Callable[[Token | None, str], None],
@@ -98,8 +100,7 @@ class NativeAudio:
         self.input_candidates_ms: tuple[int, ...] = ()
         self.target_attached_ms: int | None = None
         self._confirmed_search_floor_ms: int | None = None
-        self._search_start_ms = 0
-        self._search_exhausted_at: int | None = None
+        self._history_search_end_ms: int | None = None
         self._lexical: LexicalProgressEvidence | None = None
         self._lexical_revision = 0
         self._alignment_ready_through_ms: int | None = None
@@ -115,9 +116,8 @@ class NativeAudio:
         self._observer_running = False
         self._observer_revision = 0
 
-        # A fallback fence is just an assessment obligation. Progress is emitted
-        # only after observer measurements and the alignment search have settled
-        # through that captured PCM boundary.
+        # A fallback fence is an assessment obligation through captured PCM.
+        # It never means that every older retained search window must be exhausted.
         self._required_assessment_ms: int | None = None
         self._last_progress_key: tuple[int, int] | None = None
 
@@ -166,50 +166,66 @@ class NativeAudio:
             start = max(start, max(usable))
         return min(start, int(end_ms))
 
-    def _expand_search_locked(self, boundary: int) -> bool:
-        minimum = self._search_lower_bound_locked(boundary)
-        current = max(minimum, int(self._search_start_ms))
-        if current <= minimum:
-            self._search_exhausted_at = int(boundary)
-            return False
-        span = max(self.MIN_AUDIO_MS, int(boundary) - current)
-        expanded = max(minimum, current - max(self.INITIAL_SEARCH_WINDOW_MS, span))
-        if expanded >= current:
-            self._search_exhausted_at = int(boundary)
-            return False
-        self._search_start_ms = expanded
-        self._search_exhausted_at = None
-        return True
+    def _history_overlap_ms(self, span_ms: int) -> int:
+        span = max(self.MIN_AUDIO_MS, int(span_ms))
+        return min(
+            self.HISTORICAL_SEARCH_OVERLAP_MS,
+            max(self.MIN_AUDIO_MS, span // 2),
+            span,
+        )
 
-    def _prepare_new_audio_search_locked(self, boundary: int) -> None:
-        exhausted = self._search_exhausted_at
-        if exhausted is None or int(boundary) <= exhausted:
+    def _start_history_after_query_locked(self, query: tuple[int, int]) -> None:
+        """Expose older retained PCM without enlarging the completed query."""
+        if self._history_search_end_ms is not None:
             return
-        # Exhausting one historical snapshot says only that it did not establish
-        # the target. New PCM reopens a bounded overlapping query. The persistent
-        # floor is changed elsewhere, and only by an associated target.
-        minimum = self._search_lower_bound_locked(boundary)
-        self._search_start_ms = max(minimum, int(exhausted) - self.MIN_AUDIO_MS)
-        self._search_exhausted_at = None
+        start, end = (int(query[0]), int(query[1]))
+        minimum = self._search_lower_bound_locked(end)
+        if start <= minimum:
+            self._history_search_end_ms = minimum
+            return
+        overlap = self._history_overlap_ms(end - start)
+        self._history_search_end_ms = min(end, start + overlap)
+
+    def _advance_history_search_locked(self, query: tuple[int, int], frontier: int) -> None:
+        """Move one bounded historical window backward after a miss."""
+        start, end = (int(query[0]), int(query[1]))
+        minimum = self._search_lower_bound_locked(frontier)
+        if start <= minimum:
+            self._history_search_end_ms = minimum
+            return
+        overlap = self._history_overlap_ms(end - start)
+        self._history_search_end_ms = max(minimum, start + overlap)
+
+    def _history_query_locked(self, frontier: int) -> tuple[int, int] | None:
+        end = self._history_search_end_ms
+        if end is None:
+            return None
+        minimum = self._search_lower_bound_locked(frontier)
+        end = max(minimum, min(int(frontier), int(end)))
+        if end <= minimum:
+            self._history_search_end_ms = minimum
+            return None
+        start = max(minimum, end - self.INITIAL_SEARCH_WINDOW_MS)
+        if end - start < self.MIN_AUDIO_MS:
+            self._history_search_end_ms = minimum
+            return None
+        return (start, end)
 
     def _adopt_associated_search_floor_locked(
-        self, lexical: LexicalProgressEvidence, *, frame_ms: float, capture_end_ms: int,
+        self, lexical: LexicalProgressEvidence, *, query_start_ms: int, capture_end_ms: int,
     ) -> None:
         if not lexical.target_associated or lexical.target_start_ms is None:
             return
         minimum = self._minimum_search_start_locked(capture_end_ms)
-        target_start = int(lexical.target_start_ms)
-        if self.causal_lower_bound_ms is not None:
-            desired = minimum
-        else:
-            usable = [stamp for stamp in self.input_candidates_ms if minimum <= stamp <= target_start]
-            desired = max(usable) if usable else max(minimum, target_start - max(1, int(round(frame_ms))))
+        # The bounded snapshot that actually established association is factual
+        # sufficient context. Reuse its start rather than an earlier input time or
+        # the entire retained history on every later target-follow query.
+        desired = max(minimum, int(query_start_ms))
         confirmed = (
             int(desired) if self._confirmed_search_floor_ms is None
             else max(int(self._confirmed_search_floor_ms), int(desired))
         )
         self._confirmed_search_floor_ms = confirmed
-        self._search_start_ms = max(int(self._search_start_ms), confirmed)
 
     def begin(self, token: Token, alignment_text: str, *,
               candidates: tuple[PronunciationCandidate, ...] | None = None,
@@ -243,6 +259,7 @@ class NativeAudio:
             self._last_progress_key = None
             self._required_assessment_ms = None
             self._confirmed_search_floor_ms = None
+            self._history_search_end_ms = None
 
             frontier = self.history.latest_ms
             if frontier is not None:
@@ -250,10 +267,6 @@ class NativeAudio:
                 # all PCM already retained at that moment. Hook timing must not
                 # make a partially processed observer frontier the product result.
                 self._required_assessment_ms = int(frontier)
-            end = int(frontier if frontier is not None else self.target_attached_ms)
-            self._search_start_ms = self._initial_search_start_locked(end)
-            self._search_exhausted_at = None
-
             if frontier is not None:
                 if aligner is not None:
                     alignment_work = self._schedule_alignment_locked()
@@ -275,6 +288,7 @@ class NativeAudio:
         self.target_attached_ms = None
         self._lexical = None
         self._confirmed_search_floor_ms = None
+        self._history_search_end_ms = None
         self._alignment_ready_through_ms = None
         self._required_assessment_ms = None
         self._last_progress_key = None
@@ -556,74 +570,123 @@ class NativeAudio:
         if callback is not None:
             callback(item.token, progress, observation)
 
-    def _alignment_boundary_locked(self) -> int | None:
+        # Releasing a required fence may expose optional retained-history search.
+        # Resume it only after Controller has consumed the assessment, because
+        # Controller may complete the Presentation and retire the target.
+        next_work = None
+        with self._lock:
+            if (not self._closed and item.generation == self._generation
+                    and item.token == self.token):
+                next_work = self._schedule_alignment_locked()
+        self._submit_alignment(next_work)
+
+    def _target_associated_locked(self) -> bool:
+        lexical = self._lexical
+        return bool(
+            lexical is not None
+            and lexical.target_associated
+            and lexical.target_start_ms is not None
+        )
+
+    def _next_alignment_query_locked(
+        self,
+    ) -> tuple[tuple[int, int], int | None] | None:
         frontier = self.history.latest_ms
         if frontier is None:
             return None
         frontier = int(frontier)
         ready = self._alignment_ready_through_ms
         required = self._required_assessment_ms
-        if required is not None and (ready is None or int(ready) < int(required)):
-            return min(int(required), frontier)
-        if ready is not None and frontier <= int(ready):
-            return None
+        associated = self._target_associated_locked()
 
-        if self._last_alignment_query is not None:
-            previous = int(self._last_alignment_query[1])
-            if frontier > previous and frontier - previous < self.INFERENCE_INTERVAL_MS:
-                # If the prior frontier is still unsettled, continue widening it
-                # while waiting for enough genuinely new PCM to justify moving on.
-                if ready is None or int(ready) < previous:
-                    return previous
+        # A required fence has priority over optional historical discovery. One
+        # bounded frontier measurement acknowledges it; older retained windows
+        # remain searchable but do not become a fourth product state.
+        if required is not None:
+            boundary = min(int(required), frontier)
+            if ready is not None and int(ready) >= boundary:
                 return None
-        return frontier
+            start = (
+                self._search_lower_bound_locked(boundary)
+                if associated else self._initial_search_start_locked(boundary)
+            )
+            return ((start, boundary), boundary)
+
+        if associated:
+            if ready is not None and frontier - int(ready) < self.INFERENCE_INTERVAL_MS:
+                return None
+            # Once the target is located, do not search older unrelated history.
+            # The HuBERT backend is snapshot based, so following a still-open target
+            # reuses its confirmed floor and grows only with that target itself.
+            return ((self._search_lower_bound_locked(frontier), frontier), frontier)
+
+        current_due = bool(
+            ready is None or frontier - int(ready) >= self.INFERENCE_INTERVAL_MS
+        )
+        if current_due:
+            return ((self._initial_search_start_locked(frontier), frontier), frontier)
+
+        history_query = self._history_query_locked(frontier)
+        if history_query is not None:
+            return (history_query, None)
+        return None
 
     def _schedule_alignment_locked(self):
-        """Build the one next alignment query from current measurement state."""
+        """Build one target-discovery query or one target-follow query."""
         if (self._closed or self.token is None or self.aligner is None
                 or self._alignment_inflight_generation is not None):
             return None
-        boundary = self._alignment_boundary_locked()
-        if boundary is None:
-            return None
 
-        self._prepare_new_audio_search_locked(boundary)
-        start = max(self._search_lower_bound_locked(boundary), int(self._search_start_ms))
-        if boundary - start < self.MIN_AUDIO_MS:
-            required = self._required_assessment_ms
-            if required is not None and boundary <= int(required):
+        # Historical windows may fall entirely inside a capture gap. Advance past
+        # such empty ranges here instead of waiting for unrelated future PCM to
+        # wake the scheduler again.
+        while True:
+            planned = self._next_alignment_query_locked()
+            if planned is None:
+                return None
+            query, assessment_boundary = planned
+            start, boundary = (int(query[0]), int(query[1]))
+            if boundary - start < self.MIN_AUDIO_MS:
+                if assessment_boundary is not None:
+                    self._alignment_ready_through_ms = max(
+                        int(assessment_boundary),
+                        self._alignment_ready_through_ms
+                        if self._alignment_ready_through_ms is not None
+                        else int(assessment_boundary),
+                    )
+                return None
+            if query == self._last_alignment_query:
+                return None
+
+            segments = self.history.read(start, boundary).spans
+            if segments:
+                break
+            if assessment_boundary is not None:
                 self._alignment_ready_through_ms = max(
-                    boundary,
+                    int(assessment_boundary),
                     self._alignment_ready_through_ms
-                    if self._alignment_ready_through_ms is not None else boundary,
+                    if self._alignment_ready_through_ms is not None
+                    else int(assessment_boundary),
                 )
-            return None
-
-        query = (start, boundary)
-        if query == self._last_alignment_query:
-            return None
-        segments = self.history.read(start, boundary).spans
-        if not segments:
-            self._alignment_ready_through_ms = max(
-                boundary,
-                self._alignment_ready_through_ms
-                if self._alignment_ready_through_ms is not None else boundary,
-            )
-            return None
+                return None
+            self._advance_history_search_locked(
+                query, int(self.history.latest_ms or boundary))
 
         self._last_alignment_query = query
         generation = self._generation
         self._alignment_inflight_generation = generation
         requested_ns = time.perf_counter_ns() if self.on_inference else 0
-        return (self.token, generation, segments, self.aligner, requested_ns, query)
+        return (self.token, generation, segments, self.aligner, requested_ns,
+                query, assessment_boundary)
 
     def _submit_alignment(self, work) -> None:
         if work is None:
             return
-        token, generation, segments, aligner, requested_ns, query = work
+        token, generation, segments, aligner, requested_ns, query, assessment_boundary = work
         try:
             self._alignment_pool.submit(
-                self._infer, token, generation, segments, aligner, requested_ns, query)
+                self._infer, token, generation, segments, aligner, requested_ns,
+                query, assessment_boundary)
         except RuntimeError:
             next_work = None
             with self._lock:
@@ -704,7 +767,7 @@ class NativeAudio:
         self, token: Token, generation: int,
         segments: tuple[tuple[PCMChunk, ...], ...],
         aligner: TargetConditionedAligner, submitted_ns: int,
-        query: tuple[int, int],
+        query: tuple[int, int], assessment_boundary: int | None,
     ) -> None:
         started_ns = time.perf_counter_ns() if self.on_inference else 0
         if not submitted_ns:
@@ -733,34 +796,60 @@ class NativeAudio:
                         selection.alignment is not None
                         and selection.alignment.target_associated
                     )
-                    can_widen = False
-                    if not associated and not selection.ambiguous:
-                        can_widen = self._expand_search_locked(boundary)
-                    settled = associated or selection.ambiguous or not can_widen
+                    historical = assessment_boundary is None
+                    previously_associated = self._target_associated_locked()
 
-                    # An unresolved narrow query is not yet product evidence. Keep
-                    # its metrics for diagnostics, but publish lexical evidence only
-                    # when this frontier has a supported association or the available
-                    # search has actually settled. This also prevents evidence from a
-                    # newer unsettled frontier being paired with an older ready one.
-                    if settled and lexical is not None:
+                    if associated and lexical is not None:
                         if lexical != self._lexical:
                             self._lexical = lexical
                             self._lexical_revision += 1
-                        if selection.alignment is not None:
-                            self._adopt_associated_search_floor_locked(
-                                lexical,
-                                frame_ms=selection.alignment.frame_ms,
-                                capture_end_ms=boundary,
-                            )
+                        self._adopt_associated_search_floor_locked(
+                            lexical,
+                            query_start_ms=int(query[0]),
+                            capture_end_ms=boundary,
+                        )
+                        self._history_search_end_ms = None
+
                         if selection.alignment.committed_target_end:
                             self.aligner = None
-                            self._alignment_ready_through_ms = boundary
-                    if self.aligner is not None and settled:
+                        elif historical:
+                            # Historical discovery can revise a prior UNKNOWN, but a
+                            # partial target must then be followed toward the current
+                            # PCM frontier before that newer frontier is considered
+                            # alignment-ready.
+                            self._alignment_ready_through_ms = (
+                                boundary if self._alignment_ready_through_ms is None
+                                else min(int(self._alignment_ready_through_ms), boundary)
+                            )
+                    elif historical:
+                        if selection.ambiguous:
+                            # Multiple supported continuity spans are not resolved by
+                            # searching farther toward an arbitrary first/last match.
+                            self._history_search_end_ms = self._search_lower_bound_locked(
+                                int(self.history.latest_ms or boundary))
+                        else:
+                            self._advance_history_search_locked(
+                                query, int(self.history.latest_ms or boundary))
+                    else:
+                        # This bounded query is factual evidence at its capture
+                        # frontier even when no target is associated. Optional older
+                        # history may later revise it; assessment does not wait for
+                        # retained-history exhaustion.
+                        if lexical is not None and not previously_associated:
+                            if lexical != self._lexical:
+                                self._lexical = lexical
+                                self._lexical_revision += 1
+                        if not associated and not selection.ambiguous:
+                            self._start_history_after_query_locked(query)
+                        elif selection.ambiguous:
+                            self._history_search_end_ms = self._search_lower_bound_locked(boundary)
+
+                    if assessment_boundary is not None:
                         self._alignment_ready_through_ms = max(
-                            boundary,
+                            int(assessment_boundary),
                             self._alignment_ready_through_ms
-                            if self._alignment_ready_through_ms is not None else boundary,
+                            if self._alignment_ready_through_ms is not None
+                            else int(assessment_boundary),
                         )
                     wake_observer = self._wake_observer_locked()
 

@@ -263,7 +263,7 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
         native.close()
     assert CaptureBoundary.instances[-1].closed
 
-def test_alignment_scheduler_settles_required_fence_before_coalesced_newer_frontier():
+def test_alignment_scheduler_keeps_fallback_fence_separate_from_history_discovery():
     observations = []
     model = BlockingBlankPosterior()
     observer = RecordingVocalObserver()
@@ -277,35 +277,35 @@ def test_alignment_scheduler_settles_required_fence_before_coalesced_newer_front
         assert model.started.wait(1)
         wait_until(lambda: observer.observed_until and observer.observed_until[-1] >= 20_000)
 
-        # UNKNOWN is not published before any lexical query has completed.
+        # The captured frontier is not assessed before its bounded lexical query.
         assert not observations
 
-        # A narrow miss is not a settled UNKNOWN while retained PCM is still
-        # being searched for the known target.
+        # Completing that bounded query acknowledges the current evidence even
+        # though older retained history remains searchable. The optional backward
+        # search may start immediately afterward but cannot withhold UNKNOWN.
         model.release.set()
-        assert model.widened_started.wait(1)
-        time.sleep(.02)
-        assert not observations
-
-        # New PCM may arrive while historical search is in flight. It is retained
-        # as the newer requested frontier, but cannot make the older required
-        # boundary look settled.
-        fresh = compact_chunk(20_600, 600)
-        native.history.push(fresh, target_pid=42)
-        native.feed(fresh)
-        native.request_assessment_through(token, 20_000)
-        time.sleep(.02)
-        assert not observations
-
-        model.widened_release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_000
             for observed, progress, _item in observations))
+        assert model.widened_started.wait(1)
+
+        # New captured PCM gets priority once the already-running bounded history
+        # query finishes; the scheduler does not chain retained-history exhaustion
+        # ahead of a required newer assessment.
+        fresh = compact_chunk(20_600, 600)
+        native.history.push(fresh, target_pid=42)
+        native.feed(fresh)
+        native.request_assessment_through(token, 20_600)
+        time.sleep(.02)
+        assert not any(progress.evidence_at_ms == 20_600
+                       for _observed, progress, _item in observations)
+
+        model.widened_release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_600
             for observed, progress, _item in observations))
 
-        # An already-settled fence remains an idempotent obligation.
+        # An already-assessed fence remains an idempotent obligation.
         before = len(observations)
         native.request_assessment_through(token, 20_000)
         wait_until(lambda: any(
@@ -451,31 +451,44 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
     assert early.recurrence == late.recurrence
 
 
-def test_candidate_search_widens_to_retained_pcm_only_when_target_is_not_found():
+def test_candidate_search_widens_only_until_target_context_is_located():
     observations, reports = [], []
-    native = make_native(HistorySensitivePosterior(), observations, reports=reports, clock=lambda: 2_000)
+    native = make_native(HistorySensitivePosterior(), observations, reports=reports, clock=lambda: 20_000)
     token = Token(7, 1)
+    long_target = (PronunciationCandidate(('a', 'b', 'c', 'a', 'b', 'c')),)
     try:
         native.history.start(42)
-        for chunk in (stereo_chunk(1000, 300), stereo_chunk(1500, 500)):
-            native.history.push(chunk, target_pid=42)
-            native.feed(chunk)
-        native.begin(token, 'target', input_candidates_ms=(1200,))
+        retained = compact_chunk(20_000, 20_000)
+        native.history.push(retained, target_pid=42)
+        native.begin(
+            token, 'target', candidates=long_target,
+            causal_lower_bound_ms=1000, input_candidates_ms=(19_700,),
+        )
         wait_until(lambda: any(
             item.lexical is not None and item.lexical.target_associated
             for _observed, _progress, item in observations))
 
-        associated = next(
-            item for _observed, _progress, item in reversed(observations)
-            if item.lexical is not None and item.lexical.target_associated)
-        assert native.causal_lower_bound_ms is None
-        # External input is only a search seed.  If that narrower range lacks
-        # the target, retained PCM may be consulted without upgrading the input
-        # candidate into a causal boundary.
-        assert reports[0][1]["capture_start_ms"] == 1200
-        assert any(item["capture_start_ms"] < 1200 for _token, item in reports[1:])
-        assert associated.lexical is not None
-        assert associated.lexical.target_associated
+        associated_report = next(
+            item for _token, item in reports if item.get('target_associated'))
+        located_start = associated_report['capture_start_ms']
+
+        # The external input is only a search seed. A miss expands into older
+        # retained PCM, but each discovery query remains bounded.
+        assert reports[0][1]['capture_start_ms'] == 19_700
+        assert located_start < 19_700
+        assert associated_report['audio_ms'] <= NativeAudio.INITIAL_SEARCH_WINDOW_MS
+
+        # Once a bounded snapshot has actually located the target, later PCM is
+        # followed from that proven context rather than from the much older causal
+        # lower bound or the whole retained history.
+        before = len(reports)
+        fresh = compact_chunk(20_500, 500)
+        native.history.push(fresh, target_pid=42)
+        native.feed(fresh)
+        wait_until(lambda: len(reports) > before)
+        follow = reports[before][1]
+        assert follow['capture_start_ms'] == located_start
+        assert follow['capture_start_ms'] > 1000
     finally:
         native.close()
 
@@ -641,9 +654,9 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
             native.history.push(compact_chunk(end_ms), target_pid=42)
 
         native.begin(token, 'target')
-        retained_ms = 60_000
-        wait_until(lambda: model.durations_ms and max(model.durations_ms) >= retained_ms
-                   and any(item.lexical is not None for _token, _progress, item in observations))
+        wait_until(lambda: reports and min(
+            item['capture_start_ms'] for _token, item in reports) <= 1000
+            and any(item.lexical is not None for _token, _progress, item in observations))
         initial = tuple(model.durations_ms)
         initial_reports = len(reports)
         weak_starts = [
@@ -653,12 +666,12 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
             and not item.lexical.target_associated and item.lexical.target_start_ms is not None
         ]
         assert initial and weak_starts
-        # Retention is available search capacity, not the first work unit.
-        assert initial[0] < retained_ms
+        # Retention can be searched to its old edge without ever becoming one
+        # giant HuBERT inference request.
+        assert max(initial) <= NativeAudio.INITIAL_SEARCH_WINDOW_MS
 
-        # Once the retained history has been exhausted, new PCM reopens only a
-        # bounded overlapping query. An unassociated phone fragment remains a
-        # measurement and cannot become the persistent lower bound for later PCM.
+        # New PCM reopens only the bounded current window. An unassociated phone
+        # fragment remains a measurement and never becomes a persistent floor.
         weak_start = max(weak_starts)
         fresh = compact_chunk(60_500, 500)
         native.history.push(fresh, target_pid=42)
@@ -668,9 +681,7 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
         additional_reports = reports[initial_reports:]
         assert additional and additional_reports
         assert additional_reports[0][1]['capture_start_ms'] < weak_start
-        # Once retained history has been searched, new PCM must not turn that
-        # whole retained interval back into the routine work unit.
-        assert max(additional) < max(initial)
+        assert max(additional) <= NativeAudio.INITIAL_SEARCH_WINDOW_MS
     finally:
         native.close()
 
