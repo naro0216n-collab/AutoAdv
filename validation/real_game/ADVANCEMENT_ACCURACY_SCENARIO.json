@@ -1,618 +1,763 @@
 {
-  "description": "Independent expectations for one continuous Windows auto-advance accuracy playthrough. The sequence models ADV/novel-game presentation transitions rather than a catalogue of isolated sounds: ordinary voiced/unvoiced dialogue, leading voice delay, delayed HOOK, text-duration decoupling, persistent/looping human-vocal sources, foreground voice sustained into an unvoiced line, and authored game inputs that occur before AutoAdv advances. Case count is not a product invariant; scene labels and expectations are never read by AutoAdv.",
+  "description": "Continuous auto-advance measurement cases described by separate observable audio facts rather than source-role labels.",
   "lines": [
     {
       "id": "room-clean-short",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "quiet_room",
-      "environment": "clean_room_short",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/normal_001.wav",
       "forbidden_mix_channels": [
         "music",
         "adv_ambient",
-        "adv_background",
+        "adv_vocal_loop",
         "adv_sfx"
       ],
       "duration_pair": "same-text-001",
-      "duration_variant": "short"
+      "duration_variant": "short",
+      "voice_file": "audio/voice/normal_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "room-leading-silence",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "quiet_room",
-      "environment": "clean_voice_leading_silence",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/derived_leading_silence_001.wav",
-      "vocal_structure": "leading_silence",
-      "voice_start_relation": "hook_before_voice",
-      "vocal_source_class": "finite",
       "forbidden_mix_channels": [
         "music",
         "adv_ambient",
-        "adv_background",
+        "adv_vocal_loop",
         "adv_sfx"
-      ]
+      ],
+      "voice_file": "audio/voice/derived_leading_silence_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": true
+      }
     },
     {
       "id": "room-clean-unvoiced",
       "text": "これは音声のない台詞です。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "quiet_room",
-      "environment": "clean_room_unvoiced",
       "process_audio_expected": false,
       "expected_mix_channels": [],
       "forbidden_mix_channels": [
         "music",
         "adv_ambient",
-        "adv_background",
+        "adv_vocal_loop",
         "adv_sfx"
       ],
       "game_input_after_ms": 500,
-      "transition_role": "external_input_before_delayed_hook"
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "hook-delay-moderate",
       "text": "猫はにゃーにゃーと鳴く。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "quiet_room",
-      "environment": "clean_hook_delay_moderate",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/normal_022.wav",
       "hook_delay_class": "mid_voice_after_game_input",
       "hook_delay_ms": 550,
-      "vocal_source_class": "finite",
-      "transition_role": "external_input_then_delayed_hook"
+      "voice_file": "audio/voice/normal_022.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "hook-delay-late",
       "text": "あなたは流感になりかけているか、もっと重い病気かもしれません。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "quiet_room",
-      "environment": "clean_hook_delay_most_voice_elapsed",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/normal_030.wav",
       "hook_delay_class": "most_voice_elapsed",
       "hook_delay_ms": 4100,
-      "vocal_source_class": "finite"
+      "voice_file": "audio/voice/normal_030.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "hook-delay-after-end",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "quiet_room",
-      "environment": "clean_hook_after_foreground_end",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/normal_001.wav",
-      "hook_delay_class": "after_foreground_end",
+      "hook_delay_class": "after_voice_end",
       "hook_delay_ms": 2100,
-      "vocal_source_class": "finite"
+      "voice_file": "audio/voice/normal_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "duration-same-text-long-tail",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro_nonverbal_tail",
       "scene": "quiet_room",
-      "environment": "clean_same_text_long_nonverbal_tail",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/derived_same_text_long_tail.wav",
       "duration_pair": "same-text-001",
       "duration_variant": "long_nonverbal_tail",
-      "vocal_class": "lexical_plus_nonverbal_tail",
-      "vocal_source_class": "finite"
+      "voice_file": "audio/voice/derived_same_text_long_tail.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "duration-long-text-fast",
       "text": "あなたは流感になりかけているか、もっと重い病気かもしれません。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro_fast",
       "scene": "quiet_room",
-      "environment": "clean_long_text_fast_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/derived_normal_030_fast.wav",
       "text_duration_class": "long_text_fast_voice",
-      "vocal_source_class": "finite"
+      "voice_file": "audio/voice/derived_normal_030_fast.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "nonverbal-panting-temporal",
       "text": "はっ……はっ……はっ……",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "nonlexical",
       "scene": "quiet_room",
-      "environment": "clean_intermittent_panting",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/derived_panting_temporal.wav",
-      "vocal_class": "panting",
-      "vocal_structure": "intermittent_with_short_silence",
-      "vocal_source_class": "finite"
+      "voice_file": "audio/voice/derived_panting_temporal.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": true,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "nonverbal-breath-internal-silence",
       "text": "……ふぅ……",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "nonlexical",
       "scene": "quiet_room",
-      "environment": "clean_breath_internal_silence",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/derived_breath_pause.wav",
-      "vocal_class": "breath",
-      "vocal_structure": "internal_silence",
-      "vocal_source_class": "finite"
+      "voice_file": "audio/voice/derived_breath_pause.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "room-bgm-fadein",
       "text": "あっベルが鳴ってる。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "room_bgm",
-      "environment": "bgm_fadein_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/normal_017.wav",
       "game_input_after_ms": 650,
-      "transition_role": "external_input_voiced_to_unvoiced_sustained_tail"
+      "voice_file": "audio/voice/normal_017.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "room-bgm-unvoiced",
       "text": "返事をする前に、少し考えた。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "room_bgm",
-      "environment": "bgm_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "previous_voice_sustained": true,
-      "transition_role": "unvoiced_after_external_input_with_previous_voice_tail"
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "room-bgm-whisper",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro_whisper",
       "scene": "room_bgm",
-      "environment": "bgm_whisper",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/whisper_001.wav"
+      "voice_file": "audio/voice/whisper_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "cafe-entry-door",
       "text": "猫はにゃーにゃーと鳴く。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "cafe",
-      "environment": "scene_entry_bgm_door_crowd",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_ambient",
         "adv_sfx"
       ],
-      "foreground_file": "audio/voice/normal_022.wav"
+      "voice_file": "audio/voice/normal_022.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "cafe-crowd-local",
       "text": "彼女はスタッフをまとめていけると思いますか？",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "cafe",
-      "environment": "bgm_crowd_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_ambient"
       ],
-      "foreground_file": "audio/voice/normal_028.wav"
+      "voice_file": "audio/voice/normal_028.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
-      "id": "cafe-background-starts-unvoiced",
+      "id": "cafe-vocal-loop-starts-unvoiced",
       "text": "店内放送を聞き流しながら、主人公は黙っていた。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "cafe",
-      "environment": "bgm_crowd_background_voice_starts_during_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_ambient",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "background_vocal_relation": "starts_during_current",
-      "background_vocal_start_after_ms": 700
+      "recurrent_vocal_start_after_ms": 700,
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": true
+      }
     },
     {
-      "id": "cafe-background-cross-epoch-unvoiced",
+      "id": "cafe-vocal-loop-cross-boundary-unvoiced",
       "text": "人の声が続く店内で、主人公は黙って頷いた。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "cafe",
-      "environment": "bgm_crowd_background_voice_cross_epoch_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_ambient",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "background_vocal_relation": "persistent_cross_epoch"
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "street-bgm-transition",
       "text": "私はいつもミネラルウォーターを持ち歩いています。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_transition_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/normal_026.wav"
+      "voice_file": "audio/voice/normal_026.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
-      "id": "street-background-japanese",
+      "id": "street-text-with-vocal-loop",
       "text": "彼のあだ名は言い得て妙だよね。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_japanese_background_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "foreground_file": "audio/voice/normal_010.wav"
+      "voice_file": "audio/voice/normal_010.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
-      "id": "street-background-unvoiced",
+      "id": "street-vocal-loop-unvoiced",
       "text": "この場面の主人公にも音声は付いていない。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "street",
-      "environment": "bgm_japanese_background_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_background"
-      ]
+        "adv_vocal_loop"
+      ],
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "street-repeat-first",
       "text": "ヒューズが飛んだ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_repeat_boundary_first",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/normal_020.wav"
+      "voice_file": "audio/voice/normal_020.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "street-repeat-second",
       "text": "ヒューズが飛んだ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_repeat_boundary_second",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/normal_020.wav"
+      "voice_file": "audio/voice/normal_020.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "vocal-loop-started-in-epoch-target",
       "text": "猫はにゃーにゃーと鳴く。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_vocal_loop_started_in_epoch_target",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "foreground_file": "audio/voice/normal_022.wav",
-      "vocal_source_class": "loop_started_current_epoch",
-      "persistent_vocal_expected": true
+      "voice_file": "audio/voice/normal_022.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "vocal-loop-cross-epoch-target",
       "text": "あっベルが鳴ってる。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_vocal_loop_cross_epoch_target",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "foreground_file": "audio/voice/normal_017.wav",
-      "vocal_source_class": "persistent_cross_epoch",
-      "persistent_vocal_expected": true
+      "voice_file": "audio/voice/normal_017.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "vocal-loop-cross-epoch-unvoiced",
-      "text": "繰り返す声は背景のままで、主人公には音声がない。",
+      "text": "繰り返す声が続く中で、主人公には音声がない。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "street",
-      "environment": "bgm_vocal_loop_cross_epoch_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "vocal_source_class": "persistent_cross_epoch",
-      "persistent_vocal_expected": true,
       "game_input_after_ms": 500,
-      "transition_role": "external_input_inside_persistent_vocal_loop"
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "vocal-loop-game-input-delayed-target",
       "text": "あっベルが鳴ってる。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_vocal_loop_game_input_delayed_hook_target",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
-        "adv_background"
+        "adv_vocal_loop"
       ],
-      "foreground_file": "audio/voice/normal_017.wav",
       "hook_delay_class": "mid_voice_after_game_input",
       "hook_delay_ms": 800,
-      "vocal_source_class": "finite",
-      "persistent_vocal_expected": true,
-      "transition_role": "external_input_then_delayed_hook_inside_persistent_loop"
+      "voice_file": "audio/voice/normal_017.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true,
+        "vocal_crosses_boundary": true,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "finite-vocal-repetition-stress",
       "text": "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "street",
-      "environment": "bgm_finite_repetition_stress",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/derived_finite_repetition.wav",
-      "vocal_class": "finite_repetition_stress",
-      "vocal_source_class": "finite_recurrent",
-      "persistent_vocal_expected": false
+      "voice_file": "audio/voice/derived_finite_repetition.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": true,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "incident-nonlexical-cry",
       "text": "うっ……うう……",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "nonlexical",
       "scene": "incident",
-      "environment": "bgm_nonlexical_cry",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/stress_cry.wav"
+      "voice_file": "audio/voice/stress_cry.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "incident-midvoice-sfx",
       "text": "あなたは流感になりかけているか、もっと重い病気かもしれません。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "incident",
-      "environment": "bgm_mid_voice_long_sfx",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_sfx"
       ],
-      "foreground_file": "audio/voice/normal_030.wav"
+      "voice_file": "audio/voice/normal_030.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "incident-sfx-tail-unvoiced",
       "text": "大きな音の余韻だけが、その場に残った。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "incident",
-      "environment": "bgm_long_sfx_tail_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_sfx"
-      ]
+      ],
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "incident-nonlexical-scream",
       "text": "あああっ！",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "nonlexical",
       "scene": "incident",
-      "environment": "bgm_nonlexical_scream",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music"
       ],
-      "foreground_file": "audio/voice/stress_scream.wav"
+      "voice_file": "audio/voice/stress_scream.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "machine-transition-jvs003",
       "text": "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "jvs003",
       "scene": "machine_room",
-      "environment": "transition_bgm_machine_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_ambient"
       ],
-      "foreground_file": "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav"
+      "voice_file": "audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "machine-fading-bgm-whisper",
       "text": "あっベルが鳴ってる。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro_whisper",
       "scene": "machine_room",
-      "environment": "fading_bgm_machine_whisper",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "music",
         "adv_ambient"
       ],
-      "foreground_file": "audio/voice/whisper_017.wav"
+      "voice_file": "audio/voice/whisper_017.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "machine-unvoiced",
       "text": "機械音の中で、ナレーションだけが表示される。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": false,
-      "speaker_family": "unvoiced",
       "scene": "machine_room",
-      "environment": "machine_unvoiced",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "adv_ambient"
       ],
       "forbidden_mix_channels": [
         "music",
-        "adv_background",
+        "adv_vocal_loop",
         "adv_sfx"
-      ]
+      ],
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "machine-local",
       "text": "私はポピュラー音楽を聞きたい。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "machine_room",
-      "environment": "machine_voice",
       "process_audio_expected": true,
       "expected_mix_channels": [
         "adv_ambient"
       ],
-      "foreground_file": "audio/voice/normal_021.wav",
       "forbidden_mix_channels": [
         "music",
-        "adv_background",
+        "adv_vocal_loop",
         "adv_sfx"
-      ]
+      ],
+      "voice_file": "audio/voice/normal_021.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     },
     {
       "id": "quiet-recovery",
       "text": "彼女は息子に家で行儀よくするように言った。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "speaker_family": "amitaro",
       "scene": "quiet_recovery",
-      "environment": "clean_after_continuous_scenes",
       "process_audio_expected": true,
       "expected_mix_channels": [],
-      "foreground_file": "audio/voice/normal_035.wav",
       "forbidden_mix_channels": [
         "music",
         "adv_ambient",
-        "adv_background",
+        "adv_vocal_loop",
         "adv_sfx"
-      ]
+      ],
+      "voice_file": "audio/voice/normal_035.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false,
+        "vocal_crosses_boundary": false,
+        "delayed_vocal_onset": false
+      }
     }
   ]
 }

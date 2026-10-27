@@ -1,8 +1,8 @@
 """Opt-in target-conditioned alignment stress measurement.
 
-Real foreground/background/nonlexical recordings are mixed deterministically and
-passed through the same production phone-CTC alignment contract.  The report
-never claims speaker ownership from lexical equality and never drives game input.
+Real recordings are mixed deterministically and classified only by observable
+relations such as text correspondence, finite human-vocal activity, and recurrence.
+The report never invents source ownership and never drives game input.
 """
 from __future__ import annotations
 
@@ -31,15 +31,19 @@ def _load_cases(*, selection: str = 'all'):
     manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
     known = {sample['id']: sample for sample in manifest['samples']}
     external = {sample['id']: sample for sample in data['external_assets']}
-    if selection not in ('all', 'background', 'nonlexical'):
+    selectors = {
+        'all': lambda case: True,
+        'text-correspondence': lambda case: bool(case['audio_facts']['text_correspondence']),
+        'no-text-correspondence': lambda case: not bool(case['audio_facts']['text_correspondence']),
+        'recurrent': lambda case: bool(case['audio_facts']['vocal_loop']),
+    }
+    if selection not in selectors:
         raise ValueError(f'Unknown selection: {selection}')
-    cases = [case for case in data['cases'] if selection == 'all' or
-             (selection == 'background' and case['kind'] not in ('nonlexical', 'nonlexical_overlap')) or
-             (selection == 'nonlexical' and case['kind'] in ('nonlexical', 'nonlexical_overlap'))]
+    cases = [case for case in data['cases'] if selectors[selection](case)]
     if not cases:
         raise ValueError('No cases selected')
     audio = {}
-    ids = {source for case in cases for source in (case['foreground'], case['background']) if source}
+    ids = {source['recording'] for case in cases for source in case['sources']}
     for source_id in sorted(ids):
         if source_id in known:
             sample = known[source_id]
@@ -57,28 +61,30 @@ def _load_cases(*, selection: str = 'all'):
 
 
 def _mix(case: dict, audio: dict) -> np.ndarray:
-    foreground = audio.get(case['foreground'])
-    background = audio.get(case['background'])
-    if foreground is None and background is None:
+    sources = case.get('sources') or []
+    if not sources:
         raise ValueError('Case has no actual audio source')
-    offset = round(case['background_offset_ms'] * 48)
-    loop_frames = round(case.get('background_loop_ms', 0) * 48)
-    if loop_frames and background is None:
-        raise ValueError('background loop requires a recording')
-    length = loop_frames if loop_frames else (len(background) if background is not None else 0)
-    end = max(len(foreground) if foreground is not None else 0, offset + length)
-    out = np.zeros(end, dtype='float32')
-    if foreground is not None:
-        out[:len(foreground)] += foreground
-    if background is not None:
+    spans = []
+    for source in sources:
+        recording = audio[source['recording']]
+        offset = round(float(source.get('offset_ms', 0)) * 48)
+        loop_frames = round(float(source.get('loop_ms', 0)) * 48)
+        length = loop_frames if loop_frames else len(recording)
+        spans.append((source, recording, offset, loop_frames, offset + length))
+    out = np.zeros(max(end for *_head, end in spans), dtype='float32')
+    for source, recording, offset, loop_frames, _end in spans:
+        gain = float(source.get('gain', 1.0))
         if loop_frames:
-            for pos in range(offset, offset + loop_frames, len(background)):
-                end_frame = min(pos + len(background), offset + loop_frames)
-                out[pos:end_frame] += background[:end_frame - pos] * case['background_gain']
+            for pos in range(offset, offset + loop_frames, len(recording)):
+                end_frame = min(pos + len(recording), offset + loop_frames)
+                out[pos:end_frame] += recording[:end_frame - pos] * gain
         else:
-            out[offset:offset + len(background)] += background * case['background_gain']
+            out[offset:offset + len(recording)] += recording * gain
     return np.clip(out, -1, 1)
 
+
+def _has_loop(case: dict) -> bool:
+    return any(float(source.get('loop_ms', 0)) > 0 for source in case.get('sources', ()))
 
 def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
         model_backend=None, g2p=None) -> dict:
@@ -99,7 +105,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
         except ValueError as exc:
             for repetition in range(1, rounds + 1):
                 observations.append({
-                    'case': case['id'], 'kind': case['kind'], 'attribution': case['attribution'],
+                    'case': case['id'], **case['audio_facts'],
                     'round': repetition, 'audio_ms': round(audio_ms, 3),
                     'snapshot_count': 0, 'cumulative_alignment_ms': 0.0,
                     'max_alignment_ms': 0.0, 'cumulative_compute_ratio': 0.0,
@@ -112,7 +118,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                 })
             continue
         for repetition in range(1, rounds + 1):
-            snapshots = _stream_align(aligner, mono, idle_drain=case['background'] is None)
+            snapshots = _stream_align(aligner, mono, idle_drain=not _has_loop(case))
             if snapshots:
                 final = snapshots[-1]['alignment']
                 associated = next((item for item in snapshots
@@ -130,7 +136,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                 cumulative_ms = 0.0
                 max_ms = 0.0
             observations.append({
-                'case': case['id'], 'kind': case['kind'], 'attribution': case['attribution'],
+                'case': case['id'], **case['audio_facts'],
                 'round': repetition, 'audio_ms': round(audio_ms, 3),
                 'snapshot_count': len(snapshots),
                 'cumulative_alignment_ms': round(cumulative_ms, 3),
@@ -160,7 +166,7 @@ def run(model: Path, vocab: Path, *, selection: str = 'all', rounds: int = 1,
                               else 'insufficient_audio_for_first_snapshot'),
             })
     return {
-        'schema': 'autoadv-alignment-stress-v2',
+        'schema': 'autoadv-alignment-stress-v3',
         'device': platform.platform(), 'python': platform.python_version(),
         'model_sha256': hashlib.sha256(model.read_bytes()).hexdigest() if model.is_file() else None,
         'vocab_sha256': hashlib.sha256(vocab.read_bytes()).hexdigest() if vocab.is_file() else None,
@@ -192,7 +198,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='Target-conditioned real-audio stress evaluation')
     parser.add_argument('--model', type=Path, default=Path(paths.alignment_model))
     parser.add_argument('--vocab', type=Path, default=Path(paths.alignment_vocab))
-    parser.add_argument('--selection', choices=('all', 'background', 'nonlexical'), default='all')
+    parser.add_argument('--selection', choices=('all', 'text-correspondence', 'no-text-correspondence', 'recurrent'), default='all')
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()

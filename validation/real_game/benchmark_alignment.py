@@ -317,7 +317,7 @@ def run(model: Path, vocab: Path, *, conditions: tuple[str, ...], rounds: int, s
             elif condition == 'truncated':
                 oracle = endpoint_oracle[sample['id']]
                 # Remove the final quarter of the independently annotated
-                # foreground speech interval, not merely the file tail.  This
+                # independently annotated speech interval, not merely the file tail.  This
                 # guarantees that the negative control is missing target
                 # speech even when the source file contains trailing silence.
                 truncate_from_sample = round(float(oracle['speech_end_ms']) * .75 * 48)

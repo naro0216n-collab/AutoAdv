@@ -2,7 +2,7 @@
 
 この領域では、局所的なNativeAudio契約、検証基盤自身の契約、Hosted Windowsの文字送り経路、Windows実機の自動進行精度計測を分離する。Ren'Pyのビルド成功や検証器の単体テストをAutoAdv実機成立の代用にしない。
 
-AutoAdv実経路で確認する対象は、LunaHookが実際に返したraw文字列、AutoAdvがそこから生成したUtterance、製品内推論イベント、明示許可を伴うWindows入力である。検証ゲーム側は、自分がどのfixture caseを開始し、どの本文・foreground voiceを提示する設計だったかという刺激事実だけを記録する。voice channel、mix、音響終端、早送り、安全性等を検証側で再推論しない。
+AutoAdv実経路で確認する対象は、LunaHookが実際に返したraw文字列、AutoAdvがそこから生成したUtterance、製品内推論イベント、明示許可を伴うWindows入力である。検証ゲーム側は、自分がどのfixture caseを開始し、どの本文を提示し、どのvoice fileをvoice channelへ再生指示したかという刺激事実だけを記録する。voice channel、mix、音響終端、早送り、安全性等を検証側で再推論しない。
 
 ## 検証層
 
@@ -44,9 +44,9 @@ AutoAdv Live Advancementはprebuilt Windows fixtureを使い、`reading` phase�
   -GameExecutable C:\path\to\AutoAdvValidationGame.exe -Automated
 ```
 
-標準ケースは**件数を固定契約にせず、一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで全ケースを連続実行**する。通常のclean/mix場面に加え、実発声開始より遅いHOOK、同一本文を異なる時間で演じるpaired case、長い非言語tail、内部短無音を含む非言語発声、epoch内開始とepoch跨ぎのvocal loop、有限の自然反復を含める。場面境界でゲーム再起動、HOOK再選択、NativeAudio/`UtteranceProgress`再初期化、profile再設定、検証用状態clearは行わない。HOOK遅延はゲーム側でvoiceを先に再生してから通常のLunaHook経路へ台詞を出し、製品へ固定HOOK通知を注入しない。
+標準ケースは**件数を固定契約にせず、一つのゲームプロセス・一つの選択HOOK・一つのAutoAdvセッションで全ケースを連続実行**する。fixtureは音源役割ではなく、`text_correspondence`、`finite_vocal_activity`、`finite_vocal_repetition`、`vocal_loop`、`vocal_crosses_boundary`、`delayed_vocal_onset`という別個のfixture事実の組合せで入力同値クラスを表す。同一ケースで複数軸が同時に成立してよく、これらはAutoAdvへ入力しない。加えて実発声開始より遅いHOOK、同一本文を異なる時間で演じるpaired case等の外部時間条件を組み合わせる。場面境界でゲーム再起動、HOOK再選択、NativeAudio/`UtteranceProgress`再初期化、profile再設定、検証用状態clearは行わない。HOOK遅延はゲーム側でvoiceを先に再生してから通常のLunaHook経路へ台詞を出し、製品へ固定HOOK通知を注入しない。
 
-原音ありでは通常短文・長文、複数話者、囁き、泣き・叫び・喘ぎ相当、BGM、群衆会話、日本語背景発話、同文連続、ボイス途中から開始するSE、SE残響、機械環境音に加え、本文量と原音durationが相関しない条件を提示する。原音なしも複数mixへ分散する。これらはfixture刺激の分類であり、検証側が「安全」「早送り」「誤帰属」「音声終了」を判定するためのoracleには使用しない。
+通常短文・長文、複数話者、囁き、泣き・叫び・喘ぎ相当、BGM、群衆会話、本文非対応の日本語人声、同文連続、ボイス途中から開始するSE、SE残響、機械環境音、本文量と原音durationが相関しない条件を組み合わせる。これらは上記fixture事実と外部刺激の条件であり、検証側が「どの音源が現在台詞か」「音声終了したか」を再推論するoracleには使用しない。
 
 accuracy scenarioが`game_input_after_ms`を持つケースでは、validation driverはfixture case開始から固定時間後に選択ゲームHWNDへキーボードメッセージを送り、`validation_game_input`として記録する。ゲームが隠れていても前面化せずに入力できる。一方、Windowsの`PostMessage`はlow-level keyboard/mouse hookを通らないため、これは`WindowsGameInputObserver`で観測済みの入力を意味しない。製品の外部入力検出、保持音響、ゲーム側での実際の進行は独立した事実としてのみ扱い、外部入力を音響区間下限へ昇格させたり近接時刻から対応を捏造したりしない。製品の進行状態・音声判断・HOOK状態を参照して刺激時刻を変えない。後続ケースを隠さないための`validation_recovery_input`とは別物である。回復入力は、同じfixture caseが12秒変化しない場合だけ一度送るwatchdogで、`pause_reason`、`UtteranceProgress`、Hook状態、voice channel等を参照しない。いずれも製品成功へ読み替えず、runnerが失敗とするのはtrace/evidence破損や要求fixture case未到達等の証拠収集不成立だけである。
 
@@ -68,7 +68,7 @@ Windows実機の自動進行精度計測とHosted Live Advancementは共通の`p
 
 `ADVANCEMENT_ACCURACY_ASSETS.json`は精度計測でゲーム側から再生する外部メディアだけを固定する。巨大archiveから一部を展開せず、JVS公式個別sampleと個別配布BGM・ambient・SEを直接取得する。各ファイルはURL、SHA-256、最大サイズ、runtime配置先、権利情報を固定し、`.autoadv-validation/cache/media`へ一度だけ取得して再利用する。
 
-JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifact、Issue uploadへ含めない。素材分類や`environment`/`speaker_family`は検証結果の層別化metadataであり、AutoAdvの判断へ入力しない。
+JVS等の再配布不可素材はGit checkout、prebuilt fixture、GitHub artifact、Issue uploadへ含めない。素材metadataとfixtureの音響事実は検証結果の層別化にだけ使い、AutoAdvの判断へ入力しない。
 
 ## Issue診断面
 

@@ -4,7 +4,7 @@
   "assets": [
     {
       "id": "jvs001-sample",
-      "kind": "foreground_voice",
+      "kind": "voice_recording",
       "filename": "jvs001_VOICEACTRESS100_001.wav",
       "runtime_path": "game/audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
       "sha256": "ad812d499e23ff37929402915cdf8d3034b6bc602b8471bb6a504d5432c19869",
@@ -22,7 +22,7 @@
     },
     {
       "id": "jvs002-sample",
-      "kind": "foreground_voice",
+      "kind": "voice_recording",
       "filename": "jvs002_VOICEACTRESS100_001.wav",
       "runtime_path": "game/audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
       "sha256": "40298305cd0b063143ad5e5a7623f2a49d3c846aa6f535adfe682c19b7abbffd",
@@ -40,7 +40,7 @@
     },
     {
       "id": "jvs003-sample",
-      "kind": "foreground_voice",
+      "kind": "voice_recording",
       "filename": "jvs003_VOICEACTRESS100_001.wav",
       "runtime_path": "game/audio/runtime/voice/jvs003_VOICEACTRESS100_001.wav",
       "sha256": "b538f57686020e37cb82cfeda8dc7c369c4ffb174510a70344b7523fce0fb774",
@@ -103,7 +103,7 @@
     },
     {
       "id": "meta-restaurant-crowd",
-      "kind": "background_speech",
+      "kind": "crowd_conversation",
       "filename": "CRWDConv_Restaurant_LOOP_01.ogg",
       "runtime_path": "game/audio/runtime/ambient/CRWDConv_Restaurant_LOOP_01.ogg",
       "sha256": "8c39aac1aa71f09ca56492199a65fa187b779967db36ad32c2c5a501f3b63d9a",

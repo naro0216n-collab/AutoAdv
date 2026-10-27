@@ -66,7 +66,7 @@ def _sequence_issues(records: Sequence[dict], *, started_event: str, version: in
 
 
 def _endpoint_oracle_by_path() -> dict[str, dict]:
-    """Map clean foreground fixture paths to independent source-tail facts."""
+    """Map isolated authored voice paths to independent acoustic-end facts."""
     manifest = json.loads((HERE / 'VOICE_MANIFEST.json').read_text(encoding='utf-8'))
     oracle = json.loads((HERE / 'ALIGNMENT_ENDPOINT_ORACLE.json').read_text(encoding='utf-8'))
     samples = oracle.get('samples', {})
@@ -138,7 +138,8 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
     for index, case in enumerate(first_pass):
         case_id = str(case.get('case') or '')
         authored = expected[index] if index < len(expected) else {}
-        foreground_expected = bool(authored.get('foreground_voice'))
+        authored_voice_expected = bool(authored.get('voice_file'))
+        audio_facts = authored.get('audio_facts') if isinstance(authored.get('audio_facts'), dict) else {}
         start_ns = case.get('at_ns')
         if type(start_ns) is not int:
             issues.append(f'fixture case without timestamp: {case_id}')
@@ -186,7 +187,7 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
         endpoint = oracle.get(str(case.get('voice_file') or ''))
         earliest_end_ns = latest_end_ns = None
         early_input = None
-        endpoint_status = 'not_applicable' if not foreground_expected else 'unmeasured'
+        endpoint_status = 'not_applicable' if not authored_voice_expected else 'unmeasured'
         if voice is not None and endpoint is not None and type(voice.get('at_ns')) is int:
             speech_end_ms = float(endpoint['speech_end_ms'])
             uncertainty_ms = float(endpoint['uncertainty_ms'])
@@ -232,9 +233,10 @@ def _accuracy_case_results(records: Sequence[dict], fixture_records: Sequence[di
             'authored_game_input_at_ns': authored_input_ns,
             'authored_game_input_count': len(case_authored_inputs),
             'recovery_input_at_ns': case_recoveries[0].get('at_ns') if case_recoveries else None,
-            'foreground_endpoint_status': endpoint_status,
-            'known_foreground_end_earliest_ns': earliest_end_ns,
-            'known_foreground_end_latest_ns': latest_end_ns,
+            'audio_facts': dict(audio_facts),
+            'authored_voice_endpoint_status': endpoint_status,
+            'known_authored_voice_end_earliest_ns': earliest_end_ns,
+            'known_authored_voice_end_latest_ns': latest_end_ns,
             'early_input': early_input,
             'stopped': stopped,
             'outcome': outcome,
@@ -302,14 +304,14 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
     unresolved = [row for row in case_results
                   if row.get('outcome') in {'unresolved', 'unmeasured_endpoint'}]
     if phase == 'accuracy':
-        facts['foreground_endpoint_measured'] = sum(
-            row.get('foreground_endpoint_status') == 'measured' for row in case_results)
-        facts['foreground_endpoint_unmeasured'] = sum(
-            row.get('foreground_endpoint_status') == 'unmeasured' for row in case_results)
+        facts['authored_voice_endpoint_measured'] = sum(
+            row.get('authored_voice_endpoint_status') == 'measured' for row in case_results)
+        facts['authored_voice_endpoint_unmeasured'] = sum(
+            row.get('authored_voice_endpoint_status') == 'unmeasured' for row in case_results)
     verdict = 'failure_observed' if failures else ('incomplete' if unresolved or issues else 'no_failure_observed')
 
     return {
-        'schema': 'autoadv-offline-verification-v1',
+        'schema': 'autoadv-offline-verification-v2',
         'phase': phase,
         'verdict': verdict,
         'facts': facts,

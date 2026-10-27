@@ -1,90 +1,146 @@
 {
-  "description": "Target-conditioned alignment and difficult audio observations. Labels do not prove dialogue ownership. No blanket expected hold; same-text background-only is a diagnostic, not a negative acceptance case.",
+  "description": "Target-conditioned alignment stress cases described by text correspondence, finite human-vocal activity, and recurrence. Source order is a fixture mixing fact and never dialogue ownership.",
   "cases": [
     {
-      "id": "clean_control",
-      "kind": "lexical",
+      "id": "clean_text_correspondence",
       "display": "えっ嘘でしょ。",
-      "foreground": "normal-001",
-      "background": null,
-      "background_offset_ms": 0,
-      "background_gain": 0,
-      "attribution": "foreground"
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      },
+      "sources": [
+        {
+          "recording": "normal-001"
+        }
+      ]
     },
     {
-      "id": "background_over_foreground",
-      "kind": "overlap",
+      "id": "text_correspondence_with_vocal_loop",
       "display": "えっ嘘でしょ。",
-      "foreground": "normal-001",
-      "background": "normal-020",
-      "background_offset_ms": 0,
-      "background_gain": 0.4,
-      "attribution": "ambiguous_mix",
-      "background_loop_ms": 5600
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-001"
+        },
+        {
+          "recording": "normal-020",
+          "gain": 0.4,
+          "loop_ms": 5600
+        }
+      ]
     },
     {
-      "id": "background_outlasts_foreground",
-      "kind": "overlap",
+      "id": "text_correspondence_with_late_vocal_loop",
       "display": "えっ嘘でしょ。",
-      "foreground": "normal-001",
-      "background": "normal-020",
-      "background_offset_ms": 900,
-      "background_gain": 0.4,
-      "attribution": "ambiguous_mix",
-      "background_loop_ms": 5600
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-001"
+        },
+        {
+          "recording": "normal-020",
+          "offset_ms": 900,
+          "gain": 0.4,
+          "loop_ms": 5600
+        }
+      ]
     },
     {
-      "id": "background_only_mismatch",
-      "kind": "distractor",
+      "id": "no_text_correspondence_with_vocal_loop",
       "display": "これは表示されただけの文章です。",
-      "foreground": null,
-      "background": "normal-020",
-      "background_offset_ms": 0,
-      "background_gain": 1,
-      "attribution": "not_foreground",
-      "background_loop_ms": 5600
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-020",
+          "gain": 1.0,
+          "loop_ms": 5600
+        }
+      ]
     },
     {
-      "id": "background_only_same_text",
-      "kind": "unverified_same_text",
+      "id": "text_correspondence_from_recurrent_mix",
       "display": "ヒューズが飛んだ。",
-      "foreground": null,
-      "background": "normal-020",
-      "background_offset_ms": 0,
-      "background_gain": 1,
-      "attribution": "unverified",
-      "background_loop_ms": 5600
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-020",
+          "gain": 1.0,
+          "loop_ms": 5600
+        }
+      ]
     },
     {
-      "id": "nonlexical_cry",
-      "kind": "nonlexical",
+      "id": "nonlexical_finite_cry",
       "display": "うっ……うう……",
-      "foreground": "stress_cry",
-      "background": null,
-      "background_offset_ms": 0,
-      "background_gain": 0,
-      "attribution": "untranscribable"
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      },
+      "sources": [
+        {
+          "recording": "stress_cry"
+        }
+      ]
     },
     {
-      "id": "nonlexical_scream",
-      "kind": "nonlexical",
+      "id": "nonlexical_finite_scream",
       "display": "あああっ！",
-      "foreground": "stress_scream",
-      "background": null,
-      "background_offset_ms": 0,
-      "background_gain": 0,
-      "attribution": "untranscribable"
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      },
+      "sources": [
+        {
+          "recording": "stress_scream"
+        }
+      ]
     },
     {
-      "id": "cry_with_background_voice",
-      "kind": "nonlexical_overlap",
+      "id": "nonlexical_finite_with_vocal_loop",
       "display": "うっ……うう……",
-      "foreground": "stress_cry",
-      "background": "normal-020",
-      "background_offset_ms": 600,
-      "background_gain": 0.35,
-      "attribution": "ambiguous_mix",
-      "background_loop_ms": 5600
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "stress_cry"
+        },
+        {
+          "recording": "normal-020",
+          "offset_ms": 600,
+          "gain": 0.35,
+          "loop_ms": 5600
+        }
+      ]
     }
   ],
   "external_assets": [

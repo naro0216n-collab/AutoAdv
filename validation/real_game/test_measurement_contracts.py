@@ -79,8 +79,8 @@ def test_accuracy_fixture_and_evidence_form_one_continuous_authored_sequence():
             shutil.copy2(source / name, target / name)
         build_derived_audio(target)
         derived = sorted(path.name for path in target.glob('derived_*.wav'))
-        expected = sorted({Path(line['foreground_file']).name for line in ACCURACY_SCENARIO
-                           if str(line.get('foreground_file', '')).startswith('audio/voice/derived_')})
+        expected = sorted({Path(line['voice_file']).name for line in ACCURACY_SCENARIO
+                           if str(line.get('voice_file', '')).startswith('audio/voice/derived_')})
         assert derived == expected
         for name in derived:
             with wave.open(str(target / name), 'rb') as reader:
@@ -94,11 +94,11 @@ def test_accuracy_fixture_and_evidence_form_one_continuous_authored_sequence():
         if sample['id'] in oracle.get('samples', {})
     }
     directly_annotated = set(oracle.get('paths', {}))
-    repo_foreground = {
-        line['foreground_file'] for line in ACCURACY_SCENARIO
-        if line.get('foreground_voice') and str(line.get('foreground_file', '')).startswith('audio/voice/')
+    repo_authored_voice = {
+        line['voice_file'] for line in ACCURACY_SCENARIO
+        if str(line.get('voice_file', '')).startswith('audio/voice/')
     }
-    assert repo_foreground <= sample_paths | directly_annotated
+    assert repo_authored_voice <= sample_paths | directly_annotated
 
 
 def test_accuracy_measurement_scope_covers_product_input_equivalence_classes():
@@ -106,39 +106,48 @@ def test_accuracy_measurement_scope_covers_product_input_equivalence_classes():
     assert scenario
     assert all(line['advance_mode'] == 'audio' and not line['use_tts'] for line in scenario)
     channels = {channel for line in scenario for channel in line['expected_mix_channels']}
-    assert {'adv_background', 'adv_sfx'}.issubset(channels)
+    assert {'adv_vocal_loop', 'adv_sfx'}.issubset(channels)
 
-    # The fixture is owned by product-relevant equivalence classes, not stable
-    # case names, positions, or a historical case count.
-    assert 'hook_before_voice' in {line.get('voice_start_relation') for line in scenario}
-    assert {'mid_voice_after_game_input', 'most_voice_elapsed', 'after_foreground_end'} <= {
+    # Coverage is expressed as separate observable facts. A case may carry
+    # several at once; no source is assigned a dialogue role or treated as owned
+    # to the current dialogue merely because it overlaps in time.
+    axis_names = {
+        'text_correspondence', 'finite_vocal_activity', 'finite_vocal_repetition',
+        'vocal_loop', 'vocal_crosses_boundary', 'delayed_vocal_onset',
+    }
+    assert all(set(line['audio_facts']) == axis_names for line in scenario)
+    for line in scenario:
+        facts = line['audio_facts']
+        # These are authored facts, not mutually-exclusive source classes.
+        # More specific temporal patterns may only be asserted when the
+        # corresponding human-vocal activity is actually present.
+        assert not facts['finite_vocal_repetition'] or facts['finite_vocal_activity']
+        assert not facts['vocal_crosses_boundary'] or (
+            facts['finite_vocal_activity'] or facts['vocal_loop'])
+        assert not facts['delayed_vocal_onset'] or (
+            facts['finite_vocal_activity'] or facts['vocal_loop'])
+    combinations = {tuple(line['audio_facts'][name] for name in sorted(axis_names)) for line in scenario}
+    assert len(combinations) > 4
+
+    def has(**facts):
+        return any(all(line['audio_facts'][key] is value for key, value in facts.items())
+                   for line in scenario)
+
+    assert has(text_correspondence=True, finite_vocal_activity=True, vocal_loop=False)
+    assert has(text_correspondence=False, finite_vocal_activity=False, vocal_loop=False)
+    assert has(text_correspondence=False, finite_vocal_activity=True, vocal_loop=False)
+    assert has(text_correspondence=True, finite_vocal_activity=True, vocal_loop=True)
+    assert has(text_correspondence=False, finite_vocal_activity=False, vocal_loop=True)
+    assert has(finite_vocal_repetition=True, vocal_loop=False)
+    assert has(vocal_loop=True, vocal_crosses_boundary=True)
+    assert has(delayed_vocal_onset=True)
+
+    # Timing perturbations remain independent fixture facts rather than new
+    # audio-source classes.
+    assert {'mid_voice_after_game_input', 'most_voice_elapsed', 'after_voice_end'} <= {
         line.get('hook_delay_class') for line in scenario}
-    assert {'starts_during_current', 'persistent_cross_epoch'} <= {
-        line.get('background_vocal_relation') for line in scenario}
-    assert {'loop_started_current_epoch', 'persistent_cross_epoch', 'finite_recurrent'} <= {
-        line.get('vocal_source_class') for line in scenario}
-
-    authored = [(index, line) for index, line in enumerate(scenario)
-                if 'game_input_after_ms' in line]
-    assert any(
-        not line.get('foreground_voice') and not line.get('process_audio_expected')
-        and index + 1 < len(scenario)
-        and scenario[index + 1].get('hook_delay_class') == 'mid_voice_after_game_input'
-        for index, line in authored
-    )
-    assert any(
-        line.get('foreground_voice')
-        and index + 1 < len(scenario)
-        and not scenario[index + 1].get('foreground_voice')
-        for index, line in authored
-    )
-    assert any(
-        line.get('persistent_vocal_expected')
-        and line.get('vocal_source_class') == 'persistent_cross_epoch'
-        and index + 1 < len(scenario)
-        and scenario[index + 1].get('hook_delay_class') == 'mid_voice_after_game_input'
-        for index, line in authored
-    )
+    assert any('game_input_after_ms' in line for line in scenario)
+    assert any('recurrent_vocal_start_after_ms' in line for line in scenario)
 
 
 def _offline_verifier_sample():
@@ -158,9 +167,9 @@ def _offline_verifier_sample():
     fixture = [
         {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': start_ns, 'pid': 50},
         {'event': 'fixture_case', 'seq': 1, 'at_ns': start_ns + 5, 'case': case['id'],
-         'text': case['text'], 'voice_file': case['foreground_file']},
+         'text': case['text'], 'voice_file': case['voice_file']},
         {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': voice_ns, 'case': case['id'],
-         'voice_file': case['foreground_file'], 'duration_ms': 1637.0},
+         'voice_file': case['voice_file'], 'duration_ms': 1637.0},
     ]
     return records, fixture, voice_ns
 
@@ -187,7 +196,7 @@ def test_offline_verifier_classifies_input_from_independent_fixture_time_not_pro
     assert early_result['verdict'] == 'failure_observed'
 
 
-def test_offline_verifier_reports_unmeasured_foreground_endpoint_as_incomplete():
+def test_offline_verifier_reports_unmeasured_authored_voice_endpoint_as_incomplete():
     records, fixture, _voice_ns = _offline_verifier_sample()
     unmeasured_path = 'audio/runtime/voice/not-annotated.wav'
     unmeasured_fixture = [dict(row) for row in fixture]
@@ -195,7 +204,7 @@ def test_offline_verifier_reports_unmeasured_foreground_endpoint_as_incomplete()
     unmeasured_fixture[2]['voice_file'] = unmeasured_path
     result = validate(records, phase='accuracy', fixture_records=unmeasured_fixture)
     assert result['case_results'][0]['outcome'] == 'unmeasured_endpoint'
-    assert result['case_results'][0]['foreground_endpoint_status'] == 'unmeasured'
+    assert result['case_results'][0]['authored_voice_endpoint_status'] == 'unmeasured'
     assert result['verdict'] == 'incomplete'
 
 
@@ -218,7 +227,7 @@ def test_offline_verifier_keeps_authored_external_input_separate_from_product_ad
     authored_fixture = fixture + [{
         'event': 'fixture_case', 'seq': 3, 'at_ns': voice_ns + 200_000_000,
         'case': ACCURACY_SCENARIO[1]['id'], 'text': ACCURACY_SCENARIO[1]['text'],
-        'voice_file': ACCURACY_SCENARIO[1]['foreground_file'],
+        'voice_file': ACCURACY_SCENARIO[1]['voice_file'],
     }]
     result = validate(authored_records, phase='accuracy', fixture_records=authored_fixture)
     first = result['case_results'][0]
@@ -680,7 +689,7 @@ def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_
         manifest.write_text(json.dumps({
             'schema': 'autoadv-advancement-accuracy-assets-v1',
             'assets': [{
-                'id': 'sample', 'kind': 'foreground_voice', 'filename': 'sample.wav',
+                'id': 'sample', 'kind': 'voice_recording', 'filename': 'sample.wav',
                 'runtime_path': 'game/audio/runtime/voice/sample.wav',
                 'sha256': hashlib.sha256(payload).hexdigest(), 'size_bytes': len(payload),
                 'max_bytes': 1024, 'source_page': 'https://example.test/source',

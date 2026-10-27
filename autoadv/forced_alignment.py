@@ -5,7 +5,7 @@ utterance pronunciation fit the observed process PCM?  It does not transcribe
 free speech and it does not decide whether AutoAdv should advance the game.
 
 Frames not assigned to target phones are *unaligned* frames.  They are not
-classified as silence, BGM, SE, or background speech.  Target identity and a
+classified into silence, music, effects, or any other source-role category.  Target identity and a
 committed *target-pronunciation* boundary are derived only from evidence inside
 the same CTC posterior/path provenance.  That boundary is not a voice-file or
 playback-channel EOF.

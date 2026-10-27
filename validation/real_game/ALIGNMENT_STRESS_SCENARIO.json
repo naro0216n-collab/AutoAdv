@@ -3,87 +3,118 @@
   "lines": [
     {
       "id": "stress-intro",
-      "text": "音響整列の特殊音声検証です。背景発話と非言語音声の進行判断を確認します。",
+      "text": "音響整列の特殊音声検証です。本文対応の有無と反復人声、非言語発声の進行判断を確認します。",
       "advance_mode": "text",
-      "use_tts": false,
-      "foreground_voice": false
+      "use_tts": false
     },
     {
-      "id": "clean_control",
+      "id": "clean_text_correspondence",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "foreground_voice": true,
-      "foreground_file": "audio/voice/normal_001.wav"
+      "voice_file": "audio/voice/normal_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      }
     },
     {
-      "id": "background_over_foreground",
+      "id": "text_correspondence_with_vocal_loop",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": true,
-      "foreground_file": "audio/voice/normal_001.wav"
+      "voice_file": "audio/voice/normal_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      }
     },
     {
-      "id": "background_outlasts_foreground",
+      "id": "text_correspondence_with_late_vocal_loop",
       "text": "えっ嘘でしょ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": true,
-      "foreground_file": "audio/voice/normal_001.wav"
+      "voice_file": "audio/voice/normal_001.wav",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      }
     },
     {
-      "id": "background_only_mismatch",
+      "id": "no_text_correspondence_with_vocal_loop",
       "text": "これは表示されただけの文章です。",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": false
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      }
     },
     {
-      "id": "background_only_same_text",
+      "id": "text_correspondence_from_recurrent_mix",
       "text": "ヒューズが飛んだ。",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": false
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      }
     },
     {
-      "id": "nonlexical_cry",
+      "id": "nonlexical_finite_cry",
       "text": "うっ……うう……",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": true,
-      "foreground_file": "audio/voice/stress_cry.wav"
+      "voice_file": "audio/voice/stress_cry.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      }
     },
     {
-      "id": "nonlexical_scream",
+      "id": "nonlexical_finite_scream",
       "text": "あああっ！",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": true,
-      "foreground_file": "audio/voice/stress_scream.wav"
+      "voice_file": "audio/voice/stress_scream.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      }
     },
     {
-      "id": "cry_with_background_voice",
+      "id": "nonlexical_finite_with_vocal_loop",
       "text": "うっ……うう……",
       "advance_mode": "audio",
       "use_tts": false,
-      "assessment": "observe_end_and_possible_misattribution; compare_fallback_on_off",
-      "foreground_voice": true,
-      "foreground_file": "audio/voice/stress_cry.wav"
+      "voice_file": "audio/voice/stress_cry.wav",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      }
     },
     {
       "id": "stress-end",
       "text": "特殊音声検証を終了します。",
       "ending": true,
       "advance_mode": "text",
-      "use_tts": false,
-      "foreground_voice": false
+      "use_tts": false
     }
   ]
 }

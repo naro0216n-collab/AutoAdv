@@ -17,7 +17,7 @@ init python:
 # They are ordinary Ren'Py audio channels and are never visible to AutoAdv.
 init -2 python:
     renpy.music.register_channel("adv_ambient", "sfx", loop=True)
-    renpy.music.register_channel("adv_background", "sfx", loop=True)
+    renpy.music.register_channel("adv_vocal_loop", "sfx", loop=True)
     renpy.music.register_channel("adv_sfx", "sfx", loop=False)
 
 image bg adv_room = Solid("#141922")
@@ -30,8 +30,8 @@ image bg adv_quiet = Solid("#101418")
 screen adv_delayed_sfx(delay, filename, volume=1.0):
     timer delay action Play("adv_sfx", filename, relative_volume=volume)
 
-screen adv_delayed_background(delay, filename, volume=1.0):
-    timer delay action Play("adv_background", filename, loop=True, relative_volume=volume)
+screen adv_delayed_vocal_loop(delay, filename, volume=1.0):
+    timer delay action Play("adv_vocal_loop", filename, loop=True, relative_volume=volume)
 
 label start:
     scene black
@@ -86,7 +86,7 @@ label advancement_accuracy:
     voice "audio/voice/normal_001.wav"
     $ _adv_evidence_voice_commanded()
     a "えっ嘘でしょ。"
-    # Dialogue is already displayed/HOOKed while the foreground source remains
+    # Dialogue is already displayed/HOOKed while the authored voice waveform remains
     # silent for an acting pause. This is not a delayed-HOOK case.
     $ _adv_evidence_case("room-leading-silence", "えっ嘘でしょ。", "audio/voice/derived_leading_silence_001.wav")
     voice "audio/voice/derived_leading_silence_001.wav"
@@ -137,7 +137,7 @@ label advancement_accuracy:
     # across voiced, unvoiced and whispered lines.
     play music "audio/runtime/music/Heavenly Loop_0.ogg" loop fadein 0.8 volume 0.24
     # The validation driver gives one ordinary Windows key input during this
-    # voiced line. Ren'Py sustains the previous foreground voice into the next
+    # voiced line. Ren'Py sustains the previous finite voice into the next
     # unvoiced protagonist line, reproducing the practical voiced→unvoiced tail.
     $ _adv_evidence_case("room-bgm-fadein", "あっベルが鳴ってる。", "audio/voice/normal_017.wav")
     voice "audio/voice/normal_017.wav"
@@ -164,19 +164,19 @@ label advancement_accuracy:
     voice "audio/voice/normal_028.wav"
     $ _adv_evidence_voice_commanded()
     a "彼女はスタッフをまとめていけると思いますか？"
-    # Unrelated Japanese background speech starts only after the unvoiced line
+    # A recurrent Japanese vocal track starts only after the unvoiced line
     # is already visible, then persists across the following unvoiced boundary.
-    $ _adv_evidence_case("cafe-background-starts-unvoiced", "店内放送を聞き流しながら、主人公は黙っていた。", None)
-    show screen adv_delayed_background(0.7, "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav", 0.18)
+    $ _adv_evidence_case("cafe-vocal-loop-starts-unvoiced", "店内放送を聞き流しながら、主人公は黙っていた。", None)
+    show screen adv_delayed_vocal_loop(0.7, "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav", 0.18)
     p "店内放送を聞き流しながら、主人公は黙っていた。"
-    hide screen adv_delayed_background
-    $ _adv_evidence_case("cafe-background-cross-epoch-unvoiced", "人の声が続く店内で、主人公は黙って頷いた。", None)
+    hide screen adv_delayed_vocal_loop
+    $ _adv_evidence_case("cafe-vocal-loop-cross-boundary-unvoiced", "人の声が続く店内で、主人公は黙って頷いた。", None)
     p "人の声が続く店内で、主人公は黙って頷いた。"
-    stop adv_background fadeout 0.2
+    stop adv_vocal_loop fadeout 0.2
 
     # Scene 4: leave the crowd and change BGM as a normal scene transition.
-    # A Japanese voice then persists on an independent game channel, first
-    # behind a voiced line and then behind an unvoiced protagonist line.
+    # A recurrent Japanese vocal track then persists on an independent game channel, first
+    # alongside a text-corresponding voice and then through an unvoiced protagonist line.
     stop adv_ambient fadeout 0.6
     scene bg adv_street with fade
     play music "audio/runtime/music/LofiLoop_2.ogg" loop fadeout 0.8 fadein 0.8 volume 0.28
@@ -184,16 +184,16 @@ label advancement_accuracy:
     voice "audio/voice/normal_026.wav"
     $ _adv_evidence_voice_commanded()
     a "私はいつもミネラルウォーターを持ち歩いています。"
-    play adv_background "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
-    $ _adv_evidence_case("street-background-japanese", "彼のあだ名は言い得て妙だよね。", "audio/voice/normal_010.wav")
+    play adv_vocal_loop "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
+    $ _adv_evidence_case("street-text-with-vocal-loop", "彼のあだ名は言い得て妙だよね。", "audio/voice/normal_010.wav")
     voice "audio/voice/normal_010.wav"
     $ _adv_evidence_voice_commanded()
     a "彼のあだ名は言い得て妙だよね。"
-    $ _adv_evidence_case("street-background-unvoiced", "この場面の主人公にも音声は付いていない。", None)
+    $ _adv_evidence_case("street-vocal-loop-unvoiced", "この場面の主人公にも音声は付いていない。", None)
     p "この場面の主人公にも音声は付いていない。"
-    stop adv_background fadeout 0.2
+    stop adv_vocal_loop fadeout 0.2
 
-    # Identical successive foreground text remains inside the same BGM and
+    # Identical successive text remains inside the same BGM and
     # product session. No test-only utterance boundary is inserted.
     $ _adv_evidence_case("street-repeat-first", "ヒューズが飛んだ。", "audio/voice/normal_020.wav")
     voice "audio/voice/normal_020.wav"
@@ -207,8 +207,8 @@ label advancement_accuracy:
     # Human-vocal recurrence classes. The loop starts after the first case's
     # epoch boundary, then persists across later AutoAdv boundaries. A finite
     # target overlaps it, an unvoiced line must not wait forever for it, and a
-    # highly recurrent but finite foreground event follows after the loop stops.
-    play adv_background "audio/voice/normal_020.wav" loop volume 0.18
+    # highly recurrent but finite vocal event follows after the loop stops.
+    play adv_vocal_loop "audio/voice/normal_020.wav" loop volume 0.18
     $ _adv_evidence_case("vocal-loop-started-in-epoch-target", "猫はにゃーにゃーと鳴く。", "audio/voice/normal_022.wav")
     voice "audio/voice/normal_022.wav"
     $ _adv_evidence_voice_commanded()
@@ -217,9 +217,9 @@ label advancement_accuracy:
     voice "audio/voice/normal_017.wav"
     $ _adv_evidence_voice_commanded()
     a "あっベルが鳴ってる。"
-    $ _adv_evidence_case("vocal-loop-cross-epoch-unvoiced", "繰り返す声は背景のままで、主人公には音声がない。", None)
-    p "繰り返す声は背景のままで、主人公には音声がない。"
-    # The driver advances the unvoiced line before AutoAdv. The background loop
+    $ _adv_evidence_case("vocal-loop-cross-epoch-unvoiced", "繰り返す声が続く中で、主人公には音声がない。", None)
+    p "繰り返す声が続く中で、主人公には音声がない。"
+    # The driver advances the unvoiced line before AutoAdv. The vocal loop
     # already crosses that input boundary, while the new finite target starts
     # afterwards and its real HOOK is deliberately delayed.
     $ _adv_evidence_case("vocal-loop-game-input-delayed-target", "あっベルが鳴ってる。", "audio/voice/normal_017.wav")
@@ -227,7 +227,7 @@ label advancement_accuracy:
     $ _adv_evidence_voice_commanded()
     $ renpy.pause(.80, hard=True)
     a "あっベルが鳴ってる。"
-    stop adv_background fadeout 0.1
+    stop adv_vocal_loop fadeout 0.1
     $ _adv_evidence_case("finite-vocal-repetition-stress", "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。", "audio/voice/derived_finite_repetition.wav")
     voice "audio/voice/derived_finite_repetition.wav"
     $ _adv_evidence_voice_commanded()
@@ -279,7 +279,7 @@ label advancement_accuracy:
     a "私はポピュラー音楽を聞きたい。"
 
     # Scene 7: ordinary quiet transition and final clean recovery. The same
-    # process/session must prove no stale PCM/alignment/background state leaks.
+    # process/session must prove no stale PCM/alignment/recurrent-vocal state leaks.
     stop adv_ambient fadeout 0.3
     scene bg adv_quiet with fade
     $ _adv_evidence_case("quiet-recovery", "彼女は息子に家で行儀よくするように言った。", "audio/voice/normal_035.wav")
@@ -335,14 +335,14 @@ label bgm_voice:
     # Human-vocal recurrence classes. The loop starts after the first case's
     # epoch boundary, then persists across later AutoAdv boundaries. A finite
     # target overlaps it, an unvoiced line must not wait forever for it, and a
-    # highly recurrent but finite foreground event follows after the loop stops.
-    play adv_background "audio/voice/normal_020.wav" loop volume 0.18
+    # highly recurrent but finite vocal event follows after the loop stops.
+    play adv_vocal_loop "audio/voice/normal_020.wav" loop volume 0.18
     voice "audio/voice/normal_022.wav"
     a "猫はにゃーにゃーと鳴く。"
     voice "audio/voice/normal_017.wav"
     a "あっベルが鳴ってる。"
-    p "繰り返す声は背景のままで、主人公には音声がない。"
-    stop adv_background fadeout 0.1
+    p "繰り返す声が続く中で、主人公には音声がない。"
+    stop adv_vocal_loop fadeout 0.1
     voice "audio/voice/derived_finite_repetition.wav"
     a "ヒューズが飛んだ。ヒューズが飛んだ。ヒューズが飛んだ。"
 
@@ -354,7 +354,7 @@ label bgm_voice:
 
     "次の選択肢は、ユーザー操作によって進めてください。"
     menu:
-        "音響整列・非言語発声・背景音声テスト":
+        "音響整列・本文非対応発声・反復人声テスト":
             jump alignment_stress
         "検証を続ける":
             jump continuation
@@ -383,24 +383,24 @@ label alignment_stress:
         "CC0実録音の泣き声・叫び声が未配置です。音響整列の特殊音声検収は実行できません。"
         return
 
-    "音響整列の特殊音声検証です。背景発話と非言語音声の進行判断を確認します。"
+    "音響整列の特殊音声検証です。本文対応の有無と反復人声、非言語発声の進行判断を確認します。"
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
 
-    # One short utterance repeats as an independent background channel
+    # One short utterance repeats on an independent vocal channel
     # across multiple dialogue/advance boundaries. AutoAdv observes only
     # the same-PID mix, never a privileged Ren'Py voice-source signal.
     play sound "audio/voice/normal_020.wav" loop
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
-    # Leave the background loop running after the foreground has ended.
+    # Keep the vocal loop running after the text-corresponding voice has ended.
     voice "audio/voice/normal_001.wav"
     a "えっ嘘でしょ。"
 
-    # Background voice persists with no foreground voice at all.
+    # Recurrent human vocal persists while the displayed text has no corresponding voice.
     p "これは表示されただけの文章です。"
-    # Identical background speech is acoustically indistinguishable from
-    # a foreground occurrence of this very line using mixed PCM + target-conditioned alignment.
+    # Identical recurrent speech can correspond to the displayed text even though
+    # the mixed PCM does not reveal which game channel produced it.
     p "ヒューズが飛んだ。"
     stop sound
 

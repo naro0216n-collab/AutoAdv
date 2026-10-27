@@ -67,7 +67,7 @@ def build(voice_dir: Path) -> None:
 
     # Ordinary voiced line with a deliberate acting pause before speech. This
     # reproduces dialogue that is already displayed/HOOKed while the voice has
-    # not started yet; the silence is part of the foreground source itself.
+    # not started yet; the silence is part of the authored voice waveform itself.
     _write(voice_dir / "derived_leading_silence_001.wav", [
         _silence(1400), normal_001,
     ])
