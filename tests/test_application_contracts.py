@@ -286,14 +286,21 @@ def test_admitted_text_keeps_auto_input_bound_distinct_from_external_input_candi
     native = Native.instances[-1]
     observer = InputObserver.instances[-1]
 
-    # External input is timestamp evidence only. Inputs preceding the next
-    # admitted body are attached to that Presentation and are not promoted to
-    # AutoAdv's stronger causal lower-bound fact.
-    before = app.runtime_state()
+    # External input is timestamp evidence, not a dialogue boundary or an AUTO
+    # mutation.  Once observed after an admitted body it suppresses any later
+    # operation from that token until another body is actually admitted.
+    app.set_auto_advance(True)
     observer.publish(1200)
     observer.publish(1400)
-    assert app.runtime_state() == before
-    second = runtime_hook(app, selected, '二つ目', 3, received_ns=1_500_000_000)
+    native.publish_progress(first, UtteranceProgressState.ENDED, 1450)
+    state = app.runtime_state()
+    assert state.completed and state.authorized and not state.sent and state.pause_reason is None
+
+    # The later body consumes those facts as candidates; the input itself never
+    # becomes AutoAdv's stronger causal lower bound.  Identical text is enough
+    # to establish a new token only because a post-admission input was observed
+    # before this new Hook body arrived.
+    second = runtime_hook(app, selected, '一つ目', 3, received_ns=1_500_000_000)
     assert second == Token(first.session, first.line + 1)
     assert native.begun[-1][2:] == (None, (1200, 1400))
 

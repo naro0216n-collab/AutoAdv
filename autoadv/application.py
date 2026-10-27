@@ -562,11 +562,6 @@ class AutoAdvApplication:
         self._native_audio: NativeAudio | None = None
         self._native_audio_epoch = 0
         self._game_input_observer: WindowsGameInputObserver | None = None
-        self._game_input_lock = threading.Lock()
-        self._game_input_times: deque[int] = deque()
-        self._pending_auto_input_ms: int | None = None
-        self._presentation_causal_lower_bound: tuple[Token, int | None] | None = None
-        self._presentation_input_candidates: tuple[Token, tuple[int, ...]] | None = None
         # Application-only synchronization fence: when the text-derived fallback
         # boundary arrives, Controller must see acoustic evidence through PCM
         # that was already captured at that instant.  This does not extend the
@@ -670,42 +665,23 @@ class AutoAdvApplication:
         else:
             self._schedule_runtime(0, callback)
 
-    def _record_game_input(self, at_ms: int) -> None:
-        """Record one factual external-input time directed at the monitored game."""
+    def _record_game_input(self, session: int, at_ms: int) -> None:
+        """Publish one target-scoped external-input fact to the Controller owner."""
         at_ms = int(at_ms)
-        if at_ms <= 0:
+        if not self.controller.record_external_input(session, at_ms):
             return
-        with self._game_input_lock:
-            self._game_input_times.append(at_ms)
         self._dispatch_runtime(
             lambda ms=at_ms: self._emit_telemetry(
                 'game_input_observed', self.controller.token, at_ms=ms))
 
-    def _take_game_input_candidates(self, text_received_ns: int) -> tuple[int, ...]:
-        """Consume factual game-input times preceding one admitted text.
-
-        External input is not itself a dialogue transition: menu interaction or
-        unrelated clicks/keys can target the same game.  Once HOOK/OCR actually
-        admits a new body, inputs observed since the preceding admitted body are
-        attached as start-time candidates.  Inputs after the text observation
-        remain queued for the following body.
-        """
-        if text_received_ns <= 0:
-            return ()
-        text_received_ms = text_received_ns // 1_000_000
-        with self._game_input_lock:
-            candidates: list[int] = []
-            while self._game_input_times and self._game_input_times[0] <= text_received_ms:
-                candidates.append(self._game_input_times.popleft())
-            return tuple(candidates)
-
-    def _start_game_input_observer(self, target: Target, profile: Profile) -> None:
+    def _start_game_input_observer(self, target: Target) -> None:
         self._close_game_input_observer()
-        if profile.advance_mode.value != 'audio' or sys.platform != 'win32':
+        if sys.platform != 'win32':
             return
+        session = self.controller.session
         try:
             observer = WindowsGameInputObserver(
-                target.pid, self._record_game_input)
+                target.pid, lambda at_ms, s=session: self._record_game_input(s, at_ms))
             observer.start()
         except Exception as exc:
             self._emit_runtime_event('game_input_observer_error', None, reason=str(exc))
@@ -714,15 +690,10 @@ class AutoAdvApplication:
 
     def _close_game_input_observer(self) -> None:
         observer, self._game_input_observer = self._game_input_observer, None
-        with self._game_input_lock:
-            self._game_input_times.clear()
-        self._pending_auto_input_ms = None
-        self._presentation_causal_lower_bound = None
-        self._presentation_input_candidates = None
         if observer is not None:
             observer.close()
 
-    def _send_runtime_input(self, target: Target, virtual_key: int) -> None:
+    def _send_runtime_input(self, target: Target, virtual_key: int) -> int:
         token = self.controller.token
         self._emit_runtime_event('advance_attempt', token)
         native = self._native_audio
@@ -733,10 +704,10 @@ class AutoAdvApplication:
             native.clock() if native is not None
             else time.monotonic_ns() // 1_000_000)
         self._raw_input_send(target, virtual_key)
-        self._pending_auto_input_ms = int(lower_bound_ms)
         self._emit_runtime_event('audio_causal_lower_bound', token, at_ms=lower_bound_ms)
         self._emit_runtime_event(
             'advance_input', token, presentation_reason=self.controller.presentation_reason)
+        return int(lower_bound_ms)
 
     def runtime_state(self) -> RuntimeState:
         c = self.controller
@@ -868,7 +839,7 @@ class AutoAdvApplication:
             return
         self._apply_fallback_due(token)
 
-    def _start_presentation(self, token: Token) -> int:
+    def _start_presentation(self, token: Token) -> None:
         """Start every presentation effect for the current immutable Utterance.
 
         The event-loop adapter does not decide whether text time, native audio,
@@ -877,20 +848,17 @@ class AutoAdvApplication:
         state = self.runtime_state()
         utterance = state.utterance
         if utterance is None or token != state.token:
-            return 0
+            return
         self._cancel_voice()
         self._fallback_fence = None
-        text_received_ns = self.controller.take_utterance_received_ns(token) or time.monotonic_ns()
-        causal_lower_bound_ms = self._pending_auto_input_ms
-        self._pending_auto_input_ms = None
-        input_candidates_ms = self._take_game_input_candidates(text_received_ns)
-        self._presentation_causal_lower_bound = (token, causal_lower_bound_ms)
-        self._presentation_input_candidates = (token, input_candidates_ms)
-        if input_candidates_ms:
+        timing = self.controller.presentation_timing(token)
+        if timing is None:
+            return
+        if timing.input_candidates_ms:
             self._emit_telemetry(
                 'game_input_candidates_attached', token,
-                text_received_ns=text_received_ns,
-                input_candidates_ms=list(input_candidates_ms))
+                text_received_ns=timing.received_ns,
+                input_candidates_ms=list(timing.input_candidates_ms))
         native_audio_target = bool(
             utterance.advance_mode.value == 'audio' and not utterance.use_tts)
         if not native_audio_target and self._native_audio is not None:
@@ -914,7 +882,6 @@ class AutoAdvApplication:
                 self._start_voice(token, utterance.speech.tts_text, utterance.voice,
                                   utterance.tts_caption)
         self._notify_runtime()
-        return text_received_ns
 
     def _close_runtime(self, reason: str = 'stopped') -> None:
         self._hook_output_group.clear()
@@ -945,7 +912,7 @@ class AutoAdvApplication:
                                connection.connection_generation)
             self._reconcile_hook_sync()
         self._start_native_audio(effective)
-        self._start_game_input_observer(target, effective)
+        self._start_game_input_observer(target)
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(
@@ -1421,17 +1388,14 @@ class AutoAdvApplication:
     def _begin_native_audio(self, token: Token, alignment_text: str, candidates) -> bool:
         if self._native_audio is None:
             return False
-        causal = self._presentation_causal_lower_bound
-        causal_lower_bound_ms = (
-            causal[1] if causal is not None and causal[0] == token else None)
-        attached = self._presentation_input_candidates
-        input_candidates_ms = (
-            attached[1] if attached is not None and attached[0] == token else ())
+        timing = self.controller.presentation_timing(token)
+        if timing is None:
+            return False
         try:
             self._native_audio.begin(
                 token, alignment_text, candidates=candidates,
-                causal_lower_bound_ms=causal_lower_bound_ms,
-                input_candidates_ms=input_candidates_ms)
+                causal_lower_bound_ms=timing.causal_lower_bound_ms,
+                input_candidates_ms=timing.input_candidates_ms)
         except Exception as exc:
             detail = 'alignment target failure: ' + str(exc)
             self._emit_runtime_event('native_audio_error', token, reason=detail)

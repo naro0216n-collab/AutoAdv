@@ -252,18 +252,33 @@ def test_multisource_dialogue_is_composed_only_inside_one_synchronized_group():
 def test_external_progress_and_stale_presentation_evidence_preserve_state_ownership():
     ctrl, sent, _ = controller()
     ctrl.permit(True)
-    first = observe(ctrl, '「一つ目」', 1)
+    first = ctrl.observe(
+        generation='host', connection=1, sequence=1, source=SOURCE,
+        text='「一つ目」', pid=101, received_ns=1_000_000_000)
     assert first is not None
 
-    # A later HOOK is an external line transition, not evidence that the old
-    # line completed or that AUTO should be disabled.
-    second = ctrl.observe(generation='host', connection=1, sequence=2, source=SOURCE,
-                          text='「二つ目」', pid=101, received_ns=20)
+    # External game input is only a timestamp fact, not a dialogue boundary or
+    # an AUTO mutation.  It does make the already-admitted token stale for any
+    # later AutoAdv operation, even if that token subsequently completes.
+    assert ctrl.record_external_input(ctrl.session, 1200)
+    assert ctrl.presentation_event(first, 'text_elapsed')
+    assert ctrl.completed and ctrl.authorized and ctrl.pause_reason is None
+    assert not ctrl.try_advance() and sent == []
+
+    # A later admitted body consumes the input as timing evidence.  The same
+    # body text can therefore represent a new Presentation without inventing a
+    # boundary from the input alone.
+    second = ctrl.observe(
+        generation='host', connection=1, sequence=2, source=SOURCE,
+        text='「一つ目」', pid=101, received_ns=1_500_000_000)
     assert second is not None and second != first
+    timing = ctrl.presentation_timing(second)
+    assert timing is not None and timing.input_candidates_ms == (1200,)
+    assert timing.causal_lower_bound_ms is None
     assert ctrl.authorized and ctrl.presentation_reason is None
     assert not ctrl.presentation_event(first, 'text_elapsed')
 
-    # Only evidence for the active token can reserve an input.  After one send,
+    # Only evidence for the active token can reserve an input. After one send,
     # no new Presentation state exists until another body is actually admitted.
     assert ctrl.presentation_event(second, 'text_elapsed')
     assert ctrl.try_advance() and len(sent) == 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from copy import deepcopy
 from collections.abc import Callable, Sequence
+from threading import Lock
 from .hook_protocol import HookEvent
 from .g2p import G2PBackend
 from .utterance_progress import UtteranceProgress
@@ -29,9 +30,17 @@ class Token:
     line: int
 
 
+@dataclass(frozen=True)
+class PresentationTiming:
+    """Input/acquisition facts attached to one admitted Presentation."""
+    received_ns: int = 0
+    causal_lower_bound_ms: int | None = None
+    input_candidates_ms: tuple[int, ...] = ()
+
+
 class Controller:
     """Callbacks from devices never send input; only try_advance may do that."""
-    def __init__(self, input_send: Callable[[Target, int], None],
+    def __init__(self, input_send: Callable[[Target, int], int | None],
                  target_ready: Callable[[Target], bool], g2p: G2PBackend):
         self.input_send = input_send
         self.target_ready = target_ready
@@ -55,7 +64,10 @@ class Controller:
         self.hold_reason: str | None = None
         self.line_no = 0
         self.ocr_blank = False
-        self.utterance_received_ns = 0
+        self._input_facts_lock = Lock()
+        self._external_input_times: list[int] = []
+        self._pending_auto_input_ms: int | None = None
+        self._presentation_timing = PresentationTiming()
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
         profile.validate()
@@ -83,7 +95,10 @@ class Controller:
         self.line_no = 0
         self.completed = self.sent = False
         self.ocr_blank = False
-        self.utterance_received_ns = 0
+        with self._input_facts_lock:
+            self._external_input_times.clear()
+            self._pending_auto_input_ms = None
+            self._presentation_timing = PresentationTiming()
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
         self.native_progress = UtteranceProgress()
@@ -212,8 +227,6 @@ class Controller:
             # different stable OCR body as the next Presentation.
             self.ocr_blank = True
             return None
-        if self.utterance and text == self.utterance.raw and not self.ocr_blank:
-            return None
         had_blank = self.ocr_blank
         self.ocr_blank = False
         fields = extract_source_fields(text, self.profile, 'ocr')
@@ -230,20 +243,46 @@ class Controller:
                                  verified_boundary=had_blank,
                                  received_ns=received_ns)
 
+    def _eligible_external_inputs_locked(self, received_ns: int) -> tuple[int, ...]:
+        if received_ns <= 0:
+            return tuple(self._external_input_times)
+        received_ms = received_ns // 1_000_000
+        return tuple(value for value in self._external_input_times if value <= received_ms)
+
+    def _consume_presentation_timing(self, received_ns: int) -> PresentationTiming:
+        received_ns = max(0, int(received_ns))
+        with self._input_facts_lock:
+            candidates = self._eligible_external_inputs_locked(received_ns)
+            if received_ns <= 0:
+                self._external_input_times.clear()
+            elif candidates:
+                received_ms = received_ns // 1_000_000
+                self._external_input_times = [
+                    value for value in self._external_input_times if value > received_ms]
+            causal = self._pending_auto_input_ms
+            self._pending_auto_input_ms = None
+        return PresentationTiming(
+            received_ns=received_ns, causal_lower_bound_ms=causal,
+            input_candidates_ms=candidates)
+
     def _accept_line(self, *, sequence: int, raw: str, body: str, speaker: str, origin: str,
                      verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
         old = self.utterance
-        if (old and not self.sent and old.raw == raw and not verified_boundary and
-                self.profile.repeat_rule != 'each_flush'):
-            return None
+        with self._input_facts_lock:
+            external_boundary = bool(self._eligible_external_inputs_locked(received_ns))
+        if old and not self.sent and old.raw == raw and not verified_boundary and not external_boundary:
+            if origin == 'ocr' or self.profile.repeat_rule != 'each_flush':
+                return None
         if self.pending_profile is not None:
             self.profile = self.pending_profile
             self.pending_profile = None
-        if (old and self.sent and not verified_boundary and raw == old.raw and
-                self.profile.repeat_rule != 'each_flush'):
-            self.pause('ambiguous_identical_line')
-            return None
-        self.utterance_received_ns = max(0, int(received_ns))
+        if old and self.sent and not verified_boundary and raw == old.raw and not external_boundary:
+            if origin == 'ocr':
+                return None
+            if self.profile.repeat_rule != 'each_flush':
+                self.pause('ambiguous_identical_line')
+                return None
+        timing = self._consume_presentation_timing(received_ns)
         self.line_no += 1
         self.utterance = interpret(
             raw, self.profile, session=self.session, line=self.line_no, source=origin,
@@ -255,20 +294,32 @@ class Controller:
         self.fallback_due = False
         self.sent = False
         self.hold_reason = None
+        self._presentation_timing = timing
         return Token(self.session, self.line_no)
 
-    def take_utterance_received_ns(self, token: Token) -> int:
-        """Return the acquisition timestamp for the admitted Utterance once.
+    def record_external_input(self, session: int, at_ms: int) -> bool:
+        """Retain one observed game-input time without inventing a boundary.
 
-        This is only the time at which the text observation reached AutoAdv.
-        It is not an acoustic boundary and says nothing about which earlier
-        game input, if any, caused the dialogue transition.
+        An input observed after the current body makes that token stale for
+        further AutoAdv input.  The fact is retained until a later admitted
+        body consumes it as timing evidence for that new Presentation.
         """
-        if token != self.token or self.utterance_received_ns <= 0:
-            return 0
-        value = self.utterance_received_ns
-        self.utterance_received_ns = 0
-        return value
+        at_ms = int(at_ms)
+        if session != self.session or self.profile is None or at_ms <= 0:
+            return False
+        with self._input_facts_lock:
+            self._external_input_times.append(at_ms)
+            self._external_input_times.sort()
+        return True
+
+    def presentation_timing(self, token: Token) -> PresentationTiming | None:
+        if token != self.token:
+            return None
+        return self._presentation_timing
+
+    def _external_input_pending(self) -> bool:
+        with self._input_facts_lock:
+            return bool(self._external_input_times)
 
     def presentation_event(self, token: Token, event: str, *,
                            success: bool = True) -> bool:
@@ -361,6 +412,12 @@ class Controller:
     def try_advance(self) -> bool:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):
             return False
+        # External input does not prove a dialogue boundary, but once it has
+        # occurred after this body was admitted the current token can no longer
+        # safely emit another game operation.  A later admitted body consumes
+        # that input as timing evidence and restores normal evaluation.
+        if self._external_input_pending():
+            return False
         ready = None
         if self.hold_reason == 'target_unavailable':
             ready = self.target_ready(self.target)
@@ -374,12 +431,22 @@ class Controller:
         if not ready:
             self.pause('target_unavailable')
             return False
+        # Target checks may cross a scheduling boundary. Re-read external input
+        # immediately before reserving the operation so a newly observed game
+        # input cannot be ignored by an earlier completion decision.
+        if self._external_input_pending():
+            return False
         # Reserve the line before external I/O. An exception never causes an unsafe retry.
         self.sent = True
         self.completed = False
         try:
-            self.input_send(self.target, self.profile.input_key)  # type: ignore[union-attr]
+            sent_at_ms = self.input_send(self.target, self.profile.input_key)  # type: ignore[union-attr]
         except Exception:
             self.pause('input_failure_no_retry')
             return False
+        if sent_at_ms is not None:
+            sent_at_ms = int(sent_at_ms)
+            if sent_at_ms > 0:
+                with self._input_facts_lock:
+                    self._pending_auto_input_ms = sent_at_ms
         return True

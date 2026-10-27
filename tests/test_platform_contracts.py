@@ -289,7 +289,13 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         scheduled.pop(0)[1]()
         return sent, app.runtime_state()
 
+    class NoopInputObserver:
+        def __init__(self, *_args, **_kwargs): pass
+        def start(self): pass
+        def close(self): pass
+
     monkeypatch.setattr('autoadv.application.sys.platform', 'win32')
+    monkeypatch.setattr('autoadv.application.WindowsGameInputObserver', NoopInputObserver)
     with patch('autoadv.application.ctypes.windll', create=True) as dll:
         dll.user32 = _TargetUser32(pid=101)
         sent, state = advance_with_window_owner(101, 101)
