@@ -18,7 +18,7 @@ from .acoustic_observers import (
     AcousticObservationHistory, HumanVocalActivityObserver, VocalActivityObserver,
 )
 from .audio_buffer import AudioHistory, PCMChunk
-from .conversation import Token
+from .model import Token
 from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner, TargetTimeAlignment
 from .g2p import PronunciationCandidate
 from .process_audio import CaptureHealth, ProcessCapture
@@ -58,16 +58,20 @@ class NativeAudio:
     HISTORICAL_SEARCH_OVERLAP_MS = INITIAL_SEARCH_WINDOW_MS // 2
 
     def __init__(self, pid: int, helper: Path, model: Path, vocab: Path,
-                 on_error: Callable[[Token | None, str, bool], None],
-                 *, model_backend=None, g2p=None, clock=None,
+                 on_error: Callable[[Token | None, str], None],
+                 *, on_policy_error: Callable[[Token | None, str], None],
+                 on_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation], None],
+                 on_policy_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation], None],
+                 model_backend=None, g2p=None, clock=None,
                  human_vocal_model: Path | None = None,
                  vocal_observer: VocalActivityObserver | None = None,
-                 on_inference: Callable[[Token, dict], None] | None = None,
-                 on_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation, bool], None] | None = None):
+                 on_inference: Callable[[Token, dict], None] | None = None):
         self.pid = pid
         self.on_error = on_error
+        self.on_policy_error = on_policy_error
         self.on_inference = on_inference
         self.on_progress = on_progress
+        self.on_policy_progress = on_policy_progress
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
 
         self.history = AudioHistory(horizon_ms=self.RETENTION_MS)
@@ -277,7 +281,7 @@ class NativeAudio:
         with self._lock:
             failure = self._capture_error if self.token == token else None
         if failure:
-            self.on_error(token, failure, False)
+            self.on_error(token, failure)
 
     def _retire_target_locked(self) -> None:
         self.token = None
@@ -318,16 +322,16 @@ class NativeAudio:
             self._observer_revision += 1
             self._observer_cursor_ms = None
         if token is not None:
-            self.on_error(token, status.reason, policy_pending)
+            (self.on_policy_error if policy_pending else self.on_error)(token, status.reason)
 
     def request_policy_assessment(self, token: Token) -> bool:
         """Settle all measurements through PCM captured at this policy instant.
 
-        The caller does not own or receive the capture boundary. A later progress
-        callback is marked ``policy_settled`` only after observer and lexical work
-        have both covered that internal frontier. If capture/inference is already
-        unavailable, no obligation is armed and the caller may apply uncertainty
-        policy immediately.
+        The caller does not own or receive the capture boundary. Once observer
+        and lexical work both cover that internal frontier, the same integrated
+        inference is published through the dedicated policy-assessment callback.
+        If capture/inference is already unavailable, no obligation is armed and
+        the caller may apply uncertainty policy immediately.
         """
         alignment_work = None
         submit_observer = False
@@ -453,8 +457,8 @@ class NativeAudio:
                     self._required_assessment_ms = None
                     self._observer_running = False
                 if token is not None:
-                    self.on_error(
-                        token, "human-vocal observer failure: " + str(error), policy_pending)
+                    callback = self.on_policy_error if policy_pending else self.on_error
+                    callback(token, "human-vocal observer failure: " + str(error))
 
     def _fence_ready_locked(self, boundary_ms: int) -> bool:
         observer = self._observer_cursor_ms
@@ -572,15 +576,15 @@ class NativeAudio:
             if key == self._last_progress_key and required is None:
                 return
             self._last_progress_key = key
-            policy_settled = False
+            policy_assessment = False
             if required is not None:
-                policy_settled = self._policy_assessment_pending
+                policy_assessment = self._policy_assessment_pending
                 self._required_assessment_ms = None
-                if policy_settled:
+                if policy_assessment:
                     self._policy_assessment_pending = False
-            callback = self.on_progress
+            callback = self.on_policy_progress if policy_assessment else self.on_progress
         if callback is not None:
-            callback(item.token, progress, observation, policy_settled)
+            callback(item.token, progress, observation)
 
         # Releasing a required fence may expose optional retained-history search.
         # Resume it only after Controller has consumed the assessment, because
@@ -908,8 +912,8 @@ class NativeAudio:
                 policy_pending = self._policy_assessment_pending
                 self._policy_assessment_pending = False
                 self._required_assessment_ms = None
-            self.on_error(
-                token, "acoustic inference failure: " + str(exc), policy_pending)
+            callback = self.on_policy_error if policy_pending else self.on_error
+            callback(token, "acoustic inference failure: " + str(exc))
         finally:
             with self._lock:
                 if self._alignment_inflight_generation == generation:

@@ -11,7 +11,8 @@ from autoadv.audio_evidence import NativeAudioObservation
 from autoadv.utterance_progress import (
     UtteranceProgress, UtteranceProgressState,
 )
-from autoadv.conversation import Target, Token
+from autoadv.conversation import Target
+from autoadv.model import Token
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection
 from autoadv.storage import Catalog
@@ -66,13 +67,18 @@ class _FakeNativeAudio:
         self.requests.append(token)
         return True
 
-    def publish_progress(self, token, state, evidence_at_ms, *, policy_settled=False):
-        callback = self.callbacks['on_progress']
-        callback(
+    def publish_progress(self, token, state, evidence_at_ms):
+        self.callbacks['on_progress'](
             token,
             UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
             NativeAudioObservation(),
-            policy_settled,
+        )
+
+    def publish_policy_progress(self, token, state, evidence_at_ms):
+        self.callbacks['on_policy_progress'](
+            token,
+            UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
+            NativeAudioObservation(),
         )
 
 
@@ -448,8 +454,8 @@ def test_audio_fallback_settles_already_captured_pcm_before_policy_completion(mo
     assert not app.runtime_state().completed
     assert native.requests == [token]
 
-    native.publish_progress(
-        token, UtteranceProgressState.UNKNOWN, 1500, policy_settled=True)
+    native.publish_policy_progress(
+        token, UtteranceProgressState.UNKNOWN, 1500)
     state = app.runtime_state()
     assert state.completed
     assert state.presentation_reason == 'uncertain_text_fallback'

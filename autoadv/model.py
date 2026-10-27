@@ -453,6 +453,13 @@ class SpeechPlan:
 
 
 @dataclass(frozen=True)
+class Token:
+    """Immutable identity of one admitted Presentation within a runtime session."""
+    session: int
+    line: int
+
+
+@dataclass(frozen=True)
 class Utterance:
     session: int
     line: int

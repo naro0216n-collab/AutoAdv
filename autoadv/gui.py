@@ -8,7 +8,7 @@ import ntpath
 from pathlib import Path
 import re
 
-from .conversation import Token
+from .model import Token
 from .hook_protocol import HookEvent, ThreadSource
 from .model import (AdvanceMode, Profile, SpeakerStyle, StructureRule, ReplacementRule,
                     COMMON_FIELDS, SPEAKER_STYLE_OPTIONS, build_speaker_caption,

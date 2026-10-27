@@ -7,7 +7,7 @@ from threading import Lock
 from .hook_protocol import HookEvent
 from .g2p import G2PBackend
 from .utterance_progress import UtteranceProgress
-from .model import (AdvanceMode, Profile, Utterance, assemble_dialogue_fields,
+from .model import (AdvanceMode, Profile, Token, Utterance, assemble_dialogue_fields,
                     configured_speaker_names, extract_source_fields, interpret,
                     resolve_speaker_enclosed_body)
 
@@ -22,12 +22,6 @@ class Target:
     def __post_init__(self):
         if self.pid <= 0 or self.hwnd <= 0 or (self.hook_pid is not None and self.hook_pid <= 0) or (self.audio_pid is not None and self.audio_pid <= 0):
             raise ValueError('target must have positive PID and HWND')
-
-
-@dataclass(frozen=True)
-class Token:
-    session: int
-    line: int
 
 
 @dataclass(frozen=True)

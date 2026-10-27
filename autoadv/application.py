@@ -18,17 +18,17 @@ from dataclasses import dataclass
 from typing import Callable
 from collections.abc import Sequence
 
-from .conversation import Controller, Target, Token
+from .conversation import Controller, Target
 from .g2p import G2PBackend, default_g2p
 from .audio_evidence import NativeAudioObservation
 from .utterance_progress import (
-    UtteranceProgress, UtteranceProgressState,
+    UtteranceProgress,
 )
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import (HookSelection, OCRSettings, Profile, SpeakerStyle, ReplacementRule, StructureRule,
+from .model import (HookSelection, OCRSettings, Profile, SpeakerStyle, ReplacementRule, StructureRule, Token,
                     Utterance, EXTRACTION_PRESETS, assemble_dialogue_fields,
                     configured_speaker_names, extract_fields, interpret,
                     resolve_speaker_enclosed_body)
@@ -1205,7 +1205,6 @@ class AutoAdvApplication:
 
     def _consume_native_progress(
         self, token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
-        *, policy_settled: bool = False,
     ) -> bool:
         """Apply one current-generation integrated acoustic result to product state."""
         state = self.runtime_state()
@@ -1275,8 +1274,6 @@ class AutoAdvApplication:
         if completed:
             self._finish_presentation_transition(token, True)
             return True
-        if policy_settled:
-            return self._apply_fallback_due(token)
         return False
 
     def _start_native_audio(self, profile: Profile) -> bool:
@@ -1303,38 +1300,56 @@ class AutoAdvApplication:
             return (epoch == self._native_audio_epoch and now.session == session and
                     now.target is not None and (now.target.audio_pid or now.target.pid) == pid)
 
-        def consume_error(
-            token: Token | None, detail: str, policy_settlement_failed: bool,
-        ) -> None:
+        def consume_error(token: Token | None, detail: str) -> None:
             if not current():
                 return
             self._emit_runtime_event('native_audio_error', token, reason=detail)
-            self._handle_native_error(
-                token, policy_settlement_failed=policy_settlement_failed)
+            self._handle_native_error(token)
 
-        def publish_error(
-            token: Token | None, detail: str, policy_settlement_failed: bool,
-        ) -> None:
+        def publish_error(token: Token | None, detail: str) -> None:
             if current():
-                self._dispatch_runtime(
-                    lambda: consume_error(token, detail, policy_settlement_failed))
+                self._dispatch_runtime(lambda: consume_error(token, detail))
+
+        def consume_policy_error(token: Token | None, detail: str) -> None:
+            if not current():
+                return
+            self._emit_runtime_event('native_audio_error', token, reason=detail)
+            completed = self._handle_native_error(token)
+            if not completed and token is not None:
+                self._apply_fallback_due(token)
+
+        def publish_policy_error(token: Token | None, detail: str) -> None:
+            if current():
+                self._dispatch_runtime(lambda: consume_policy_error(token, detail))
 
         def consume_progress(
             token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
-            policy_settled: bool,
         ) -> None:
             if current():
-                self._consume_native_progress(
-                    token, progress, observation, policy_settled=policy_settled)
+                self._consume_native_progress(token, progress, observation)
 
         def publish_progress(
             token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
-            policy_settled: bool,
         ) -> None:
             if current():
                 self._dispatch_runtime(
-                    lambda: consume_progress(
-                        token, progress, observation, policy_settled))
+                    lambda: consume_progress(token, progress, observation))
+
+        def consume_policy_progress(
+            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+        ) -> None:
+            if not current():
+                return
+            completed = self._consume_native_progress(token, progress, observation)
+            if not completed:
+                self._apply_fallback_due(token)
+
+        def publish_policy_progress(
+            token: Token, progress: UtteranceProgress, observation: NativeAudioObservation,
+        ) -> None:
+            if current():
+                self._dispatch_runtime(
+                    lambda: consume_policy_progress(token, progress, observation))
 
         def publish_inference(token: Token, metrics: dict) -> None:
             if current():
@@ -1369,9 +1384,11 @@ class AutoAdvApplication:
                 native = NativeAudio(
                     pid, Path(native_helper), Path(alignment_model), Path(alignment_vocab),
                     publish_error,
+                    on_policy_error=publish_policy_error,
                     human_vocal_model=Path(human_vocal_model),
                     on_inference=publish_inference,
-                    on_progress=publish_progress)
+                    on_progress=publish_progress,
+                    on_policy_progress=publish_policy_progress)
                 native.start()
                 self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:
@@ -1406,9 +1423,7 @@ class AutoAdvApplication:
             return False
         return True
 
-    def _handle_native_error(
-        self, token: Token | None, *, policy_settlement_failed: bool = False,
-    ) -> bool:
+    def _handle_native_error(self, token: Token | None) -> bool:
         """Route unavailable native audio through the existing uncertainty policy."""
         state = self.runtime_state()
         if token is None or token != state.token or state.utterance is None:
@@ -1419,8 +1434,6 @@ class AutoAdvApplication:
         completed = self.controller.apply_utterance_progress(token, UtteranceProgress())
         if completed:
             return self._finish_presentation_transition(token, True)
-        if policy_settlement_failed:
-            return self._apply_fallback_due(token)
         self._notify_runtime()
         return False
 

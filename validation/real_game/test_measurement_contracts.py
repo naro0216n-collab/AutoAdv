@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from autoadv.g2p import PronunciationCandidate
-from autoadv.conversation import Token
+from autoadv.model import Token
 from autoadv.hook_protocol import HookEvent, ThreadSource
 from validation.real_game import fixture_runtime, issue_reporting, prepare_accuracy_assets as media
 from validation.real_game.benchmark_alignment import run as run_alignment_benchmark

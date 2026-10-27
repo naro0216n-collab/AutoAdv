@@ -7,7 +7,7 @@ import time
 from threading import Event, Lock, Thread
 from typing import Callable
 from urllib import parse, request
-from .conversation import Token
+from .model import Token
 
 
 def synthesize(base_url: str, reading: str, voice: str, caption: str = '') -> bytes:
