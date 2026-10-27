@@ -3,24 +3,6 @@
   "purpose": "Runtime-only media for Windows auto-advance accuracy measurement. These files are cached outside Git and hydrated into the staged Ren'Py runtime only for the accuracy phase.",
   "assets": [
     {
-      "id": "jvs001-sample",
-      "kind": "voice_recording",
-      "filename": "jvs001_VOICEACTRESS100_001.wav",
-      "runtime_path": "game/audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
-      "sha256": "ad812d499e23ff37929402915cdf8d3034b6bc602b8471bb6a504d5432c19869",
-      "size_bytes": 413854,
-      "max_bytes": 1048576,
-      "source_page": "https://sites.google.com/site/shinnosuketakamichi/research-topics/jvs_corpus",
-      "urls": [
-        "https://drive.usercontent.google.com/download?id=142aj-qFJOhoteWKqgRzvNoq02JbZIsaG&export=download&confirm=t",
-        "https://drive.google.com/uc?export=download&id=142aj-qFJOhoteWKqgRzvNoq02JbZIsaG"
-      ],
-      "license": "JVS corpus terms: academic/noncommercial research and personal use; redistribution is not permitted",
-      "redistributable": false,
-      "speaker_family": "jvs001",
-      "text": "また、東寺のように、五大明王と呼ばれる、主要な明王の中央に配されることも多い。"
-    },
-    {
       "id": "jvs002-sample",
       "kind": "voice_recording",
       "filename": "jvs002_VOICEACTRESS100_001.wav",

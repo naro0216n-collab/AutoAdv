@@ -64,7 +64,6 @@ label advancement_accuracy:
     # is signalled to AutoAdv.
     python:
         _adv_runtime_assets = [
-            "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
             "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
             "audio/runtime/music/Heavenly Loop_0.ogg",
             "audio/runtime/music/LofiLoop_2.ogg",
@@ -174,7 +173,7 @@ label advancement_accuracy:
     stop adv_vocal_loop fadeout 0.2
 
     # Scene 4: leave the crowd and change BGM as a normal scene transition.
-    # A recurrent Japanese vocal track then persists on an independent game channel, first
+    # A recurrent human-vocal cry then persists on an independent game channel, first
     # alongside a text-corresponding voice and then through an unvoiced protagonist line.
     stop adv_ambient fadeout 0.6
     scene bg adv_street with fade
@@ -183,7 +182,7 @@ label advancement_accuracy:
     voice "audio/voice/normal_026.wav"
     $ _adv_evidence_voice_commanded()
     a "私はいつもミネラルウォーターを持ち歩いています。"
-    play adv_vocal_loop "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
+    play adv_vocal_loop "audio/voice/stress_cry.wav" loop volume 0.18
     $ _adv_evidence_case("street-text-with-vocal-loop", "彼のあだ名は言い得て妙だよね。", "audio/voice/normal_010.wav")
     voice "audio/voice/normal_010.wav"
     $ _adv_evidence_voice_commanded()
