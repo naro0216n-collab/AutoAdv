@@ -59,6 +59,7 @@ class TargetTimeAlignment:
     frame_count: int = 0
     target_unit_spans: tuple[FrameSpan, ...] = ()
     unaligned_spans: tuple[FrameSpan, ...] = ()
+    observed_units: int = 0
     aligned_target_units: int = 0
     target_associated: bool = False
     complete_alignment: bool = False
@@ -193,12 +194,14 @@ def _support_from_path(margins: np.ndarray, states: np.ndarray, units: int,
 
 def _candidate_alignment(log_probs: np.ndarray, phonemes: tuple[str, ...],
                          ids: tuple[int, ...], reading_rank: int,
-                         frame_ms: float, policy: AlignmentPolicy) -> TargetTimeAlignment:
+                         frame_ms: float, policy: AlignmentPolicy,
+                         observed_units: int) -> TargetTimeAlignment:
     frames = int(log_probs.shape[0])
     units = len(ids)
     if not frames or not units:
         return TargetTimeAlignment(target_phonemes=phonemes, reading_rank=reading_rank,
                                    frame_ms=frame_ms, frame_count=frames,
+                                   observed_units=observed_units,
                                    rejection="empty_target_or_audio")
 
     # Target-vs-best-competitor log margin at every frame.  A free state has no
@@ -209,6 +212,7 @@ def _candidate_alignment(log_probs: np.ndarray, phonemes: tuple[str, ...],
         if not 0 <= label < labels:
             return TargetTimeAlignment(target_phonemes=phonemes, reading_rank=reading_rank,
                                        frame_ms=frame_ms, frame_count=frames,
+                                       observed_units=observed_units,
                                        rejection="target_token_out_of_model_range")
         competitor = log_probs.copy()[:, :]
         competitor[:, label] = -np.inf
@@ -294,6 +298,7 @@ def _candidate_alignment(log_probs: np.ndarray, phonemes: tuple[str, ...],
         return TargetTimeAlignment(
             target_phonemes=phonemes, reading_rank=reading_rank,
             frame_ms=frame_ms, frame_count=frames,
+            observed_units=observed_units,
             rejection="insufficient_model_support",
         )
 
@@ -336,6 +341,7 @@ def _candidate_alignment(log_probs: np.ndarray, phonemes: tuple[str, ...],
         frame_count=frames,
         target_unit_spans=supported_spans,
         unaligned_spans=_compact_spans(supported_states, free=True),
+        observed_units=observed_units,
         aligned_target_units=supported_units,
         target_associated=associated,
         complete_alignment=complete,
@@ -391,9 +397,21 @@ class TargetConditionedAligner:
         frame_ms = float(self.model.frame_stride_ms)
         if not np.isfinite(frame_ms) or frame_ms <= 0:
             raise ValueError("alignment model must provide a positive fixed frame stride")
+        special_ids = {
+            int(index) for token, index in self.model.vocab.items()
+            if token in SPECIAL_TOKENS
+        }
+        labels = np.argmax(logits, axis=1)
+        observed_units = 0
+        previous = None
+        for raw_label in labels:
+            label = int(raw_label)
+            if label != previous and label not in special_ids:
+                observed_units += 1
+            previous = label
         results = [
             _candidate_alignment(log_probs, candidate.phonemes, ids, candidate.rank,
-                                 frame_ms, self.policy)
+                                 frame_ms, self.policy, observed_units)
             for candidate, ids in self._encoded
         ]
         primary = min(results, key=lambda item: item.reading_rank)

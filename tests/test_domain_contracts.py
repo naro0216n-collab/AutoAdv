@@ -207,6 +207,7 @@ def test_forced_alignment_requires_target_evidence_and_right_context_from_one_pa
     assert (prefix.target_associated, prefix.complete_alignment, prefix.committed_target_end) == (True, False, False)
     assert (edge.target_associated, edge.complete_alignment, edge.committed_target_end) == (True, True, False)
     assert (committed.target_associated, committed.complete_alignment, committed.committed_target_end) == (True, True, True)
+    assert committed.observed_units == committed.target_units == 3
     assert committed.post_target_free_frames >= 7
 
     logits, vocab = logits_with_phones(('a', 'b', 'c'), frames=30, starts=(5, 10, 15))
@@ -216,13 +217,15 @@ def test_forced_alignment_requires_target_evidence_and_right_context_from_one_pa
     aligner.set_target('target')
     ambiguous = aligner.align(chunks(30))
     assert ambiguous.complete_alignment and not ambiguous.committed_target_end
+    assert ambiguous.observed_units == 4
 
 
 def _lexical_evidence(*, start=1100, aligned_end=1320, target_end=1320,
                       associated=True, complete=True, committed=True,
-                      target_units=4, aligned_units=4):
+                      target_units=4, observed_units=None, aligned_units=4):
     return LexicalProgressEvidence(
         target_units=target_units,
+        observed_units=target_units if observed_units is None else observed_units,
         aligned_target_units=aligned_units,
         target_associated=associated,
         complete_alignment=complete,
@@ -402,6 +405,7 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     )
     recurrence_starts = []
     progress, _ = _progress(
+        lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': unstable, 'nonlexical': unstable},
         recurrence_starts=recurrence_starts,
@@ -409,6 +413,7 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     assert progress.state == UtteranceProgressState.ACTIVE
     assert recurrence_starts == [('nonlexical', 1120), ('speech', 1120)]
     released, _ = _progress(
+        lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable, 'nonlexical': unstable},
     )
@@ -424,22 +429,35 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
         strength=.79, period_ms=1800, period_stability=.61,
         recent_strength=.73, level_consistency=.56)
     released, measured = _progress(
+        lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
         recurrence=(higher_min_but_invalid, valid_low_margin),
     )
     assert released.state == UtteranceProgressState.UNKNOWN
     assert measured == valid_low_margin
 
-    # A committed known-text endpoint shifts recurrence evaluation to the tail.
-    # Repetition inside the finite utterance cannot release protection early.
+    # Reading amount is deliberately a rough gate. Before excess, a committed
+    # textual endpoint keeps recurrence scoped to the post-target tail. Once
+    # observed pronunciation exceeds the selected reading, the same already
+    # measured recurrence may use the whole continuing activity instead.
     recurrence_starts = []
-    _progress(
-        lexical=_lexical_evidence(target_end=1320),
+    before_excess, _ = _progress(
+        lexical=_lexical_evidence(target_end=1320, observed_units=4),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable},
         recurrence_starts=recurrence_starts,
     )
+    assert before_excess.state == UtteranceProgressState.UNKNOWN
     assert recurrence_starts == [('nonlexical', 1320), ('speech', 1320)]
+    recurrence_starts.clear()
+    after_excess, _ = _progress(
+        lexical=_lexical_evidence(target_end=1320, observed_units=5),
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable},
+        recurrence_starts=recurrence_starts,
+    )
+    assert after_excess.state == UtteranceProgressState.UNKNOWN
+    assert recurrence_starts == [('nonlexical', 1120), ('speech', 1120)]
 
     # Advancing only wall-clock evaluation time cannot close a measured open run.
     for frontier in (1400, 2400, 5200):

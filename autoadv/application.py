@@ -772,7 +772,10 @@ class AutoAdvApplication:
         return self.controller.begin(profile, target, generation, connection)
 
     def _attempt_advance(self) -> bool:
+        reason = self.controller.presentation_reason
         sent = self.controller.try_advance()
+        if sent and reason == 'force_timeout':
+            self._cancel_voice()
         if sent and self._capture_transition_pending:
             self._schedule(0, self._apply_capture_transition)
         self._notify_runtime()
@@ -858,6 +861,9 @@ class AutoAdvApplication:
                 'game_input_candidates_attached', token,
                 text_received_ns=timing.received_ns,
                 input_candidates_ms=list(timing.input_candidates_ms))
+        self._schedule(
+            utterance.force_advance_seconds * 1000,
+            lambda t=token: self._runtime_presentation_event(t, 'force_due'))
         native_audio_target = bool(
             utterance.advance_mode.value == 'audio' and not utterance.use_tts)
         if not native_audio_target and self._native_audio is not None:
@@ -1229,6 +1235,7 @@ class AutoAdvApplication:
         self._emit_telemetry(
             'native_audio_observation', token,
             target_units=(lexical.target_units if lexical is not None else 0),
+            observed_units=(lexical.observed_units if lexical is not None else 0),
             aligned_target_units=(lexical.aligned_target_units if lexical is not None else 0),
             target_associated=(lexical.target_associated if lexical is not None else False),
             complete_alignment=(lexical.complete_alignment if lexical is not None else False),

@@ -355,6 +355,8 @@ class Controller:
                     not u.uncertain_text_fallback):
                 return False
             self.fallback_due = True
+        elif event == 'force_due':
+            return self._presentation_done('force_timeout')
         else:
             raise ValueError(f'unknown presentation event: {event}')
         return self._reconcile_completion()

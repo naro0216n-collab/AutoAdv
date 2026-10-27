@@ -188,7 +188,7 @@ class OCRSettings:
             raise ValueError('invalid OCR configuration')
 
 
-COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'default_tts',
+COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'force_advance_seconds', 'default_tts',
                  'default_voice', 'reading_ms', 'per_reading_unit_wait_ms',
                  'native_helper', 'alignment_model', 'alignment_vocab', 'input_key')
 
@@ -352,6 +352,7 @@ class Profile:
     insert_pc_hooks: bool = False
     advance_mode: AdvanceMode = AdvanceMode.TEXT
     uncertain_text_fallback: bool = True
+    force_advance_seconds: int = 30
     default_tts: bool = False
     default_voice: str = ''
     speaker_tts: dict[str, bool] = field(default_factory=dict)
@@ -407,7 +408,9 @@ class Profile:
             raise ValueError('invalid manual HOOK')
         if any(not k or not v for k, v in self.name_readings.items()):
             raise ValueError('invalid name reading')
-        if (type(self.uncertain_text_fallback) is not bool or type(self.default_tts) is not bool
+        if (type(self.uncertain_text_fallback) is not bool
+                or type(self.force_advance_seconds) is not int or self.force_advance_seconds <= 0
+                or type(self.default_tts) is not bool
                 or any(type(v) is not bool or not k for k, v in self.speaker_tts.items())):
             raise ValueError('invalid TTS and fallback settings')
         if any(not name or not isinstance(style, SpeakerStyle)
@@ -464,6 +467,7 @@ class Utterance:
     tts_caption: str
     advance_mode: AdvanceMode
     uncertain_text_fallback: bool
+    force_advance_seconds: int
     reading_unit_count: int
     text_wait_ms: int
 
@@ -774,6 +778,7 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
         speaker=speaker, text=body, speech=speech, use_tts=use_tts, voice=voice,
         tts_caption=tts_caption,
         advance_mode=advance_mode, uncertain_text_fallback=profile.uncertain_text_fallback,
+        force_advance_seconds=profile.force_advance_seconds,
         reading_unit_count=reading_units,
         text_wait_ms=max(profile.reading_ms, reading_units * profile.per_reading_unit_wait_ms),
     )

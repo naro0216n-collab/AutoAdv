@@ -23,6 +23,7 @@ def test_progress_mode_state_model_has_one_completion_reason_and_one_send():
         (AdvanceMode.AUDIO, True, True, ('tts_finished',), True, 'tts'),
         (AdvanceMode.AUDIO, False, True, ('fallback_due',), False, 'uncertain_text_fallback'),
         (AdvanceMode.AUDIO, False, False, (), True, 'utterance_progress'),
+        (AdvanceMode.AUDIO, False, False, ('force_due',), False, 'force_timeout'),
     )
     for mode, tts, fallback, events, native, expected in scenarios:
         ctrl, sent, _ = controller(mode=mode, tts=tts, fallback=fallback)

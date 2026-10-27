@@ -256,7 +256,8 @@ def _compact_product_trace(
 
     presentation_fields = {
         "utterance": ["source", "hook_sequence", "raw", "body", "speaker", "advance_mode",
-                      "use_tts", "uncertain_text_fallback", "reading_units", "text_wait_ms"],
+                      "use_tts", "uncertain_text_fallback", "force_advance_seconds",
+                      "reading_units", "text_wait_ms"],
         "utterance_progress": ["state", "evidence_at_ms"],
         "advance_attempt": [],
         "audio_causal_lower_bound": ["at_ms", "after_line"],

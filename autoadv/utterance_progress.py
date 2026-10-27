@@ -62,6 +62,7 @@ class LexicalProgressEvidence:
     """Target-conditioned alignment measurement for one PCM query."""
 
     target_units: int
+    observed_units: int
     aligned_target_units: int
     target_associated: bool
     complete_alignment: bool
@@ -84,6 +85,7 @@ class LexicalProgressEvidence:
     ) -> "LexicalProgressEvidence":
         return cls(
             target_units=alignment.target_units,
+            observed_units=alignment.observed_units,
             aligned_target_units=alignment.aligned_target_units,
             target_associated=alignment.target_associated,
             complete_alignment=alignment.complete_alignment,
@@ -330,16 +332,26 @@ def evaluate_utterance_progress(
 
     open_runs = tuple((observer, run) for observer, run in observed if run.open)
     if open_runs:
+        # Approximate phone count is deliberately a weak gate, not endpoint
+        # evidence.  Once the already-computed CTC stream has produced more
+        # units than the selected reading contains, recurrence may use the whole
+        # continuing activity instead of waiting for an exact textual endpoint.
+        # No extra inference or confidence/state model is introduced around the
+        # count; uncertainty only changes how much existing recurrence evidence
+        # is eligible for this assessment.
+        reading_exceeded = bool(
+            lexical is not None
+            and lexical.target_units > 0
+            and lexical.observed_units > lexical.target_units
+        )
         # Observer series are independent measurements of the same process mix,
         # not independently owned vocal sources.  Recurrence is therefore one
-        # additional property of the currently open human-vocal risk.  Search
+        # additional property of the currently open human-vocal risk. Search
         # only observers that actually support that risk, while retaining their
         # score provenance inside the measurement layer.
         recurrence_start = min(int(run.start_ms) for _observer, run in open_runs)
-        if target_complete and lexical is not None and lexical.target_end_ms is not None:
-            # For known text, finite repetitions inside the utterance must not
-            # release protection.  Only repetition that remains after the
-            # committed textual acoustic endpoint can explain a continuing tail.
+        if (target_complete and not reading_exceeded and lexical is not None
+                and lexical.target_end_ms is not None):
             recurrence_start = max(recurrence_start, int(lexical.target_end_ms))
         candidates: tuple[VocalRecurrenceEvidence, ...] = ()
         if recurrence_lookup is not None:

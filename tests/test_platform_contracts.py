@@ -368,6 +368,7 @@ def test_windows_game_input_observer_publishes_only_for_the_selected_process(mon
 
 def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_state():
     assert CommonSettings().uncertain_text_fallback
+    assert CommonSettings().force_advance_seconds == 30
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / 'settings.json'
         c = Catalog(irodori_root='C:/tts', host_dll='C:/luna/LunaHost.dll')
@@ -399,6 +400,8 @@ def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_stat
         raw = json.loads(path.read_text(encoding='utf-8'))
         assert 'next_line_timeout_ms' not in raw['common']
         assert 'next_line_timeout_ms' not in raw['games'][game.id]['profiles'][p.id]
+        assert raw['common']['force_advance_seconds'] == 30
+        assert raw['games'][game.id]['profiles'][p.id]['force_advance_seconds'] == 30
         path.write_text(json.dumps({**raw, 'schema_version': 3}), encoding='utf-8')
         with pytest.raises(ValueError, match='unsupported settings schema'):
             load(path)

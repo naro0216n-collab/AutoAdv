@@ -370,10 +370,17 @@ def test_audio_mode_without_uncertainty_fallback_has_no_text_timer_completion(mo
     token = runtime_hook(app, selected, '本文', 2)
     assert token is not None
     app.set_auto_advance(True)
-    wait_ms = app.runtime_state().utterance.text_wait_ms
+    utterance = app.runtime_state().utterance
+    wait_ms = utterance.text_wait_ms
     assert not any(delay == wait_ms for delay, _callback in scheduled)
     state = app.runtime_state()
     assert state.authorized and not state.sent and not state.completed
+    maximum = next(
+        callback for delay, callback in scheduled
+        if delay == utterance.force_advance_seconds * 1000)
+    maximum()
+    state = app.runtime_state()
+    assert state.sent and state.presentation_reason == 'force_timeout'
 
 
 def test_application_keeps_newest_native_progress_at_the_fallback_boundary(monkeypatch):
@@ -442,7 +449,7 @@ def test_audio_fallback_fences_already_captured_pcm_before_policy_completion(mon
     assert state.presentation_reason == 'uncertain_text_fallback'
 
 
-def test_text_mode_timer_completes_the_current_presentation_without_creating_a_next_line_timer():
+def test_text_mode_timer_completes_and_its_later_maximum_deadline_is_inert():
     app, _ = app_with_game()
     selected = source('TEXT', 3)
     profile = app.current_profile()
@@ -454,15 +461,17 @@ def test_text_mode_timer_completes_the_current_presentation_without_creating_a_n
     connect_hook(app)
     token = runtime_hook(app, selected, '本文', 2)
     app.set_auto_advance(True)
-    delay, presentation = scheduled.pop(0)
-    assert delay == app.runtime_state().utterance.text_wait_ms
+    utterance = app.runtime_state().utterance
+    presentation = next(callback for delay, callback in scheduled
+                        if delay == utterance.text_wait_ms)
+    maximum = next(callback for delay, callback in scheduled
+                   if delay == utterance.force_advance_seconds * 1000)
     presentation()
     state = app.runtime_state()
     assert state.token == token and state.authorized and state.sent
     assert state.pause_reason is None
-    # Sending a line does not invent a timer for a Presentation whose body has
-    # not arrived yet.
-    assert not scheduled
+    assert not maximum()
+    assert app.runtime_state().token == token and app.runtime_state().sent
 
 def test_persistence_commands_are_atomic_and_user_settings_hide_storage_mechanics():
     app, saves = app_with_game()

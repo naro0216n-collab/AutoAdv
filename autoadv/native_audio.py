@@ -871,6 +871,7 @@ class NativeAudio:
                             metrics.update({
                                 "frame_count": chosen.frame_count,
                                 "target_units": chosen.target_units,
+                                "observed_units": chosen.observed_units,
                                 "aligned_target_units": chosen.aligned_target_units,
                                 "target_coverage": round(chosen.coverage, 4),
                                 "target_associated": chosen.target_associated,

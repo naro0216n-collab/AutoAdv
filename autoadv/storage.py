@@ -19,6 +19,7 @@ _GAME_KEYS = frozenset({'id', 'name', 'executable', 'audio_executable', 'input_e
 _PROFILE_KEYS = frozenset({
     'id', 'name', 'hooks', 'body_source', 'speaker_source', 'source_rules', 'unwrap_speaker_enclosed_body',
     'inserted_hooks', 'insert_pc_hooks', 'advance_mode', 'uncertain_text_fallback',
+    'force_advance_seconds',
     'default_tts', 'default_voice', 'speaker_tts', 'speaker_voices', 'speaker_styles', 'replacements',
     'name_readings', 'source', 'ocr', 'native_helper', 'alignment_model',
     'alignment_vocab', 'inherit_common', 'reading_ms',
@@ -39,21 +40,37 @@ def _require_object(value: object, expected: frozenset[str], label: str) -> dict
 
 
 def _require_profile_object(value: object) -> dict:
-    """Accept an omitted new optional style map while keeping v4 structurally strict."""
+    """Fill fields introduced inside the current schema, rejecting every other shape."""
     if not isinstance(value, dict):
         raise ValueError('invalid current settings profile')
     keys = set(value)
     if keys == _PROFILE_KEYS:
         return value
-    profile_without_optional_styles = _PROFILE_KEYS - {'speaker_styles'}
-    if keys == profile_without_optional_styles:
-        return {**value, 'speaker_styles': {}}
+    missing = _PROFILE_KEYS - keys
+    if not (keys - _PROFILE_KEYS) and missing <= {'speaker_styles', 'force_advance_seconds'}:
+        return {
+            **value,
+            'speaker_styles': value.get('speaker_styles', {}),
+            'force_advance_seconds': value.get('force_advance_seconds', 30),
+        }
     raise ValueError('invalid current settings profile')
+
+
+def _require_common_object(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError('invalid current settings common settings')
+    keys = set(value)
+    if keys == _COMMON_KEYS:
+        return value
+    if keys == _COMMON_KEYS - {'force_advance_seconds'}:
+        return {**value, 'force_advance_seconds': 30}
+    raise ValueError('invalid current settings common settings')
 
 @dataclass
 class CommonSettings:
     advance_mode: AdvanceMode = AdvanceMode.TEXT
     uncertain_text_fallback: bool = True
+    force_advance_seconds: int = 30
     default_tts: bool = False
     default_voice: str = ''
     reading_ms: int = 700
@@ -142,6 +159,7 @@ def _profile_payload(p: Profile) -> dict:
         unwrap_speaker_enclosed_body=p.unwrap_speaker_enclosed_body,
         inserted_hooks=p.inserted_hooks, insert_pc_hooks=p.insert_pc_hooks,
         advance_mode=p.advance_mode.value, uncertain_text_fallback=p.uncertain_text_fallback,
+        force_advance_seconds=p.force_advance_seconds,
         default_tts=p.default_tts, default_voice=p.default_voice,
         speaker_tts=p.speaker_tts, speaker_voices=p.speaker_voices,
         speaker_styles={name: vars(style) for name, style in p.speaker_styles.items()},
@@ -197,7 +215,8 @@ def _read_profile(raw: object) -> Profile:
         source_rules=source_rules, unwrap_speaker_enclosed_body=raw['unwrap_speaker_enclosed_body'],
         inserted_hooks=list(raw['inserted_hooks']),
         insert_pc_hooks=raw['insert_pc_hooks'], advance_mode=AdvanceMode(raw['advance_mode']),
-        uncertain_text_fallback=raw['uncertain_text_fallback'], default_tts=raw['default_tts'],
+        uncertain_text_fallback=raw['uncertain_text_fallback'],
+        force_advance_seconds=raw['force_advance_seconds'], default_tts=raw['default_tts'],
         default_voice=raw['default_voice'], speaker_tts=dict(raw['speaker_tts']),
         speaker_voices=dict(raw['speaker_voices']), speaker_styles=speaker_styles,
         replacements=_read_replacements(raw['replacements']),
@@ -244,7 +263,7 @@ def load(path: Path | None = None) -> Catalog:
     raw = _require_object(json.loads(path.read_text(encoding='utf-8')), _ROOT_KEYS, 'root')
     if raw['schema_version'] != 4:
         raise ValueError('unsupported settings schema')
-    common_raw = _require_object(raw['common'], _COMMON_KEYS, 'common settings')
+    common_raw = _require_common_object(raw['common'])
     catalog = Catalog(
         raw['irodori_root'], raw['irodori_url'], raw['host_dll'],
         luna_imports=dict(raw['luna_imports']),

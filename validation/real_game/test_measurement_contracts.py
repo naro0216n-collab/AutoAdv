@@ -430,7 +430,8 @@ def test_trace_keeps_raw_hook_and_utterance_instead_of_hash_only_evidence():
             utterance=SimpleNamespace(
                 source='HOOK|1|2', sequence=3, raw=raw, text=raw, speaker='',
                 advance_mode=SimpleNamespace(value='audio'), use_tts=False,
-                uncertain_text_fallback=True, reading_unit_count=12, text_wait_ms=900))
+                    uncertain_text_fallback=True, force_advance_seconds=30,
+                    reading_unit_count=12, text_wait_ms=900))
         app.observer('utterance', token, {})
         app.observer('hook_error', token, {'reason': 'native diagnostic'})
         app.observer('native_ready', None, {'session': 1, 'ready': False, 'reason': 'capture unavailable', 'audio_pid': 9})

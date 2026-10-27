@@ -458,12 +458,13 @@ def run_gui() -> int:
 
             game_settings = group('この作品の進行設定', page='game', section='advance_details', detail=True)
             self.uncertain_text_fallback=QCheckBox('音声判定が不確かなとき本文時間で進む')
+            self.force_advance_seconds=QSpinBox(); self.force_advance_seconds.setRange(1,86400); self.force_advance_seconds.setSuffix(' 秒')
             self.per_reading_unit_wait_ms=QSpinBox(); self.per_reading_unit_wait_ms.setRange(1,600000); self.per_reading_unit_wait_ms.setSuffix(' ms / 読み単位')
             self.reading_ms=QSpinBox(); self.reading_ms.setRange(1,600000); self.reading_ms.setSuffix(' ms')
             self.wait_preview=QLabel('')
             self.input_key=QSpinBox(); self.input_key.setRange(1,254)
             self.repeat=QComboBox(); self.repeat.addItem('連続同文は重複として扱う','distinct_only'); self.repeat.addItem('連続同文は各flushを別台詞として扱う','each_flush')
-            game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('1読み単位待機',setting_row('per_reading_unit_wait_ms', self.per_reading_unit_wait_ms)); game_settings.addRow('本文待機の最低時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
+            game_settings.addRow(setting_row('uncertain_text_fallback', self.uncertain_text_fallback)); game_settings.addRow('強制進行までの最大待機',setting_row('force_advance_seconds', self.force_advance_seconds)); game_settings.addRow('1読み単位待機',setting_row('per_reading_unit_wait_ms', self.per_reading_unit_wait_ms)); game_settings.addRow('本文待機の最低時間',setting_row('reading_ms', self.reading_ms)); game_settings.addRow('送りキー',setting_row('input_key', self.input_key)); game_settings.addRow('同文',self.repeat); game_settings.addRow(self.wait_preview)
 
             target_details = group('別プロセスを使う作品', page='game', section='target_details', detail=True)
             self.game_exe=QLineEdit(); self.audio_exe=QLineEdit(); self.input_exe=QLineEdit()
@@ -490,7 +491,7 @@ def run_gui() -> int:
 
             common = group('共通の既定値', page='settings', section='common_advance')
             self.common_controls={}
-            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき本文時間で進む','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'本文待機の最低時間 (ms)','per_reading_unit_wait_ms':'1読み単位あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード'}
+            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき本文時間で進む','force_advance_seconds':'強制進行までの最大待機 (秒)','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'本文待機の最低時間 (ms)','per_reading_unit_wait_ms':'1読み単位あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード'}
             for key in common_titles:
                 value=getattr(self.catalog.common,key)
                 if key=='advance_mode':
@@ -498,7 +499,11 @@ def run_gui() -> int:
                     for button,mode in ((text_button,AdvanceMode.TEXT),(audio_button,AdvanceMode.AUDIO)): button.setCheckable(True); button.setProperty('advanceMode',mode.value); mode_group.addButton(button); lay.addWidget(button,1)
                     (audio_button if value==AdvanceMode.AUDIO else text_button).setChecked(True); self.common_advance_mode_group=mode_group; self.common_advance_text_button=text_button; self.common_advance_audio_button=audio_button
                 elif isinstance(value,bool): control=QCheckBox('有効'); control.setChecked(value)
-                elif isinstance(value,int): control=QSpinBox(); control.setRange(1,254 if key=='input_key' else 600000); control.setValue(value)
+                elif isinstance(value,int):
+                    control=QSpinBox()
+                    control.setRange(1,254 if key=='input_key' else (86400 if key=='force_advance_seconds' else 600000))
+                    if key=='force_advance_seconds': control.setSuffix(' 秒')
+                    control.setValue(value)
                 else: control=QLineEdit(value)
                 self.common_controls[key]=control; common.addRow(common_titles[key],control)
             for key, control in self.common_controls.items():
@@ -538,7 +543,7 @@ def run_gui() -> int:
             diagnostics.addRow(self.btn_host)
             self.section_toggles['diagnostics'].toggled.connect(lambda checked: checked and self.refresh_diagnostics())
 
-            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_reading_unit_wait_ms':self.per_reading_unit_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key}
+            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'force_advance_seconds':self.force_advance_seconds,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_reading_unit_wait_ms':self.per_reading_unit_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key}
 
             for button in (self.advance_text_button,self.advance_audio_button): button.toggled.connect(lambda checked,key='advance_mode': checked and self.profile_setting_changed(key))
             for button in (self.source_hook_button,self.source_ocr_button): button.toggled.connect(lambda checked: checked and self.profile_setting_changed('source'))
@@ -853,6 +858,7 @@ def run_gui() -> int:
             self.default_tts.setChecked(effective.default_tts)
             self.set_advance_mode(effective.advance_mode)
             self.uncertain_text_fallback.setChecked(effective.uncertain_text_fallback)
+            self.force_advance_seconds.setValue(effective.force_advance_seconds)
             self.per_reading_unit_wait_ms.setValue(effective.per_reading_unit_wait_ms)
             self.default_voice.setEditText(effective.default_voice)
             self.audition_voice_choice.setEditText(effective.default_voice)
