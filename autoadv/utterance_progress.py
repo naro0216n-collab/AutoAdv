@@ -134,6 +134,33 @@ LOOP_STABILITY = 0.60
 RECENT_LOOP_STRENGTH = 0.72
 LOOP_LEVEL_CONSISTENCY = 0.55
 
+# A threshold crossing is a measurement, not an endpoint.  Releasing an already
+# observed finite-vocal risk requires a contiguous span of explicitly measured
+# sub-threshold support.  The floor prevents a single narrow VAD frame from
+# splitting breaths, cries and ordinary within-utterance pauses; observers with
+# wider receptive fields naturally require at least one full support window.
+MIN_QUIET_SUPPORT_MS = 240
+
+# Partial target alignment is direct evidence that the known finite utterance
+# has begun but has not yet reached its target end.  When vocal support briefly
+# drops, keep analyzing real PCM long enough for the existing incremental
+# aligner to show whether target coverage resumes.  This is an analysis budget,
+# not an estimated utterance duration or a completion timer.
+MIN_PARTIAL_ANALYSIS_MS = 500
+MAX_PARTIAL_ANALYSIS_MS = 2_000
+
+
+@dataclass(frozen=True)
+class _ActivityRun:
+    start_ms: int
+    support_start_ms: int
+    last_positive: VocalScoreSample
+    closed_at_ms: int | None = None
+
+    @property
+    def open(self) -> bool:
+        return self.closed_at_ms is None
+
 
 def _ordered_samples(series: VocalEvidenceSeries) -> tuple[VocalScoreSample, ...]:
     """Return one observer's factual measurements in acoustic time order."""
@@ -143,62 +170,155 @@ def _ordered_samples(series: VocalEvidenceSeries) -> tuple[VocalScoreSample, ...
     ))
 
 
-def _latest_positive(
-    series: VocalEvidenceSeries, *, not_before_ms: int,
-) -> VocalScoreSample | None:
-    threshold = float(series.active_score_threshold)
-    positives = [
-        sample for sample in _ordered_samples(series)
-        if int(sample.at_ms) >= int(not_before_ms) and float(sample.score) >= threshold
-    ]
-    return positives[-1] if positives else None
+def _support_width_ms(sample: VocalScoreSample) -> int:
+    return max(0, int(sample.at_ms) - int(sample.support_start_ms))
 
 
-def _observed_closed_after(
-    series: VocalEvidenceSeries, *, last_positive: VocalScoreSample,
-    not_before_ms: int | None = None,
-) -> bool:
-    """Whether this observer explicitly measured quiet after the positive support.
+def _required_quiet_support_ms(samples: tuple[VocalScoreSample, ...]) -> int:
+    return max(MIN_QUIET_SUPPORT_MS, max(
+        (_support_width_ms(sample) for sample in samples), default=0))
 
-    Passage of time and absence of samples are not closure evidence.  A low score
-    closes the risk only when the acoustic support that produced it begins after
-    both the last positive observation and any additional factual lower bound.
+
+def _quiet_support_end(
+    series: VocalEvidenceSeries, *, after_ms: int, through_ms: int | None = None,
+) -> int | None:
+    """Return where enough contiguous measured low support closes a run.
+
+    Only sub-threshold input support entirely after ``after_ms`` counts.  Gaps
+    between measured supports are not silently filled, and wall-clock distance
+    from the last positive is irrelevant.
     """
     threshold = float(series.active_score_threshold)
-    boundary = int(last_positive.at_ms)
+    samples = _ordered_samples(series)
+    required = _required_quiet_support_ms(samples)
+    quiet_start: int | None = None
+    quiet_end: int | None = None
+    for sample in samples:
+        at_ms = int(sample.at_ms)
+        if at_ms <= int(after_ms):
+            continue
+        if through_ms is not None and at_ms > int(through_ms):
+            break
+        if float(sample.score) >= threshold:
+            quiet_start = quiet_end = None
+            continue
+        support_start = int(sample.support_start_ms)
+        if support_start < int(after_ms) or at_ms <= support_start:
+            continue
+        if quiet_start is None or quiet_end is None or support_start > quiet_end:
+            quiet_start, quiet_end = support_start, at_ms
+        else:
+            quiet_end = max(quiet_end, at_ms)
+        if quiet_end - quiet_start >= required:
+            return quiet_end
+    return None
+
+
+def _activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
+    """Build observer-local activity runs from measured support intervals.
+
+    A run starts on a positive observer measurement.  It survives threshold
+    valleys until the same observer has measured enough contiguous low support
+    to close it.  A later positive after closure starts a genuinely new run.
+    """
+    threshold = float(series.active_score_threshold)
+    samples = _ordered_samples(series)
+    required = _required_quiet_support_ms(samples)
+    runs: list[_ActivityRun] = []
+    start_ms: int | None = None
+    support_start_ms: int | None = None
+    last_positive: VocalScoreSample | None = None
+    quiet_start: int | None = None
+    quiet_end: int | None = None
+
+    for sample in samples:
+        at_ms = int(sample.at_ms)
+        if float(sample.score) >= threshold:
+            if start_ms is None:
+                start_ms = at_ms
+                support_start_ms = int(sample.support_start_ms)
+            last_positive = sample
+            quiet_start = quiet_end = None
+            continue
+        if start_ms is None or last_positive is None or support_start_ms is None:
+            continue
+        boundary = int(last_positive.at_ms)
+        sample_start = int(sample.support_start_ms)
+        if sample_start < boundary or at_ms <= sample_start:
+            continue
+        if quiet_start is None or quiet_end is None or sample_start > quiet_end:
+            quiet_start, quiet_end = sample_start, at_ms
+        else:
+            quiet_end = max(quiet_end, at_ms)
+        if quiet_end - quiet_start < required:
+            continue
+        runs.append(_ActivityRun(
+            start_ms=start_ms, support_start_ms=support_start_ms,
+            last_positive=last_positive, closed_at_ms=quiet_end))
+        start_ms = support_start_ms = None
+        last_positive = None
+        quiet_start = quiet_end = None
+
+    if start_ms is not None and support_start_ms is not None and last_positive is not None:
+        runs.append(_ActivityRun(
+            start_ms=start_ms, support_start_ms=support_start_ms,
+            last_positive=last_positive, closed_at_ms=None))
+    return tuple(runs)
+
+
+def _target_activity_run(
+    series: VocalEvidenceSeries, *, target_start_ms: int, target_observed_end_ms: int,
+) -> _ActivityRun | None:
+    """Return the latest run whose measured support intersects target span.
+
+    This deliberately does not select an arbitrary later process-local voice.
+    A run beginning after the observed target span belongs to no target merely
+    because it is the latest positive in the process mix.
+    """
+    candidates = [
+        run for run in _activity_runs(series)
+        if int(run.last_positive.at_ms) >= int(target_start_ms)
+        and int(run.support_start_ms) <= int(target_observed_end_ms)
+    ]
+    return candidates[-1] if candidates else None
+
+
+def _run_closed_after(
+    series: VocalEvidenceSeries, *, run: _ActivityRun, not_before_ms: int | None = None,
+) -> bool:
+    boundary = int(run.last_positive.at_ms)
     if not_before_ms is not None:
         boundary = max(boundary, int(not_before_ms))
-    return any(
-        int(sample.at_ms) > int(last_positive.at_ms)
-        and int(sample.support_start_ms) >= boundary
-        and float(sample.score) < threshold
-        for sample in _ordered_samples(series)
-    )
+    return _quiet_support_end(series, after_ms=boundary) is not None
 
 
 def _open_activity_start(series: VocalEvidenceSeries) -> int | None:
-    """Return the observer's currently open threshold-supported activity.
-
-    Activity is split only by an observed sub-threshold support window that no
-    longer overlaps the preceding positive observation.  No wall-clock closure
-    or inferred silence is introduced here.
-    """
-    threshold = float(series.active_score_threshold)
-    start_ms: int | None = None
-    last_positive: VocalScoreSample | None = None
-    for sample in _ordered_samples(series):
-        if float(sample.score) >= threshold:
-            if start_ms is None:
-                start_ms = int(sample.at_ms)
-            last_positive = sample
-            continue
-        if (last_positive is not None
-                and int(sample.support_start_ms) >= int(last_positive.at_ms)):
-            start_ms = None
-            last_positive = None
-    if start_ms is None or last_positive is None:
+    runs = _activity_runs(series)
+    if not runs or not runs[-1].open:
         return None
-    return start_ms
+    return int(runs[-1].start_ms)
+
+
+def _partial_analysis_window_ms(lexical: LexicalProgressEvidence) -> int:
+    """Bound extra acoustic analysis from observed target progress only.
+
+    The ratio of unaligned to aligned pronunciation units determines how much
+    additional *PCM analysis* is worthwhile after the latest aligned unit.  The
+    result never declares when speech should end and is bounded so a partial
+    mismatch eventually returns to UNKNOWN/fallback policy.
+    """
+    aligned = max(0, int(lexical.aligned_target_units))
+    target = max(0, int(lexical.target_units))
+    if (aligned <= 0 or target <= aligned or lexical.target_start_ms is None
+            or lexical.aligned_end_ms is None):
+        return 0
+    observed_span = max(1, int(lexical.aligned_end_ms) - int(lexical.target_start_ms))
+    remaining = target - aligned
+    projected_analysis = observed_span * remaining / aligned
+    return max(
+        MIN_PARTIAL_ANALYSIS_MS,
+        min(MAX_PARTIAL_ANALYSIS_MS, int(round(projected_analysis))),
+    )
 
 
 def _stable_recurrence(recurrence: VocalRecurrenceEvidence | None) -> bool:
@@ -246,11 +366,15 @@ def evaluate_utterance_progress(
             and lexical.committed_target_end
             and lexical.target_end_ms is not None
         )
-        measured: list[tuple[VocalEvidenceSeries, VocalScoreSample]] = []
+        observed_target_end = int(
+            lexical.target_end_ms if complete else lexical.aligned_end_ms)
+        measured: list[tuple[VocalEvidenceSeries, _ActivityRun]] = []
         for series in vocal.series if vocal is not None else ():
-            last_positive = _latest_positive(series, not_before_ms=target_start)
-            if last_positive is not None:
-                measured.append((series, last_positive))
+            run = _target_activity_run(
+                series, target_start_ms=target_start,
+                target_observed_end_ms=observed_target_end)
+            if run is not None:
+                measured.append((series, run))
 
         if not measured:
             return UtteranceProgress(
@@ -260,9 +384,9 @@ def evaluate_utterance_progress(
         if complete:
             target_end = int(lexical.target_end_ms)
             open_risk = any(
-                not _observed_closed_after(
-                    series, last_positive=last_positive, not_before_ms=target_end)
-                for series, last_positive in measured
+                not _run_closed_after(
+                    series, run=run, not_before_ms=target_end)
+                for series, run in measured
             )
             if open_risk:
                 recurrence = recurrence_for(target_end)
@@ -277,10 +401,19 @@ def evaluate_utterance_progress(
                 state=UtteranceProgressState.ENDED,
                 evidence_at_ms=capture_end), None
 
-        if any(
-            not _observed_closed_after(series, last_positive=last_positive)
-            for series, last_positive in measured
-        ):
+        # A partial target is direct evidence that the known finite utterance
+        # began.  Short observer valleys remain inside that activity run.  Even
+        # after the run has enough measured quiet to close, keep the result
+        # ACTIVE only for a bounded *analysis* window so the existing incremental
+        # aligner can consume additional PCM and demonstrate resumed target
+        # coverage.  If coverage does not advance through that observed window,
+        # release to UNKNOWN rather than inventing an endpoint.
+        if any(run.open for _series, run in measured):
+            return UtteranceProgress(
+                state=UtteranceProgressState.ACTIVE,
+                evidence_at_ms=capture_end), None
+        extension = _partial_analysis_window_ms(lexical)
+        if extension > 0 and capture_end - int(lexical.aligned_end_ms) < extension:
             return UtteranceProgress(
                 state=UtteranceProgressState.ACTIVE,
                 evidence_at_ms=capture_end), None

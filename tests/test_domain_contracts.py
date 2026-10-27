@@ -292,30 +292,35 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
                 lex=direct_relation, voc=unclosed, end=later_end
             )).state == UtteranceProgressState.ACTIVE
 
-    # Explicit sub-threshold measurements whose acoustic support is entirely
-    # after the last positive can release that risk back to UNKNOWN.
-    closed_prefix = evaluate(observation(
+    # A partial target is not released by the first quiet window after its
+    # latest aligned unit.  The existing incremental aligner gets a bounded
+    # amount of additional observed PCM; lack of further target progress then
+    # releases the result to UNKNOWN rather than inventing an endpoint.
+    short_quiet_prefix = evaluate(observation(
         lex=lexical(complete=False, committed=False),
         voc=vocal(intervals=((1100, 1340),), end=1800), end=1800))
-    assert closed_prefix.state == UtteranceProgressState.UNKNOWN
+    assert short_quiet_prefix.state == UtteranceProgressState.ACTIVE
+    exhausted_prefix = evaluate(observation(
+        lex=lexical(complete=False, committed=False),
+        voc=vocal(intervals=((1100, 1340),), end=1900), end=1900))
+    assert exhausted_prefix.state == UtteranceProgressState.UNKNOWN
 
-    # Once the target is located, an open finite human-vocal change in the same
-    # evaluated Presentation remains protective regardless of its distance from
-    # the lexical endpoint.  The gap is an input dimension, not a special case.
-    continuing_snapshot = None
-    for tail_gap_ms in range(0, 1201, 240):
-        tail_start = 1400 + tail_gap_ms
-        capture_end = tail_start + 240
-        snapshot = observation(
-            lex=lexical(),
-            voc=vocal(intervals=((1100, 1300), (tail_start, capture_end - 20)), end=capture_end),
-            end=capture_end)
-        assert evaluate(snapshot).state == UtteranceProgressState.ACTIVE
-        continuing_snapshot = snapshot
-    # The evaluator has no inference history: identical evidence is identical.
-    assert continuing_snapshot is not None
-    continuing = evaluate(continuing_snapshot)
-    assert evaluate(continuing_snapshot) == continuing
+    # Once the target is located, a vocal continuation that remains in the same
+    # measured activity run stays protective.  After enough measured quiet has
+    # closed that target-linked run, a later process-local voice is not silently
+    # re-attributed to the already closed target.
+    continuing_snapshot = observation(
+        lex=lexical(),
+        voc=vocal(intervals=((1100, 1300), (1400, 1620)), end=1640),
+        end=1640)
+    assert evaluate(continuing_snapshot).state == UtteranceProgressState.ACTIVE
+    assert evaluate(continuing_snapshot) == evaluate(continuing_snapshot)
+
+    later_process_voice = observation(
+        lex=lexical(),
+        voc=vocal(intervals=((1100, 1300), (1800, 2020)), end=2040),
+        end=2040)
+    assert evaluate(later_process_voice).state == UtteranceProgressState.ENDED
 
     ended = evaluate(observation(
         lex=lexical(), voc=vocal(intervals=((1100, 1580),), end=2100), end=2100))
@@ -329,7 +334,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             VocalEvidenceSeries(
                 observer='speech', active_score_threshold=.45,
                 samples=(
-                    VocalScoreSample(1400, .9, 1384),
+                    VocalScoreSample(1280, .9, 1264),
                     VocalScoreSample(1416, .9, 1400),
                 )),
             VocalEvidenceSeries(
@@ -342,15 +347,27 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         assert evaluate(observation(
             lex=lexical(), voc=independent_scales, end=1500)).state == UtteranceProgressState.ACTIVE
 
-    speech_closed = HumanVocalEvidence(series=(VocalEvidenceSeries(
+    short_valley = HumanVocalEvidence(series=(VocalEvidenceSeries(
         observer='speech', active_score_threshold=.45,
         samples=(
-            VocalScoreSample(1400, .9, 1384),
+            VocalScoreSample(1280, .9, 1264),
             VocalScoreSample(1416, .9, 1400),
             VocalScoreSample(1500, .1, 1450),
         )),))
     assert evaluate(observation(
-        lex=lexical(), voc=speech_closed, end=1500)).state == UtteranceProgressState.ENDED
+        lex=lexical(), voc=short_valley, end=1500)).state == UtteranceProgressState.ACTIVE
+
+    measured_quiet = HumanVocalEvidence(series=(VocalEvidenceSeries(
+        observer='speech', active_score_threshold=.45,
+        samples=(
+            VocalScoreSample(1280, .9, 1264),
+            VocalScoreSample(1416, .9, 1400),
+            VocalScoreSample(1500, .1, 1450),
+            VocalScoreSample(1600, .1, 1500),
+            VocalScoreSample(1700, .1, 1600),
+        )),))
+    assert evaluate(observation(
+        lex=lexical(), voc=measured_quiet, end=1700)).state == UtteranceProgressState.ENDED
 
     stable_loop = VocalRecurrenceEvidence(
         strength=.9, period_ms=500, period_stability=.85,
@@ -430,7 +447,7 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert evaluate(observation(
         voc=inherited, end=1120, lower=1000)).state == UtteranceProgressState.UNKNOWN
 
-    restarted = HumanVocalEvidence(series=(VocalEvidenceSeries(
+    short_valley_restart = HumanVocalEvidence(series=(VocalEvidenceSeries(
         observer='nonlexical', active_score_threshold=.45,
         samples=(
             VocalScoreSample(960, .9, 720),
@@ -438,7 +455,18 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             VocalScoreSample(1200, .9, 1040),
         )),))
     assert evaluate(observation(
-        voc=restarted, end=1200, lower=1000)).state == UtteranceProgressState.ACTIVE
+        voc=short_valley_restart, end=1200, lower=1000)).state == UtteranceProgressState.UNKNOWN
+
+    restarted = HumanVocalEvidence(series=(VocalEvidenceSeries(
+        observer='nonlexical', active_score_threshold=.45,
+        samples=(
+            VocalScoreSample(960, .9, 720),
+            VocalScoreSample(1240, .1, 960),
+            VocalScoreSample(1480, .1, 1240),
+            VocalScoreSample(1720, .9, 1480),
+        )),))
+    assert evaluate(observation(
+        voc=restarted, end=1720, lower=1000)).state == UtteranceProgressState.ACTIVE
 
     post_boundary_unclosed = vocal(
         intervals=((1120, 1380),), end=1380, observer='nonlexical')
@@ -447,36 +475,42 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
             voc=post_boundary_unclosed, end=later_end, lower=1000
         )).state == UtteranceProgressState.ACTIVE
 
-    # Progress follows newly observed acoustic evidence, not a one-way latch.
-    # A finite activity may close and a genuinely later activity may reopen the
-    # cut risk any number of times inside the same Presentation.  Each UNKNOWN
-    # transition requires an observed low-support window; advancing the clock
-    # alone cannot create one.
-    alternating_samples = (
+    # Threshold chatter is not a state machine.  Short measured valleys remain
+    # within one finite activity run, while sufficiently long measured quiet can
+    # close that run and a genuinely later rise can open another.
+    short_valleys = (
         VocalScoreSample(1120, .9, 1000),
         VocalScoreSample(1240, .1, 1120),
         VocalScoreSample(1360, .9, 1240),
         VocalScoreSample(1480, .1, 1360),
         VocalScoreSample(1600, .9, 1480),
     )
-    expected = (
-        UtteranceProgressState.ACTIVE,
-        UtteranceProgressState.UNKNOWN,
-        UtteranceProgressState.ACTIVE,
-        UtteranceProgressState.UNKNOWN,
-        UtteranceProgressState.ACTIVE,
-    )
-    observed = []
-    for index in range(1, len(alternating_samples) + 1):
+    for index in range(1, len(short_valleys) + 1):
         evidence = HumanVocalEvidence(series=(VocalEvidenceSeries(
             observer='nonlexical', active_score_threshold=.45,
-            samples=alternating_samples[:index],
+            samples=short_valleys[:index],
         ),))
-        observed.append(evaluate(observation(
-            voc=evidence, end=alternating_samples[index - 1].at_ms,
+        assert evaluate(observation(
+            voc=evidence, end=short_valleys[index - 1].at_ms,
             lower=1000,
-        )).state)
-    assert tuple(observed) == expected
+        )).state == UtteranceProgressState.ACTIVE
+
+    separated = HumanVocalEvidence(series=(VocalEvidenceSeries(
+        observer='nonlexical', active_score_threshold=.45,
+        samples=(
+            VocalScoreSample(1120, .9, 1000),
+            VocalScoreSample(1240, .1, 1120),
+            VocalScoreSample(1360, .1, 1240),
+        ),
+    ),))
+    assert evaluate(observation(
+        voc=separated, end=1360, lower=1000)).state == UtteranceProgressState.UNKNOWN
+    reopened = HumanVocalEvidence(series=(VocalEvidenceSeries(
+        observer='nonlexical', active_score_threshold=.45,
+        samples=separated.series[0].samples + (VocalScoreSample(1480, .9, 1360),),
+    ),))
+    assert evaluate(observation(
+        voc=reopened, end=1480, lower=1000)).state == UtteranceProgressState.ACTIVE
 
     # For known text, retained-PCM alignment locates the target itself.  External
     # input timestamps neither widen nor move the lexical relation.

@@ -451,7 +451,21 @@ class NativeAudio:
 
         required = self._required_assessment_ms
         if required is not None:
-            return int(required) if ready >= int(required) else None
+            required = int(required)
+            if ready < required:
+                return None
+            # A previously-ready lexical frontier is not a settled fallback
+            # assessment while an expanded/same-boundary alignment query can
+            # still revise the target evidence through this fence.  Wait for
+            # all such already-captured work; never wait for future PCM.
+            if self._alignment_inflight_generation is not None:
+                query = self._last_alignment_query
+                if query is not None and int(query[1]) <= required:
+                    return None
+            if (self._pending_alignment_boundary is not None
+                    and int(self._pending_alignment_boundary) <= required):
+                return None
+            return required
         previous = self._last_progress_key[0] if self._last_progress_key is not None else None
         if previous is not None and ready - int(previous) < self.INFERENCE_INTERVAL_MS:
             return None
@@ -482,7 +496,11 @@ class NativeAudio:
         if boundary is None or self.token is None:
             return None
         key = (int(boundary), self._lexical_revision)
-        if key == self._last_progress_key:
+        # A fallback fence may request a boundary that was already assessed.
+        # Re-emitting that same settled assessment is the acknowledgement;
+        # otherwise the obligation would remain armed forever merely because
+        # duplicate product progress is normally suppressed.
+        if key == self._last_progress_key and self._required_assessment_ms is None:
             return None
         lexical = self._lexical
         feature_start = self._feature_start_locked(lexical, boundary)
@@ -536,11 +554,11 @@ class NativeAudio:
                     or item.lexical_revision != self._lexical_revision):
                 return
             key = (item.boundary_ms, item.lexical_revision)
-            if key == self._last_progress_key:
+            required = self._required_assessment_ms
+            if key == self._last_progress_key and required is None:
                 return
             self._last_progress_key = key
-            if (self._required_assessment_ms is not None
-                    and item.boundary_ms >= self._required_assessment_ms):
+            if required is not None and item.boundary_ms >= required:
                 self._required_assessment_ms = None
             callback = self.on_progress
         if callback is not None:
