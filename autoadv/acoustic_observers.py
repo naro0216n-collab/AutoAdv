@@ -326,8 +326,20 @@ class AcousticObservationHistory:
 
         best: tuple[float, VocalRecurrenceEvidence] | None = None
         for lag in range(minimum_lag, maximum_lag + 1):
-            left = values[:-lag]
-            right = values[lag:]
+            # Recurrence describes structure that is still present now, not how
+            # well the entire lifetime of an activity run fits one period.  Use
+            # only the most recent evidence required to compare several cycles
+            # for each candidate lag.  Old onset transients and independent
+            # periodic modulation (for example BGM leaking into a vocal score)
+            # therefore cannot accumulate indefinitely and erase an otherwise
+            # continuing recurrent component.
+            local_count = min(
+                values.size,
+                lag * (cls.MIN_RECURRENCE_CYCLES + 1),
+            )
+            local = values[-local_count:]
+            left = local[:-lag]
+            right = local[lag:]
             if left.size < lag * (cls.MIN_RECURRENCE_CYCLES - 1):
                 continue
             left_centered = left - left.mean()

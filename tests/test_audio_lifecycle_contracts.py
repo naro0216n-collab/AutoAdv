@@ -767,3 +767,53 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     assert flat_finite_risk.period_ms is None
     assert changing.strength < periodic.strength
     assert changing.recent_strength < periodic.recent_strength
+
+    # Recurrence is a current measurement, not whole-run conformity.  Earlier
+    # non-periodic activity must age out once enough recent cycles repeat.  A
+    # second, differently-periodic modulation represents interference on the
+    # same observer score scale without inventing BGM/source ownership.
+    history = AcousticObservationHistory()
+    frames = []
+    at = 1000
+    for score in (
+        .32, .81, .18, .64, .91, .27, .73, .11, .56, .88,
+        .24, .69, .14, .77, .35, .58, .93, .21, .62, .41,
+    ):
+        frames.append(VocalActivityFrame(
+            at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
+        at += 100
+    modulation = (.00, .12, .19, .16, .04, -.10, -.19)
+    for index, score in enumerate(repeated * 10):
+        frames.append(VocalActivityFrame(
+            at_ms=at,
+            score=max(0.0, min(1.0, score + modulation[index % len(modulation)])),
+            support_start_ms=at - 100,
+            observer='speech',
+        ))
+        at += 100
+    history.add_vocal(tuple(frames))
+    current = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
+    assert current.period_ms is not None
+    assert min(
+        current.strength,
+        current.period_stability,
+        current.recent_strength,
+        current.level_consistency,
+    ) > .85
+
+    # The same cache must also stop reporting the old recurrence after the
+    # recent score structure changes; no sticky loop state is retained.
+    suffix = (
+        .18, .77, .31, .66, .09, .83, .54, .24, .91, .37,
+        .62, .14, .72, .28, .49, .88, .22, .58, .11, .79,
+        .43, .19, .68, .34, .95, .26, .57, .16, .74, .39,
+    )
+    later_frames = []
+    for score in suffix:
+        later_frames.append(VocalActivityFrame(
+            at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
+        at += 100
+    history.add_vocal(tuple(later_frames))
+    later = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
+    assert later.strength < current.strength
+    assert later.recent_strength < current.recent_strength
