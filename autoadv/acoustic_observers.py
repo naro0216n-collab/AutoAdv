@@ -15,7 +15,8 @@ import numpy as np
 from .audio_buffer import PCMChunk
 from .forced_alignment import _downsample_48k_to_16k
 from .utterance_progress import (
-    HumanVocalEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence, VocalScoreSample,
+    HumanVocalEvidence, VocalActivityInterval, VocalEvidenceSeries,
+    VocalRecurrenceEvidence, VocalScoreSample,
 )
 
 
@@ -238,6 +239,7 @@ class AcousticObservationHistory:
     }
     MIN_RECURRENCE_LAG_MS = 300
     MIN_RECURRENCE_CYCLES = 4
+    MIN_INACTIVE_SUPPORT_MS = 240
 
     def __init__(self, *, horizon_ms: int = 10 * 60 * 1000):
         self.horizon_ms = int(horizon_ms)
@@ -269,6 +271,87 @@ class AcousticObservationHistory:
     def _threshold(cls, observer: str) -> float:
         return float(cls.ACTIVE_SCORE_THRESHOLD.get(observer, 0.45))
 
+    @classmethod
+    def _activity_intervals(
+        cls, frames: list[VocalActivityFrame], *, threshold: float,
+    ) -> tuple[VocalActivityInterval, ...]:
+        """Derive observer-local activity intervals from measured score support.
+
+        A positive score records activity. Disappearance is established only by a
+        contiguous sub-threshold support range that begins no earlier than the
+        last positive measurement and spans at least this observer's measurement
+        support. Short score valleys therefore remain measurement noise rather
+        than Presentation state.
+        """
+        ordered = sorted(
+            frames,
+            key=lambda frame: (
+                int(frame.at_ms),
+                int(frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms),
+            ),
+        )
+        if not ordered:
+            return ()
+        required = max(
+            cls.MIN_INACTIVE_SUPPORT_MS,
+            max(
+                int(frame.at_ms)
+                - int(frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms)
+                for frame in ordered
+            ),
+        )
+        positive = [frame for frame in ordered if float(frame.score) >= threshold]
+        if not positive:
+            return ()
+
+        quiet_ranges: list[tuple[int, int]] = []
+        for frame in ordered:
+            if float(frame.score) >= threshold:
+                continue
+            start = int(frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms)
+            end = int(frame.at_ms)
+            if end <= start:
+                continue
+            if quiet_ranges and start <= quiet_ranges[-1][1]:
+                quiet_ranges[-1] = (quiet_ranges[-1][0], max(quiet_ranges[-1][1], end))
+            else:
+                quiet_ranges.append((start, end))
+
+        def quiet_after(last_active: int, before: int | None) -> tuple[int, int] | None:
+            for start, end in quiet_ranges:
+                if start < last_active:
+                    continue
+                bounded_end = min(end, before) if before is not None else end
+                if bounded_end - start >= required:
+                    return (start, bounded_end)
+            return None
+
+        intervals: list[VocalActivityInterval] = []
+        start = last_active = int(positive[0].at_ms)
+        for frame in positive[1:]:
+            at_ms = int(frame.at_ms)
+            quiet = quiet_after(last_active, at_ms)
+            if quiet is not None:
+                intervals.append(VocalActivityInterval(
+                    start_ms=start,
+                    last_active_ms=last_active,
+                    inactive_required_ms=required,
+                    inactive_start_ms=quiet[0],
+                    inactive_end_ms=quiet[1],
+                ))
+                start = at_ms
+            last_active = at_ms
+
+        quiet = quiet_after(last_active, None)
+        intervals.append(VocalActivityInterval(
+            start_ms=start,
+            last_active_ms=last_active,
+            inactive_required_ms=required,
+            inactive_start_ms=(quiet[0] if quiet is not None else None),
+            inactive_end_ms=(quiet[1] if quiet is not None else None),
+        ))
+        return tuple(intervals)
+
     def summarize_vocal(self, *, start_ms: int, end_ms: int) -> HumanVocalEvidence:
         selected = [frame for frame in self._vocal if start_ms <= frame.at_ms <= end_ms]
         by_observer: dict[str, list[VocalActivityFrame]] = {}
@@ -289,6 +372,8 @@ class AcousticObservationHistory:
                     )
                     for frame in frames
                 ),
+                activity=self._activity_intervals(
+                    frames, threshold=self._threshold(observer)),
             )
             for observer, frames in sorted(by_observer.items())
         )

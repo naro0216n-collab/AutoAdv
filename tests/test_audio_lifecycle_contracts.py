@@ -738,24 +738,43 @@ def test_human_vocal_observers_keep_independent_score_series_and_time_support():
     assert all(item.samples for item in vocal.series)
 
 
-def test_vocal_history_is_a_queryable_measurement_cache_not_a_boundary_state_machine():
+def test_vocal_history_derives_observer_local_activity_intervals_from_score_support():
     history = AcousticObservationHistory()
     history.add_vocal(tuple(
-        VocalActivityFrame(at_ms=at_ms, score=probability, observer='speech')
-        for at_ms, probability in (
-            (960, .9), (976, .9), (992, .9),
-            (1008, .9), (1024, .9), (1040, .1), (1056, .1),
-            (1072, .9), (1088, .9),
+        VocalActivityFrame(
+            at_ms=at_ms, score=probability, support_start_ms=support, observer='speech')
+        for at_ms, probability, support in (
+            (1120, .9, 1000),
+            (1240, .1, 1120),
+            (1360, .9, 1240),
+            (1480, .1, 1360),
+            (1600, .9, 1480),
         )
     ))
 
-    full = history.summarize_vocal(start_ms=950, end_ms=1100)
-    clipped = history.summarize_vocal(start_ms=1000, end_ms=1100)
-    assert tuple(sample.at_ms for sample in full.series[0].samples) == (
-        960, 976, 992, 1008, 1024, 1040, 1056, 1072, 1088)
-    assert tuple(sample.at_ms for sample in clipped.series[0].samples) == (
-        1008, 1024, 1040, 1056, 1072, 1088)
-    # The cache stores measurements, not derived event/boundary labels.
+    measured = history.summarize_vocal(start_ms=1000, end_ms=1600).series[0]
+    assert tuple(sample.at_ms for sample in measured.samples) == (1120, 1240, 1360, 1480, 1600)
+    # Short sub-threshold support is not enough to establish disappearance, so
+    # score valleys remain one measured activity interval without Presentation state.
+    assert len(measured.activity) == 1
+    assert (measured.activity[0].start_ms, measured.activity[0].last_active_ms) == (1120, 1600)
+    assert measured.activity[0].ongoing
+
+    history.add_vocal((
+        VocalActivityFrame(at_ms=1840, score=.1, support_start_ms=1600, observer='speech'),
+        VocalActivityFrame(at_ms=2080, score=.1, support_start_ms=1840, observer='speech'),
+    ))
+    closed = history.summarize_vocal(start_ms=1000, end_ms=2080).series[0].activity
+    assert len(closed) == 1
+    assert not closed[0].ongoing
+    assert closed[0].inactive_support_after(1600)
+
+    history.add_vocal((
+        VocalActivityFrame(at_ms=2200, score=.9, support_start_ms=2184, observer='speech'),
+    ))
+    reopened = history.summarize_vocal(start_ms=1000, end_ms=2200).series[0].activity
+    assert len(reopened) == 2
+    assert not reopened[0].ongoing and reopened[1].ongoing
 
 
 def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():

@@ -118,6 +118,7 @@ class NativeAudio:
         # A fallback fence is an assessment obligation through captured PCM.
         # It never means that every older retained search window must be exhausted.
         self._required_assessment_ms: int | None = None
+        self._settled_assessment_ms: int | None = None
         self._last_progress_key: tuple[int, int] | None = None
 
         self._generation = 0
@@ -257,6 +258,7 @@ class NativeAudio:
             self._last_alignment_query = None
             self._last_progress_key = None
             self._required_assessment_ms = None
+            self._settled_assessment_ms = None
             self._confirmed_search_floor_ms = None
             self._history_search_end_ms = None
 
@@ -290,6 +292,7 @@ class NativeAudio:
         self._history_search_end_ms = None
         self._alignment_ready_through_ms = None
         self._required_assessment_ms = None
+        self._settled_assessment_ms = None
         self._last_progress_key = None
 
     def finish_line(self, token: Token) -> bool:
@@ -520,11 +523,10 @@ class NativeAudio:
             vocal = self.features.summarize_vocal(
                 start_ms=int(feature_start), end_ms=int(item.boundary_ms))
 
-        def recurrence_lookup(observer: str, start_ms: int, end_ms: int):
+        def recurrence_lookup(start_ms: int, end_ms: int):
             return self.features.recurrences(
                 start_ms=int(start_ms),
                 end_ms=int(end_ms),
-                observer=observer,
             )
 
         progress, recurrence = evaluate_utterance_progress(
@@ -563,7 +565,17 @@ class NativeAudio:
                 return
             self._last_progress_key = key
             if required is not None:
+                self._settled_assessment_ms = max(
+                    int(required),
+                    self._settled_assessment_ms
+                    if self._settled_assessment_ms is not None else int(required),
+                )
                 self._required_assessment_ms = None
+            progress = UtteranceProgress(
+                state=progress.state,
+                evidence_at_ms=progress.evidence_at_ms,
+                settled_through_ms=self._settled_assessment_ms,
+            )
             callback = self.on_progress
         if callback is not None:
             callback(item.token, progress, observation)

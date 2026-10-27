@@ -1,8 +1,9 @@
 """Native-audio evidence and integrated progression assessment.
 
-Measurements retain their own provenance.  This module combines lexical,
-human-vocal, temporal and optional recurrence evidence exactly once; it does not
-reconstruct source identity or reinterpret transport facts as endpoints.
+Measurements retain their own provenance. This module combines already measured
+lexical, human-vocal, temporal and recurrence evidence exactly once. It does not
+reconstruct acoustic activity from model scores and does not own advancement
+policy.
 """
 from __future__ import annotations
 
@@ -25,12 +26,44 @@ class VocalScoreSample:
 
 
 @dataclass(frozen=True)
+class VocalActivityInterval:
+    """One observer-local interval of measured human-vocal activity.
+
+    ``inactive_*`` records the contiguous sub-threshold support that established
+    disappearance. It is measurement evidence, not a Presentation state.
+    """
+
+    start_ms: int
+    last_active_ms: int
+    inactive_required_ms: int
+    inactive_start_ms: int | None = None
+    inactive_end_ms: int | None = None
+
+    @property
+    def ongoing(self) -> bool:
+        return (
+            self.inactive_start_ms is None
+            or self.inactive_end_ms is None
+            or self.inactive_end_ms - self.inactive_start_ms < self.inactive_required_ms
+        )
+
+    def inactive_support_after(self, boundary_ms: int) -> bool:
+        if self.ongoing or self.inactive_start_ms is None or self.inactive_end_ms is None:
+            return False
+        return (
+            self.inactive_end_ms - max(self.inactive_start_ms, int(boundary_ms))
+            >= self.inactive_required_ms
+        )
+
+
+@dataclass(frozen=True)
 class VocalEvidenceSeries:
-    """One observer's human-vocal measurements on its own score scale."""
+    """One observer's measurements on its own score and time-support scale."""
 
     observer: str
     active_score_threshold: float = 0.45
     samples: tuple[VocalScoreSample, ...] = ()
+    activity: tuple[VocalActivityInterval, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,7 +75,7 @@ class HumanVocalEvidence:
 
 @dataclass(frozen=True)
 class VocalRecurrenceEvidence:
-    """Current periodic repetition measured from one human-vocal observer."""
+    """Periodic repetition measured from human-vocal observation history."""
 
     strength: float = 0.0
     period_ms: int | None = None
@@ -111,10 +144,16 @@ class NativeAudioObservation:
 
 @dataclass(frozen=True)
 class UtteranceProgress:
-    """One integrated answer consumed by Controller."""
+    """One integrated audio judgment consumed by Controller.
+
+    ``settled_through_ms`` is a synchronization watermark: when present, the
+    audio subsystem has settled every measurement required for an explicit
+    assessment fence through that captured PCM boundary.
+    """
 
     state: UtteranceProgressState = UtteranceProgressState.UNKNOWN
     evidence_at_ms: int | None = None
+    settled_through_ms: int | None = None
 
     @property
     def ended(self) -> bool:
@@ -131,122 +170,6 @@ class UtteranceProgress:
 
 LOOP_REPEATABILITY = 0.60
 LOOP_PERIOD_PROMINENCE = 0.10
-
-# A threshold crossing is a measurement, not an endpoint. Releasing an already
-# observed finite-vocal risk requires a contiguous span of explicitly measured
-# sub-threshold support, never wall-clock passage alone.
-MIN_QUIET_SUPPORT_MS = 240
-
-
-@dataclass
-class _ActivityRun:
-    start_ms: int
-    last_positive_ms: int
-    quiet_required_ms: int
-    quiet_start_ms: int | None = None
-    quiet_end_ms: int | None = None
-
-    @property
-    def open(self) -> bool:
-        return (self.quiet_start_ms is None or self.quiet_end_ms is None
-                or self.quiet_end_ms - self.quiet_start_ms < self.quiet_required_ms)
-
-    def closed_after(self, boundary_ms: int) -> bool:
-        if self.open or self.quiet_start_ms is None or self.quiet_end_ms is None:
-            return False
-        return (self.quiet_end_ms - max(self.quiet_start_ms, int(boundary_ms))
-                >= self.quiet_required_ms)
-
-
-def _series_activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
-    """Build one observer's finite activity runs from measured support only.
-
-    Positive support opens or continues a run. Sub-threshold support closes it
-    only after enough contiguous measured quiet from the same observer. A later
-    positive after closure starts a new run; short valleys remain inside the run.
-    """
-    samples = tuple(sorted(
-        series.samples,
-        key=lambda sample: (int(sample.at_ms), int(sample.support_start_ms)),
-    ))
-    required = max(MIN_QUIET_SUPPORT_MS, max(
-        (int(sample.at_ms) - int(sample.support_start_ms) for sample in samples), default=0))
-    threshold = float(series.active_score_threshold)
-    runs: list[_ActivityRun] = []
-    current: _ActivityRun | None = None
-
-    for sample in samples:
-        at_ms = int(sample.at_ms)
-        support_start = int(sample.support_start_ms)
-        positive = float(sample.score) >= threshold
-
-        if positive:
-            if current is None or not current.open:
-                current = _ActivityRun(at_ms, at_ms, required)
-                runs.append(current)
-            else:
-                current.last_positive_ms = at_ms
-                current.quiet_start_ms = current.quiet_end_ms = None
-            continue
-
-        if current is None:
-            continue
-        if not current.open:
-            if (current.quiet_end_ms is not None and support_start <= current.quiet_end_ms
-                    and at_ms > support_start):
-                current.quiet_end_ms = max(current.quiet_end_ms, at_ms)
-            continue
-        if support_start < current.last_positive_ms or at_ms <= support_start:
-            continue
-
-        if (current.quiet_start_ms is None or current.quiet_end_ms is None
-                or support_start > current.quiet_end_ms):
-            current.quiet_start_ms, current.quiet_end_ms = support_start, at_ms
-        else:
-            current.quiet_end_ms = max(current.quiet_end_ms, at_ms)
-
-    return tuple(runs)
-
-
-def _timing_facts(
-    *, lexical: LexicalProgressEvidence | None, causal_lower_bound_ms: int | None,
-    input_candidates_ms: tuple[int, ...],
-) -> tuple[int, ...]:
-    """Choose factual time anchors without promoting them to source labels."""
-    if causal_lower_bound_ms is not None:
-        return (int(causal_lower_bound_ms),)
-
-    target_start = None
-    if (lexical is not None and lexical.target_associated
-            and lexical.aligned_target_units > 0
-            and lexical.target_start_ms is not None):
-        target_start = int(lexical.target_start_ms)
-
-    candidates = tuple(sorted({
-        int(value) for value in input_candidates_ms if int(value) > 0
-    }))
-    if target_start is not None:
-        earlier = tuple(value for value in candidates if value <= target_start)
-        return (max(earlier) if earlier else target_start,)
-    return candidates
-
-
-def _activity_runs_after(
-    series: VocalEvidenceSeries, *, timing_facts: tuple[int, ...],
-) -> tuple[_ActivityRun, ...]:
-    """Return physical activity runs whose measured onset follows a time fact.
-
-    Run segmentation is owned solely by ``_series_activity_runs``. Presentation
-    timing relates whole measured runs to known facts; it never cuts a second
-    onset out of score fluctuations inside an existing run.
-    """
-    if not timing_facts:
-        return ()
-    return tuple(
-        run for run in _series_activity_runs(series)
-        if any(run.start_ms >= fact and run.last_positive_ms > fact
-               for fact in timing_facts)
-    )
 
 
 def _stable_recurrence(recurrence: VocalRecurrenceEvidence | None) -> bool:
@@ -268,6 +191,63 @@ def _representative_recurrence(
     return max(pool, key=lambda item: (item.prominence, item.strength))
 
 
+def _target_located(lexical: LexicalProgressEvidence | None) -> bool:
+    return bool(
+        lexical is not None
+        and lexical.target_associated
+        and lexical.aligned_target_units > 0
+        and lexical.target_start_ms is not None
+        and lexical.aligned_end_ms is not None
+    )
+
+
+def _target_complete(lexical: LexicalProgressEvidence | None) -> bool:
+    return bool(
+        _target_located(lexical)
+        and lexical is not None
+        and lexical.complete_alignment
+        and lexical.committed_target_end
+        and lexical.target_end_ms is not None
+    )
+
+
+def _presentation_anchors(
+    *, lexical: LexicalProgressEvidence | None, causal_lower_bound_ms: int | None,
+    input_candidates_ms: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return factual times that can relate new vocal activity to this Presentation.
+
+    AutoAdv's own successful input is a hard causal lower bound. External inputs
+    remain candidates. Once known text is acoustically located, only a candidate
+    not later than that located onset can safely narrow the relation.
+    """
+    if causal_lower_bound_ms is not None:
+        return (int(causal_lower_bound_ms),)
+
+    candidates = tuple(sorted({int(value) for value in input_candidates_ms if int(value) > 0}))
+    if _target_located(lexical) and lexical is not None and lexical.target_start_ms is not None:
+        target_start = int(lexical.target_start_ms)
+        earlier = tuple(value for value in candidates if value <= target_start)
+        return (max(earlier) if earlier else target_start,)
+    return candidates
+
+
+def _related_activity(
+    vocal: HumanVocalEvidence | None, *, anchors: tuple[int, ...],
+) -> tuple[VocalActivityInterval, ...]:
+    if vocal is None or not anchors:
+        return ()
+    return tuple(
+        interval
+        for series in vocal.series
+        for interval in series.activity
+        if any(
+            interval.start_ms >= anchor and interval.last_active_ms > anchor
+            for anchor in anchors
+        )
+    )
+
+
 def evaluate_utterance_progress(
     *,
     capture_end_ms: int | None,
@@ -275,115 +255,61 @@ def evaluate_utterance_progress(
     vocal: HumanVocalEvidence | None,
     causal_lower_bound_ms: int | None = None,
     input_candidates_ms: tuple[int, ...] = (),
-    recurrence_lookup: Callable[
-        [str, int, int], tuple[VocalRecurrenceEvidence, ...]
-    ] | None = None,
+    recurrence_lookup: Callable[[int, int], tuple[VocalRecurrenceEvidence, ...]] | None = None,
 ) -> tuple[UtteranceProgress, VocalRecurrenceEvidence | None]:
-    """Combine factual measurements once into cut-risk / end / unknown.
+    """Map measured evidence to current finite-vocal risk / end / unknown.
 
-    Human-vocal measurements are never assigned to a target or source. Known
-    text alignment and input observations only provide time anchors and, when
-    committed, a textual end candidate.
+    Acoustic activity segmentation belongs to the measurement layer. This
+    function only relates those measurements to the current Presentation and
+    never changes Controller policy.
     """
     if capture_end_ms is None:
         return UtteranceProgress(evidence_at_ms=None), None
     capture_end = int(capture_end_ms)
-
-    target_located = bool(
-        lexical is not None
-        and lexical.target_associated
-        and lexical.aligned_target_units > 0
-        and lexical.target_start_ms is not None
-        and lexical.aligned_end_ms is not None
-    )
-    target_complete = bool(
-        target_located
-        and lexical is not None
-        and lexical.complete_alignment
-        and lexical.committed_target_end
-        and lexical.target_end_ms is not None
-    )
-    facts = _timing_facts(
+    located = _target_located(lexical)
+    complete = _target_complete(lexical)
+    anchors = _presentation_anchors(
         lexical=lexical,
         causal_lower_bound_ms=causal_lower_bound_ms,
         input_candidates_ms=input_candidates_ms,
     )
-
-    observed: list[tuple[str, _ActivityRun]] = []
-    for series in vocal.series if vocal is not None else ():
-        observed.extend(
-            (series.observer, run)
-            for run in _activity_runs_after(series, timing_facts=facts)
-        )
+    related = _related_activity(vocal, anchors=anchors)
+    ongoing = tuple(interval for interval in related if interval.ongoing)
 
     measured_recurrence: VocalRecurrenceEvidence | None = None
-
-    open_runs = tuple((observer, run) for observer, run in observed if run.open)
-    if open_runs:
-        # Reading amount is only a rough permission to consult recurrence before
-        # a textual endpoint has been committed.  It never changes the acoustic
-        # history being measured: doing so would make an uncertain phone count
-        # erase or recreate recurrence evidence.
+    if ongoing:
         reading_exceeded = bool(
             lexical is not None
             and lexical.target_units > 0
             and lexical.observed_units > lexical.target_units
         )
-        recurrence_eligible = bool(
-            not target_located or target_complete or reading_exceeded
-        )
-
-        candidates: tuple[VocalRecurrenceEvidence, ...] = ()
-        recurrent_observers: set[str] = set()
-        if recurrence_eligible and recurrence_lookup is not None:
-            # Recurrence describes structure around a Presentation relation, not
-            # the lifetime of the latest threshold-positive run.  Look equally
-            # far before and after the factual anchor so a repeating structure
-            # that crosses the Presentation boundary remains measurable even if
-            # its natural quiet gaps split activity runs.  The window expands
-            # only as current evidence accumulates; no fixed loop-duration guess
-            # or source label is introduced.
-            anchor = max(facts) if facts else capture_end
-            recurrence_start = max(0, int(anchor) - max(0, capture_end - int(anchor)))
-            collected: list[VocalRecurrenceEvidence] = []
-            for observer in sorted({observer for observer, _run in open_runs}):
-                observer_candidates = recurrence_lookup(
-                    observer, recurrence_start, capture_end)
-                collected.extend(observer_candidates)
-                if any(_stable_recurrence(candidate)
-                       for candidate in observer_candidates):
-                    recurrent_observers.add(observer)
-            candidates = tuple(collected)
-        measured_recurrence = _representative_recurrence(candidates)
-        # Observer series are independent measurements of the same process mix,
-        # not interchangeable proof about one owned source.  Repetition measured
-        # by one observer cannot erase a still-open finite-vocal risk measured by
-        # another.  Every observer that currently contributes an open risk must
-        # itself show stable recurrence before recurrence can release protection.
-        open_observers = {observer for observer, _run in open_runs}
-        if not open_observers.issubset(recurrent_observers):
+        recurrence_needed = bool(not located or complete or reading_exceeded)
+        if recurrence_needed and recurrence_lookup is not None:
+            recurrence_start = min(anchors) if anchors else min(
+                interval.start_ms for interval in ongoing)
+            candidates = recurrence_lookup(recurrence_start, capture_end)
+            measured_recurrence = _representative_recurrence(candidates)
+        if not _stable_recurrence(measured_recurrence):
             return UtteranceProgress(
                 state=UtteranceProgressState.ACTIVE,
-                evidence_at_ms=capture_end), measured_recurrence
+                evidence_at_ms=capture_end,
+            ), measured_recurrence
 
-    if not target_complete or lexical is None:
+    if not complete or lexical is None:
         return UtteranceProgress(
             state=UtteranceProgressState.UNKNOWN,
-            evidence_at_ms=capture_end), measured_recurrence
+            evidence_at_ms=capture_end,
+        ), measured_recurrence
 
-    # A committed known-text end is not by itself physical vocal EOF. Ended
-    # requires measured human-vocal activity that overlaps the located text and
-    # is subsequently closed by the same observer. Activity observed only after
-    # the textual end cannot manufacture that physical-end evidence.
     target_start = int(lexical.target_start_ms)
     target_end = int(lexical.target_end_ms)
-    physical_end_observed = any(
-        run.start_ms <= target_end
-        and run.last_positive_ms >= target_start
-        and run.closed_after(target_end)
-        for _observer, run in observed
+    ended = any(
+        interval.start_ms <= target_end
+        and interval.last_active_ms >= target_start
+        and interval.inactive_support_after(target_end)
+        for interval in related
     )
     return UtteranceProgress(
-        state=(UtteranceProgressState.ENDED
-               if physical_end_observed else UtteranceProgressState.UNKNOWN),
-        evidence_at_ms=capture_end), measured_recurrence
+        state=(UtteranceProgressState.ENDED if ended else UtteranceProgressState.UNKNOWN),
+        evidence_at_ms=capture_end,
+    ), measured_recurrence

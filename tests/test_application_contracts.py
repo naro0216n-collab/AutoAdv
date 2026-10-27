@@ -65,11 +65,13 @@ class _FakeNativeAudio:
     def request_assessment_through(self, token, through_ms):
         self.requests.append((token, through_ms))
 
-    def publish_progress(self, token, state, evidence_at_ms):
+    def publish_progress(self, token, state, evidence_at_ms, *, settled_through_ms=None):
         callback = self.callbacks['on_progress']
         callback(
             token,
-            UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
+            UtteranceProgress(
+                state=state, evidence_at_ms=evidence_at_ms,
+                settled_through_ms=settled_through_ms),
             NativeAudioObservation(),
         )
 
@@ -443,7 +445,8 @@ def test_audio_fallback_fences_already_captured_pcm_before_policy_completion(mon
     assert not app.runtime_state().completed
     assert native.requests == [(token, 1500)]
 
-    native.publish_progress(token, UtteranceProgressState.UNKNOWN, 1500)
+    native.publish_progress(
+        token, UtteranceProgressState.UNKNOWN, 1500, settled_through_ms=1500)
     state = app.runtime_state()
     assert state.completed
     assert state.presentation_reason == 'uncertain_text_fallback'
