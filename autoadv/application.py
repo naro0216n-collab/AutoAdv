@@ -818,10 +818,11 @@ class AutoAdvApplication:
     def _fallback_due(self, token: Token) -> None:
         """Fence fallback against PCM already captured at the policy boundary.
 
-        The text-derived deadline remains unchanged.  If native capture already
-        contains newer PCM than the integrated progress evidence, defer only
-        until that factual PCM snapshot has been analyzed.  No future audio is
-        awaited and no silence/voice fact is inferred from transport state.
+        The text-derived deadline remains unchanged.  Before applying fallback,
+        request one settled assessment through the captured frontier so slower
+        known-text alignment cannot be mistaken for already-current evidence.
+        No future audio is awaited and no silence/voice fact is inferred from
+        transport state.
         """
         state = self.runtime_state()
         utterance = state.utterance
@@ -831,9 +832,7 @@ class AutoAdvApplication:
             return
         native = self._native_audio
         fence_ms = native.observation_fence(token) if native is not None else None
-        progress = self.controller.native_progress
-        if (fence_ms is not None and
-                (progress.evidence_at_ms is None or progress.evidence_at_ms < fence_ms)):
+        if fence_ms is not None:
             self._fallback_fence = (token, fence_ms)
             native.request_assessment_through(token, fence_ms)
             return

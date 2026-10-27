@@ -425,6 +425,10 @@ def test_audio_fallback_fences_already_captured_pcm_before_policy_completion(mon
     native = Native.instances[-1]
     native.fence_ms = 1500
 
+    # A current human-vocal frontier does not imply that known-text alignment
+    # has settled the same boundary. Fallback therefore requests an explicit
+    # integrated assessment even when ordinary progress already reached it.
+    native.publish_progress(token, UtteranceProgressState.UNKNOWN, 1500)
     deadline = next(
         callback for delay, callback in scheduled
         if delay == app.runtime_state().utterance.text_wait_ms)

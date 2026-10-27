@@ -1,9 +1,9 @@
 """Process-scoped acoustic measurement over one retained PCM timeline.
 
 ProcessCapture owns acquisition and AudioHistory is the only raw-audio source of
-truth. Target-independent human-vocal observation advances through that timeline
-with one cursor; target-conditioned alignment issues bounded range queries over
-the same timeline. Neither path recreates capture state or owns game input.
+truth. Human-vocal observation advances continuously through that timeline with
+one cursor, while known-text alignment issues bounded range queries over the same
+timeline. Neither measurement recreates capture state or owns game input.
 """
 from __future__ import annotations
 
@@ -109,8 +109,8 @@ class NativeAudio:
         self._alignment_inflight_generation: int | None = None
         self._last_alignment_query: tuple[int, int] | None = None
 
-        # Continuous target-independent observation follows AudioHistory itself.
-        # There is no second PCM queue or replay path.
+        # Continuous human-vocal observation follows AudioHistory itself. There
+        # is no second PCM queue or replay path.
         self._observer_cursor_ms: int | None = None
         self._observer_running = False
         self._observer_revision = 0
@@ -445,32 +445,39 @@ class NativeAudio:
                 if token is not None:
                     self.on_error(token, "human-vocal observer failure: " + str(error))
 
+    def _fence_ready_locked(self, boundary_ms: int) -> bool:
+        observer = self._observer_cursor_ms
+        if observer is None or int(observer) < int(boundary_ms):
+            return False
+        if self.aligner is None:
+            return True
+        alignment = self._alignment_ready_through_ms
+        return alignment is not None and int(alignment) >= int(boundary_ms)
+
     def _ready_boundary_locked(self) -> int | None:
         if self.token is None or self._observer_cursor_ms is None:
             return None
         observer = int(self._observer_cursor_ms)
-        if self.aligner is None:
-            ready = observer
-        elif self._alignment_ready_through_ms is None:
-            return None
-        else:
-            ready = min(observer, int(self._alignment_ready_through_ms))
 
         required = self._required_assessment_ms
         if required is not None:
             required = int(required)
-            if ready < required:
+            # An explicit assessment fence is the only point where both
+            # measurements must cover the same captured boundary. Ordinary
+            # human-vocal updates must not be frozen by slower alignment work.
+            if not self._fence_ready_locked(required):
                 return None
-            # Required boundaries are released only after the alignment search
-            # itself is settled there; a narrow failed query cannot acknowledge
-            # the fence while retained evidence is still being examined.
             return required
+
+        # Outside an explicit fence, the continuously measured acoustic frontier
+        # is the assessment frontier. A later alignment result increments the
+        # lexical revision and causes the same frontier to be assessed again.
         if self._last_progress_key is not None:
             previous, revision = self._last_progress_key
             if (revision == self._lexical_revision
-                    and ready - int(previous) < self.INFERENCE_INTERVAL_MS):
+                    and observer - int(previous) < self.INFERENCE_INTERVAL_MS):
                 return None
-        return ready
+        return observer
 
     def _assessment_locked(self) -> _Assessment | None:
         boundary = self._ready_boundary_locked()
@@ -507,7 +514,7 @@ class NativeAudio:
         feature_start = self.features.earliest_ms if needs_vocal else None
         if feature_start is not None:
             # Alignment may narrow its PCM queries after locating the text, but
-            # target-independent activity keeps one meaning over the retained
+            # continuous human-vocal activity keeps one meaning over the retained
             # measurement timeline. Cropping that cache at a Presentation fact
             # would recreate an old run as a synthetic post-fact onset.
             vocal = self.features.summarize_vocal(
@@ -549,10 +556,17 @@ class NativeAudio:
                 return
             key = (item.boundary_ms, item.lexical_revision)
             required = self._required_assessment_ms
+            if required is not None:
+                required = int(required)
+                # An ordinary assessment may have started just before a fallback
+                # fence was requested. It cannot acknowledge that newer fence
+                # unless both measurements are now settled through the boundary.
+                if item.boundary_ms < required or not self._fence_ready_locked(required):
+                    return
             if key == self._last_progress_key and required is None:
                 return
             self._last_progress_key = key
-            if required is not None and item.boundary_ms >= required:
+            if required is not None:
                 self._required_assessment_ms = None
             callback = self.on_progress
         if callback is not None:

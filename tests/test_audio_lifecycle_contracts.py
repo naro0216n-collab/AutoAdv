@@ -96,7 +96,7 @@ class StaticVocalObserver:
 
 
 class PeriodicVocalObserver:
-    """Emit a target-independent repeating human-vocal score pattern."""
+    """Emit a repeating human-vocal score pattern."""
 
     pattern = (.92, .88, .2, .1, .86, .9)
     cadence_ms = 100
@@ -263,7 +263,7 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
         native.close()
     assert CaptureBoundary.instances[-1].closed
 
-def test_alignment_scheduler_keeps_fallback_fence_separate_from_history_discovery():
+def test_alignment_scheduler_synchronizes_only_explicit_assessment_fences(monkeypatch):
     observations = []
     model = BlockingBlankPosterior()
     observer = RecordingVocalObserver()
@@ -277,35 +277,56 @@ def test_alignment_scheduler_keeps_fallback_fence_separate_from_history_discover
         assert model.started.wait(1)
         wait_until(lambda: observer.observed_until and observer.observed_until[-1] >= 20_000)
 
-        # The captured frontier is not assessed before its bounded lexical query.
+        # Target attachment is an explicit fence: retained acoustic evidence is
+        # not published before one bounded known-text query covers that frontier.
         assert not observations
 
-        # Completing that bounded query acknowledges the current evidence even
-        # though older retained history remains searchable. The optional backward
-        # search may start immediately afterward but cannot withhold UNKNOWN.
         model.release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_000
             for observed, progress, _item in observations))
         assert model.widened_started.wait(1)
 
-        # New captured PCM gets priority once the already-running bounded history
-        # query finishes; the scheduler does not chain retained-history exhaustion
-        # ahead of a required newer assessment.
+        # Optional retained-history discovery can remain busy, but it does not
+        # freeze newer continuously measured human-vocal evidence.
         fresh = compact_chunk(20_600, 600)
         native.history.push(fresh, target_pid=42)
         native.feed(fresh)
-        native.request_assessment_through(token, 20_600)
-        time.sleep(.02)
-        assert not any(progress.evidence_at_ms == 20_600
-                       for _observed, progress, _item in observations)
-
-        model.widened_release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_600
             for observed, progress, _item in observations))
 
-        # An already-assessed fence remains an idempotent obligation.
+        # A fence can race an ordinary assessment already in progress. That
+        # pre-fence work cannot acknowledge the fence while alignment is stale.
+        import autoadv.native_audio as native_audio_module
+        real_evaluate = native_audio_module.evaluate_utterance_progress
+        assessment_started = Event()
+        assessment_release = Event()
+
+        def blocking_evaluate(**kwargs):
+            if kwargs['capture_end_ms'] == 21_200:
+                assessment_started.set()
+                assessment_release.wait(1)
+            return real_evaluate(**kwargs)
+
+        monkeypatch.setattr(native_audio_module, 'evaluate_utterance_progress', blocking_evaluate)
+        fenced = compact_chunk(21_200, 600)
+        native.history.push(fenced, target_pid=42)
+        native.feed(fenced)
+        assert assessment_started.wait(1)
+        before = len(observations)
+        native.request_assessment_through(token, 21_200)
+        assessment_release.set()
+        time.sleep(.02)
+        assert not any(progress.evidence_at_ms == 21_200
+                       for _observed, progress, _item in observations[before:])
+
+        model.widened_release.set()
+        wait_until(lambda: any(
+            observed == token and progress.evidence_at_ms == 21_200
+            for observed, progress, _item in observations[before:]))
+
+        # An already-settled fence remains an idempotent obligation.
         before = len(observations)
         native.request_assessment_through(token, 20_000)
         wait_until(lambda: any(
@@ -378,7 +399,7 @@ def test_pcm_timeline_preserves_causal_cropping_and_discontinuity_for_alignment(
         native.history.start(42)
         # The causal lower bound falls inside retained PCM.  A later transport
         # gap is part of the same timeline contract and must be visible to both
-        # target-conditioned alignment and the streaming observer.
+        # known-text alignment and the streaming observer.
         chunks = (
             stereo_chunk(900, 200),      # 700..900
             stereo_chunk(1400, 500),     # 900..1400
@@ -397,7 +418,7 @@ def test_pcm_timeline_preserves_causal_cropping_and_discontinuity_for_alignment(
         # associate the target.  Association here would mean the gap was
         # compressed away before alignment.
         assert not any(item['target_associated'] for _token, item in reports)
-        # Target-independent measurements on both sides of the transport gap
+        # Human-vocal measurements on both sides of the transport gap
         # remain factual cache entries; the gap is not filled with invented PCM.
         vocal = native.features.summarize_vocal(start_ms=700, end_ms=2200)
         times = tuple(sample.at_ms for series in vocal.series for sample in series.samples)
@@ -434,7 +455,7 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
         token = Token(6, 1)
         try:
             native.history.start(42)
-            # Target-independent observation starts before the causal bound.
+            # Continuous human-vocal observation starts before the causal bound.
             # Alignment may crop raw PCM at that bound, but locating the text
             # must not crop the already-measured activity series and recreate
             # the same physical run as a post-boundary onset.

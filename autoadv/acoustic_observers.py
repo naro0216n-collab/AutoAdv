@@ -1,4 +1,4 @@
-"""Continuous target-independent acoustic measurements.
+"""Continuous acoustic measurements over retained PCM.
 
 Observers report only model-local measurements tied to the PCM time ranges that
 produced them.  They never own Presentation state or advancement decisions.
