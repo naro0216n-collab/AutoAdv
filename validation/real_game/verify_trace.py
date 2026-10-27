@@ -287,6 +287,10 @@ def verify(records: Sequence[dict], *, phase: str = 'mixed',
 
     case_results: list[dict] = []
     if phase == 'accuracy':
+        if facts['game_input_observations'] < facts['validation_game_inputs']:
+            issues.append(
+                'authored validation input was not observed through the product input observer: '
+                f"stimuli={facts['validation_game_inputs']} observed={facts['game_input_observations']}")
         if fixture_records is None:
             issues.append('accuracy verification requires fixture evidence')
         else:

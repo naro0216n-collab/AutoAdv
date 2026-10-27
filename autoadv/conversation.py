@@ -249,40 +249,47 @@ class Controller:
         received_ms = received_ns // 1_000_000
         return tuple(value for value in self._external_input_times if value <= received_ms)
 
-    def _consume_presentation_timing(self, received_ns: int) -> PresentationTiming:
-        received_ns = max(0, int(received_ns))
-        with self._input_facts_lock:
-            candidates = self._eligible_external_inputs_locked(received_ns)
-            if received_ns <= 0:
-                self._external_input_times.clear()
-            elif candidates:
-                received_ms = received_ns // 1_000_000
-                self._external_input_times = [
-                    value for value in self._external_input_times if value > received_ms]
-            causal = self._pending_auto_input_ms
-            self._pending_auto_input_ms = None
+    def _consume_presentation_timing_locked(
+            self, received_ns: int, candidates: tuple[int, ...]) -> PresentationTiming:
+        """Consume exactly the input facts used to admit this Presentation."""
+        if received_ns <= 0:
+            self._external_input_times.clear()
+        elif candidates:
+            received_ms = received_ns // 1_000_000
+            self._external_input_times = [
+                value for value in self._external_input_times if value > received_ms]
+        causal = self._pending_auto_input_ms
+        self._pending_auto_input_ms = None
         return PresentationTiming(
             received_ns=received_ns, causal_lower_bound_ms=causal,
             input_candidates_ms=candidates)
 
     def _accept_line(self, *, sequence: int, raw: str, body: str, speaker: str, origin: str,
                      verified_boundary: bool = False, received_ns: int = 0) -> Token | None:
+        received_ns = max(0, int(received_ns))
         old = self.utterance
+        staged = self.pending_profile
+        repeat_profile = staged or self.profile
+        reject_sent_identical = False
         with self._input_facts_lock:
-            external_boundary = bool(self._eligible_external_inputs_locked(received_ns))
-        if old and not self.sent and old.raw == raw and not verified_boundary and not external_boundary:
-            if origin == 'ocr' or self.profile.repeat_rule != 'each_flush':
-                return None
-        if self.pending_profile is not None:
-            self.profile = self.pending_profile
+            candidates = self._eligible_external_inputs_locked(received_ns)
+            external_boundary = bool(candidates)
+            if old and not self.sent and old.raw == raw and not verified_boundary and not external_boundary:
+                if origin == 'ocr' or repeat_profile.repeat_rule != 'each_flush':
+                    return None
+            if old and self.sent and not verified_boundary and raw == old.raw and not external_boundary:
+                reject_sent_identical = (
+                    origin == 'ocr' or repeat_profile.repeat_rule != 'each_flush')
+            timing = (None if reject_sent_identical else
+                      self._consume_presentation_timing_locked(received_ns, candidates))
+        if staged is not None:
+            self.profile = staged
             self.pending_profile = None
-        if old and self.sent and not verified_boundary and raw == old.raw and not external_boundary:
-            if origin == 'ocr':
-                return None
-            if self.profile.repeat_rule != 'each_flush':
+        if reject_sent_identical:
+            if origin != 'ocr':
                 self.pause('ambiguous_identical_line')
-                return None
-        timing = self._consume_presentation_timing(received_ns)
+            return None
+        assert timing is not None
         self.line_no += 1
         self.utterance = interpret(
             raw, self.profile, session=self.session, line=self.line_no, source=origin,
@@ -431,14 +438,15 @@ class Controller:
         if not ready:
             self.pause('target_unavailable')
             return False
-        # Target checks may cross a scheduling boundary. Re-read external input
-        # immediately before reserving the operation so a newly observed game
-        # input cannot be ignored by an earlier completion decision.
-        if self._external_input_pending():
-            return False
-        # Reserve the line before external I/O. An exception never causes an unsafe retry.
-        self.sent = True
-        self.completed = False
+        # Target checks may cross a scheduling boundary. The final external-input
+        # check and operation reservation are one input-fact transaction: an
+        # observer that records first prevents this token from reserving input;
+        # an already reserved token remains one-way even if later I/O fails.
+        with self._input_facts_lock:
+            if self._external_input_times:
+                return False
+            self.sent = True
+            self.completed = False
         try:
             sent_at_ms = self.input_send(self.target, self.profile.input_key)  # type: ignore[union-attr]
         except Exception:

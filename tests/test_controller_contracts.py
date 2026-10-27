@@ -143,6 +143,26 @@ def test_user_authorization_runtime_holds_and_input_failure_are_independent_stat
     assert not failing.try_advance() and len(failures) == 1
 
 
+def test_external_input_observed_during_target_preflight_prevents_operation_reservation():
+    sent = []
+    ctrl = None
+
+    def ready(_target):
+        assert ctrl is not None
+        assert ctrl.record_external_input(ctrl.session, 1200)
+        return True
+
+    ctrl = Controller(lambda _target, key: sent.append(key), ready, TEST_G2P)
+    ctrl.begin(profile(), Target(101, 202), 'host', 1)
+    ctrl.permit(True)
+    token = observe(ctrl, '「一つ目」')
+    assert token is not None and ctrl.presentation_event(token, 'text_elapsed')
+
+    assert not ctrl.try_advance()
+    assert not ctrl.sent and ctrl.completed and ctrl.authorized and sent == []
+
+
+
 def test_session_sequence_and_line_identity_reject_stale_or_ambiguous_events_without_guessing():
     ctrl, sent, _ = controller()
     ctrl.permit(True)

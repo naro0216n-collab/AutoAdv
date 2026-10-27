@@ -128,20 +128,39 @@ class SessionDriver:
 
     @staticmethod
     def _send_validation_game_input(runtime):
-        """Send the authored keyboard stimulus directly to the selected game.
+        """Inject one ordinary external keyboard stimulus through Windows.
 
-        A desktop-level SendInput mouse event would instead hit an unrelated
-        window when the game is covered. Window-targeted keyboard messages work
-        without focusing or exposing the game. They are *not* low-level input
-        events and must not be reported as observed by WindowsGameInputObserver.
-        The independent fixture log records whether the game actually moves.
+        This does not call the product's targeted PostMessage adapter or inject
+        Controller state. WindowsGameInputObserver must observe the low-level
+        key event when Windows routes it to the selected game, while the fixture
+        independently records whether the game actually advanced. Validation
+        never forces foreground activation to manufacture that observation.
         """
-        from autoadv.windows_input import WindowsAdvancementInput
+        import ctypes
 
         if runtime.target is None or runtime.profile is None:
             raise RuntimeError('validation game input has no bound game target or key')
-        WindowsAdvancementInput(
-            runtime.target.hwnd, virtual_key=runtime.profile.input_key).advance()
+        virtual_key = int(runtime.profile.input_key)
+        if not 1 <= virtual_key <= 254:
+            raise RuntimeError('validation game input key is invalid')
+        user32 = ctypes.windll.user32
+        user32.MapVirtualKeyW.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+        user32.MapVirtualKeyW.restype = ctypes.c_uint32
+        scan = int(user32.MapVirtualKeyW(virtual_key, 0))
+        if not 1 <= scan <= 0xFF:
+            raise RuntimeError('validation game input key has no Windows scancode')
+        ULONG_PTR = ctypes.c_uint64 if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_uint32
+        user32.keybd_event.argtypes = (ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_uint32, ULONG_PTR)
+        user32.keybd_event.restype = None
+        extended = 0x0001 if virtual_key in {
+            0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+            0x2D, 0x2E, 0x6F, 0x90, 0x91,
+        } else 0
+        user32.keybd_event(virtual_key, scan, extended, 0)
+        try:
+            time.sleep(0.035)
+        finally:
+            user32.keybd_event(virtual_key, scan, extended | 0x0002, 0)
 
     def _send_authored_game_input(self, runtime, case_id, now):
         delay_ms = ACCURACY_GAME_INPUTS_MS.get(case_id)

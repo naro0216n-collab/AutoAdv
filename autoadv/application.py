@@ -899,6 +899,9 @@ class AutoAdvApplication:
         self.stop_monitoring('session_changed')
         if effective.source == 'ocr':
             self._begin_runtime(effective, target, 'ocr', 1)
+            # Input observation belongs to the monitoring session itself. Start
+            # it before the first acquisition source can admit a Presentation.
+            self._start_game_input_observer(target)
             self._start_ocr(effective)
         else:
             selected_sources = tuple(identity for identity in
@@ -910,9 +913,9 @@ class AutoAdvApplication:
                 raise RuntimeError('ゲームへのLunaHook接続が完了していません')
             self._begin_runtime(effective, target, connection.host_generation,
                                connection.connection_generation)
+            self._start_game_input_observer(target)
             self._reconcile_hook_sync()
         self._start_native_audio(effective)
-        self._start_game_input_observer(target)
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(

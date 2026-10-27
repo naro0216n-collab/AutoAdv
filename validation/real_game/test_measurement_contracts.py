@@ -239,6 +239,45 @@ def test_offline_verifier_keeps_authored_external_input_separate_from_product_ad
     assert result['facts']['external_input_candidates'] == 1
     assert result['facts']['auto_input_causal_bounds'] == 0
 
+    missing_observation = validate(
+        [row for row in authored_records if row.get('event') != 'game_input_observed'],
+        phase='accuracy', fixture_records=authored_fixture)
+    assert missing_observation['verdict'] == 'incomplete'
+    assert any('authored validation input was not observed' in issue
+               for issue in missing_observation['evidence_issues'])
+
+
+def test_authored_game_input_uses_windows_keyboard_stimulus_without_product_injection(monkeypatch):
+    import ctypes
+    from validation.real_game import gui_session
+
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    calls = []
+    user32 = SimpleNamespace(
+        MapVirtualKeyW=Function(lambda key, _mode: 0x1C if key == 13 else 0),
+        keybd_event=Function(lambda key, scan, flags, extra: calls.append(
+            (int(key), int(scan), int(flags), int(extra)))),
+    )
+    monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(gui_session.time, 'sleep', lambda _seconds: None)
+    runtime = SimpleNamespace(
+        target=SimpleNamespace(pid=50, hwnd=77),
+        profile=SimpleNamespace(input_key=13),
+    )
+
+    SessionDriver._send_validation_game_input(runtime)
+
+    assert calls == [(13, 0x1C, 0, 0), (13, 0x1C, 0x0002, 0)]
+
+
 def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
     sent, traces = [], []
     runtime = SimpleNamespace(

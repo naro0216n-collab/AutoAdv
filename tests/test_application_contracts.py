@@ -269,6 +269,36 @@ def test_runtime_publishes_selected_provenance_and_utterance_before_presentation
 
 
 
+def test_monitoring_starts_input_observation_before_hook_acquisition(monkeypatch):
+    _Native, InputObserver = _install_audio_runtime_fakes(monkeypatch)
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    selected = source('ORDER', 3)
+    profile.hooks = [HookSelection('ORDER', 3, 4)]
+    profile.body_source = selected.identity
+    app.select_profile(app.game_id, app.profile_id)
+
+    timeline = []
+
+    def start_observer(self):
+        self.started = True
+        timeline.append('input_observer')
+
+    monkeypatch.setattr(InputObserver, 'start', start_observer)
+    original_handle = app._handle_hook_output
+
+    def handle_hook_output(event):
+        timeline.append('hook_acquisition')
+        return original_handle(event)
+
+    monkeypatch.setattr(app, '_handle_hook_output', handle_hook_output)
+
+    connect_hook(app)
+    runtime_hook(app, selected, '本文', 2, received_ns=1_000_000_000)
+
+    assert timeline.index('input_observer') < timeline.index('hook_acquisition')
+
+
 def test_admitted_text_keeps_auto_input_bound_distinct_from_external_input_candidates(monkeypatch):
     Native, InputObserver = _install_audio_runtime_fakes(monkeypatch)
     app, _ = app_with_game()
