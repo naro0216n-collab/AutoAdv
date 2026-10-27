@@ -462,16 +462,25 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert evaluate(observation(
         voc=short_valley_restart, end=1200, lower=1000)).state == UtteranceProgressState.UNKNOWN
 
+    # The physical observer run may remain continuous across a Presentation
+    # boundary because a wide receptive field still overlaps the preceding
+    # voice.  Presentation relation is narrower: enough low-score support after
+    # the timing fact followed by a later rise is a new finite-vocal risk even
+    # when that wide observer cannot certify a physical run closure.  The same
+    # relation rule applies to a confirmed AutoAdv lower bound and to an
+    # external-input candidate attached when the new text actually arrives.
     restarted = HumanVocalEvidence(series=(VocalEvidenceSeries(
         observer='nonlexical', active_score_threshold=.45,
         samples=(
-            VocalScoreSample(960, .9, 720),
-            VocalScoreSample(1240, .1, 960),
-            VocalScoreSample(1480, .1, 1240),
-            VocalScoreSample(1720, .9, 1480),
+            VocalScoreSample(960, .9, 0),
+            VocalScoreSample(1240, .1, 280),
+            VocalScoreSample(1480, .1, 520),
+            VocalScoreSample(1720, .9, 760),
         )),))
-    assert evaluate(observation(
-        voc=restarted, end=1720, lower=1000)).state == UtteranceProgressState.ACTIVE
+    for lower, inputs in ((1000, ()), (None, (1000,))):
+        assert evaluate(observation(
+            voc=restarted, end=1720, lower=lower, inputs=inputs
+        )).state == UtteranceProgressState.ACTIVE
 
     post_boundary_unclosed = vocal(
         intervals=((1120, 1380),), end=1380, observer='nonlexical')

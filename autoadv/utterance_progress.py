@@ -211,6 +211,57 @@ def _activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
     return tuple(runs)
 
 
+def _open_activity_start_after(
+    series: VocalEvidenceSeries, *, timing_fact_ms: int,
+) -> int | None:
+    """Locate current finite-vocal risk relative to one Presentation timing fact.
+
+    Observer runs remain process-continuous across Presentation boundaries so
+    persistent background/tails are not recreated as new sources.  A run that
+    already crossed the timing fact therefore becomes current risk only when
+    the observer first measured enough post-fact low-score support and later
+    rose again.  This is evidence of a new acoustic change, not a physical EOF;
+    the stricter observer-specific quiet requirement remains reserved for
+    closing finite-vocal runs.
+    """
+    runs = _activity_runs(series)
+    if not runs or not runs[-1].open:
+        return None
+    current = runs[-1]
+    fact = int(timing_fact_ms)
+    if current.last_positive_ms <= fact:
+        return None
+    if current.start_ms > fact:
+        return current.start_ms
+
+    threshold = float(series.active_score_threshold)
+    quiet_start: int | None = None
+    quiet_end: int | None = None
+    for sample in sorted(
+        series.samples,
+        key=lambda item: (int(item.at_ms), int(item.support_start_ms)),
+    ):
+        at_ms = int(sample.at_ms)
+        if at_ms <= fact or at_ms > current.last_positive_ms:
+            continue
+        if float(sample.score) >= threshold:
+            if (quiet_start is not None and quiet_end is not None
+                    and quiet_end - quiet_start >= MIN_QUIET_SUPPORT_MS):
+                return at_ms
+            quiet_start = quiet_end = None
+            continue
+
+        support_start = max(fact, int(sample.support_start_ms))
+        if at_ms <= support_start:
+            continue
+        if quiet_start is None or quiet_end is None or support_start > quiet_end:
+            quiet_start, quiet_end = support_start, at_ms
+        else:
+            quiet_end = max(quiet_end, at_ms)
+
+    return None
+
+
 def _stable_recurrence(recurrence: VocalRecurrenceEvidence | None) -> bool:
     if recurrence is None or recurrence.period_ms is None:
         return False
@@ -308,9 +359,13 @@ def evaluate_utterance_progress(
 
     open_starts: list[int] = []
     for series in vocal.series if vocal is not None else ():
-        runs = _activity_runs(series)
-        if runs and runs[-1].open and any(fact <= runs[-1].start_ms for fact in timing_facts):
-            open_starts.append(runs[-1].start_ms)
+        starts = [
+            start for fact in timing_facts
+            if (start := _open_activity_start_after(
+                series, timing_fact_ms=fact)) is not None
+        ]
+        if starts:
+            open_starts.append(min(starts))
 
     if not open_starts:
         return UtteranceProgress(
