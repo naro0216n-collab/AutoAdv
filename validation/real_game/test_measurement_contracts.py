@@ -470,7 +470,7 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
                     'committed_target_end': False, 'causal_lower_bound_ms': 900,
                     'input_candidates_ms': [920], 'target_attached_ms': 940,
                     'lexical_target_end_ms': None, 'queue_ms': 3.0, 'align_ms': 10.0,
-                    'path_margin': 2.5,
+                    'path_margin': 2.5, 'boundary_margin': float('-inf'),
                 })
             trace.append(row)
         trace.extend([
@@ -495,6 +495,14 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
              'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1500},
             {'event': 'hook_event', 'seq': 228, 'at_ns': 303,
              'hook_event': {
+                 'kind': 'diagnostic', 'host_generation': 'g', 'connection_generation': 1,
+                 'sequence': 10, 'received_ns': 99, 'process_id': 5,
+                 'source': None, 'text': '', 'detail': 'startup-only-diagnostic'},
+             'outcome': {'connection_transition': None, 'capture': {'changed': False},
+                         'token': None, 'flush_delay_ms': None,
+                         'note': 'LunaHost: startup-only-diagnostic'}},
+            {'event': 'hook_event', 'seq': 230, 'at_ns': 305,
+             'hook_event': {
                  'kind': 'output', 'host_generation': 'g', 'connection_generation': 1,
                  'sequence': 11, 'received_ns': 100, 'process_id': 5,
                  'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
@@ -502,7 +510,7 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
                  'text': raw, 'detail': ''},
              'outcome': {'connection_transition': None, 'capture': {'changed': False},
                          'token': None, 'flush_delay_ms': None, 'note': ''}},
-            {'event': 'hook_event', 'seq': 229, 'at_ns': 304,
+            {'event': 'hook_event', 'seq': 231, 'at_ns': 306,
              'hook_event': {
                  'kind': 'output', 'host_generation': 'g', 'connection_generation': 1,
                  'sequence': 12, 'received_ns': 101, 'process_id': 5,
@@ -523,9 +531,22 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
             # Keep partitioning under contract even when the product trace becomes compact.
             {'event': 'fixture_note', 'seq': 3, 'at_ns': 11, 'note': '証' * 65000},
         ]
-        (root / 'autoadv-fixture-evidence.jsonl').write_text(
-            ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in fixture),
-            encoding='utf-8')
+        fixture_path = root / 'autoadv-fixture-evidence.jsonl'
+        fixture_text = ''.join(
+            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in fixture)
+        fixture_path.write_text(fixture_text, encoding='utf-8')
+        shared_fixture, fixture_representation = issue_reporting._compact_fixture_evidence(fixture_text)
+        assert fixture_representation == issue_reporting.FIXTURE_ENCODING
+        fixture_table = json.loads(shared_fixture)
+        assert fixture_table['source_record_count'] == len(fixture)
+        reconstructed = [None] * len(fixture)
+        for table in fixture_table['tables']:
+            constants = table.get('constants', {})
+            for row in table['rows']:
+                values = dict(zip(table['columns'], row))
+                source_index = values.pop('source_index')
+                reconstructed[source_index] = {'event': table['event'], **constants, **values}
+        assert reconstructed == fixture
 
         report = {
             'schema': 'autoadv-offline-verification-v1', 'phase': 'accuracy',
@@ -535,6 +556,10 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         }
         (root / 'autoadv-accuracy.result.json').write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        (root / 'autoadv-alignment.result.json').write_text(
+            '{"unrelated_marker":true}', encoding='utf-8')
+        (root / 'autoadv-debug.jsonl').write_text(
+            '{"event":"unrelated_marker"}\n', encoding='utf-8')
         (root / 'validation.log').write_text(
             'runtime C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl diagnostics\n',
             encoding='utf-8')
@@ -558,7 +583,10 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
             issue_reporting.sanitize_public_issue(trace_text))
         assert representation == issue_reporting.TRACE_ENCODING
         assert len(compact_trace) < len(issue_reporting.sanitize_public_issue(trace_text)) // 4
-        compact_records = [json.loads(line) for line in compact_trace.splitlines()]
+        def strict_json(line):
+            return json.loads(line, parse_constant=lambda value: (_ for _ in ()).throw(
+                AssertionError(f'non-finite JSON token leaked: {value}')))
+        compact_records = [strict_json(line) for line in compact_trace.splitlines()]
         header = compact_records[0]
         assert header['issue_encoding'] == issue_reporting.TRACE_ENCODING
         assert header['source_record_count'] == len(trace)
@@ -567,8 +595,11 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
                              if record['event'] == 'hook_analysis')
         assert hook_analysis['selected'][0][5] == 11
         assert 'raw' not in hook_analysis['selected_columns']
-        assert [row[13] for row in hook_analysis['outputs']] == [
+        text_index = hook_analysis['output_columns'].index('text')
+        assert [row[text_index] for row in hook_analysis['outputs']] == [
             'case2\ncase3 <USERPROFILE>\\AutoAdv <REDACTED-TOKEN>', 'other']
+        assert hook_analysis['output_constants']['source_id'] == 1
+        assert hook_analysis['lifecycle'] == []
 
         presentation = next(record for record in compact_records
                             if record['event'] == 'presentation_analysis')
@@ -585,7 +616,7 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         assert len(presentation['alignment']['state_changes']) <= 2
         assert presentation['alignment']['queue_ms'][0] == 220
         assert presentation['alignment']['final'][0] == 1500
-        assert presentation['alignment']['final'][-2:] == [2.5, None]
+        assert presentation['alignment']['final'][-2:] == [2.5, '-Infinity']
         assert 'delta_from_seq' not in compact_trace
 
         # Polling cadence is not a transport dimension: adding many identical
@@ -615,7 +646,12 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
         assert 'autoadv-fixture-evidence.jsonl' in first_snapshot.body
         assert 'autoadv-accuracy.result.json' in first_snapshot.body
         assert 'validation-summary.json' in first_snapshot.body
+        assert issue_reporting.SUMMARY_ENCODING in first_snapshot.body
+        assert issue_reporting.FIXTURE_ENCODING in first_snapshot.body
+        assert f'{issue_reporting.ACCURACY_REPORT}#facts' in first_snapshot.body
         assert 'validation.log' not in first_snapshot.body
+        assert 'unrelated_marker' not in first_snapshot.body
+        assert 'startup-only-diagnostic' not in first_snapshot.body
         assert issue_reporting.TRACE_ENCODING in first_snapshot.body
         assert '"source_endpoint_ms"' in first_snapshot.body
         assert '1234.5' in first_snapshot.body
@@ -629,9 +665,9 @@ def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diag
             root, 'a' * 40, known_human_vocal_digests={human_digest})
         assert issue_reporting.HUMAN_VOCAL_REPORT in repeated_snapshot.body
         assert human_digest in repeated_snapshot.body
-        assert '"file_count": 1' in repeated_snapshot.body
+        assert '"file_count": 1' not in repeated_snapshot.body
         assert 'observer-full-detail' not in repeated_snapshot.body
-        assert 'digest+summary`' in repeated_snapshot.body
+        assert 'digest-reference`' in repeated_snapshot.body
 
         comments = _comments()
         # Previous runs used a plain manifest row with the digest; the new reporter

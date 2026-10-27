@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import subprocess
 import tempfile
@@ -39,7 +40,12 @@ DIAGNOSTIC_DIGEST_RE = re.compile(
     r"(?P<digest>[0-9a-f]{64})\s*-->"
 )
 HUMAN_VOCAL_REPORT = "autoadv-human-vocal.result.json"
+ACCURACY_TRACE = "autoadv-accuracy.jsonl"
+ACCURACY_REPORT = "autoadv-accuracy.result.json"
+FIXTURE_EVIDENCE_RE = re.compile(r"^autoadv-fixture-[A-Za-z0-9_-]+\.jsonl$")
 TRACE_ENCODING = "presentation-analysis-jsonl-v1"
+FIXTURE_ENCODING = "fixture-evidence-table-json-v1"
+SUMMARY_ENCODING = "validation-run-metadata-json-v1"
 
 
 def history_marker(slot: int) -> str:
@@ -89,6 +95,46 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return value
 
 
+def _json_safe(value: Any) -> Any:
+    """Return a strict-JSON representation without losing non-finite sign."""
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, dict):
+        return {str(name): _json_safe(item) for name, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _json_text(value: Any, *, indent: int | None = None, sort_keys: bool = False) -> str:
+    separators = (",", ":") if indent is None else None
+    return json.dumps(
+        _json_safe(value), ensure_ascii=False, allow_nan=False, indent=indent,
+        sort_keys=sort_keys, separators=separators,
+    )
+
+
+def _factor_table(
+    columns: list[str], rows: list[list[Any]], *, preserve: Iterable[str] = (),
+) -> tuple[list[str], dict[str, Any], list[list[Any]]]:
+    """Move repeated columns into one constant map while preserving every row."""
+    if len(rows) < 2:
+        return list(columns), {}, [list(row) for row in rows]
+    preserved = set(preserve)
+    constant_indexes = [
+        index for index, name in enumerate(columns)
+        if name not in preserved and all(row[index] == rows[0][index] for row in rows[1:])
+    ]
+    constants = {columns[index]: rows[0][index] for index in constant_indexes}
+    kept = [index for index in range(len(columns)) if index not in constant_indexes]
+    return (
+        [columns[index] for index in kept], constants,
+        [[row[index] for index in kept] for row in rows],
+    )
+
+
 @dataclass(frozen=True)
 class Snapshot:
     run: str
@@ -113,38 +159,28 @@ def _needs_validation_log(summary: dict[str, Any]) -> bool:
 
 
 def _evidence_paths(root: Path, summary: dict[str, Any]) -> tuple[Path, ...]:
-    """Return evidence that belongs on every analysis surface for this run.
+    """Return the explicit remote-analysis contract for one accuracy run.
 
-    The transcript is a runner/setup diagnostic and is shared only when the
-    launcher or a phase runner failed.  The isolated human-vocal report has its
-    own digest/summary policy and is handled separately.
+    The run directory is the durable evidence store; adding another local
+    ``autoadv-*`` diagnostic must not silently expand the Issue payload.  Only
+    the accuracy trace/report, fixture stimulus evidence, run summary and a
+    failure transcript belong on the normal remote surface.  The isolated
+    human-vocal report follows its digest policy separately.
     """
-    paths: list[Path] = []
-    for path in root.iterdir():
-        if not path.is_file():
-            continue
-        name = path.name
-        if name == "validation-summary.json":
-            paths.append(path)
-        elif name == "validation.log" and _needs_validation_log(summary):
-            paths.append(path)
-        elif name == HUMAN_VOCAL_REPORT:
-            continue
-        elif name.startswith("autoadv-") and (
-            name.endswith(".jsonl") or name.endswith(".result.json")
-        ):
-            paths.append(path)
-    priority = {
-        "validation-summary.json": 0,
-        "validation.log": 4,
-    }
-    return tuple(sorted(paths, key=lambda path: (
-        priority.get(path.name, 2 if path.name.endswith(".jsonl") else 3),
-        path.name,
-    )))
+    paths = [root / "validation-summary.json", root / ACCURACY_TRACE]
+    paths.extend(sorted(
+        path for path in root.iterdir()
+        if path.is_file() and FIXTURE_EVIDENCE_RE.fullmatch(path.name)
+    ))
+    paths.append(root / ACCURACY_REPORT)
+    if _needs_validation_log(summary):
+        paths.append(root / "validation.log")
+    return tuple(path for path in paths if path.is_file())
 
 
-def _evidence_language(path: Path) -> str:
+def _evidence_language(path: Path, representation: str = "full") -> str:
+    if representation == FIXTURE_ENCODING:
+        return "json"
     if path.name.endswith(".jsonl"):
         return "jsonl"
     if path.name.endswith(".json"):
@@ -152,14 +188,14 @@ def _evidence_language(path: Path) -> str:
     return "text"
 
 
-
-
 def _markdown_fence(content: str) -> str:
     longest = max((len(match.group(0)) for match in re.finditer(r"`+", content)), default=0)
     return "`" * max(3, longest + 1)
 
 
-def _compact_product_trace(content: str) -> tuple[str, str]:
+def _compact_product_trace(
+    content: str, *, include_hook_diagnostics: bool = False,
+) -> tuple[str, str]:
     """Keep causal events, summarize only cadence-level acoustic telemetry.
 
     The local JSONL is the complete trace.  The Issue copy keeps all low-rate
@@ -290,10 +326,17 @@ def _compact_product_trace(content: str) -> tuple[str, str]:
             if hook.get("kind") == "output":
                 hook_output_rows.append([*common, hook.get("text")])
             else:
-                hook_lifecycle_rows.append([
-                    *common, hook.get("kind"), hook.get("process_id"),
-                    hook.get("text"), hook.get("detail"), outcome.get("note"),
-                ])
+                semantic_change = bool(
+                    outcome.get("connection_transition") or capture.get("changed")
+                    or capture.get("new_ambiguity") or capture.get("active_source_removed")
+                    or capture.get("monitor_started") or token.get("session") is not None
+                    or token.get("line") is not None or outcome.get("flush_delay_ms") is not None
+                )
+                if hook.get("kind") != "diagnostic" or include_hook_diagnostics or semantic_change:
+                    hook_lifecycle_rows.append([
+                        *common, hook.get("kind"), hook.get("process_id"),
+                        hook.get("text"), hook.get("detail"), outcome.get("note"),
+                    ])
             continue
         if key[0] is not None and key[1] is not None:
             presentation_events.setdefault(key, []).append(presentation_event(record))
@@ -301,21 +344,34 @@ def _compact_product_trace(content: str) -> tuple[str, str]:
             output.append(dict(record))
 
     if hook_output_rows or hook_lifecycle_rows or selected_hook_rows:
-        output.append({
+        common_columns = [
+            "seq", "at_ns", "source_id", "hook_sequence", "received_ns",
+            "connection_transition", "capture_changed", "new_ambiguity",
+            "active_source_removed", "monitor_started", "token_session",
+            "token_line", "flush_delay_ms",
+        ]
+        tables = {
+            "output": (common_columns + ["text"], hook_output_rows),
+            "lifecycle": (common_columns + ["kind", "pid", "text", "detail", "note"],
+                          hook_lifecycle_rows),
+            "selected": (["seq", "at_ns", "session", "generation", "connection",
+                          "hook_sequence", "received_ns", "pid", "source"], selected_hook_rows),
+        }
+        hook_analysis: dict[str, Any] = {
             "event": "hook_analysis",
             "source_columns": ["id", "generation", "connection", "pid", "address",
                                "context", "context2", "hook_code", "hook_name"],
-            "common_columns": ["seq", "at_ns", "source_id", "hook_sequence", "received_ns",
-                               "connection_transition", "capture_changed", "new_ambiguity",
-                               "active_source_removed", "monitor_started", "token_session",
-                               "token_line", "flush_delay_ms"],
-            "output_suffix": ["text"],
-            "lifecycle_suffix": ["kind", "pid", "text", "detail", "note"],
-            "selected_columns": ["seq", "at_ns", "session", "generation", "connection",
-                                 "hook_sequence", "received_ns", "pid", "source"],
-            "sources": hook_source_rows, "outputs": hook_output_rows,
-            "lifecycle": hook_lifecycle_rows, "selected": selected_hook_rows,
-        })
+            "sources": hook_source_rows,
+        }
+        for name, (columns, rows) in tables.items():
+            factored_columns, constants, factored_rows = _factor_table(
+                columns, rows, preserve=("seq", "at_ns"),
+            )
+            hook_analysis[f"{name}_columns"] = factored_columns
+            if constants:
+                hook_analysis[f"{name}_constants"] = constants
+            hook_analysis[name if name != "output" else "outputs"] = factored_rows
+        output.append(hook_analysis)
 
     def stats(rows: list[dict[str, Any]], name: str) -> list[Any] | None:
         values = sorted(float(row[name]) for row in rows
@@ -430,32 +486,84 @@ def _compact_product_trace(content: str) -> tuple[str, str]:
             } if alignment_rows else None,
         })
 
-    return "".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                   for item in output), TRACE_ENCODING
+    return "".join(_json_text(item) + "\n" for item in output), TRACE_ENCODING
 
-def _shared_representation(path: Path, content: str) -> tuple[str, str]:
-    if path.name.endswith(".jsonl") and "fixture-evidence" not in path.name:
-        return _compact_product_trace(content)
+
+def _compact_fixture_evidence(content: str) -> tuple[str, str]:
+    try:
+        records = [json.loads(line) for line in content.splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        return content, "full"
+    if not records or not all(isinstance(record, dict) and isinstance(record.get("event"), str)
+                              for record in records):
+        return content, "full"
+
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    field_order: dict[str, list[str]] = {}
+    for index, record in enumerate(records):
+        event = str(record["event"])
+        fields = [name for name in record if name != "event"]
+        if event not in field_order:
+            field_order[event] = fields
+        elif set(fields) != set(field_order[event]):
+            return content, "full"
+        grouped.setdefault(event, []).append((index, record))
+
+    tables: list[dict[str, Any]] = []
+    for event, entries in grouped.items():
+        columns = ["source_index", *field_order[event]]
+        rows = [[index, *[record.get(name) for name in field_order[event]]]
+                for index, record in entries]
+        columns, constants, rows = _factor_table(columns, rows, preserve=("source_index",))
+        table: dict[str, Any] = {"event": event, "columns": columns, "rows": rows}
+        if constants:
+            table["constants"] = constants
+        tables.append(table)
+    value = {
+        "schema": FIXTURE_ENCODING,
+        "source_record_count": len(records),
+        "tables": tables,
+    }
+    return _json_text(value) + "\n", FIXTURE_ENCODING
+
+
+def _shared_representation(
+    path: Path,
+    content: str,
+    *,
+    include_hook_diagnostics: bool = False,
+    report_facts_available: bool = False,
+) -> tuple[str, str]:
+    if path.name == ACCURACY_TRACE:
+        return _compact_product_trace(content, include_hook_diagnostics=include_hook_diagnostics)
+    if FIXTURE_EVIDENCE_RE.fullmatch(path.name):
+        return _compact_fixture_evidence(content)
     if path.name.endswith(".json"):
         try:
             value = json.loads(content)
-            case_rows = value.get("case_results") if isinstance(value, dict) else None
-            if (isinstance(value, dict)
-                    and value.get("schema") == "autoadv-offline-verification-v1"
-                    and isinstance(case_rows, list)
-                    and all(isinstance(row, dict) for row in case_rows)):
-                columns = list(case_rows[0]) if case_rows else []
-                if all(list(row) == columns for row in case_rows):
-                    value = dict(value)
-                    value["case_result_columns"] = columns
-                    value["case_results"] = [[row[name] for name in columns] for row in case_rows]
-                    representation = "verifier-table-json"
-                else:
-                    representation = "compact-json"
-            else:
-                representation = "compact-json"
-            return (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
-                    representation)
+            representation = "compact-json"
+            if (path.name == "validation-summary.json" and isinstance(value, dict)
+                    and report_facts_available and not include_hook_diagnostics):
+                value = dict(value)
+                phases = []
+                for phase in value.get("phases", ()):
+                    phase = dict(phase) if isinstance(phase, dict) else phase
+                    if isinstance(phase, dict) and phase.get("phase") == "accuracy":
+                        phase.pop("facts", None)
+                        phase["facts_ref"] = f"{ACCURACY_REPORT}#facts"
+                    phases.append(phase)
+                value["phases"] = phases
+                representation = SUMMARY_ENCODING
+            elif isinstance(value, dict) and value.get("schema") == "autoadv-offline-verification-v1":
+                case_rows = value.get("case_results")
+                if (isinstance(case_rows, list) and all(isinstance(row, dict) for row in case_rows)):
+                    columns = list(case_rows[0]) if case_rows else []
+                    if all(list(row) == columns for row in case_rows):
+                        value = dict(value)
+                        value["case_result_columns"] = columns
+                        value["case_results"] = [[row[name] for name in columns] for row in case_rows]
+                        representation = "verifier-table-json"
+            return _json_text(value) + "\n", representation
         except json.JSONDecodeError:
             pass
     return content, "full"
@@ -568,7 +676,12 @@ def _evidence_blocks(
         raw = path.read_text(encoding="utf-8-sig", errors="replace")
         content = sanitize_public_issue(raw)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        shared, representation = _shared_representation(path, content)
+        shared, representation = _shared_representation(
+            path,
+            content,
+            include_hook_diagnostics=_needs_validation_log(summary),
+            report_facts_available=(root / ACCURACY_REPORT).is_file(),
+        )
         manifest.append(
             f"| `{path.name}` | {len(content)} | {len(shared)} | `{digest}` | `{representation}` |"
         )
@@ -581,7 +694,7 @@ def _evidence_blocks(
             fence = _markdown_fence(chunk)
             blocks.append("\n".join((
                 f"<details open><summary>{label}</summary>", "",
-                f"{fence}{_evidence_language(path)}",
+                f"{fence}{_evidence_language(path, representation)}",
                 chunk,
                 fence, "</details>",
             )))
@@ -598,22 +711,22 @@ def _evidence_blocks(
         if not isinstance(value, dict):
             value = {"error": "diagnostic root is not an object"}
         diagnostic_summary = _human_vocal_summary(value)
-        summary_text = json.dumps(
-            diagnostic_summary, ensure_ascii=False, indent=2, sort_keys=True,
-        ) + "\n"
+        summary_text = _json_text(diagnostic_summary, indent=2, sort_keys=True) + "\n"
         known = known_human_vocal_digests or set()
-        include_detail = digest not in known or bool(diagnostic_summary["collection_anomaly"])
-        representation = "digest+summary+detail" if include_detail else "digest+summary"
+        anomaly = bool(diagnostic_summary["collection_anomaly"])
+        include_payload = digest not in known or anomaly
+        representation = "digest+summary+detail" if include_payload else "digest-reference"
+        shared_chars = len(summary_text) + len(content) if include_payload else 0
         manifest.extend((
             f"<!-- autoadv-validation-diagnostic:{HUMAN_VOCAL_REPORT}:{digest} -->",
-            f"| `{HUMAN_VOCAL_REPORT}` | {len(content)} | {len(summary_text) if not include_detail else len(summary_text) + len(content)} | `{digest}` | `{representation}` |",
+            f"| `{HUMAN_VOCAL_REPORT}` | {len(content)} | {shared_chars} | `{digest}` | `{representation}` |",
         ))
-        fence = _markdown_fence(summary_text)
-        blocks.append("\n".join((
-            f"<details open><summary>{HUMAN_VOCAL_REPORT} · summary</summary>", "",
-            f"{fence}json", summary_text, fence, "</details>",
-        )))
-        if include_detail:
+        if include_payload:
+            fence = _markdown_fence(summary_text)
+            blocks.append("\n".join((
+                f"<details open><summary>{HUMAN_VOCAL_REPORT} · summary</summary>", "",
+                f"{fence}json", summary_text, fence, "</details>",
+            )))
             chunks = _split_text(content, chunk_char_limit, chunk_byte_limit)
             for index, chunk in enumerate(chunks, 1):
                 label = (f"{HUMAN_VOCAL_REPORT} · detail" if len(chunks) == 1 else
