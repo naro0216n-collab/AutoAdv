@@ -433,6 +433,17 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     )
     assert released.state == UtteranceProgressState.UNKNOWN
 
+    # Without a located text target, observer provenance does not imply multiple
+    # independent vocal sources. Stable current recurrence from one measurement
+    # can release the generic finite-vocal risk; requiring every observer to
+    # rediscover the same period would turn observer disagreement into a source
+    # ownership rule and indefinitely hold genuine loops.
+    generic_released, _ = _progress(
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable, 'nonlexical': unstable},
+    )
+    assert generic_released.state == UtteranceProgressState.UNKNOWN
+
     # Recurrence is an existence claim over measured period candidates. Generic
     # self-similarity at one lag cannot hide a weaker but period-specific lag.
     self_similar_not_periodic = VocalRecurrenceEvidence(
@@ -490,7 +501,7 @@ def test_unassociated_lexical_fragments_do_not_change_temporal_vocal_evidence():
     assert unbounded.state == UtteranceProgressState.UNKNOWN
 
 
-def test_short_score_valleys_do_not_become_endpoints_but_measured_quiet_can_close_a_run():
+def test_vocal_disappearance_uses_common_observation_support_and_short_valleys_do_not_end_risk():
     samples = (
         (1120, .9, 1000),
         (1240, .1, 1120),
@@ -518,6 +529,31 @@ def test_short_score_valleys_do_not_become_endpoints_but_measured_quiet_can_clos
     )))
     progress, _ = _progress(vocal=reopened, end=1800, lower=1000)
     assert progress.state == UtteranceProgressState.ACTIVE
+
+    # Different observers measure the same process mix with different receptive
+    # fields. A narrow speech observer cannot declare disappearance after a short
+    # local valley while a wider current human-vocal measurement establishes a
+    # longer factual support horizon.
+    narrow_quiet = _vocal_evidence(
+        ('speech', (
+            (1120, .9, 1104),
+            (1320, .1, 1120), (1520, .1, 1320), (1720, .1, 1520),
+        )),
+        ('nonlexical', ((1720, .1, 760),)),
+    )
+    progress, _ = _progress(vocal=narrow_quiet, end=1720, lower=1000)
+    assert progress.state == UtteranceProgressState.ACTIVE
+
+    enough_common_quiet = _vocal_evidence(
+        ('speech', (
+            (1120, .9, 1104),
+            (1320, .1, 1120), (1520, .1, 1320), (1720, .1, 1520),
+            (1920, .1, 1720), (2120, .1, 1920), (2320, .1, 2120),
+        )),
+        ('nonlexical', ((1720, .1, 760), (2320, .1, 1360))),
+    )
+    progress, _ = _progress(vocal=enough_common_quiet, end=2320, lower=1000)
+    assert progress.state == UtteranceProgressState.UNKNOWN
 
 
 class _FakeOnnxSession:
