@@ -130,7 +130,7 @@ def _stage_japanese_font(voice_dir: Path) -> None:
     sdk = os.environ.get("RENPY_SDK")
     if not sdk:
         return
-    source = Path(sdk) / "launcher" / "game" / "fonts" / "SourceHanSansLite.ttf"
+    source = Path(sdk) / "sdk-fonts" / "SourceHanSansLite.ttf"
     if not source.is_file():
         raise FileNotFoundError(f"Ren'Py CJK font is missing: {source}")
     target = voice_dir.parent.parent / "fonts" / source.name
