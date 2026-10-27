@@ -262,6 +262,22 @@ def _stable_recurrence(recurrence: VocalRecurrenceEvidence | None) -> bool:
     )
 
 
+def _representative_recurrence(
+    candidates: tuple[VocalRecurrenceEvidence, ...],
+) -> VocalRecurrenceEvidence | None:
+    if not candidates:
+        return None
+    stable = tuple(candidate for candidate in candidates if _stable_recurrence(candidate))
+    pool = stable or candidates
+    return max(
+        pool,
+        key=lambda item: min(
+            item.strength, item.period_stability,
+            item.recent_strength, item.level_consistency,
+        ),
+    )
+
+
 def evaluate_utterance_progress(
     *,
     capture_end_ms: int | None,
@@ -269,7 +285,9 @@ def evaluate_utterance_progress(
     vocal: HumanVocalEvidence | None,
     causal_lower_bound_ms: int | None = None,
     input_candidates_ms: tuple[int, ...] = (),
-    recurrence_lookup: Callable[[str, int, int], VocalRecurrenceEvidence | None] | None = None,
+    recurrence_lookup: Callable[
+        [str, int, int], tuple[VocalRecurrenceEvidence, ...]
+    ] | None = None,
 ) -> tuple[UtteranceProgress, VocalRecurrenceEvidence | None]:
     """Combine factual measurements once into cut-risk / end / unknown.
 
@@ -310,17 +328,28 @@ def evaluate_utterance_progress(
 
     measured_recurrence: VocalRecurrenceEvidence | None = None
 
-    # Every observer keeps its own score scale and recurrence. A repeated
-    # structure from one observer can release only that observer's open risk.
-    for observer, run in observed:
-        if not run.open:
-            continue
-        recurrence = (
-            recurrence_lookup(observer, int(run.start_ms), capture_end)
-            if recurrence_lookup is not None else None
-        )
-        measured_recurrence = recurrence
-        if not _stable_recurrence(recurrence):
+    open_runs = tuple((observer, run) for observer, run in observed if run.open)
+    if open_runs:
+        # Observer series are independent measurements of the same process mix,
+        # not independently owned vocal sources.  Recurrence is therefore one
+        # additional property of the currently open human-vocal risk.  Search
+        # only observers that actually support that risk, while retaining their
+        # score provenance inside the measurement layer.
+        recurrence_start = min(int(run.start_ms) for _observer, run in open_runs)
+        if target_complete and lexical is not None and lexical.target_end_ms is not None:
+            # For known text, finite repetitions inside the utterance must not
+            # release protection.  Only repetition that remains after the
+            # committed textual acoustic endpoint can explain a continuing tail.
+            recurrence_start = max(recurrence_start, int(lexical.target_end_ms))
+        candidates: tuple[VocalRecurrenceEvidence, ...] = ()
+        if recurrence_lookup is not None:
+            collected: list[VocalRecurrenceEvidence] = []
+            for observer in sorted({observer for observer, _run in open_runs}):
+                collected.extend(recurrence_lookup(
+                    observer, recurrence_start, capture_end))
+            candidates = tuple(collected)
+        measured_recurrence = _representative_recurrence(candidates)
+        if not any(_stable_recurrence(candidate) for candidate in candidates):
             return UtteranceProgress(
                 state=UtteranceProgressState.ACTIVE,
                 evidence_at_ms=capture_end), measured_recurrence

@@ -253,8 +253,13 @@ def _progress(*, lexical=None, vocal=None, end=2000, lower=1000, inputs=(), recu
         if recurrence_starts is not None:
             recurrence_starts.append((observer, start))
         if isinstance(recurrence, dict):
-            return recurrence.get(observer)
-        return recurrence
+            item = recurrence.get(observer)
+            return () if item is None else (item,)
+        if recurrence is None:
+            return ()
+        if isinstance(recurrence, tuple):
+            return recurrence
+        return (recurrence,)
     result, measured_recurrence = evaluate_utterance_progress(
         capture_end_ms=end,
         lexical=lexical,
@@ -353,7 +358,7 @@ def test_audio_progress_uses_temporal_evidence_without_assigning_human_vocal_own
     assert progress.state == UtteranceProgressState.ACTIVE
 
 
-def test_vocal_risk_uses_observed_time_changes_and_observer_local_recurrence():
+def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     post_input_voice = _vocal_evidence(('nonlexical', (
         (1120, .9, 1080), (1240, .9, 1200), (1380, .9, 1340),
     )))
@@ -398,16 +403,43 @@ def test_vocal_risk_uses_observed_time_changes_and_observer_local_recurrence():
     recurrence_starts = []
     progress, _ = _progress(
         vocal=two_open, end=2500, lower=1000,
-        recurrence={'speech': stable, 'nonlexical': unstable},
+        recurrence={'speech': unstable, 'nonlexical': unstable},
         recurrence_starts=recurrence_starts,
     )
     assert progress.state == UtteranceProgressState.ACTIVE
-    assert recurrence_starts == [('speech', 1120), ('nonlexical', 1180)]
+    assert recurrence_starts == [('nonlexical', 1120), ('speech', 1120)]
     released, _ = _progress(
         vocal=two_open, end=2500, lower=1000,
-        recurrence={'speech': stable, 'nonlexical': stable},
+        recurrence={'speech': stable, 'nonlexical': unstable},
     )
     assert released.state == UtteranceProgressState.UNKNOWN
+
+    # Recurrence is an existence claim over measured period candidates.  A
+    # different lag with a better scalar minimum cannot hide a candidate that
+    # satisfies every product recurrence dimension.
+    higher_min_but_invalid = VocalRecurrenceEvidence(
+        strength=.77, period_ms=700, period_stability=.9,
+        recent_strength=.9, level_consistency=.9)
+    valid_low_margin = VocalRecurrenceEvidence(
+        strength=.79, period_ms=1800, period_stability=.61,
+        recent_strength=.73, level_consistency=.56)
+    released, measured = _progress(
+        vocal=two_open, end=2500, lower=1000,
+        recurrence=(higher_min_but_invalid, valid_low_margin),
+    )
+    assert released.state == UtteranceProgressState.UNKNOWN
+    assert measured == valid_low_margin
+
+    # A committed known-text endpoint shifts recurrence evaluation to the tail.
+    # Repetition inside the finite utterance cannot release protection early.
+    recurrence_starts = []
+    _progress(
+        lexical=_lexical_evidence(target_end=1320),
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable},
+        recurrence_starts=recurrence_starts,
+    )
+    assert recurrence_starts == [('nonlexical', 1320), ('speech', 1320)]
 
     # Advancing only wall-clock evaluation time cannot close a measured open run.
     for frontier in (1400, 2400, 5200):

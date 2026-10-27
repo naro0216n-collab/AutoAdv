@@ -520,16 +520,12 @@ class NativeAudio:
             vocal = self.features.summarize_vocal(
                 start_ms=int(feature_start), end_ms=int(item.boundary_ms))
 
-        recurrence = None
-
         def recurrence_lookup(observer: str, start_ms: int, end_ms: int):
-            nonlocal recurrence
-            recurrence = self.features.recurrence(
-                start_ms=min(int(start_ms), int(end_ms)),
+            return self.features.recurrences(
+                start_ms=int(start_ms),
                 end_ms=int(end_ms),
                 observer=observer,
             )
-            return recurrence
 
         progress, recurrence = evaluate_utterance_progress(
             capture_end_ms=item.boundary_ms,

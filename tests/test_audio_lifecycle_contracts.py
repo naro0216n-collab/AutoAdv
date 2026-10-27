@@ -636,12 +636,12 @@ def test_capture_callback_is_not_blocked_by_acoustic_analysis():
     token = Token(11, 1)
     recurrence_started = Event()
     recurrence_release = Event()
-    original_recurrence = native.features.recurrence
+    original_recurrences = native.features.recurrences
 
-    def blocking_recurrence(*, start_ms, end_ms, observer=None):
+    def blocking_recurrences(*, start_ms, end_ms, observer=None):
         recurrence_started.set()
         recurrence_release.wait(2)
-        return original_recurrence(
+        return original_recurrences(
             start_ms=start_ms, end_ms=end_ms, observer=observer)
 
     try:
@@ -653,7 +653,7 @@ def test_capture_callback_is_not_blocked_by_acoustic_analysis():
         wait_until(lambda: bool(observations) and observations[-1][2].lexical is not None
                    and observations[-1][2].lexical.committed_target_end)
 
-        native.features.recurrence = blocking_recurrence
+        native.features.recurrences = blocking_recurrences
         tail = stereo_chunk(3200, 1200, value=.05)
         native.history.push(tail, target_pid=42)
         native.feed(tail)
@@ -838,3 +838,56 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     later = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
     assert later.strength < current.strength
     assert later.recent_strength < current.recent_strength
+
+    # Human-vocal event observers expose class structure that a scalar maximum
+    # cannot retain.  A loop can keep the same peak activity level while its
+    # vocal class pattern repeats; recurrence must use that preserved evidence
+    # instead of treating the flat maximum as an indefinitely finite vocal.
+    component_history = AcousticObservationHistory()
+    component_pattern = (
+        (.9, .1, .0),
+        (.1, .9, .0),
+        (.0, .1, .9),
+        (.1, .0, .9),
+    )
+    component_frames = []
+    at = 1000
+    for _cycle in range(6):
+        for components in component_pattern:
+            component_frames.append(VocalActivityFrame(
+                at_ms=at,
+                score=max(components),
+                support_start_ms=at - 100,
+                observer='nonlexical',
+                component_scores=components,
+            ))
+            at += 100
+    component_history.add_vocal(tuple(component_frames))
+    structured = component_history.recurrence(
+        start_ms=1000, end_ms=at - 100, observer='nonlexical')
+    assert structured.period_ms == 400
+    assert structured.strength > .95
+
+    changing_components = (
+        (.9, .1, .0), (.1, .9, .0), (.0, .2, .9), (.8, .3, .0),
+        (.2, .9, .7), (.9, .0, .4), (.3, .8, .9), (.7, .9, .1),
+        (.9, .2, .8), (.4, .9, .3), (.8, .1, .9), (.9, .6, .2),
+        (.5, .9, .1), (.9, .3, .7), (.2, .7, .9), (.8, .9, .4),
+        (.9, .4, .6), (.3, .9, .8), (.7, .2, .9), (.9, .8, .1),
+    )
+    changed_history = AcousticObservationHistory()
+    changed_frames = []
+    at = 1000
+    for components in changing_components:
+        changed_frames.append(VocalActivityFrame(
+            at_ms=at,
+            score=max(components),
+            support_start_ms=at - 100,
+            observer='nonlexical',
+            component_scores=components,
+        ))
+        at += 100
+    changed_history.add_vocal(tuple(changed_frames))
+    changed_structure = changed_history.recurrence(
+        start_ms=1000, end_ms=at - 100, observer='nonlexical')
+    assert changed_structure.strength < structured.strength

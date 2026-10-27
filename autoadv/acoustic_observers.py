@@ -295,36 +295,57 @@ class AcousticObservationHistory:
         return HumanVocalEvidence(series=series)
 
     @classmethod
-    def _series_recurrence(
+    def _series_recurrence_candidates(
         cls, frames: list[VocalActivityFrame], *, threshold: float,
-    ) -> VocalRecurrenceEvidence | None:
+    ) -> tuple[VocalRecurrenceEvidence, ...]:
         if len(frames) < cls.MIN_RECURRENCE_CYCLES * 2:
-            return None
+            return ()
         times = np.asarray([frame.at_ms for frame in frames], dtype=np.float64)
         gaps = np.diff(times)
         gaps = gaps[gaps > 0]
         if not gaps.size:
-            return None
+            return ()
         cadence = float(np.median(gaps))
         if not np.isfinite(cadence) or cadence <= 0:
-            return None
+            return ()
 
-        # Resample only this observer's score series to its own median cadence.
+        # Resample only this observer's measurements to its own median cadence.
         # Different observers are never averaged onto one probability scale.
+        # When the observer exposes a class-score vector, preserve that structure
+        # for recurrence instead of first collapsing it to the maximum class.
+        # The scalar activity score remains the observer-local gate for whether
+        # the interval contains human-vocal evidence at all.
         grid = np.arange(times[0], times[-1] + cadence * 0.5, cadence, dtype=np.float64)
         if grid.size < cls.MIN_RECURRENCE_CYCLES * 2:
-            return None
-        values = np.interp(grid, times, np.asarray([frame.score for frame in frames], dtype=np.float64))
+            return ()
+        activity = np.interp(
+            grid, times, np.asarray([frame.score for frame in frames], dtype=np.float64))
+        activity = np.clip(activity, 0.0, 1.0)
+        if np.count_nonzero(activity >= threshold) < cls.MIN_RECURRENCE_CYCLES:
+            return ()
+
+        component_size = len(frames[0].component_scores) if frames else 0
+        use_components = bool(
+            component_size
+            and all(len(frame.component_scores) == component_size for frame in frames)
+        )
+        if use_components:
+            raw_features = np.asarray(
+                [frame.component_scores for frame in frames], dtype=np.float64)
+            values = np.column_stack([
+                np.interp(grid, times, raw_features[:, index])
+                for index in range(component_size)
+            ])
+        else:
+            values = activity[:, None]
         values = np.clip(values, 0.0, 1.0)
-        if np.count_nonzero(values >= threshold) < cls.MIN_RECURRENCE_CYCLES:
-            return None
 
         minimum_lag = max(1, int(round(cls.MIN_RECURRENCE_LAG_MS / cadence)))
         maximum_lag = int(grid.size // cls.MIN_RECURRENCE_CYCLES)
         if maximum_lag < minimum_lag:
-            return None
+            return ()
 
-        best: tuple[float, VocalRecurrenceEvidence] | None = None
+        candidates: list[VocalRecurrenceEvidence] = []
         for lag in range(minimum_lag, maximum_lag + 1):
             # Recurrence describes structure that is still present now, not how
             # well the entire lifetime of an activity run fits one period.  Use
@@ -334,23 +355,28 @@ class AcousticObservationHistory:
             # therefore cannot accumulate indefinitely and erase an otherwise
             # continuing recurrent component.
             local_count = min(
-                values.size,
+                values.shape[0],
                 lag * (cls.MIN_RECURRENCE_CYCLES + 1),
             )
             local = values[-local_count:]
             left = local[:-lag]
             right = local[lag:]
-            if left.size < lag * (cls.MIN_RECURRENCE_CYCLES - 1):
+            if left.shape[0] < lag * (cls.MIN_RECURRENCE_CYCLES - 1):
                 continue
-            left_centered = left - left.mean()
-            right_centered = right - right.mean()
+            # Remove each feature's own temporal mean.  A steady vocal/class
+            # profile is persistence, not recurrence, even when different class
+            # dimensions have different absolute levels.
+            left_centered = left - left.mean(axis=0, keepdims=True)
+            right_centered = right - right.mean(axis=0, keepdims=True)
             denom = float(np.linalg.norm(left_centered) * np.linalg.norm(right_centered))
             if denom <= 1e-8:
                 # A sustained flat vocal score is persistence, not evidence of
                 # recurrence.  Releasing it as a loop would cut long finite cries.
                 continue
-            correlation = max(0.0, min(1.0, float(left_centered @ right_centered / denom)))
-            pair_similarity = np.clip(1.0 - np.abs(left - right), 0.0, 1.0)
+            correlation = max(0.0, min(1.0, float(
+                np.vdot(left_centered, right_centered) / denom)))
+            pair_similarity = np.clip(
+                1.0 - np.mean(np.abs(left - right), axis=1), 0.0, 1.0)
             level_consistency = float(pair_similarity.mean())
             recent_count = min(lag, pair_similarity.size)
             recent_strength = float(pair_similarity[-recent_count:].mean())
@@ -371,10 +397,32 @@ class AcousticObservationHistory:
                 recent_strength=recent_strength,
                 level_consistency=level_consistency,
             )
-            rank = min(correlation, recent_strength, level_consistency, period_stability)
-            if best is None or rank > best[0]:
-                best = (rank, evidence)
-        return best[1] if best is not None else None
+            candidates.append(evidence)
+
+        # Progression owns the acceptance contract.  Keep every measured period
+        # candidate so the observer layer never discards a valid recurrence
+        # merely because another lag ranks better under a different reduction.
+        return tuple(candidates)
+
+    def recurrences(
+        self, *, start_ms: int, end_ms: int, observer: str | None = None,
+    ) -> tuple[VocalRecurrenceEvidence, ...]:
+        """Return current recurrence candidates without crossing observer provenance."""
+        selected = [
+            frame for frame in self._vocal
+            if start_ms <= frame.at_ms <= end_ms
+            and int(frame.support_start_ms if frame.support_start_ms is not None else frame.at_ms)
+                >= start_ms
+            and (observer is None or frame.observer == observer)
+        ]
+        by_observer: dict[str, list[VocalActivityFrame]] = {}
+        for frame in selected:
+            by_observer.setdefault(frame.observer, []).append(frame)
+        candidates: list[VocalRecurrenceEvidence] = []
+        for observer, frames in by_observer.items():
+            candidates.extend(self._series_recurrence_candidates(
+                frames, threshold=self._threshold(observer)))
+        return tuple(candidates)
 
     def recurrence(
         self, *, start_ms: int, end_ms: int, observer: str | None = None,
@@ -386,20 +434,11 @@ class AcousticObservationHistory:
         but product progression requests recurrence for the open observer risk it
         is evaluating.
         """
-        selected = [
-            frame for frame in self._vocal
-            if start_ms <= frame.at_ms <= end_ms
-            and (observer is None or frame.observer == observer)
-        ]
-        by_observer: dict[str, list[VocalActivityFrame]] = {}
-        for frame in selected:
-            by_observer.setdefault(frame.observer, []).append(frame)
-        candidates = [
-            candidate
-            for observer, frames in by_observer.items()
-            if (candidate := self._series_recurrence(
-                frames, threshold=self._threshold(observer))) is not None
-        ]
+        candidates = self.recurrences(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            observer=observer,
+        )
         if not candidates:
             return VocalRecurrenceEvidence()
         return max(

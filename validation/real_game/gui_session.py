@@ -128,15 +128,15 @@ class SessionDriver:
 
     @staticmethod
     def _send_validation_game_input(runtime):
-        """Inject one ordinary external keyboard stimulus through Windows.
+        """Inject one ordinary external keyboard stimulus into the active game.
 
         This does not call the product's targeted PostMessage adapter or inject
         Controller state. WindowsGameInputObserver must observe the low-level
-        key event when Windows routes it to the selected game, while the fixture
-        independently records whether the game actually advanced. Validation
-        never forces foreground activation to manufacture that observation.
+        key event while the selected game is the Windows foreground target, and
+        the fixture independently records whether the game actually advanced.
         """
         import ctypes
+        from ctypes import wintypes
 
         if runtime.target is None or runtime.profile is None:
             raise RuntimeError('validation game input has no bound game target or key')
@@ -144,23 +144,84 @@ class SessionDriver:
         if not 1 <= virtual_key <= 254:
             raise RuntimeError('validation game input key is invalid')
         user32 = ctypes.windll.user32
+
+        user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = (
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.SetForegroundWindow(wintypes.HWND(int(runtime.target.hwnd)))
+        # Foreground activation is part of the authored external stimulus.  Do
+        # not fall back to targeted messages: that would bypass the product's
+        # low-level keyboard observation path we are validating.
+        time.sleep(0.05)
+        foreground = user32.GetForegroundWindow()
+        foreground_pid = wintypes.DWORD()
+        if (not foreground
+                or not user32.GetWindowThreadProcessId(foreground, ctypes.byref(foreground_pid))
+                or int(foreground_pid.value) != int(runtime.target.pid)):
+            raise RuntimeError('validation game could not become the foreground input target')
+
         user32.MapVirtualKeyW.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
         user32.MapVirtualKeyW.restype = ctypes.c_uint32
         scan = int(user32.MapVirtualKeyW(virtual_key, 0))
         if not 1 <= scan <= 0xFF:
             raise RuntimeError('validation game input key has no Windows scancode')
-        ULONG_PTR = ctypes.c_uint64 if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_uint32
-        user32.keybd_event.argtypes = (ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_uint32, ULONG_PTR)
-        user32.keybd_event.restype = None
-        extended = 0x0001 if virtual_key in {
+
+        ULONG_PTR = ctypes.c_size_t
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ('dx', wintypes.LONG),
+                ('dy', wintypes.LONG),
+                ('mouseData', wintypes.DWORD),
+                ('dwFlags', wintypes.DWORD),
+                ('time', wintypes.DWORD),
+                ('dwExtraInfo', ULONG_PTR),
+            ]
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ('wVk', wintypes.WORD),
+                ('wScan', wintypes.WORD),
+                ('dwFlags', wintypes.DWORD),
+                ('time', wintypes.DWORD),
+                ('dwExtraInfo', ULONG_PTR),
+            ]
+
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [
+                ('uMsg', wintypes.DWORD),
+                ('wParamL', wintypes.WORD),
+                ('wParamH', wintypes.WORD),
+            ]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [('mi', MOUSEINPUT), ('ki', KEYBDINPUT), ('hi', HARDWAREINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ('data',)
+            _fields_ = [('type', wintypes.DWORD), ('data', INPUT_UNION)]
+
+        INPUT_KEYBOARD = 1
+        KEYEVENTF_EXTENDEDKEY = 0x0001
+        KEYEVENTF_KEYUP = 0x0002
+        extended = KEYEVENTF_EXTENDEDKEY if virtual_key in {
             0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
             0x2D, 0x2E, 0x6F, 0x90, 0x91,
         } else 0
-        user32.keybd_event(virtual_key, scan, extended, 0)
-        try:
-            time.sleep(0.035)
-        finally:
-            user32.keybd_event(virtual_key, scan, extended | 0x0002, 0)
+        inputs = (INPUT * 2)(
+            INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(
+                wVk=virtual_key, wScan=scan, dwFlags=extended, time=0, dwExtraInfo=0)),
+            INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(
+                wVk=virtual_key, wScan=scan, dwFlags=extended | KEYEVENTF_KEYUP,
+                time=0, dwExtraInfo=0)),
+        )
+        user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+        user32.SendInput.restype = wintypes.UINT
+        if int(user32.SendInput(len(inputs), inputs, ctypes.sizeof(INPUT))) != len(inputs):
+            raise RuntimeError('validation low-level keyboard input was not injected')
 
     def _send_authored_game_input(self, runtime, case_id, now):
         delay_ms = ACCURACY_GAME_INPUTS_MS.get(case_id)

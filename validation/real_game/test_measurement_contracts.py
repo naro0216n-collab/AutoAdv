@@ -247,7 +247,7 @@ def test_offline_verifier_keeps_authored_external_input_separate_from_product_ad
                for issue in missing_observation['evidence_issues'])
 
 
-def test_authored_game_input_uses_windows_keyboard_stimulus_without_product_injection(monkeypatch):
+def test_authored_game_input_activates_game_and_uses_low_level_keyboard_stimulus(monkeypatch):
     import ctypes
     from validation.real_game import gui_session
 
@@ -261,10 +261,26 @@ def test_authored_game_input_uses_windows_keyboard_stimulus_without_product_inje
             return self.callback(*args)
 
     calls = []
+
+    def foreground_pid(_hwnd, pid):
+        pid._obj.value = 50
+        return 1
+
+    def send_input(count, inputs, size):
+        calls.append(('send', int(count), int(size), tuple(
+            (int(inputs[index].type), int(inputs[index].ki.wVk),
+             int(inputs[index].ki.wScan), int(inputs[index].ki.dwFlags))
+            for index in range(int(count))
+        )))
+        return count
+
     user32 = SimpleNamespace(
+        SetForegroundWindow=Function(lambda hwnd: calls.append(
+            ('foreground', int(hwnd.value))) or 1),
+        GetForegroundWindow=Function(lambda: 77),
+        GetWindowThreadProcessId=Function(foreground_pid),
         MapVirtualKeyW=Function(lambda key, _mode: 0x1C if key == 13 else 0),
-        keybd_event=Function(lambda key, scan, flags, extra: calls.append(
-            (int(key), int(scan), int(flags), int(extra)))),
+        SendInput=Function(send_input),
     )
     monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(user32=user32), raising=False)
     monkeypatch.setattr(gui_session.time, 'sleep', lambda _seconds: None)
@@ -275,7 +291,12 @@ def test_authored_game_input_uses_windows_keyboard_stimulus_without_product_inje
 
     SessionDriver._send_validation_game_input(runtime)
 
-    assert calls == [(13, 0x1C, 0, 0), (13, 0x1C, 0x0002, 0)]
+    assert calls[0] == ('foreground', 77)
+    assert calls[1][0:2] == ('send', 2)
+    assert calls[1][3] == (
+        (1, 13, 0x1C, 0),
+        (1, 13, 0x1C, 0x0002),
+    )
 
 
 def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
