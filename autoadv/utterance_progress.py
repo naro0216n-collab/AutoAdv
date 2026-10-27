@@ -161,8 +161,8 @@ class _ActivityRun:
                 >= self.quiet_required_ms)
 
 
-def _activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
-    """Build observer-local runs once from measured support intervals.
+def _series_activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
+    """Build one observer's finite activity runs from measured support only.
 
     Positive support opens or continues a run. Sub-threshold support closes it
     only after enough contiguous measured quiet from the same observer. A later
@@ -211,79 +211,32 @@ def _activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
     return tuple(runs)
 
 
-def _activity_context_after(
-    series: VocalEvidenceSeries, *, timing_fact_ms: int,
-) -> int | None:
-    """Return existing activity context when current post-fact risk is observed.
-
-    Physical activity runs stay observer-local.  A run that begins after the
-    timing fact is directly relevant.  When the same physical run crossed the
-    fact, measured post-fact low support followed by a later rise is the temporal
-    evidence that a new finite-vocal risk may have appeared.  The returned start
-    keeps the run's pre-fact context available to recurrence measurement;
-    otherwise periodic activity is made artificially non-periodic
-    by cropping it at the latest rise.
-    """
-    runs = _activity_runs(series)
-    if not runs or not runs[-1].open:
-        return None
-    current = runs[-1]
-    fact = int(timing_fact_ms)
-    if current.last_positive_ms <= fact:
-        return None
-    if current.start_ms > fact:
-        return current.start_ms
-
-    threshold = float(series.active_score_threshold)
-    quiet_start: int | None = None
-    quiet_end: int | None = None
-    for sample in sorted(
-        series.samples,
-        key=lambda item: (int(item.at_ms), int(item.support_start_ms)),
-    ):
-        at_ms = int(sample.at_ms)
-        if at_ms <= fact or at_ms > current.last_positive_ms:
-            continue
-        if float(sample.score) >= threshold:
-            if (quiet_start is not None and quiet_end is not None
-                    and quiet_end - quiet_start >= MIN_QUIET_SUPPORT_MS):
-                return current.start_ms
-            quiet_start = quiet_end = None
-            continue
-
-        support_start = max(fact, int(sample.support_start_ms))
-        if at_ms <= support_start:
-            continue
-        if quiet_start is None or quiet_end is None or support_start > quiet_end:
-            quiet_start, quiet_end = support_start, at_ms
-        else:
-            quiet_end = max(quiet_end, at_ms)
-
-    return None
+def _activity_runs(vocal: HumanVocalEvidence | None) -> tuple[_ActivityRun, ...]:
+    """Build the observer-local activity timeline once for one assessment."""
+    if vocal is None:
+        return ()
+    return tuple(
+        run
+        for series in vocal.series
+        for run in _series_activity_runs(series)
+    )
 
 
 def _target_related_runs(
-    vocal: HumanVocalEvidence | None, *, target_start_ms: int, target_observed_end_ms: int,
+    runs: tuple[_ActivityRun, ...], *, target_start_ms: int, target_observed_end_ms: int,
 ) -> tuple[_ActivityRun, ...]:
-    """Follow one target-related finite activity episode across observers.
+    """Follow one located target's finite activity episode across observers.
 
-    Each observer keeps its own score scale and contributes only its latest run
-    intersecting the located target, matching the existing lexical relation. A
-    later run from any observer joins only while measured quiet has not yet been
-    sufficient to separate that episode.
+    Target ownership comes from target-associated lexical evidence before this
+    function is called. Human-vocal runs only describe physical continuation:
+    overlap can protect the located target, but it never creates target ownership.
+    A later run joins only while measured quiet has not separated the episode.
     """
-    all_runs: list[_ActivityRun] = []
-    related: list[_ActivityRun] = []
-    for series in vocal.series if vocal is not None else ():
-        runs = _activity_runs(series)
-        all_runs.extend(runs)
-        run = next((
-            item for item in reversed(runs)
-            if item.last_positive_ms >= int(target_start_ms)
-            and item.support_start_ms <= int(target_observed_end_ms)
-        ), None)
-        if run is not None:
-            related.append(run)
+    related = [
+        run for run in runs
+        if run.last_positive_ms >= int(target_start_ms)
+        and run.support_start_ms <= int(target_observed_end_ms)
+    ]
     if not related:
         return ()
 
@@ -295,7 +248,7 @@ def _target_related_runs(
 
     related_ids = {id(run) for run in related}
     frontier = max(continuation_until(run) for run in related)
-    for run in sorted(all_runs, key=lambda item: item.start_ms):
+    for run in sorted(runs, key=lambda item: item.start_ms):
         if id(run) in related_ids or run.last_positive_ms <= int(target_observed_end_ms):
             continue
         if run.start_ms > frontier:
@@ -336,25 +289,26 @@ def evaluate_utterance_progress(
             return None
         return recurrence_lookup(int(start_ms), capture_end)
 
-    lexical_span = bool(
+    runs = _activity_runs(vocal)
+    target_located = bool(
         lexical is not None
+        and lexical.target_associated
         and lexical.aligned_target_units > 0
         and lexical.target_start_ms is not None
         and lexical.aligned_end_ms is not None
     )
 
-    if lexical_span and lexical is not None:
+    if target_located and lexical is not None:
         target_start = int(lexical.target_start_ms)
         complete = bool(
-            lexical.target_associated
-            and lexical.complete_alignment
+            lexical.complete_alignment
             and lexical.committed_target_end
             and lexical.target_end_ms is not None
         )
         observed_target_end = int(
             lexical.target_end_ms if complete else lexical.aligned_end_ms)
         measured = _target_related_runs(
-            vocal, target_start_ms=target_start, target_observed_end_ms=observed_target_end)
+            runs, target_start_ms=target_start, target_observed_end_ms=observed_target_end)
 
         if not measured:
             return UtteranceProgress(
@@ -364,7 +318,15 @@ def evaluate_utterance_progress(
         if complete:
             target_end = int(lexical.target_end_ms)
             if any(not run.closed_after(target_end) for run in measured):
-                recurrence = recurrence_for(target_end)
+                # If an open human-vocal structure already crossed the located
+                # target start, retain that pre-target context when checking
+                # recurrence. Otherwise recurrence starts at the target end and
+                # cannot retroactively turn ordinary target speech into a loop.
+                recurrence_start = min(
+                    (run.start_ms for run in measured if run.start_ms < target_start),
+                    default=target_end,
+                )
+                recurrence = recurrence_for(recurrence_start)
                 if _stable_recurrence(recurrence):
                     return UtteranceProgress(
                         state=UtteranceProgressState.UNKNOWN,
@@ -376,10 +338,10 @@ def evaluate_utterance_progress(
                 state=UtteranceProgressState.ENDED,
                 evidence_at_ms=capture_end), None
 
-        # Partial target evidence remains protective only while its measured
-        # activity run is still open. Incremental alignment continues in
-        # NativeAudio as new PCM arrives; this domain does not manufacture a
-        # reading-count-derived hold time.
+        # Only an associated target owns a lexical progression relation. A
+        # partial but associated target stays protective while its measured
+        # activity episode remains open. Unassociated phone fragments fall
+        # through to the independent timing evidence below.
         return UtteranceProgress(
             state=(UtteranceProgressState.ACTIVE
                    if any(run.open for run in measured)
@@ -393,23 +355,20 @@ def evaluate_utterance_progress(
             state=UtteranceProgressState.UNKNOWN,
             evidence_at_ms=capture_end), None
 
-    recurrence_contexts = [
-        context
-        for series in vocal.series if vocal is not None
-        for fact in timing_facts
-        if (context := _activity_context_after(
-            series, timing_fact_ms=fact)) is not None
-    ]
-
-    if not recurrence_contexts:
+    # A Presentation-independent human-vocal run becomes current cut risk only
+    # when its observer actually opens a run after an observed timing fact.
+    # Boundary-crossing activity and short threshold valleys stay the same run;
+    # they are never reinterpreted by a second raw-score state machine.
+    current_runs = tuple(
+        run for run in runs
+        if run.open and any(fact <= run.start_ms for fact in timing_facts)
+    )
+    if not current_runs:
         return UtteranceProgress(
             state=UtteranceProgressState.UNKNOWN,
             evidence_at_ms=capture_end), None
 
-    # Recurrence needs the existing structure that made the current rise
-    # interpretable. Cropping at the rise would discard evidence that the same
-    # structure already repeated across the Presentation boundary.
-    recurrence_start = min(recurrence_contexts)
+    recurrence_start = min(run.start_ms for run in current_runs)
     recurrence = recurrence_for(recurrence_start)
     if _stable_recurrence(recurrence):
         return UtteranceProgress(

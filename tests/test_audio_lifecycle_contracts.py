@@ -174,6 +174,17 @@ class RecordingBlankPosterior:
         return logits
 
 
+class RecordingWeakPosterior(RecordingBlankPosterior):
+    """Record searches while producing only an unassociated target fragment."""
+
+    def infer(self, chunks):
+        logits = super().infer(chunks)
+        frame = max(0, logits.shape[0] - 5)
+        logits[frame, 0] = 0.0
+        logits[frame, VOCAB['a']] = 7.0
+        return logits
+
+
 class StaticAudioEventModel:
     def __init__(self, *, class_index=19, score=.9):
         self.class_index = class_index
@@ -587,9 +598,9 @@ def test_capture_callback_is_not_blocked_by_acoustic_analysis():
 
 
 def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
-    observations = []
-    model = RecordingBlankPosterior()
-    native = make_native(model, observations)
+    observations, reports = [], []
+    model = RecordingWeakPosterior()
+    native = make_native(model, observations, reports=reports)
     token = Token(9, 1)
     try:
         native.history.start(42)
@@ -600,19 +611,29 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
         retained_ms = 60_000
         wait_until(lambda: model.durations_ms and max(model.durations_ms) >= retained_ms)
         initial = tuple(model.durations_ms)
-        assert initial
+        initial_reports = len(reports)
+        weak_starts = [
+            item.lexical.target_start_ms
+            for _token, _progress, item in observations
+            if item.lexical is not None and item.lexical.aligned_target_units > 0
+            and not item.lexical.target_associated and item.lexical.target_start_ms is not None
+        ]
+        assert initial and weak_starts
         # Retention is available search capacity, not the first work unit.
         assert initial[0] < retained_ms
 
         # Once the retained history has been exhausted, new PCM reopens only a
-        # bounded overlapping query.  It must not make every 500 ms frontier
-        # trigger another complete 60 s scan.
+        # bounded overlapping query. An unassociated phone fragment remains a
+        # measurement and cannot become the persistent lower bound for later PCM.
+        weak_start = max(weak_starts)
         fresh = compact_chunk(60_500, 500)
         native.history.push(fresh, target_pid=42)
         native.feed(fresh)
-        wait_until(lambda: len(model.durations_ms) > len(initial))
+        wait_until(lambda: len(reports) > initial_reports)
         additional = tuple(model.durations_ms[len(initial):])
-        assert additional
+        additional_reports = reports[initial_reports:]
+        assert additional and additional_reports
+        assert additional_reports[0][1]['capture_start_ms'] < weak_start
         # Once retained history has been searched, new PCM must not turn that
         # whole retained interval back into the routine work unit.
         assert max(additional) < max(initial)

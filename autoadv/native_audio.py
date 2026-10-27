@@ -97,7 +97,7 @@ class NativeAudio:
         self.causal_lower_bound_ms: int | None = None
         self.input_candidates_ms: tuple[int, ...] = ()
         self.target_attached_ms: int | None = None
-        self._search_floor_ms = 0
+        self._confirmed_search_floor_ms: int | None = None
         self._search_start_ms = 0
         self._search_exhausted_at: int | None = None
         self._lexical: LexicalProgressEvidence | None = None
@@ -143,9 +143,20 @@ class NativeAudio:
             start = max(start, int(self.causal_lower_bound_ms))
         return start
 
+    def _search_lower_bound_locked(self, end_ms: int) -> int:
+        """Return the current factual lower bound for alignment search.
+
+        Retention and AutoAdv's own successful input are hard bounds. A later
+        bound may be adopted only after target association is established; weak
+        phone fragments and exhausted queries never become search ownership.
+        """
+        minimum = self._minimum_search_start_locked(end_ms)
+        if self._confirmed_search_floor_ms is not None:
+            minimum = max(minimum, int(self._confirmed_search_floor_ms))
+        return minimum
+
     def _initial_search_start_locked(self, end_ms: int) -> int:
         minimum = self._minimum_search_start_locked(end_ms)
-        self._search_floor_ms = minimum
         start = max(minimum, int(end_ms) - self.INITIAL_SEARCH_WINDOW_MS)
         usable = [
             value for value in self.input_candidates_ms
@@ -157,7 +168,7 @@ class NativeAudio:
         return min(start, int(end_ms))
 
     def _expand_search_locked(self, boundary: int) -> bool:
-        minimum = max(self._minimum_search_start_locked(boundary), int(self._search_floor_ms))
+        minimum = self._search_lower_bound_locked(boundary)
         current = max(minimum, int(self._search_start_ms))
         if current <= minimum:
             self._search_exhausted_at = int(boundary)
@@ -175,22 +186,14 @@ class NativeAudio:
         exhausted = self._search_exhausted_at
         if exhausted is None or int(boundary) <= exhausted:
             return
-        minimum = self._minimum_search_start_locked(boundary)
-        lexical = self._lexical
-        if (lexical is not None and lexical.aligned_target_units > 0
-                and lexical.target_start_ms is not None):
-            # Preserve only evidence already tied to the emerging target.
-            start = int(lexical.target_start_ms)
-        else:
-            # No target evidence existed in the exhausted history. Keep only a
-            # small backend context across the old frontier; do not rescan an
-            # arbitrary fixed history window for every new PCM packet.
-            start = int(exhausted) - self.MIN_AUDIO_MS
-        self._search_floor_ms = max(minimum, start)
-        self._search_start_ms = self._search_floor_ms
+        # Exhausting one historical snapshot says only that it did not establish
+        # the target. New PCM reopens a bounded overlapping query. The persistent
+        # floor is changed elsewhere, and only by an associated target.
+        minimum = self._search_lower_bound_locked(boundary)
+        self._search_start_ms = max(minimum, int(exhausted) - self.MIN_AUDIO_MS)
         self._search_exhausted_at = None
 
-    def _narrow_search_locked(
+    def _adopt_associated_search_floor_locked(
         self, lexical: LexicalProgressEvidence, *, frame_ms: float, capture_end_ms: int,
     ) -> None:
         if not lexical.target_associated or lexical.target_start_ms is None:
@@ -202,8 +205,12 @@ class NativeAudio:
         else:
             usable = [stamp for stamp in self.input_candidates_ms if minimum <= stamp <= target_start]
             desired = max(usable) if usable else max(minimum, target_start - max(1, int(round(frame_ms))))
-        self._search_floor_ms = max(int(self._search_floor_ms), int(desired))
-        self._search_start_ms = max(int(self._search_start_ms), int(desired))
+        confirmed = (
+            int(desired) if self._confirmed_search_floor_ms is None
+            else max(int(self._confirmed_search_floor_ms), int(desired))
+        )
+        self._confirmed_search_floor_ms = confirmed
+        self._search_start_ms = max(int(self._search_start_ms), confirmed)
 
     def begin(self, token: Token, alignment_text: str, *,
               candidates: tuple[PronunciationCandidate, ...] | None = None,
@@ -237,6 +244,7 @@ class NativeAudio:
             self._last_alignment_query = None
             self._last_progress_key = None
             self._required_assessment_ms = None
+            self._confirmed_search_floor_ms = None
 
             frontier = self.history.latest_ms
             if frontier is not None:
@@ -269,6 +277,7 @@ class NativeAudio:
         self.input_candidates_ms = ()
         self.target_attached_ms = None
         self._lexical = None
+        self._confirmed_search_floor_ms = None
         self._alignment_ready_through_ms = None
         self._required_assessment_ms = None
         self._last_progress_key = None
@@ -468,7 +477,8 @@ class NativeAudio:
 
     def _feature_start_locked(self, lexical: LexicalProgressEvidence | None, end_ms: int) -> int | None:
         retained = self._retained_start_locked(end_ms)
-        if lexical is not None and lexical.target_start_ms is not None:
+        if (lexical is not None and lexical.target_associated
+                and lexical.target_start_ms is not None):
             target_start = int(lexical.target_start_ms)
             if self.causal_lower_bound_ms is not None:
                 return max(retained, int(self.causal_lower_bound_ms))
@@ -562,7 +572,7 @@ class NativeAudio:
     def _start_alignment_locked(self, boundary: int):
         if self._closed or self.token is None or self.aligner is None:
             return None
-        start = max(self._minimum_search_start_locked(boundary), int(self._search_start_ms))
+        start = max(self._search_lower_bound_locked(boundary), int(self._search_start_ms))
         segments = self.history.read(start, boundary).spans
         if not segments:
             return None
@@ -579,7 +589,7 @@ class NativeAudio:
         boundary = int(boundary)
         if boundary - int(self._search_start_ms) < self.MIN_AUDIO_MS:
             return None
-        query = (max(self._minimum_search_start_locked(boundary), int(self._search_start_ms)), boundary)
+        query = (max(self._search_lower_bound_locked(boundary), int(self._search_start_ms)), boundary)
         if query == self._last_alignment_query:
             return None
         if self._alignment_inflight_generation is not None:
@@ -732,7 +742,7 @@ class NativeAudio:
                             self._lexical = lexical
                             self._lexical_revision += 1
                         if selection.alignment is not None:
-                            self._narrow_search_locked(
+                            self._adopt_associated_search_floor_locked(
                                 lexical,
                                 frame_ms=selection.alignment.frame_ms,
                                 capture_end_ms=boundary,

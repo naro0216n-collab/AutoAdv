@@ -499,14 +499,12 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
     assert evaluate(observation(
         voc=short_valley_restart, end=1200, lower=1000)).state == UtteranceProgressState.UNKNOWN
 
-    # The physical observer run may remain continuous across a Presentation
-    # boundary because a wide receptive field still overlaps the preceding
-    # voice.  Presentation relation is narrower: enough low-score support after
-    # the timing fact followed by a later rise is a new finite-vocal risk even
-    # when that wide observer cannot certify a physical run closure.  The same
-    # relation rule applies to a confirmed AutoAdv lower bound and to an
-    # external-input candidate attached when the new text actually arrives.
-    restarted = HumanVocalEvidence(series=(VocalEvidenceSeries(
+    # One observer timeline has one closure rule. A wide receptive field that
+    # still spans the pre-Presentation activity cannot be split by a second,
+    # narrower raw-score interpretation merely because its score dipped and rose.
+    # Both an AutoAdv causal bound and an external-input candidate preserve that
+    # uncertainty until the observer itself closes and reopens the activity run.
+    boundary_spanning = HumanVocalEvidence(series=(VocalEvidenceSeries(
         observer='nonlexical', active_score_threshold=.45,
         samples=(
             VocalScoreSample(960, .9, 0),
@@ -516,22 +514,8 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         )),))
     for lower, inputs in ((1000, ()), (None, (1000,))):
         assert evaluate(observation(
-            voc=restarted, end=1720, lower=lower, inputs=inputs
-        )).state == UtteranceProgressState.ACTIVE
-
-    # When a post-boundary rise occurs inside an already-open physical run,
-    # recurrence is measured over that run's existing structure rather than
-    # cropping away the pre-boundary cycles at the rise.
-    recurrence_starts = []
-    recurrent_progress, _ = evaluate_utterance_progress(
-        capture_end_ms=1720, lexical=None, vocal=restarted, causal_lower_bound_ms=1000,
-        recurrence_lookup=lambda start, _end: (
-            recurrence_starts.append(start) or
-            (stable_loop if start <= 960 else VocalRecurrenceEvidence())
-        ),
-    )
-    assert recurrent_progress.state == UtteranceProgressState.UNKNOWN
-    assert recurrence_starts == [960]
+            voc=boundary_spanning, end=1720, lower=lower, inputs=inputs
+        )).state == UtteranceProgressState.UNKNOWN
 
     post_boundary_unclosed = vocal(
         intervals=((1120, 1380),), end=1380, observer='nonlexical')
@@ -661,13 +645,19 @@ def test_alignment_reading_selection_and_audio_judgment_preserve_evidence_roles(
         voc=vocal(intervals=((1120, 1380), (1800, 1980)), end=2000), end=2000))
     assert later_unowned_voice.state == UtteranceProgressState.ACTIVE
 
-    # A measured lexical prefix can locate a cut-risk chain before it reaches the
-    # stricter target_associated ownership threshold.
-    weak_relation = evaluate(observation(
-        lex=lexical(start=1400, aligned_end=1530, complete=False, committed=False,
-                    associated=False),
-        voc=vocal(intervals=((1120, 1260), (1450, 1780)), end=1800), end=1800))
-    assert weak_relation.state == UtteranceProgressState.ACTIVE
+    # An unassociated phone fragment is a measurement, not target ownership.
+    # It cannot change progression meaning by itself; the same post-input vocal
+    # run remains protective because of timing evidence, while the same fragment
+    # without a timing relation remains UNKNOWN.
+    weak = lexical(start=1400, aligned_end=1530, complete=False, committed=False,
+                   associated=False)
+    weak_vocal = vocal(intervals=((1120, 1260), (1450, 1780)), end=1800)
+    timing_only = evaluate(observation(voc=weak_vocal, end=1800))
+    assert evaluate(observation(lex=weak, voc=weak_vocal, end=1800)) == timing_only
+    assert timing_only.state == UtteranceProgressState.ACTIVE
+    assert evaluate(observation(
+        lex=weak, voc=weak_vocal, end=1800, lower=None
+    )).state == UtteranceProgressState.UNKNOWN
 
     # HOOK arrival is knowledge timing only. Changing it while every acoustic
     # measurement and causal bound remains identical cannot change the answer.
