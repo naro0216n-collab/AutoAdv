@@ -789,14 +789,34 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
     assert changing.strength < periodic.strength
     assert changing.prominence < periodic.prominence
 
+    # Recurrence describes the structure present at the current frontier, not
+    # uninterrupted conformity of every intervening cycle. A bounded local mix
+    # disturbance may obscure one cycle without erasing repeated evidence on
+    # both sides of it.
+    interrupted_history = AcousticObservationHistory()
+    interrupted_frames = []
+    at = 1000
+    interference = (.15, .8, .35, .6, .25, .7)
+    for pattern in (repeated, repeated, repeated, interference, repeated):
+        for score in pattern:
+            interrupted_frames.append(VocalActivityFrame(
+                at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
+            at += 100
+    interrupted_history.add_vocal(tuple(interrupted_frames))
+    interrupted = interrupted_history.recurrence(
+        start_ms=900, end_ms=at - 100, observer='speech')
+    assert interrupted.period_ms == 600
+    assert interrupted.strength > .9
+    assert interrupted.prominence > .1
+
     # Slow finite change can be highly self-similar at many lags. It is not a
-    # period unless one lag stands out from that generic temporal smoothness.
+    # period unless one lag stands out from neighbouring lags.
     smooth = recurrence_for_cycles(tuple(
         tuple(.5 + .01 * (cycle * 6 + index) for index in range(6))
         for cycle in range(6)
     ))
     assert smooth.strength > .9
-    assert smooth.prominence == 0.0
+    assert smooth.prominence < 1e-6
 
     # Recurrence is a current measurement, not whole-run conformity.  Earlier
     # non-periodic activity must age out once enough recent cycles repeat.  A

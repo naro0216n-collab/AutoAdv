@@ -320,29 +320,30 @@ def evaluate_utterance_progress(
 
     open_runs = tuple((observer, run) for observer, run in observed if run.open)
     if open_runs:
-        # Approximate phone count is deliberately a weak gate, not endpoint
-        # evidence.  Once the already-computed CTC stream has produced more
-        # units than the selected reading contains, recurrence may use the whole
-        # continuing activity instead of waiting for an exact textual endpoint.
-        # No extra inference or confidence/state model is introduced around the
-        # count; uncertainty only changes how much existing recurrence evidence
-        # is eligible for this assessment.
+        # Reading amount is only a rough permission to consult recurrence before
+        # a textual endpoint has been committed.  It never changes the acoustic
+        # history being measured: doing so would make an uncertain phone count
+        # erase or recreate recurrence evidence.
         reading_exceeded = bool(
             lexical is not None
             and lexical.target_units > 0
             and lexical.observed_units > lexical.target_units
         )
-        # Observer series are independent measurements of the same process mix,
-        # not independently owned vocal sources.  Recurrence is therefore one
-        # additional property of the currently open human-vocal risk. Search
-        # only observers that actually support that risk, while retaining their
-        # score provenance inside the measurement layer.
-        recurrence_start = min(int(run.start_ms) for _observer, run in open_runs)
-        if (target_complete and not reading_exceeded and lexical is not None
-                and lexical.target_end_ms is not None):
-            recurrence_start = max(recurrence_start, int(lexical.target_end_ms))
+        recurrence_eligible = bool(
+            not target_located or target_complete or reading_exceeded
+        )
+
         candidates: tuple[VocalRecurrenceEvidence, ...] = ()
-        if recurrence_lookup is not None:
+        if recurrence_eligible and recurrence_lookup is not None:
+            # Recurrence describes structure around a Presentation relation, not
+            # the lifetime of the latest threshold-positive run.  Look equally
+            # far before and after the factual anchor so a repeating structure
+            # that crosses the Presentation boundary remains measurable even if
+            # its natural quiet gaps split activity runs.  The window expands
+            # only as current evidence accumulates; no fixed loop-duration guess
+            # or source label is introduced.
+            anchor = max(facts) if facts else capture_end
+            recurrence_start = max(0, int(anchor) - max(0, capture_end - int(anchor)))
             collected: list[VocalRecurrenceEvidence] = []
             for observer in sorted({observer for observer, _run in open_runs}):
                 collected.extend(recurrence_lookup(

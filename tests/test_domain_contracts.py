@@ -401,15 +401,25 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
         ('speech', ((1120, .9, 1080), (1700, .9, 1660), (2300, .9, 2260))),
         ('nonlexical', ((1180, .9, 1140), (1800, .9, 1760), (2400, .9, 2360))),
     )
+    # An incomplete located target remains protected while its observed reading
+    # amount has not exceeded the selected reading. Reading excess only permits
+    # recurrence to participate; it is not itself endpoint or loop evidence.
     recurrence_starts = []
+    protected, _ = _progress(
+        lexical=_lexical_evidence(complete=False, committed=False, observed_units=4),
+        vocal=two_open, end=2500, lower=1000,
+        recurrence={'speech': stable, 'nonlexical': stable},
+        recurrence_starts=recurrence_starts,
+    )
+    assert protected.state == UtteranceProgressState.ACTIVE
+    assert recurrence_starts == []
+
     progress, _ = _progress(
         lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': unstable, 'nonlexical': unstable},
-        recurrence_starts=recurrence_starts,
     )
     assert progress.state == UtteranceProgressState.ACTIVE
-    assert recurrence_starts == [('nonlexical', 1120), ('speech', 1120)]
     released, _ = _progress(
         lexical=_lexical_evidence(complete=False, committed=False, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
@@ -431,28 +441,25 @@ def test_vocal_risk_uses_observed_time_changes_and_current_recurrence():
     assert released.state == UtteranceProgressState.UNKNOWN
     assert measured == periodic
 
-    # Reading amount is deliberately a rough gate. Before excess, a committed
-    # textual endpoint keeps recurrence scoped to the post-target tail. Once
-    # observed pronunciation exceeds the selected reading, the same already
-    # measured recurrence may use the whole continuing activity instead.
-    recurrence_starts = []
+    # Once a textual endpoint is committed, recurrence may resolve an otherwise
+    # open vocal risk regardless of the approximate reading count. The reading
+    # count must not rewrite the acoustic interval or change the same evidence.
+    starts_without_excess = []
     before_excess, _ = _progress(
         lexical=_lexical_evidence(target_end=1320, observed_units=4),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable},
-        recurrence_starts=recurrence_starts,
+        recurrence_starts=starts_without_excess,
     )
-    assert before_excess.state == UtteranceProgressState.UNKNOWN
-    assert recurrence_starts == [('nonlexical', 1320), ('speech', 1320)]
-    recurrence_starts.clear()
+    starts_with_excess = []
     after_excess, _ = _progress(
         lexical=_lexical_evidence(target_end=1320, observed_units=5),
         vocal=two_open, end=2500, lower=1000,
         recurrence={'speech': stable},
-        recurrence_starts=recurrence_starts,
+        recurrence_starts=starts_with_excess,
     )
-    assert after_excess.state == UtteranceProgressState.UNKNOWN
-    assert recurrence_starts == [('nonlexical', 1120), ('speech', 1120)]
+    assert before_excess.state == after_excess.state == UtteranceProgressState.UNKNOWN
+    assert starts_without_excess == starts_with_excess
 
     # Advancing only wall-clock evaluation time cannot close a measured open run.
     for frontier in (1400, 2400, 5200):
