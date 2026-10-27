@@ -7,7 +7,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-py -3.11 "%~dp0scripts\prepare_windows_runtime.py" --repo "%~dp0" --launch
+py -3.11 "%~dp0scripts\prepare_windows_runtime.py" --launch
 if errorlevel 1 (
   echo AutoAdv runtime setup failed. See the message above.
   pause
