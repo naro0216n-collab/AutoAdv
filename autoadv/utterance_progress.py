@@ -158,32 +158,19 @@ class _ActivityRun:
                 >= self.quiet_required_ms)
 
 
-def _quiet_support_required(vocal: HumanVocalEvidence | None) -> int:
-    """Return one conservative disappearance horizon for the current evidence.
+def _series_activity_runs(series: VocalEvidenceSeries) -> tuple[_ActivityRun, ...]:
+    """Build one observer's finite activity runs from measured support only.
 
-    Observer scores keep their own scales, but disappearance is a statement about
-    the same process mix.  A narrow observer window must therefore not release a
-    finite-vocal risk while another current observer still measures much wider
-    acoustic support.  The widest factual support window becomes the common
-    minimum quiet span; no source ownership or per-case timeout is inferred.
+    Positive support opens or continues a run. Sub-threshold support closes it
+    only after enough contiguous measured quiet from the same observer. A later
+    positive after closure starts a new run; short valleys remain inside the run.
     """
-    widths = (
-        int(sample.at_ms) - int(sample.support_start_ms)
-        for series in (vocal.series if vocal is not None else ())
-        for sample in series.samples
-    )
-    return max(MIN_QUIET_SUPPORT_MS, max(widths, default=0))
-
-
-def _series_activity_runs(
-    series: VocalEvidenceSeries, *, quiet_required_ms: int,
-) -> tuple[_ActivityRun, ...]:
-    """Build one observer's finite activity runs from measured support only."""
     samples = tuple(sorted(
         series.samples,
         key=lambda sample: (int(sample.at_ms), int(sample.support_start_ms)),
     ))
-    required = int(quiet_required_ms)
+    required = max(MIN_QUIET_SUPPORT_MS, max(
+        (int(sample.at_ms) - int(sample.support_start_ms) for sample in samples), default=0))
     threshold = float(series.active_score_threshold)
     runs: list[_ActivityRun] = []
     current: _ActivityRun | None = None
@@ -245,7 +232,7 @@ def _timing_facts(
 
 
 def _activity_runs_after(
-    series: VocalEvidenceSeries, *, timing_facts: tuple[int, ...], quiet_required_ms: int,
+    series: VocalEvidenceSeries, *, timing_facts: tuple[int, ...],
 ) -> tuple[_ActivityRun, ...]:
     """Return physical activity runs whose measured onset follows a time fact.
 
@@ -256,8 +243,7 @@ def _activity_runs_after(
     if not timing_facts:
         return ()
     return tuple(
-        run for run in _series_activity_runs(
-            series, quiet_required_ms=quiet_required_ms)
+        run for run in _series_activity_runs(series)
         if any(run.start_ms >= fact and run.last_positive_ms > fact
                for fact in timing_facts)
     )
@@ -323,20 +309,21 @@ def evaluate_utterance_progress(
         input_candidates_ms=input_candidates_ms,
     )
 
-    quiet_required_ms = _quiet_support_required(vocal)
     observed: list[tuple[str, _ActivityRun]] = []
     for series in vocal.series if vocal is not None else ():
         observed.extend(
             (series.observer, run)
-            for run in _activity_runs_after(
-                series, timing_facts=facts, quiet_required_ms=quiet_required_ms)
+            for run in _activity_runs_after(series, timing_facts=facts)
         )
 
     measured_recurrence: VocalRecurrenceEvidence | None = None
+
     open_runs = tuple((observer, run) for observer, run in observed if run.open)
     if open_runs:
-        # Reading amount is only permission to consult recurrence before a text
-        # endpoint is committed; it never becomes endpoint evidence itself.
+        # Reading amount is only a rough permission to consult recurrence before
+        # a textual endpoint has been committed.  It never changes the acoustic
+        # history being measured: doing so would make an uncertain phone count
+        # erase or recreate recurrence evidence.
         reading_exceeded = bool(
             lexical is not None
             and lexical.target_units > 0
@@ -346,14 +333,20 @@ def evaluate_utterance_progress(
             not target_located or target_complete or reading_exceeded
         )
 
-        open_observers = {observer for observer, _run in open_runs}
-        recurrent_observers: set[str] = set()
         candidates: tuple[VocalRecurrenceEvidence, ...] = ()
+        recurrent_observers: set[str] = set()
         if recurrence_eligible and recurrence_lookup is not None:
+            # Recurrence describes structure around a Presentation relation, not
+            # the lifetime of the latest threshold-positive run.  Look equally
+            # far before and after the factual anchor so a repeating structure
+            # that crosses the Presentation boundary remains measurable even if
+            # its natural quiet gaps split activity runs.  The window expands
+            # only as current evidence accumulates; no fixed loop-duration guess
+            # or source label is introduced.
             anchor = max(facts) if facts else capture_end
             recurrence_start = max(0, int(anchor) - max(0, capture_end - int(anchor)))
             collected: list[VocalRecurrenceEvidence] = []
-            for observer in sorted(open_observers):
+            for observer in sorted({observer for observer, _run in open_runs}):
                 observer_candidates = recurrence_lookup(
                     observer, recurrence_start, capture_end)
                 collected.extend(observer_candidates)
@@ -362,14 +355,13 @@ def evaluate_utterance_progress(
                     recurrent_observers.add(observer)
             candidates = tuple(collected)
         measured_recurrence = _representative_recurrence(candidates)
-
-        # Observer provenance is not source identity. For unresolved generic
-        # vocal activity, one stable current recurrence is enough to release the
-        # generic risk. Once text is acoustically located, recurrence may release
-        # protection only when no observer still reports a non-recurrent open risk.
-        recurrence_releases = bool(recurrent_observers) and (
-            not target_located or open_observers <= recurrent_observers)
-        if not recurrence_releases:
+        # Observer series are independent measurements of the same process mix,
+        # not interchangeable proof about one owned source.  Repetition measured
+        # by one observer cannot erase a still-open finite-vocal risk measured by
+        # another.  Every observer that currently contributes an open risk must
+        # itself show stable recurrence before recurrence can release protection.
+        open_observers = {observer for observer, _run in open_runs}
+        if not open_observers.issubset(recurrent_observers):
             return UtteranceProgress(
                 state=UtteranceProgressState.ACTIVE,
                 evidence_at_ms=capture_end), measured_recurrence
