@@ -2,21 +2,122 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
 from autoadv.application import AutoAdvApplication
 from autoadv.utterance_progress import (
-    HumanVocalEvidence, LexicalProgressEvidence, VocalEvidenceSeries, VocalRecurrenceEvidence,
-    VocalScoreSample, UtteranceProgress, UtteranceProgressState,
+    UtteranceProgress, UtteranceProgressState, NativeAudioObservation,
 )
 from autoadv.conversation import Target, Token
 from autoadv.hook_protocol import HookEvent
 from autoadv.model import AdvanceMode, HookSelection
 from autoadv.storage import Catalog
-from autoadv.utterance_progress import NativeAudioObservation
 from tests.contracts_support import app_with_game, capture_group, connect_hook, runtime_hook, source
 from tests.g2p_support import TEST_G2P
+
+
+class _ImmediateThread:
+    def __init__(self, *, target, daemon, name):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+class _FakeNativeAudio:
+    instances = []
+
+    def __init__(self, pid, helper, model, vocab, notify, **callbacks):
+        self.pid = pid
+        self.callbacks = callbacks
+        self.begun = []
+        self.requests = []
+        self.fence_ms = None
+        self.clock_ms = 5000
+        self.started = False
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+    def cancel(self):
+        pass
+
+    def finish_line(self, _token):
+        pass
+
+    def begin(self, token, text, candidates=(), causal_lower_bound_ms=None,
+              input_candidates_ms=()):
+        self.begun.append((token, text, causal_lower_bound_ms, tuple(input_candidates_ms)))
+
+    def clock(self):
+        return self.clock_ms
+
+    def observation_fence(self, _token):
+        return self.fence_ms
+
+    def request_assessment_through(self, token, through_ms):
+        self.requests.append((token, through_ms))
+
+    def publish_progress(self, token, state, evidence_at_ms):
+        callback = self.callbacks['on_progress']
+        callback(
+            token,
+            UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
+            NativeAudioObservation(),
+        )
+
+
+class _FakeGameInputObserver:
+    instances = []
+
+    def __init__(self, pid, on_input):
+        self.pid = pid
+        self.on_input = on_input
+        self.started = False
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+    def publish(self, at_ms):
+        self.on_input(at_ms)
+
+
+def _install_audio_runtime_fakes(monkeypatch):
+    import autoadv.application as application_module
+    import autoadv.native_runtime as native_runtime_module
+    import threading as real_threading
+
+    _FakeNativeAudio.instances.clear()
+    _FakeGameInputObserver.instances.clear()
+    monkeypatch.setattr(application_module, 'threading', SimpleNamespace(Thread=_ImmediateThread, Lock=real_threading.Lock))
+    monkeypatch.setattr(application_module, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(application_module, 'NativeAudio', _FakeNativeAudio)
+    monkeypatch.setattr(application_module, 'WindowsGameInputObserver', _FakeGameInputObserver)
+    monkeypatch.setattr(native_runtime_module, 'managed_paths', lambda: SimpleNamespace(
+        helper_dll='helper.dll', alignment_model='alignment.onnx',
+        alignment_vocab='alignment.json', human_vocal_model='vocal.onnx'))
+    return _FakeNativeAudio, _FakeGameInputObserver
+
+
+def _runtime_scheduler(queue):
+    def schedule(delay, callback):
+        if delay == 0:
+            callback()
+        else:
+            queue.append((delay, callback))
+    return schedule
 
 
 def test_capture_workspace_composes_fields_only_within_observed_group_and_preserves_source_content():
@@ -169,90 +270,67 @@ def test_runtime_publishes_selected_provenance_and_utterance_before_presentation
 
 
 def test_admitted_text_keeps_auto_input_bound_distinct_from_external_input_candidates(monkeypatch):
+    Native, InputObserver = _install_audio_runtime_fakes(monkeypatch)
     app, _ = app_with_game()
-    p = app.current_profile()
-    src = source('INPUTBOUND', 4)
-    p.hooks = [HookSelection('INPUTBOUND', 4, 5)]
-    p.body_source = src.identity
+    profile = app.current_profile()
+    selected = source('INPUTBOUND', 4)
+    profile.hooks = [HookSelection('INPUTBOUND', 4, 5)]
+    profile.body_source = selected.identity
     app.select_profile(app.game_id, app.profile_id)
     app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
     scheduled = []
-    events = []
-    app.configure_runtime_loop(
-        schedule=lambda delay, callback: scheduled.append((delay, callback)),
-        on_event=lambda name, token, detail: events.append((name, token, detail)))
+    app.configure_runtime_loop(schedule=_runtime_scheduler(scheduled))
     connect_hook(app)
-
-    first = runtime_hook(app, src, '一つ目', 2, received_ns=1_000_000_000)
+    first = runtime_hook(app, selected, '一つ目', 2, received_ns=1_000_000_000)
     assert first is not None
+    native = Native.instances[-1]
+    observer = InputObserver.instances[-1]
 
-    class Native:
-        def __init__(self):
-            self.begun = []
-        def begin(self, token, text, candidates=(), causal_lower_bound_ms=None,
-                  input_candidates_ms=()):
-            self.begun.append((token, text, causal_lower_bound_ms,
-                               tuple(input_candidates_ms)))
-        def cancel(self): pass
-        def finish_line(self, _token): pass
-        def observation_fence(self, _token): return None
-        def request_assessment_through(self, _token, _through_ms): pass
-    native = Native()
-    app._native_audio = native
-
-    # Input observation itself is only timestamp history and does not mutate the
-    # current presentation. Once new text is actually admitted, all preceding
-    # inputs since the prior admitted body are attached as weak timing
-    # candidates; none is upgraded to AutoAdv's causal lower-bound contract.
+    # External input is timestamp evidence only. Inputs preceding the next
+    # admitted body are attached to that Presentation and are not promoted to
+    # AutoAdv's stronger causal lower-bound fact.
     before = app.runtime_state()
-    app._record_game_input(1200)
-    app._record_game_input(1400)
+    observer.publish(1200)
+    observer.publish(1400)
     assert app.runtime_state() == before
-    second = runtime_hook(app, src, '二つ目', 3, received_ns=1_500_000_000)
+    second = runtime_hook(app, selected, '二つ目', 3, received_ns=1_500_000_000)
     assert second == Token(first.session, first.line + 1)
-    assert native.begun[-1][2] is None
-    assert native.begun[-1][3] == (1200, 1400)
+    assert native.begun[-1][2:] == (None, (1200, 1400))
 
-    # Candidate retention is delimited by admitted text, not an arbitrary
-    # HOOK-proximity threshold. A later body consumes the inputs observed since
-    # the preceding admitted body, and no candidate is reused across bodies.
-    app._record_game_input(2000)
-    third = runtime_hook(app, src, '三つ目', 4, received_ns=4_500_000_000)
+    # Candidate ownership is delimited by admitted bodies, not a proximity
+    # threshold, and candidates are consumed exactly once.
+    observer.publish(2000)
+    third = runtime_hook(app, selected, '三つ目', 4, received_ns=4_500_000_000)
     assert third == Token(second.session, second.line + 1)
-    assert native.begun[-1][2] is None
-    assert native.begun[-1][3] == (2000,)
+    assert native.begun[-1][2:] == (None, (2000,))
 
-    # AutoAdv owns the meaning of its own advancement input, so that successful
-    # send is a strong lower bound even when NativeAudio is temporarily absent.
-    # Application retains the fact until the next admitted body and passes it
-    # separately from any external-input candidates.
-    app._native_audio = None
-    monkeypatch.setattr('autoadv.application.time.monotonic_ns', lambda: 5_000_000_000)
-    target = app.runtime_state().target
-    assert target is not None
-    app._send_runtime_input(target, 13)
-    app._record_game_input(5200)
-    next_native = Native()
-    app._native_audio = next_native
-    fourth = runtime_hook(app, src, '四つ目', 5, received_ns=5_500_000_000)
+    # A successful AutoAdv advancement is different evidence. Drive it through
+    # the normal progress/authorization path and verify that the next body gets
+    # the owned causal lower bound separately from later external input.
+    native.clock_ms = 5000
+    app.set_auto_advance(True)
+    native.publish_progress(third, UtteranceProgressState.ENDED, 4900)
+    assert app.runtime_state().sent
+    observer.publish(5200)
+    fourth = runtime_hook(app, selected, '四つ目', 5, received_ns=5_500_000_000)
     assert fourth == Token(third.session, third.line + 1)
-    assert next_native.begun[-1][2] == 5000
-    assert next_native.begun[-1][3] == (5200,)
+    assert native.begun[-1][2:] == (5000, (5200,))
 
-def test_application_owns_audio_fallback_deadline_without_gui_policy():
+
+def test_audio_mode_without_uncertainty_fallback_has_no_text_timer_completion(monkeypatch):
+    _install_audio_runtime_fakes(monkeypatch)
     app, _ = app_with_game()
-    p = app.current_profile()
-    text = source('T', 1)
-    p.hooks = [HookSelection('T', 1, 2)]
-    p.body_source = text.identity
+    profile = app.current_profile()
+    selected = source('T', 1)
+    profile.hooks = [HookSelection('T', 1, 2)]
+    profile.body_source = selected.identity
     app.select_profile(app.game_id, app.profile_id)
     app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
     app.set_profile_setting('uncertain_text_fallback', False)
-    p = app.current_profile()
     scheduled = []
-    app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+    app.configure_runtime_loop(schedule=_runtime_scheduler(scheduled))
     connect_hook(app)
-    token = runtime_hook(app, text, '本文', 2)
+    token = runtime_hook(app, selected, '本文', 2)
     assert token is not None
     app.set_auto_advance(True)
     wait_ms = app.runtime_state().utterance.text_wait_ms
@@ -260,148 +338,90 @@ def test_application_owns_audio_fallback_deadline_without_gui_policy():
     state = app.runtime_state()
     assert state.authorized and not state.sent and not state.completed
 
-    class RetainedNative:
-        pid = 101
-        def observation_fence(self, _token): return None
-        def request_assessment_through(self, _token, _through_ms): pass
-        def finish_line(self, _token): raise AssertionError('inconclusive audio must remain active')
 
-    # The Application must propagate non-terminal progress into Controller
-    # state before the fallback deadline; otherwise an active finite voice
-    # would be indistinguishable from unresolved audio at the policy boundary.
-    active_app, _ = app_with_game()
-    ap = active_app.current_profile()
-    active_source = source('ACTIVE', 2)
-    ap.hooks = [HookSelection('ACTIVE', 2, 3)]
-    ap.body_source = active_source.identity
-    active_app.select_profile(active_app.game_id, active_app.profile_id)
-    active_app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
-    active_app.set_profile_setting('uncertain_text_fallback', True)
-    active_scheduled = []
-    active_app.configure_runtime_loop(
-        schedule=lambda delay, callback: active_scheduled.append((delay, callback)))
-    active_telemetry = []
-    active_app.configure_telemetry(
-        lambda name, token, detail: active_telemetry.append((name, token, dict(detail))))
-    connect_hook(active_app)
-    active_token = runtime_hook(active_app, active_source, '短い本文', 2)
-    assert active_token is not None
-    active_app._native_audio = RetainedNative()
-    active_app._consume_native_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.ACTIVE, evidence_at_ms=1500), NativeAudioObservation(
-        lexical=LexicalProgressEvidence(
-            target_units=5, aligned_target_units=3, target_associated=True,
-            complete_alignment=False, committed_target_end=False,
-            target_start_ms=1050, aligned_end_ms=1300, target_end_ms=None,
-            reading_rank=0, path_margin=3.0, boundary_margin=0.0),
-        vocal=HumanVocalEvidence(
-            series=(VocalEvidenceSeries(
-                observer='speech', active_score_threshold=.45,
-                samples=(
-                    VocalScoreSample(1100, .95, 1050),
-                    VocalScoreSample(1250, .95, 1200),
-                    VocalScoreSample(1400, .95, 1350),
-                    VocalScoreSample(1490, .95, 1440),
-                )),)),
-        recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000,
-        target_attached_ms=1100))
-    active_app._consume_native_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.ACTIVE, evidence_at_ms=1600), NativeAudioObservation(
-        vocal=HumanVocalEvidence(), recurrence=VocalRecurrenceEvidence(),
-        causal_lower_bound_ms=1000))
-    progress_events = [item for item in active_telemetry if item[0] == 'utterance_progress']
-    observation_events = [item for item in active_telemetry if item[0] == 'native_audio_observation']
-    assert len(progress_events) == 1 and progress_events[0][2]['state'] == 'active'
-    assert len(observation_events) == 2
-    # Query callbacks may complete out of order. An older snapshot is telemetry,
-    # not permission to replace the newer integrated judgment.
-    active_app._consume_native_progress(active_token, UtteranceProgress(
-        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1400), NativeAudioObservation(
-        vocal=HumanVocalEvidence(),
-        recurrence=VocalRecurrenceEvidence(), causal_lower_bound_ms=1000))
-    assert active_app.controller.native_progress.active
-    active_app.set_auto_advance(True)
-    active_deadline = next(
-        callback for delay, callback in active_scheduled
-        if delay == active_app.runtime_state().utterance.text_wait_ms)
-    active_deadline()
-    active_state = active_app.runtime_state()
-    assert active_state.pause_reason is None
-    assert active_state.authorized and not active_state.sent and not active_state.completed
-
-    # The policy boundary is not permission to decide from stale acoustic state.
-    # Application snapshots PCM that already exists at the deadline and applies
-    # the unchanged fallback policy only after integrated evidence reaches it.
-    fenced_app, _ = app_with_game()
-    fp = fenced_app.current_profile()
-    fenced_source = source('FENCED', 4)
-    fp.hooks = [HookSelection('FENCED', 4, 5)]
-    fp.body_source = fenced_source.identity
-    fenced_app.select_profile(fenced_app.game_id, fenced_app.profile_id)
-    fenced_app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
-    fenced_app.set_profile_setting('uncertain_text_fallback', True)
-    fenced_scheduled = []
-    fenced_app.configure_runtime_loop(
-        schedule=lambda delay, callback: fenced_scheduled.append((delay, callback)))
-    connect_hook(fenced_app)
-    fenced_token = runtime_hook(fenced_app, fenced_source, '本文', 2)
-
-    class FencedNative:
-        pid = 101
-        requested = None
-        def observation_fence(self, token):
-            assert token == fenced_token
-            return 1500
-        def request_assessment_through(self, token, through_ms):
-            self.requested = (token, through_ms)
-        def finish_line(self, _token): pass
-
-    fenced_native = FencedNative()
-    fenced_app._native_audio = fenced_native
-    fenced_deadline = next(
-        callback for delay, callback in fenced_scheduled
-        if delay == fenced_app.runtime_state().utterance.text_wait_ms)
-    fenced_deadline()
-    assert not fenced_app.runtime_state().completed
-    assert fenced_native.requested == (fenced_token, 1500)
-
-
-    fenced_app._consume_native_progress(fenced_token, UtteranceProgress(
-        state=UtteranceProgressState.UNKNOWN, evidence_at_ms=1500), NativeAudioObservation(
-        vocal=HumanVocalEvidence(
-            series=(VocalEvidenceSeries(
-                observer='speech', active_score_threshold=.45,
-                samples=(
-                    VocalScoreSample(1100, 0.0, 1050),
-                    VocalScoreSample(1300, 0.0, 1250),
-                    VocalScoreSample(1500, 0.0, 1450),
-                )),)),
-        recurrence=VocalRecurrenceEvidence()))
-    assert fenced_app.runtime_state().completed
-    assert fenced_app.runtime_state().presentation_reason == 'uncertain_text_fallback'
-
-    text_app, _ = app_with_game()
-    text_source = source('TEXT', 3)
-    tp = text_app.current_profile()
-    tp.hooks = [HookSelection('TEXT', 3, 4)]
-    tp.body_source = text_source.identity
-    text_app.select_profile(text_app.game_id, text_app.profile_id)
+def test_application_keeps_newest_native_progress_at_the_fallback_boundary(monkeypatch):
+    Native, _InputObserver = _install_audio_runtime_fakes(monkeypatch)
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    selected = source('ACTIVE', 2)
+    profile.hooks = [HookSelection('ACTIVE', 2, 3)]
+    profile.body_source = selected.identity
+    app.select_profile(app.game_id, app.profile_id)
+    app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    app.set_profile_setting('uncertain_text_fallback', True)
     scheduled = []
-    text_app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
-    connect_hook(text_app)
-    text_token = runtime_hook(text_app, text_source, '本文', 2)
-    text_app.set_auto_advance(True)
-    presentation_delay, presentation = scheduled.pop(0)
-    assert presentation_delay == text_app.runtime_state().utterance.text_wait_ms
-    presentation()
-    assert text_app.runtime_state().token == text_token
-    assert text_app.runtime_state().authorized
-    assert text_app.runtime_state().sent
-    assert text_app.runtime_state().pause_reason is None
-    # Sending a line must not create a timer-driven judgment for a Presentation
-    # whose body has not arrived yet.
-    assert not scheduled
+    app.configure_runtime_loop(schedule=_runtime_scheduler(scheduled))
+    connect_hook(app)
+    token = runtime_hook(app, selected, '短い本文', 2)
+    assert token is not None
+    native = Native.instances[-1]
 
+    native.publish_progress(token, UtteranceProgressState.ACTIVE, 1600)
+    # Completion work can finish out of order. Older evidence must not replace
+    # the newer integrated frontier merely because its callback arrives later.
+    native.publish_progress(token, UtteranceProgressState.UNKNOWN, 1400)
+    app.set_auto_advance(True)
+    deadline = next(
+        callback for delay, callback in scheduled
+        if delay == app.runtime_state().utterance.text_wait_ms)
+    deadline()
+    state = app.runtime_state()
+    assert state.pause_reason is None
+    assert state.authorized and not state.sent and not state.completed
+
+
+def test_audio_fallback_fences_already_captured_pcm_before_policy_completion(monkeypatch):
+    Native, _InputObserver = _install_audio_runtime_fakes(monkeypatch)
+    app, _ = app_with_game()
+    profile = app.current_profile()
+    selected = source('FENCED', 4)
+    profile.hooks = [HookSelection('FENCED', 4, 5)]
+    profile.body_source = selected.identity
+    app.select_profile(app.game_id, app.profile_id)
+    app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
+    app.set_profile_setting('uncertain_text_fallback', True)
+    scheduled = []
+    app.configure_runtime_loop(schedule=_runtime_scheduler(scheduled))
+    connect_hook(app)
+    token = runtime_hook(app, selected, '本文', 2)
+    assert token is not None
+    native = Native.instances[-1]
+    native.fence_ms = 1500
+
+    deadline = next(
+        callback for delay, callback in scheduled
+        if delay == app.runtime_state().utterance.text_wait_ms)
+    deadline()
+    assert not app.runtime_state().completed
+    assert native.requests == [(token, 1500)]
+
+    native.publish_progress(token, UtteranceProgressState.UNKNOWN, 1500)
+    state = app.runtime_state()
+    assert state.completed
+    assert state.presentation_reason == 'uncertain_text_fallback'
+
+
+def test_text_mode_timer_completes_the_current_presentation_without_creating_a_next_line_timer():
+    app, _ = app_with_game()
+    selected = source('TEXT', 3)
+    profile = app.current_profile()
+    profile.hooks = [HookSelection('TEXT', 3, 4)]
+    profile.body_source = selected.identity
+    app.select_profile(app.game_id, app.profile_id)
+    scheduled = []
+    app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+    connect_hook(app)
+    token = runtime_hook(app, selected, '本文', 2)
+    app.set_auto_advance(True)
+    delay, presentation = scheduled.pop(0)
+    assert delay == app.runtime_state().utterance.text_wait_ms
+    presentation()
+    state = app.runtime_state()
+    assert state.token == token and state.authorized and state.sent
+    assert state.pause_reason is None
+    # Sending a line does not invent a timer for a Presentation whose body has
+    # not arrived yet.
+    assert not scheduled
 
 def test_persistence_commands_are_atomic_and_user_settings_hide_storage_mechanics():
     app, saves = app_with_game()
@@ -451,7 +471,7 @@ def test_play_view_exposes_only_actionable_runtime_holds():
         issue = app.play_view().issue
         assert (issue.action if issue else None) == action
 
-def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cross_sessions(monkeypatch):
+def test_ocr_worker_lifecycle_and_results_are_owned_by_the_active_monitoring_session(monkeypatch):
     import autoadv.application as application_module
     from types import SimpleNamespace
 
@@ -486,7 +506,6 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     assert app.activate_selected_target() == 'monitoring'
     worker = FakeWorker.instances[-1]
     assert worker.started
-    app._record_game_input(10)
     monkeypatch.setattr(application_module.time, 'monotonic_ns', lambda: 20_000_000)
     worker.on_text(3, '台詞')
     first_token = app.runtime_state().token
@@ -494,9 +513,7 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     assert delayed
 
     # A second stabilized OCR body is admitted directly without inventing a
-    # blank-only transition rule.  Inputs observed since the prior admitted
-    # body are attached to this Presentation as factual timestamps.
-    app._record_game_input(30)
+    # blank-only transition rule.
     monkeypatch.setattr(application_module.time, 'monotonic_ns', lambda: 40_000_000)
     worker.on_text(4, '次台詞')
     assert app.runtime_state().utterance.raw == '次台詞'
@@ -506,6 +523,10 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
     assert app.runtime_state().pause_reason == 'ocr_failure'
     app.stop_monitoring('session_changed')
     assert worker.closed
+
+
+def test_irodori_connection_results_from_replaced_sessions_are_ignored(monkeypatch):
+    import autoadv.application as application_module
 
     class DeferredThread:
         pending = []
@@ -546,11 +567,27 @@ def test_application_owns_external_worker_lifecycles_and_stale_results_cannot_cr
 def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_defaults(monkeypatch):
     import autoadv.application as application_module
     import autoadv.native_runtime as native_runtime_module
+    import threading as real_threading
     from types import SimpleNamespace
 
     class ImmediateThread:
         def __init__(self, *, target, daemon, name): self.target = target
         def start(self): self.target()
+    class FakeCapture:
+        def __init__(self, hwnd, pid):
+            self.hwnd, self.pid = hwnd, pid
+
+    class FakeReader:
+        def __init__(self, config, capture):
+            self.config, self.capture = config, capture
+
+    class FakeWorker:
+        def __init__(self, reader, on_text, on_error):
+            self.started = False
+            self.closed = False
+        def start(self): self.started = True
+        def close(self): self.closed = True
+
     class FakeNative:
         instances = []
         def __init__(self, pid, helper, model, vocab, notify, **callbacks):
@@ -568,7 +605,12 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
         alignment_vocab='C:/runtime/vocab.json',
         human_vocal_model='C:/runtime/yamnet.onnx',
     )
-    monkeypatch.setattr(application_module.threading, 'Thread', ImmediateThread)
+    monkeypatch.setattr(
+        application_module, 'threading',
+        SimpleNamespace(Thread=ImmediateThread, Lock=real_threading.Lock))
+    monkeypatch.setattr(application_module, 'WindowsClientCapture', FakeCapture)
+    monkeypatch.setattr(application_module, 'TesseractOCR', FakeReader)
+    monkeypatch.setattr(application_module, 'OCRWorker', FakeWorker)
     monkeypatch.setattr(application_module, 'NativeAudio', FakeNative)
     monkeypatch.setattr(native_runtime_module, 'managed_paths', lambda: managed)
     app, _ = app_with_game()
@@ -576,7 +618,6 @@ def test_monitor_lifecycle_owns_native_audio_instance_and_uses_managed_runtime_d
     app.set_profile_setting('advance_mode', AdvanceMode.AUDIO)
     app.select_primary_target(101, 500)
     app.select_audio_target(202)
-    monkeypatch.setattr(app, '_start_ocr', lambda _profile: True)
     app.configure_runtime_loop(schedule=lambda _delay, callback: callback())
     assert app.activate_selected_target() == 'monitoring'
     native = FakeNative.instances[-1]
@@ -671,8 +712,8 @@ def test_selected_capture_providers_own_luna_sync_and_connected_profile_configur
     body = source('T', 1)
     speaker = source('S', 5, address=2)
     app.select_primary_target(101, 500)
-    from tests.contracts_support import _Host
-    app.hook_host = _Host()
+    from tests.contracts_support import FakeHookHost
+    app.hook_host = FakeHookHost()
     assert app.activate_selected_target() == 'connecting'
     app.handle_hook_event(HookEvent('connected', 'host', 1, 1, 10, 101))
 

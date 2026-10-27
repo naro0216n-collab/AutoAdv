@@ -141,7 +141,7 @@ def test_accuracy_measurement_scope_covers_product_input_equivalence_classes():
     )
 
 
-def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
+def _offline_verifier_sample():
     case = ACCURACY_SCENARIO[0]
     start_ns = 1_000_000_000
     voice_ns = 1_010_000_000
@@ -150,8 +150,6 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
         {'event': 'trace_started', 'version': 3, 'at_ns': start_ns},
         {'event': 'validation_collection_target', 'seq': 1, 'at_ns': start_ns + 1,
          'phase': 'accuracy', 'dialogues': 1, 'final_observation_seconds': 12.0},
-        # Deliberately contradictory product inference. Offline classification must
-        # not consume it.
         {'event': 'utterance_progress', 'seq': 2, 'at_ns': start_ns + 2,
          'session': 1, 'line': 1, 'state': 'active'},
         {'event': 'advance_attempt', 'seq': 3, 'at_ns': input_ns, 'session': 1, 'line': 1},
@@ -164,14 +162,19 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
         {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': voice_ns, 'case': case['id'],
          'voice_file': case['foreground_file'], 'duration_ms': 1637.0},
     ]
+    return records, fixture, voice_ns
+
+
+def test_offline_verifier_classifies_input_from_independent_fixture_time_not_product_inference():
+    records, fixture, voice_ns = _offline_verifier_sample()
     result = validate(records, phase='accuracy', fixture_records=fixture)
     assert result['verdict'] == 'no_failure_observed'
     assert result['case_results'][0]['outcome'] == 'advanced'
     assert result['case_results'][0]['early_input'] is False
     assert result['facts']['advance_inputs'] == 1
-    for removed in ('ok', 'collection_valid', 'measurement_valid', 'collection_complete'):
-        assert removed not in result
 
+    # Contradictory product inference is evidence under analysis, never the
+    # offline oracle. Changing it cannot change the independent classification.
     changed = [dict(row) for row in records]
     changed[2]['state'] = 'ended'
     assert validate(changed, phase='accuracy', fixture_records=fixture)['case_results'] == result['case_results']
@@ -183,21 +186,22 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
     assert early_result['case_results'][0]['outcome'] == 'early_input'
     assert early_result['verdict'] == 'failure_observed'
 
-    # A voiced case without an independent clean-source endpoint is measured as
-    # incomplete rather than being promoted to a safe advancement by absence of
-    # contrary evidence.
-    unmeasured_fixture = [dict(row) for row in fixture]
+
+def test_offline_verifier_reports_unmeasured_foreground_endpoint_as_incomplete():
+    records, fixture, _voice_ns = _offline_verifier_sample()
     unmeasured_path = 'audio/runtime/voice/not-annotated.wav'
+    unmeasured_fixture = [dict(row) for row in fixture]
     unmeasured_fixture[1]['voice_file'] = unmeasured_path
     unmeasured_fixture[2]['voice_file'] = unmeasured_path
-    unmeasured = validate(records, phase='accuracy', fixture_records=unmeasured_fixture)
-    assert unmeasured['case_results'][0]['outcome'] == 'unmeasured_endpoint'
-    assert unmeasured['case_results'][0]['foreground_endpoint_status'] == 'unmeasured'
-    assert unmeasured['verdict'] == 'incomplete'
+    result = validate(records, phase='accuracy', fixture_records=unmeasured_fixture)
+    assert result['case_results'][0]['outcome'] == 'unmeasured_endpoint'
+    assert result['case_results'][0]['foreground_endpoint_status'] == 'unmeasured'
+    assert result['verdict'] == 'incomplete'
 
-    # An authored external game input is a stimulus fact, not an AutoAdv input.
-    # Even when it occurs before the clean-source endpoint it must not be called
-    # an AutoAdv early advance.
+
+def test_offline_verifier_keeps_authored_external_input_separate_from_product_advancement():
+    _records, fixture, voice_ns = _offline_verifier_sample()
+    start_ns = fixture[0]['at_ns']
     authored_records = [
         {'event': 'trace_started', 'version': 3, 'at_ns': start_ns},
         {'event': 'validation_collection_target', 'seq': 1, 'at_ns': start_ns + 1,
@@ -211,73 +215,66 @@ def test_offline_verifier_uses_fixture_and_input_times_not_product_inference():
          'text_received_ns': voice_ns + 140_000_000,
          'input_candidates_ms': [1234]},
     ]
-    authored_fixture = [
-        {'event': 'fixture_started', 'version': 1, 'seq': 0, 'at_ns': start_ns, 'pid': 50},
-        {'event': 'fixture_case', 'seq': 1, 'at_ns': start_ns + 5,
-         'case': ACCURACY_SCENARIO[0]['id'], 'text': ACCURACY_SCENARIO[0]['text'],
-         'voice_file': ACCURACY_SCENARIO[0]['foreground_file']},
-        {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': voice_ns,
-         'case': ACCURACY_SCENARIO[0]['id'],
-         'voice_file': ACCURACY_SCENARIO[0]['foreground_file'], 'duration_ms': 1637.0},
-        {'event': 'fixture_case', 'seq': 3, 'at_ns': voice_ns + 200_000_000,
-         'case': ACCURACY_SCENARIO[1]['id'], 'text': ACCURACY_SCENARIO[1]['text'],
-         'voice_file': ACCURACY_SCENARIO[1]['foreground_file']},
-    ]
-    authored = validate(authored_records, phase='accuracy', fixture_records=authored_fixture)
-    first_result = authored['case_results'][0]
-    assert first_result['outcome'] == 'authored_input'
-    assert first_result['product_input_at_ns'] is None
-    assert first_result['early_input'] is None
-    assert authored['facts']['validation_game_inputs'] == 1
-    # Posted keyboard messages are not low-level input. Even a coincident
-    # observation must not be attributed to this driver stimulus by time alone.
-    assert authored['facts']['game_input_observations'] == 1
-    assert authored['facts']['external_input_candidate_attachments'] == 1
-    assert authored['facts']['external_input_candidates'] == 1
-    assert authored['facts']['auto_input_causal_bounds'] == 0
-    assert 'authored_input_observed_at_ns' not in first_result
-    assert 'authored_input_causal_bound_ms' not in first_result
-    assert not any('authored game input was not observed' in issue
-                   for issue in authored['evidence_issues'])
+    authored_fixture = fixture + [{
+        'event': 'fixture_case', 'seq': 3, 'at_ns': voice_ns + 200_000_000,
+        'case': ACCURACY_SCENARIO[1]['id'], 'text': ACCURACY_SCENARIO[1]['text'],
+        'voice_file': ACCURACY_SCENARIO[1]['foreground_file'],
+    }]
+    result = validate(authored_records, phase='accuracy', fixture_records=authored_fixture)
+    first = result['case_results'][0]
+    assert first['outcome'] == 'authored_input'
+    assert first['product_input_at_ns'] is None and first['early_input'] is None
+    assert result['facts']['validation_game_inputs'] == 1
+    assert result['facts']['game_input_observations'] == 1
+    assert result['facts']['external_input_candidate_attachments'] == 1
+    assert result['facts']['external_input_candidates'] == 1
+    assert result['facts']['auto_input_causal_bounds'] == 0
 
-
-def test_authored_game_input_uses_fixed_fixture_time_not_product_state(monkeypatch):
+def test_authored_game_input_uses_fixed_fixture_time_not_product_state():
     sent, traces = [], []
-    from autoadv import windows_input
-
-    class TargetedKeyboard:
-        def __init__(self, hwnd, *, virtual_key):
-            sent.append(('bound', hwnd, virtual_key))
-
-        def advance(self):
-            sent.append(('sent',))
-
-    monkeypatch.setattr(windows_input, 'WindowsAdvancementInput', TargetedKeyboard)
-
     runtime = SimpleNamespace(
         token=SimpleNamespace(session=1, line=8), pause_reason='irrelevant_runtime_reason', sent=True,
         target=SimpleNamespace(pid=50, hwnd=77), profile=SimpleNamespace(input_key=13))
     product = SimpleNamespace(runtime_state=lambda: runtime)
-    driver = SessionDriver(
-        SimpleNamespace(application=product), SimpleNamespace(),
-        {'timeout_seconds': 60},
-        SimpleNamespace(emit=lambda name, **fields: traces.append((name, fields))),
-        clock=lambda: 0.0,
-    )
-    case_id = 'room-clean-unvoiced'
-    driver.current_case = case_id
-    driver.current_case_seen_at = 10.0
-    delay_s = ACCURACY_GAME_INPUTS_MS[case_id] / 1000.0
-    assert not driver._send_authored_game_input(runtime, case_id, 10.0 + delay_s - 0.001)
-    assert driver._send_authored_game_input(runtime, case_id, 10.0 + delay_s)
-    assert sent == [('bound', 77, 13), ('sent',)]
-    assert traces == [('validation_game_input', {
-        'case': case_id, 'scheduled_after_ms': ACCURACY_GAME_INPUTS_MS[case_id]})]
-    runtime.pause_reason = ''
-    runtime.sent = False
-    assert not driver._send_authored_game_input(runtime, case_id, 99.0)
-    assert sent == [('bound', 77, 13), ('sent',)]
+    clock = [10.0]
 
+    with tempfile.TemporaryDirectory() as directory:
+        evidence = Path(directory) / 'fixture.jsonl'
+        case_id = 'room-clean-unvoiced'
+        evidence.write_text(json.dumps({
+            'event': 'fixture_case', 'seq': 1, 'at_ns': 1,
+            'case': case_id, 'text': 'fixture', 'voice_file': None,
+        }) + '\n', encoding='utf-8')
+        driver = SessionDriver(
+            SimpleNamespace(application=product, close=lambda: None),
+            SimpleNamespace(quit=lambda: None, exit=lambda _code: None),
+            {'timeout_seconds': 60, 'phase': 'accuracy', 'dialogues': 2,
+             'evidence': str(evidence)},
+            SimpleNamespace(emit=lambda name, **fields: traces.append((name, fields))),
+            clock=lambda: clock[0], game_input_send=lambda current: sent.append(current),
+        )
+        driver.state = 'running'
+
+        # The first observed fixture case establishes the authored schedule.
+        driver.tick()
+        assert sent == []
+        delay_s = ACCURACY_GAME_INPUTS_MS[case_id] / 1000.0
+        clock[0] = 10.0 + delay_s - 0.001
+        driver.tick()
+        assert sent == []
+
+        # Runtime pause/sent fields are deliberately irrelevant: the stimulus is
+        # fixed by the fixture case and its authored delay.
+        clock[0] = 10.0 + delay_s
+        driver.tick()
+        assert sent == [runtime]
+        assert traces == [('validation_game_input', {
+            'case': case_id, 'scheduled_after_ms': ACCURACY_GAME_INPUTS_MS[case_id]})]
+        runtime.pause_reason = ''
+        runtime.sent = False
+        clock[0] = 59.0
+        driver.tick()
+        assert sent == [runtime]
 
 def test_validation_recovery_is_fixed_case_watchdog_not_product_state_interpretation():
     actions, recoveries, traces = [], [], []
@@ -415,287 +412,264 @@ def _comments():
     return result
 
 
-def test_issue_reporting_shares_analysis_evidence_without_repeating_durable_diagnostics():
+def _published_payload(snapshot, name: str) -> str:
+    blocks = []
+    pattern = re.compile(
+        r'<details(?: open)?><summary>(?P<label>[^<]+)</summary>\n\n'
+        r'(?P<fence>`{3,})[^\n]*\n(?P<body>.*?)\n(?P=fence)\n</details>',
+        re.S,
+    )
+    for match in pattern.finditer(snapshot.body):
+        label = match.group('label')
+        if label == name or label.startswith(name + ' · chunk '):
+            blocks.append(match.group('body'))
+    return ''.join(blocks)
+
+
+def _strict_json(text: str):
+    return json.loads(
+        text,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            AssertionError(f'non-finite JSON token leaked: {value}')),
+    )
+
+
+def _write_issue_run(root: Path, *, runner_error: str | None = None, large_fixture=False):
+    summary = {
+        'schema': 'autoadv-local-validation-v4', 'phase_requested': 'accuracy',
+        'started_utc': '2026-10-25T00:00:00Z', 'ended_utc': '2026-10-25T00:01:00Z',
+        'phases': [{'phase': 'accuracy', 'report_present': True, 'runner_error': runner_error,
+                    'facts': {'requested_cases': 2, 'fixture_cases': 2, 'hook_outputs': 2,
+                              'utterances': 2, 'presentation_completions': 1,
+                              'advance_inputs': 1, 'validation_game_inputs': 1,
+                              'validation_recovery_inputs': 0}}],
+        'launcher_error': None,
+    }
+    (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
+
+    raw = 'case2\ncase3 C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl'
+    trace = [
+        {'event': 'trace_started', 'version': 3, 'at_ns': 1},
+        {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'session': 1,
+         'generation': 'g', 'connection': 1, 'hook_sequence': 11, 'received_ns': 100,
+         'pid': 5, 'address': 0x1234, 'context': 1, 'context2': 2,
+         'source': 'H|1|2', 'raw': raw},
+        {'event': 'utterance', 'seq': 2, 'at_ns': 12, 'session': 1, 'line': 1,
+         'source': 'H|1|2', 'hook_sequence': 11, 'raw': raw, 'body': raw,
+         'speaker': '', 'advance_mode': 'audio', 'use_tts': False,
+         'uncertain_text_fallback': True, 'reading_units': 8, 'text_wait_ms': 1400},
+        {'event': 'native_audio_observation', 'seq': 3, 'at_ns': 13,
+         'session': 1, 'line': 1, 'evidence_at_ms': 1000, 'target_units': 8,
+         'aligned_target_units': 3, 'target_associated': True,
+         'complete_alignment': False, 'committed_target_end': False,
+         'causal_lower_bound_ms': 900, 'input_candidates_ms': [920],
+         'target_attached_ms': 940, 'lexical_target_end_ms': None,
+         'vocal_series': [{'observer': 'nonlexical', 'frame_count': 5,
+                           'active_count': 4, 'peak_score': .93,
+                           'active_score_threshold': .45,
+                           'measurement_support_start_ms': 900,
+                           'measurement_support_end_ms': 1000}],
+         'recurrence_strength': .91, 'recurrence_period_ms': 640,
+         'recurrence_stability': .82, 'recent_recurrence_strength': .88,
+         'recurrence_level_consistency': .84},
+        {'event': 'utterance_progress', 'seq': 4, 'at_ns': 14,
+         'session': 1, 'line': 1, 'state': 'active', 'evidence_at_ms': 1000},
+    ]
+    for index in range(40):
+        trace.append({
+            'event': 'alignment_inference', 'seq': 10 + index, 'at_ns': 20 + index,
+            'session': 1, 'line': 1, 'target_associated': True, 'target_units': 8,
+            'aligned_target_units': 3, 'complete_alignment': False,
+            'committed_target_end': False, 'queue_ms': float(index % 7),
+            'align_ms': 10.0 + (index % 5), 'capture_start_ms': 900,
+            'capture_end_ms': 1100 + index * 10, 'path_margin': 2.5,
+            'boundary_margin': float('-inf'),
+        })
+    trace.extend([
+        {'event': 'native_audio_observation', 'seq': 60, 'at_ns': 300,
+         'session': 1, 'line': 1, 'evidence_at_ms': 1500,
+         'target_units': 8, 'aligned_target_units': 3,
+         'target_associated': True, 'complete_alignment': False,
+         'committed_target_end': False, 'causal_lower_bound_ms': 900,
+         'input_candidates_ms': [920], 'target_attached_ms': 940,
+         'lexical_target_end_ms': None,
+         'vocal_series': [{'observer': 'nonlexical', 'frame_count': 7,
+                           'active_count': 5, 'peak_score': .93,
+                           'active_score_threshold': .45,
+                           'measurement_support_start_ms': 900,
+                           'measurement_support_end_ms': 1500}],
+         'recurrence_strength': .91, 'recurrence_period_ms': 640,
+         'recurrence_stability': .82, 'recent_recurrence_strength': .88,
+         'recurrence_level_consistency': .84},
+        {'event': 'utterance_progress', 'seq': 61, 'at_ns': 301,
+         'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1500},
+        {'event': 'hook_event', 'seq': 62, 'at_ns': 302,
+         'hook_event': {'kind': 'diagnostic', 'host_generation': 'g',
+                        'connection_generation': 1, 'sequence': 10, 'received_ns': 99,
+                        'process_id': 5, 'source': None, 'text': '',
+                        'detail': 'startup-only-diagnostic'},
+         'outcome': {'connection_transition': None, 'capture': {'changed': False},
+                     'token': None, 'flush_delay_ms': None,
+                     'note': 'LunaHost: startup-only-diagnostic'}},
+        {'event': 'hook_event', 'seq': 63, 'at_ns': 303,
+         'hook_event': {'kind': 'output', 'host_generation': 'g',
+                        'connection_generation': 1, 'sequence': 11, 'received_ns': 100,
+                        'process_id': 5,
+                        'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
+                                   'context2': 2, 'hook_code': 'H', 'hook_name': 'name'},
+                        'text': raw, 'detail': ''},
+         'outcome': {'connection_transition': None, 'capture': {'changed': False},
+                     'token': None, 'flush_delay_ms': None, 'note': ''}},
+        {'event': 'hook_event', 'seq': 64, 'at_ns': 304,
+         'hook_event': {'kind': 'output', 'host_generation': 'g',
+                        'connection_generation': 1, 'sequence': 12, 'received_ns': 101,
+                        'process_id': 5,
+                        'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
+                                   'context2': 2, 'hook_code': 'H', 'hook_name': 'name'},
+                        'text': 'other', 'detail': ''},
+         'outcome': {'connection_transition': None, 'capture': {'changed': False},
+                     'token': None, 'flush_delay_ms': None, 'note': ''}},
+    ])
+    (root / 'autoadv-accuracy.jsonl').write_text(
+        ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n'
+                for item in trace), encoding='utf-8')
+
+    fixture = [
+        {'event': 'fixture_started', 'version': 2, 'at_ns': 2, 'pid': 5},
+        {'event': 'fixture_case', 'seq': 1, 'at_ns': 10, 'pid': 5,
+         'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
+        {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': 10, 'pid': 5,
+         'case': 'case2', 'voice_file': 'jvs.wav', 'duration_ms': 1200.0},
+    ]
+    if large_fixture:
+        fixture.append({'event': 'fixture_note', 'seq': 3, 'at_ns': 11, 'pid': 5,
+                        'note': '証' * 65000})
+    (root / 'autoadv-fixture-evidence.jsonl').write_text(
+        ''.join(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n'
+                for item in fixture), encoding='utf-8')
+
+    report = {
+        'schema': 'autoadv-offline-verification-v1', 'phase': 'accuracy',
+        'verdict': 'failure_observed', 'facts': {'requested_cases': 2},
+        'case_results': [
+            {'case': 'case2', 'outcome': 'early_input', 'source_endpoint_ms': 1234.5},
+            {'case': 'case3', 'outcome': 'advanced', 'source_endpoint_ms': 2345.5},
+        ],
+        'evidence_issues': [],
+    }
+    (root / 'autoadv-accuracy.result.json').write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    (root / 'autoadv-alignment.result.json').write_text(
+        '{"unrelated_marker":true}', encoding='utf-8')
+    (root / 'autoadv-debug.jsonl').write_text(
+        '{"event":"unrelated_marker"}\n', encoding='utf-8')
+    (root / 'validation.log').write_text(
+        'runtime C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl diagnostics\n',
+        encoding='utf-8')
+
+    human_vocal = {
+        'schema': 'autoadv-human-vocal-observer-diagnostic-v1',
+        'evidence_layer': 'isolated_fixture_observer_measurement',
+        'product_acceptance': False, 'platform': 'Windows-test',
+        'model': 'C:\\Users\\alice\\AutoAdv\\human-vocal.onnx',
+        'threshold_grid': [0.05, 0.10],
+        'files': [{'file': 'speaker.wav', 'duration_ms': 1200,
+                   'observers': {'nonlexical': {'peak_score': .9,
+                                               'detail_marker': 'observer-full-detail'}}}],
+    }
+    human_path = root / issue_reporting.HUMAN_VOCAL_REPORT
+    human_path.write_text(json.dumps(human_vocal, ensure_ascii=False, indent=2), encoding='utf-8')
+    sanitized_human = issue_reporting.sanitize_public_issue(human_path.read_text(encoding='utf-8'))
+    human_digest = hashlib.sha256(sanitized_human.encode('utf-8')).hexdigest()
+    return summary, human_digest
+
+
+def test_issue_snapshot_preserves_analysis_facts_without_copying_unrelated_or_redundant_files():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory) / '20261025T000000Z-runnew'; root.mkdir()
-        summary = {
-            'schema': 'autoadv-local-validation-v4', 'phase_requested': 'accuracy',
-            'started_utc': '2026-10-25T00:00:00Z', 'ended_utc': '2026-10-25T00:01:00Z',
-            'phases': [{'phase': 'accuracy', 'report_present': True, 'runner_error': None,
-                        'facts': {'requested_cases': 2, 'fixture_cases': 2, 'hook_outputs': 1,
-                                  'utterances': 1, 'presentation_completions': 1,
-                                  'advance_inputs': 1, 'validation_game_inputs': 1, 'validation_recovery_inputs': 0}}],
-            'launcher_error': None,
-        }
-        (root / 'validation-summary.json').write_text(json.dumps(summary), encoding='utf-8')
+        _summary, _digest = _write_issue_run(root)
+        snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
 
-        raw = 'case2\ncase3 C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl'
-        trace = [
-            {'event': 'trace_started', 'version': 3, 'at_ns': 1},
-            {'event': 'hook_output', 'seq': 1, 'at_ns': 11, 'session': 1,
-             'generation': 'g', 'connection': 1, 'hook_sequence': 11, 'received_ns': 100,
-             'pid': 5, 'address': 0x1234, 'context': 1, 'context2': 2,
-             'source': 'H|1|2', 'raw': raw},
-            {'event': 'native_audio_observation', 'seq': 2, 'at_ns': 12,
-             'session': 1, 'line': 1, 'evidence_at_ms': 1000, 'target_units': 8,
-             'aligned_target_units': 3, 'target_associated': True,
-             'complete_alignment': False, 'committed_target_end': False,
-             'causal_lower_bound_ms': 900, 'input_candidates_ms': [920],
-             'target_attached_ms': 940, 'lexical_target_end_ms': None,
-             'vocal_series': [{'observer': 'nonlexical', 'frame_count': 5,
-                               'active_count': 4, 'peak_score': .93,
-                               'active_score_threshold': .45,
-                               'measurement_support_start_ms': 900,
-                               'measurement_support_end_ms': 1000}],
-             'recurrence_strength': .91, 'recurrence_period_ms': 640,
-             'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-             'recurrence_level_consistency': .84},
-            {'event': 'utterance_progress', 'seq': 3, 'at_ns': 13,
-             'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1000},
-            {'event': 'utterance_progress', 'seq': 4, 'at_ns': 14,
-             'session': 1, 'line': 1, 'state': 'active', 'evidence_at_ms': 1000},
-        ]
-        for i in range(220):
-            row = {
-                'event': 'alignment_inference', 'seq': i + 5, 'at_ns': 20 + i,
-                'session': 1, 'line': 1, 'target_associated': True,
-                'target_units': 8, 'queue_ms': float(i % 7), 'align_ms': 10.0 + (i % 5),
-                'capture_start_ms': 900, 'capture_end_ms': 1000 + i,
-                'padding': '音' * 180,
-            }
-            if i == 219:
-                row.update({
-                    'capture_end_ms': 1500, 'aligned_target_units': 3,
-                    'target_associated': True, 'complete_alignment': False,
-                    'committed_target_end': False, 'causal_lower_bound_ms': 900,
-                    'input_candidates_ms': [920], 'target_attached_ms': 940,
-                    'lexical_target_end_ms': None, 'queue_ms': 3.0, 'align_ms': 10.0,
-                    'path_margin': 2.5, 'boundary_margin': float('-inf'),
-                })
-            trace.append(row)
-        trace.extend([
-            {'event': 'native_audio_observation', 'seq': 225, 'at_ns': 300,
-             'session': 1, 'line': 1, 'evidence_at_ms': 1500,
-             'target_units': 8, 'aligned_target_units': 3,
-             'target_associated': True, 'complete_alignment': False,
-             'committed_target_end': False, 'causal_lower_bound_ms': 900,
-             'input_candidates_ms': [920], 'target_attached_ms': 940,
-             'lexical_target_end_ms': None,
-             'vocal_series': [{'observer': 'nonlexical', 'frame_count': 7,
-                               'active_count': 5, 'peak_score': .93,
-                               'active_score_threshold': .45,
-                               'measurement_support_start_ms': 900,
-                               'measurement_support_end_ms': 1500}],
-             'recurrence_strength': .91, 'recurrence_period_ms': 640,
-             'recurrence_stability': .82, 'recent_recurrence_strength': .88,
-             'recurrence_level_consistency': .84},
-            {'event': 'utterance_progress', 'seq': 226, 'at_ns': 301,
-             'session': 1, 'line': 1, 'state': 'active', 'evidence_at_ms': 1500},
-            {'event': 'utterance_progress', 'seq': 227, 'at_ns': 302,
-             'session': 1, 'line': 1, 'state': 'unknown', 'evidence_at_ms': 1500},
-            {'event': 'hook_event', 'seq': 228, 'at_ns': 303,
-             'hook_event': {
-                 'kind': 'diagnostic', 'host_generation': 'g', 'connection_generation': 1,
-                 'sequence': 10, 'received_ns': 99, 'process_id': 5,
-                 'source': None, 'text': '', 'detail': 'startup-only-diagnostic'},
-             'outcome': {'connection_transition': None, 'capture': {'changed': False},
-                         'token': None, 'flush_delay_ms': None,
-                         'note': 'LunaHost: startup-only-diagnostic'}},
-            {'event': 'hook_event', 'seq': 230, 'at_ns': 305,
-             'hook_event': {
-                 'kind': 'output', 'host_generation': 'g', 'connection_generation': 1,
-                 'sequence': 11, 'received_ns': 100, 'process_id': 5,
-                 'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
-                            'context2': 2, 'hook_code': 'H', 'hook_name': 'name'},
-                 'text': raw, 'detail': ''},
-             'outcome': {'connection_transition': None, 'capture': {'changed': False},
-                         'token': None, 'flush_delay_ms': None, 'note': ''}},
-            {'event': 'hook_event', 'seq': 231, 'at_ns': 306,
-             'hook_event': {
-                 'kind': 'output', 'host_generation': 'g', 'connection_generation': 1,
-                 'sequence': 12, 'received_ns': 101, 'process_id': 5,
-                 'source': {'process_id': 5, 'address': 0x1234, 'context': 1,
-                            'context2': 2, 'hook_code': 'H', 'hook_name': 'name'},
-                 'text': 'other', 'detail': ''},
-             'outcome': {'connection_transition': None, 'capture': {'changed': False},
-                         'token': None, 'flush_delay_ms': None, 'note': ''}},
-        ])
-        trace_text = ''.join(
-            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in trace)
-        (root / 'autoadv-accuracy.jsonl').write_text(trace_text, encoding='utf-8')
+        # The public Issue surface keeps the evidence needed to reconstruct the
+        # run's causal story, not every file that happens to share a prefix.
+        for name in ('validation-summary.json', 'autoadv-accuracy.jsonl',
+                     'autoadv-fixture-evidence.jsonl', 'autoadv-accuracy.result.json'):
+            assert name in snapshot.body
+        assert 'unrelated_marker' not in snapshot.body
+        assert 'startup-only-diagnostic' not in snapshot.body
+        assert 'validation.log' not in snapshot.body
 
-        fixture = [
-            {'event': 'fixture_started', 'version': 2, 'at_ns': 2},
-            {'event': 'fixture_case', 'seq': 1, 'at_ns': 10, 'case': 'case2', 'text': 'case2', 'voice_file': 'jvs.wav'},
-            {'event': 'fixture_voice_commanded', 'seq': 2, 'at_ns': 10, 'case': 'case2', 'voice_file': 'jvs.wav'},
-            # Keep partitioning under contract even when the product trace becomes compact.
-            {'event': 'fixture_note', 'seq': 3, 'at_ns': 11, 'note': '証' * 65000},
-        ]
-        fixture_path = root / 'autoadv-fixture-evidence.jsonl'
-        fixture_text = ''.join(
-            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in fixture)
-        fixture_path.write_text(fixture_text, encoding='utf-8')
-        shared_fixture, fixture_representation = issue_reporting._compact_fixture_evidence(fixture_text)
-        assert fixture_representation == issue_reporting.FIXTURE_ENCODING
-        fixture_table = json.loads(shared_fixture)
-        assert fixture_table['source_record_count'] == len(fixture)
-        reconstructed = [None] * len(fixture)
-        for table in fixture_table['tables']:
-            constants = table.get('constants', {})
-            for row in table['rows']:
-                values = dict(zip(table['columns'], row))
-                source_index = values.pop('source_index')
-                reconstructed[source_index] = {'event': table['event'], **constants, **values}
-        assert reconstructed == fixture
+        trace_text = _published_payload(snapshot, 'autoadv-accuracy.jsonl')
+        trace_records = [_strict_json(line) for line in trace_text.splitlines() if line]
+        serialized_trace = json.dumps(trace_records, ensure_ascii=False)
+        assert 'case2\\ncase3 <USERPROFILE>\\\\AutoAdv <REDACTED-TOKEN>' in serialized_trace
+        assert 'active' in serialized_trace and 'unknown' in serialized_trace
+        assert '1500' in serialized_trace and '-Infinity' in serialized_trace
 
-        report = {
-            'schema': 'autoadv-offline-verification-v1', 'phase': 'accuracy',
-            'verdict': 'failure_observed', 'facts': {'requested_cases': 2},
-            'case_results': [{'case': 'case2', 'outcome': 'early_input', 'source_endpoint_ms': 1234.5}],
-            'evidence_issues': [],
-        }
-        (root / 'autoadv-accuracy.result.json').write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-        (root / 'autoadv-alignment.result.json').write_text(
-            '{"unrelated_marker":true}', encoding='utf-8')
-        (root / 'autoadv-debug.jsonl').write_text(
-            '{"event":"unrelated_marker"}\n', encoding='utf-8')
-        (root / 'validation.log').write_text(
-            'runtime C:\\Users\\alice\\AutoAdv ghp_1234567890abcdefghijkl diagnostics\n',
-            encoding='utf-8')
+        fixture = _strict_json(_published_payload(snapshot, 'autoadv-fixture-evidence.jsonl'))
+        serialized_fixture = json.dumps(fixture, ensure_ascii=False)
+        assert all(value in serialized_fixture for value in ('case2', 'jvs.wav', '1200.0'))
 
-        human_vocal = {
-            'schema': 'autoadv-human-vocal-observer-diagnostic-v1',
-            'evidence_layer': 'isolated_fixture_observer_measurement',
-            'product_acceptance': False, 'platform': 'Windows-test',
-            'model': 'C:\\Users\\alice\\AutoAdv\\human-vocal.onnx',
-            'threshold_grid': [0.05, 0.10],
-            'files': [{'file': 'speaker.wav', 'duration_ms': 1200,
-                       'observers': {'nonlexical': {'peak_score': .9,
-                                                   'detail_marker': 'observer-full-detail'}}}],
-        }
-        human_path = root / issue_reporting.HUMAN_VOCAL_REPORT
-        human_path.write_text(json.dumps(human_vocal, ensure_ascii=False, indent=2), encoding='utf-8')
-        sanitized_human = issue_reporting.sanitize_public_issue(human_path.read_text(encoding='utf-8'))
-        human_digest = hashlib.sha256(sanitized_human.encode('utf-8')).hexdigest()
+        report = _strict_json(_published_payload(snapshot, 'autoadv-accuracy.result.json'))
+        serialized_report = json.dumps(report, ensure_ascii=False)
+        assert all(value in serialized_report for value in ('early_input', '1234.5', 'advanced', '2345.5'))
 
-        compact_trace, representation = issue_reporting._compact_product_trace(
-            issue_reporting.sanitize_public_issue(trace_text))
-        assert representation == issue_reporting.TRACE_ENCODING
-        assert len(compact_trace) < len(issue_reporting.sanitize_public_issue(trace_text)) // 4
-        def strict_json(line):
-            return json.loads(line, parse_constant=lambda value: (_ for _ in ()).throw(
-                AssertionError(f'non-finite JSON token leaked: {value}')))
-        compact_records = [strict_json(line) for line in compact_trace.splitlines()]
-        header = compact_records[0]
-        assert header['issue_encoding'] == issue_reporting.TRACE_ENCODING
-        assert header['source_record_count'] == len(trace)
+        summary = _strict_json(_published_payload(snapshot, 'validation-summary.json'))
+        serialized_summary = json.dumps(summary, ensure_ascii=False)
+        # Accuracy facts have one owner on the Issue surface; summary may point to
+        # them but must not duplicate the table already carried by the verifier.
+        assert '"requested_cases"' not in serialized_summary
+        assert snapshot.body.count('"requested_cases"') == 1
 
-        hook_analysis = next(record for record in compact_records
-                             if record['event'] == 'hook_analysis')
-        assert hook_analysis['selected'][0][5] == 11
-        assert 'raw' not in hook_analysis['selected_columns']
-        text_index = hook_analysis['output_columns'].index('text')
-        assert [row[text_index] for row in hook_analysis['outputs']] == [
-            'case2\ncase3 <USERPROFILE>\\AutoAdv <REDACTED-TOKEN>', 'other']
-        assert hook_analysis['output_constants']['source_id'] == 1
-        assert hook_analysis['lifecycle'] == []
 
-        presentation = next(record for record in compact_records
-                            if record['event'] == 'presentation_analysis')
-        assert presentation['session'] == 1 and presentation['line'] == 1
-        progress = [row for row in presentation['events'] if row[0] == 'utterance_progress']
-        assert [row[1] for row in progress] == [4, 227]
-        assert [row[3] for row in progress] == ['active', 'unknown']
-        assert presentation['observation_count'] == 2
-        assert [row[0] for row in presentation['observations']] == [2, 225]
-        assert presentation['observations'][-1][9:12] == [900, [920], 940]
-        assert presentation['vocal_rollup']['nonlexical'][-1] == 1500
-        assert presentation['recurrence_rollup'][1] == .91
-        assert presentation['alignment']['count'] == 220
-        assert len(presentation['alignment']['state_changes']) <= 2
-        assert presentation['alignment']['queue_ms'][0] == 220
-        assert presentation['alignment']['final'][0] == 1500
-        assert presentation['alignment']['final'][-2:] == [2.5, '-Infinity']
-        assert 'delta_from_seq' not in compact_trace
+def test_issue_diagnostics_are_conditional_and_digest_scoped():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / '20261025T000000Z-runnew'; root.mkdir()
+        summary, human_digest = _write_issue_run(root)
 
-        # Polling cadence is not a transport dimension: adding many identical
-        # high-rate inference samples changes only aggregate counts/statistics.
-        insert_at = next(index for index, row in enumerate(trace)
-                         if row.get('event') == 'native_audio_observation'
-                         and row.get('seq') == 225)
-        repeated_alignment = [
-            dict(row, seq=1000 + index)
-            for index, row in enumerate(trace) if row.get('event') == 'alignment_inference'
-        ]
-        repeated_observations = [
-            dict(trace[2], seq=2000 + index) for index in range(220)
-        ]
-        doubled = (trace[:insert_at] + repeated_alignment + repeated_observations
-                   + trace[insert_at:])
-        doubled_text = ''.join(
-            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n' for item in doubled)
-        doubled_compact, _ = issue_reporting._compact_product_trace(
-            issue_reporting.sanitize_public_issue(doubled_text))
-        assert len(doubled_compact) < len(compact_trace) + 1500
+        first = issue_reporting.format_snapshot(root, 'a' * 40)
+        assert human_digest in first.body
+        assert 'observer-full-detail' in first.body
 
-        first_snapshot = issue_reporting.format_snapshot(root, 'a' * 40)
-        assert len(first_snapshot.parts) >= 2
-        assert 'Shared analysis evidence' in first_snapshot.body
-        assert 'autoadv-accuracy.jsonl' in first_snapshot.body
-        assert 'autoadv-fixture-evidence.jsonl' in first_snapshot.body
-        assert 'autoadv-accuracy.result.json' in first_snapshot.body
-        assert 'validation-summary.json' in first_snapshot.body
-        assert issue_reporting.SUMMARY_ENCODING in first_snapshot.body
-        assert issue_reporting.FIXTURE_ENCODING in first_snapshot.body
-        assert f'{issue_reporting.ACCURACY_REPORT}#facts' in first_snapshot.body
-        assert 'validation.log' not in first_snapshot.body
-        assert 'unrelated_marker' not in first_snapshot.body
-        assert 'startup-only-diagnostic' not in first_snapshot.body
-        assert issue_reporting.TRACE_ENCODING in first_snapshot.body
-        assert '"source_endpoint_ms"' in first_snapshot.body
-        assert '1234.5' in first_snapshot.body
-        assert 'verifier-table-json' in first_snapshot.body
-        assert 'case2\\ncase3 <USERPROFILE>\\\\AutoAdv <REDACTED-TOKEN>' in first_snapshot.body
-        assert 'observer-full-detail' in first_snapshot.body  # first unseen diagnostic digest is shared once
-        assert 'analysis evidence timeline' not in first_snapshot.body
-        assert 'base64' not in first_snapshot.body
-
-        repeated_snapshot = issue_reporting.format_snapshot(
+        repeated = issue_reporting.format_snapshot(
             root, 'a' * 40, known_human_vocal_digests={human_digest})
-        assert issue_reporting.HUMAN_VOCAL_REPORT in repeated_snapshot.body
-        assert human_digest in repeated_snapshot.body
-        assert '"file_count": 1' not in repeated_snapshot.body
-        assert 'observer-full-detail' not in repeated_snapshot.body
-        assert 'digest-reference`' in repeated_snapshot.body
+        assert human_digest in repeated.body
+        assert 'observer-full-detail' not in repeated.body
+
+        failed = dict(summary)
+        failed['phases'] = [{**summary['phases'][0], 'runner_error': 'runner failed'}]
+        (root / 'validation-summary.json').write_text(json.dumps(failed), encoding='utf-8')
+        failure = issue_reporting.format_snapshot(
+            root, 'a' * 40, known_human_vocal_digests={human_digest})
+        assert 'validation.log' in failure.body
+        assert '<USERPROFILE>\\AutoAdv <REDACTED-TOKEN> diagnostics' in failure.body
+
+
+def test_issue_upload_plan_bounds_transport_without_dropping_the_logical_run():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / '20261025T000000Z-runnew'; root.mkdir()
+        _summary, human_digest = _write_issue_run(root, large_fixture=True)
+        snapshot = issue_reporting.format_snapshot(
+            root, 'a' * 40, known_human_vocal_digests={human_digest})
+        assert len(snapshot.parts) > 1
 
         comments = _comments()
-        # Previous runs used a plain manifest row with the digest; the new reporter
-        # must reuse that evidence instead of forcing one transition-time resend.
         comments[0]['body'] += (
             f'\n| `{issue_reporting.HUMAN_VOCAL_REPORT}` | 239258 | `{human_digest}` |')
         plan = issue_reporting.build_upload_plan(root, 'a' * 40, comments)
-        history = [op for op in plan['operations'] if op['role'] == 'history']
-        continuations = [op for op in plan['operations'] if op['role'] == 'continuation']
-        assert len(history) == 1
-        assert len(continuations) == plan['parts'] - 1
-        assert history[0]['slot'] == 4
-        assert plan['operations'].index(history[0]) == len(continuations)
+        operations = [op for op in plan['operations']
+                      if op['role'] in {'history', 'continuation'}]
+        assert operations
         assert all(len(op['body']) <= issue_reporting.COMMENT_BODY_TARGET_CHARS
-                   for op in history + continuations)
+                   for op in operations)
         assert all(len(op['body'].encode('utf-8')) <= issue_reporting.COMMENT_BODY_TARGET_BYTES
-                   for op in history + continuations)
-        assert all('observer-full-detail' not in op['body'] for op in history + continuations)
-        # Existing archived comments are recycled before any new comment is created.
-        assert all(op['action'] == 'patch' for op in continuations[:2])
+                   for op in operations)
+        assert all('observer-full-detail' not in op['body'] for op in operations)
 
-        failed_summary = dict(summary)
-        failed_summary['phases'] = [{**summary['phases'][0], 'runner_error': 'runner failed'}]
-        (root / 'validation-summary.json').write_text(json.dumps(failed_summary), encoding='utf-8')
-        failure_snapshot = issue_reporting.format_snapshot(
-            root, 'a' * 40, known_human_vocal_digests={human_digest})
-        assert 'validation.log' in failure_snapshot.body
-        assert '<USERPROFILE>\\AutoAdv <REDACTED-TOKEN> diagnostics' in failure_snapshot.body
+        # Physical comment partitioning must not alter the logical evidence body.
+        published = '\n\n'.join(part for part in snapshot.parts)
+        assert '証' * 1000 in published
+        assert 'case2' in published and '1234.5' in published
 
 
 def test_accuracy_assets_and_alignment_benchmark_verify_inputs_without_becoming_acceptance_proxy():

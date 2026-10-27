@@ -141,16 +141,17 @@ class BlockingBlankPosterior(BlockingPosterior):
         super().__init__()
         self.logits[:] = -4.0
         self.logits[:, 0] = 5.0
-        self.calls = 0
+        self.initial_capture_start_ms = None
         self.widened_started = Event()
         self.widened_release = Event()
 
     def infer(self, chunks):
-        self.calls += 1
-        if self.calls == 1:
+        capture_start_ms = min(chunk.start_ms for chunk in chunks)
+        if self.initial_capture_start_ms is None:
+            self.initial_capture_start_ms = capture_start_ms
             self.started.set()
             self.release.wait(2)
-        elif self.calls == 2:
+        elif capture_start_ms < self.initial_capture_start_ms:
             self.widened_started.set()
             self.widened_release.wait(2)
         return self.logits
@@ -235,16 +236,32 @@ def make_native(model, observations, errors=None, reports=None, *, clock=lambda:
 
 
 def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
+    import autoadv.native_audio as native_audio_module
+
+    class CaptureBoundary:
+        instances = []
+
+        def __init__(self, pid, helper, history, on_chunk, on_health, clock):
+            self.started = False
+            self.closed = False
+            self.__class__.instances.append(self)
+
+        def start(self):
+            self.started = True
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(native_audio_module, 'ProcessCapture', CaptureBoundary)
     observations = []
     native = make_native(StaticPosterior(), observations, clock=lambda: 1000)
-    started = []
-    monkeypatch.setattr(native._capture, "start", lambda: started.append(True))
     try:
         native.start()
-        assert started == [True]
+        assert CaptureBoundary.instances[-1].started
         assert native.causal_lower_bound_ms is None
     finally:
         native.close()
+    assert CaptureBoundary.instances[-1].closed
 
 def test_completed_bounded_alignment_can_satisfy_fallback_fence_while_search_widens():
     observations = []

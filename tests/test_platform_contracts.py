@@ -21,9 +21,9 @@ from autoadv.application import AutoAdvApplication
 from autoadv.conversation import Target
 from autoadv.game_windows import ProcessCandidate, WindowCandidate, find_game_processes, find_game_windows
 from autoadv.hook_host import HookHost, parse_host_event
-from autoadv.hook_host_worker import NativeHost, _full_string_hook_code, _luna_output_content, ipc_json
+from autoadv.hook_host_worker import NativeHost, ipc_json
 from autoadv.import_luna import inspect_luna, add_luna_games
-from autoadv.luna_abi import load_exports, validate_abi
+from autoadv.luna_abi import ThreadParam, load_exports, validate_abi
 from autoadv.model import HookSelection, ReplacementRule, SpeakerStyle
 from autoadv.process_audio import ProcessCapture
 from autoadv.running_target_dialog import available_targets
@@ -39,17 +39,54 @@ from tests.g2p_support import TEST_G2P
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_process_capture_preserves_helper_timeline_when_python_reader_is_delayed():
+def test_process_capture_preserves_helper_timeline_when_python_reader_is_delayed(monkeypatch, tmp_path):
+    import autoadv.process_audio as process_audio_module
+
+    packet = b''.join(
+        process_audio_module.HEADER.pack(8, helper_ms, 1) + (b'\x00' * 8)
+        for helper_ms in (5_000, 5_100, 7_500))
+
+    class HelperProcess:
+        def __init__(self):
+            self.stdout = io.BytesIO(packet)
+            self.terminated = False
+
+        def poll(self):
+            return 0 if self.terminated else None
+
+        def terminate(self):
+            self.terminated = True
+
+    class InlineThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+        def join(self, timeout=None):
+            pass
+
+    helper = tmp_path / 'process-loopback.dll'
+    helper.write_bytes(b'helper')
+    process = HelperProcess()
+    monkeypatch.setattr(process_audio_module.sys, 'platform', 'win32')
+    monkeypatch.setattr(process_audio_module.subprocess, 'CREATE_NO_WINDOW', 0, raising=False)
+    monkeypatch.setattr(process_audio_module.subprocess, 'Popen', lambda *args, **kwargs: process)
+    monkeypatch.setattr(process_audio_module, 'Thread', InlineThread)
+
+    chunks = []
     readings = iter((10_000, 25_000, 40_000))
     capture = ProcessCapture(
-        42, Path('unused.dll'), AudioHistory(), lambda _chunk: None,
-        lambda _status: None, clock=lambda: next(readings))
-
-    # The first packet establishes only the clock-domain offset. Later receive
-    # latency must not compress or stretch the helper's factual capture times.
-    assert capture._local_timestamp(5_000) == 10_000
-    assert capture._local_timestamp(5_100) == 10_100
-    assert capture._local_timestamp(7_500) == 12_500
+        42, helper, AudioHistory(), chunks.append, lambda _status: None,
+        clock=lambda: next(readings))
+    capture.start()
+    try:
+        # The first packet establishes the clock-domain offset. Later Python
+        # receive latency cannot compress or stretch the helper chronology.
+        assert [chunk.at_ms for chunk in chunks] == [10_000, 10_100, 12_500]
+    finally:
+        capture.close()
 
 
 def test_irodori_request_omits_unset_caption_and_sends_explicit_caption():
@@ -105,7 +142,7 @@ class _TargetUser32:
         self.GetWindowThreadProcessId = _Win32Function(get_pid)
 
 
-def test_luna_boundary_preserves_provenance_content_and_upstream_abi():
+def test_luna_event_boundary_preserves_process_and_source_provenance():
     packet = dict(kind='output', host_generation='h', connection_generation=1,
                   sequence=2, received_ns=5, process_id=31,
                   source=dict(process_id=31, address=5, context=3, context2=4,
@@ -114,14 +151,35 @@ def test_luna_boundary_preserves_provenance_content_and_upstream_abi():
     with pytest.raises(ValueError):
         parse_host_event({**packet, 'process_id': 32})
 
-    for code in ('HQF0@1', 'EXHQXFN0@1', 'ENHQXFN0@1'):
-        assert _full_string_hook_code(code)
-        assert _luna_output_content(code, '話者\n本文\n') == '話者\n本文'
-        assert _luna_output_content(code, '本文\n\n') == '本文\n'
-        assert _luna_output_content(code, '  本文  \n') == '  本文  '
-    assert _luna_output_content('HQF0@1', '\n') == '\n'
-    assert _luna_output_content('HQ0@1', '本文\n') == '本文\n'
 
+def test_native_luna_output_removes_only_the_upstream_full_string_separator():
+    packets = []
+    host = NativeHost.__new__(NativeHost)
+    host.send = packets.append
+    host.generation = 'host'
+    host.connection_generation = 1
+    host.sequence = 0
+    host.lock = __import__('threading').Lock()
+    host.callbacks = []
+    host.connected = set()
+    host.managed = set()
+    host.find_callbacks = []
+    host.dll = SimpleNamespace(Luna_Start=Mock(), Luna_Settings=Mock())
+    host.start()
+    output = host.dll.Luna_Start.call_args.args[4]
+    thread = ThreadParam(31, 5, 3, 4)
+    for code, text, expected in (
+        ('HQF0@1', '話者\n本文\n', '話者\n本文'),
+        ('EXHQXFN0@1', '本文\n\n', '本文\n'),
+        ('ENHQXFN0@1', '  本文  \n', '  本文  '),
+        ('HQF0@1', '\n', '\n'),
+        ('HQ0@1', '本文\n', '本文\n'),
+    ):
+        output(code, b'text', thread, text)
+        assert packets[-1]['text'] == expected
+
+
+def test_luna_ipc_and_native_exports_follow_the_pinned_upstream_abi():
     message = {'kind': 'diagnostic', 'detail': '已经注入—日本語🎮'}
     encoded = ipc_json(message)
     assert json.loads(encoded) == message
@@ -135,9 +193,8 @@ def test_luna_boundary_preserves_provenance_content_and_upstream_abi():
     load_exports(dll)
     assert len(dll.Luna_InsertPCHooks.argtypes) == 2
 
-    # NativeHost delegates discovery/insertion to Luna while matching the
-    # actual target process architecture and never taking over an existing
-    # upstream injection.
+
+def test_native_host_delegates_attach_discovery_and_pc_hook_insertion_to_luna():
     host = NativeHost.__new__(NativeHost)
     host.managed = set()
     host.connected = set()
@@ -167,7 +224,6 @@ def test_luna_boundary_preserves_provenance_content_and_upstream_abi():
     assert host.command({'action': 'insert_pc_hooks', 'pid': 31})
     assert host.dll.Luna_InsertPCHooks.call_args_list == [
         __import__('unittest').mock.call(31, 0), __import__('unittest').mock.call(31, 1)]
-
 
 def test_luna_runtime_is_pinned_integrity_checked_and_architecture_matched():
     root = ROOT / 'vendor' / 'luna'
@@ -202,21 +258,44 @@ def test_luna_runtime_is_pinned_integrity_checked_and_architecture_matched():
             assert args[0].endswith('LunaSubProcess32.exe') and args[3].endswith('LunaHook32.dll')
 
 
-def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency():
+def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(monkeypatch):
+    from tests.contracts_support import connect_hook, runtime_hook, source
+
     down, down_lparam, up, up_lparam = key_message_parameters(0x0D, 0x1C)
     assert (down, up) == (WM_KEYDOWN, WM_KEYUP)
     assert ((down_lparam >> 16) & 0xFF, (up_lparam >> 30) & 0x3) == (0x1C, 0x3)
     assert key_message_parameters(0x12, 0x38)[::2] == (WM_SYSKEYDOWN, WM_SYSKEYUP)
 
-    fake = _TargetUser32(pid=101)
-    with patch('autoadv.application.sys.platform', 'win32'), patch('autoadv.application.ctypes.windll', create=True) as dll:
-        dll.user32 = fake
-        assert AutoAdvApplication._windows_target_ready(Target(101, 77))
-        assert not AutoAdvApplication._windows_target_ready(Target(202, 77))
+    def advance_with_window_owner(target_pid, window_pid):
+        sent = []
+        catalog = Catalog()
+        game = catalog.create_game('Game')
+        app = AutoAdvApplication(
+            catalog, lambda: None,
+            input_send=lambda target, key: sent.append((target.pid, target.hwnd, key)),
+            g2p=TEST_G2P,
+        )
+        app.select_profile(game.id, game.default_profile)
+        selected = source('WINDOW', 1, pid=target_pid)
+        profile = app.current_profile()
+        profile.hooks = [HookSelection('WINDOW', 1, 2)]
+        profile.body_source = selected.identity
+        scheduled = []
+        app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+        connect_hook(app, pid=target_pid, hwnd=77)
+        token = runtime_hook(app, selected, '本文', 2, pid=target_pid)
+        assert token is not None
+        app.set_auto_advance(True)
+        scheduled.pop(0)[1]()
+        return sent, app.runtime_state()
 
-    assert WindowsGameInputObserver._window_pid(_TargetUser32(pid=101), 77) == 101
-    assert WindowsGameInputObserver._window_pid(_TargetUser32(hwnd_valid=False), 77) == 0
-
+    monkeypatch.setattr('autoadv.application.sys.platform', 'win32')
+    with patch('autoadv.application.ctypes.windll', create=True) as dll:
+        dll.user32 = _TargetUser32(pid=101)
+        sent, state = advance_with_window_owner(101, 101)
+        assert sent == [(101, 77, 13)] and state.sent
+        sent, state = advance_with_window_owner(202, 101)
+        assert sent == [] and state.pause_reason == 'target_unavailable'
 
     for results, expected_calls, raises in (((1, 1), 2, False), ((0,), 1, True), ((1, 0), 2, True)):
         fake = _User32(results=results)
@@ -229,6 +308,57 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
                 WindowsAdvancementInput(77).advance()
         assert len(fake.calls) == expected_calls
 
+
+def test_windows_game_input_observer_publishes_only_for_the_selected_process(monkeypatch):
+    import autoadv.windows_input as windows_input_module
+    import ctypes
+
+    class HookUser32(_TargetUser32):
+        def __init__(self, pid):
+            super().__init__(pid=pid)
+            self.keyboard_proc = None
+            self._buffer = ctypes.create_string_buffer(64)
+            self.SetWindowsHookExW = _Win32Function(self._set_hook)
+            self.CallNextHookEx = _Win32Function(lambda *_: 0)
+            self.UnhookWindowsHookEx = _Win32Function(lambda *_: 1)
+            self.GetForegroundWindow = _Win32Function(lambda: 77)
+            self.WindowFromPoint = _Win32Function(lambda _point: 77)
+            self.GetMessageW = _Win32Function(self._message)
+            self.TranslateMessage = _Win32Function(lambda *_: 1)
+            self.DispatchMessageW = _Win32Function(lambda *_: 1)
+            self.PostThreadMessageW = _Win32Function(lambda *_: 1)
+
+        def _set_hook(self, kind, callback, _module, _thread):
+            if kind == windows_input_module.WH_KEYBOARD_LL:
+                self.keyboard_proc = callback
+            return kind
+
+        def _message(self, *_args):
+            if self.keyboard_proc is not None:
+                callback, self.keyboard_proc = self.keyboard_proc, None
+                callback(0, WM_KEYDOWN, ctypes.addressof(self._buffer))
+            return 0
+
+    class Kernel32:
+        def __init__(self):
+            self.GetCurrentThreadId = _Win32Function(lambda: 1)
+            self.GetModuleHandleW = _Win32Function(lambda _name: 1)
+
+    def observed(expected_pid, actual_pid):
+        events = []
+        user32 = HookUser32(actual_pid)
+        with patch.object(windows_input_module.sys, 'platform', 'win32'), \
+             patch.object(windows_input_module.ctypes, 'windll',
+                          SimpleNamespace(user32=user32, kernel32=Kernel32()), create=True), \
+             patch.object(windows_input_module.ctypes, 'WINFUNCTYPE',
+                          lambda *_types: (lambda fn: fn), create=True):
+            observer = WindowsGameInputObserver(expected_pid, events.append, clock=lambda: 4321)
+            observer.start()
+            observer.close()
+        return events
+
+    assert observed(101, 101) == [4321]
+    assert observed(202, 101) == []
 
 def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_state():
     assert CommonSettings().uncertain_text_fallback

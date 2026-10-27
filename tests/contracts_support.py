@@ -70,7 +70,7 @@ class _Child:
         return None
 
 
-class _Host:
+class FakeHookHost:
     def __init__(self):
         self.child = _Child()
         self.commands = []
@@ -82,7 +82,7 @@ class _Host:
 def connect_hook(app: AutoAdvApplication, *, pid: int = 101, hwnd: int = 500,
                  generation: str = 'host', connection: int = 1):
     app.select_primary_target(pid, hwnd)
-    app.hook_host = _Host()
+    app.hook_host = FakeHookHost()
     assert app.activate_selected_target() == 'connecting'
     app.handle_hook_event(HookEvent('connected', generation, connection, 1, 10, process_id=pid))
 
