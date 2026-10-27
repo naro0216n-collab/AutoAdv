@@ -263,7 +263,7 @@ def test_monitoring_start_does_not_invent_a_target_causal_boundary(monkeypatch):
         native.close()
     assert CaptureBoundary.instances[-1].closed
 
-def test_completed_bounded_alignment_can_satisfy_fallback_fence_while_search_widens():
+def test_alignment_scheduler_settles_required_fence_before_coalesced_newer_frontier():
     observations = []
     model = BlockingBlankPosterior()
     observer = RecordingVocalObserver()
@@ -280,22 +280,37 @@ def test_completed_bounded_alignment_can_satisfy_fallback_fence_while_search_wid
         # UNKNOWN is not published before any lexical query has completed.
         assert not observations
 
-        # The first bounded query is a complete factual measurement even though
-        # retained-history search can widen after it finds no target. Controller
-        # must be able to consume that UNKNOWN assessment without waiting for the
-        # widened query to finish.
+        # A narrow miss is not a settled UNKNOWN while retained PCM is still
+        # being searched for the known target.
         model.release.set()
         assert model.widened_started.wait(1)
+        time.sleep(.02)
+        assert not observations
+
+        # New PCM may arrive while historical search is in flight. It is retained
+        # as the newer requested frontier, but cannot make the older required
+        # boundary look settled.
+        fresh = compact_chunk(20_600, 600)
+        native.history.push(fresh, target_pid=42)
+        native.feed(fresh)
+        native.request_assessment_through(token, 20_000)
+        time.sleep(.02)
+        assert not observations
+
+        model.widened_release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 20_000
             for observed, progress, _item in observations))
+        wait_until(lambda: any(
+            observed == token and progress.evidence_at_ms == 20_600
+            for observed, progress, _item in observations))
 
-        # The same already-assessed fence remains an idempotent obligation while
-        # widening is still in flight; no future capture packet is required.
+        # An already-settled fence remains an idempotent obligation.
         before = len(observations)
         native.request_assessment_through(token, 20_000)
-        wait_until(lambda: len(observations) > before)
-        assert observations[-1][1].evidence_at_ms == 20_000
+        wait_until(lambda: any(
+            progress.evidence_at_ms == 20_000
+            for _observed, progress, _item in observations[before:]))
     finally:
         model.release.set()
         model.widened_release.set()
@@ -626,7 +641,8 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
 
         native.begin(token, 'target')
         retained_ms = 60_000
-        wait_until(lambda: model.durations_ms and max(model.durations_ms) >= retained_ms)
+        wait_until(lambda: model.durations_ms and max(model.durations_ms) >= retained_ms
+                   and any(item.lexical is not None for _token, _progress, item in observations))
         initial = tuple(model.durations_ms)
         initial_reports = len(reports)
         weak_starts = [

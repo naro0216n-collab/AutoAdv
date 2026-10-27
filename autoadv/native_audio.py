@@ -104,10 +104,9 @@ class NativeAudio:
         self._lexical_revision = 0
         self._alignment_ready_through_ms: int | None = None
 
-        # One expensive alignment may be active; at most one newer boundary is
-        # retained. Intermediate snapshots have no product meaning.
+        # One scheduler owns alignment work. The PCM frontier remains in
+        # AudioHistory; no second pending/requested frontier is maintained here.
         self._alignment_inflight_generation: int | None = None
-        self._pending_alignment_boundary: int | None = None
         self._last_alignment_query: tuple[int, int] | None = None
 
         # Continuous target-independent observation follows AudioHistory itself.
@@ -117,8 +116,8 @@ class NativeAudio:
         self._observer_revision = 0
 
         # A fallback fence is just an assessment obligation. Progress is emitted
-        # when observer measurements and one completed lexical query have reached it;
-        # wider retained-history searches may continue and revise later evidence.
+        # only after observer measurements and the alignment search have settled
+        # through that captured PCM boundary.
         self._required_assessment_ms: int | None = None
         self._last_progress_key: tuple[int, int] | None = None
 
@@ -232,7 +231,6 @@ class NativeAudio:
         submit_observer = False
         with self._lock:
             self._generation += 1
-            self._pending_alignment_boundary = None
             self.token = token
             self.aligner = aligner
             self.causal_lower_bound_ms = lower_bound
@@ -257,8 +255,8 @@ class NativeAudio:
             self._search_exhausted_at = None
 
             if frontier is not None:
-                if aligner is not None and frontier - self._search_start_ms >= self.MIN_AUDIO_MS:
-                    alignment_work = self._request_alignment_locked(int(frontier))
+                if aligner is not None:
+                    alignment_work = self._schedule_alignment_locked()
                 submit_observer = self._wake_observer_locked()
 
         self._submit_alignment(alignment_work)
@@ -270,7 +268,6 @@ class NativeAudio:
             self.on_error(token, failure)
 
     def _retire_target_locked(self) -> None:
-        self._pending_alignment_boundary = None
         self.token = None
         self.aligner = None
         self.causal_lower_bound_ms = None
@@ -291,7 +288,7 @@ class NativeAudio:
 
     def cancel(self) -> None:
         with self._lock:
-            if self.token is not None or self.aligner is not None or self._pending_alignment_boundary is not None:
+            if self.token is not None or self.aligner is not None:
                 self._retire_target_locked()
 
     def health(self, status: CaptureHealth) -> None:
@@ -329,15 +326,7 @@ class NativeAudio:
                 self._required_assessment_ms if self._required_assessment_ms is not None else boundary,
             )
             if self.aligner is not None:
-                alignment_work = self._request_alignment_locked(boundary)
-                if (alignment_work is None
-                        and self._alignment_inflight_generation is None
-                        and boundary - int(self._search_start_ms) < self.MIN_AUDIO_MS):
-                    self._alignment_ready_through_ms = max(
-                        boundary,
-                        self._alignment_ready_through_ms
-                        if self._alignment_ready_through_ms is not None else boundary,
-                    )
+                alignment_work = self._schedule_alignment_locked()
             submit_observer = self._wake_observer_locked()
         self._submit_alignment(alignment_work)
         if submit_observer:
@@ -352,12 +341,7 @@ class NativeAudio:
                 return
             submit_observer = self._wake_observer_locked()
             if self.token is not None and self.aligner is not None:
-                self._prepare_new_audio_search_locked(int(chunk.at_ms))
-                last_boundary = self._last_alignment_query[1] if self._last_alignment_query is not None else -1
-                if (int(chunk.at_ms) - self._search_start_ms >= self.MIN_AUDIO_MS
-                        and (last_boundary < 0
-                             or int(chunk.at_ms) - last_boundary >= self.INFERENCE_INTERVAL_MS)):
-                    alignment_work = self._request_alignment_locked(int(chunk.at_ms))
+                alignment_work = self._schedule_alignment_locked()
         if submit_observer:
             self._submit_observer()
         self._submit_alignment(alignment_work)
@@ -464,9 +448,9 @@ class NativeAudio:
             required = int(required)
             if ready < required:
                 return None
-            # A completed bounded query is the lexical evidence currently
-            # available at this fence. Search widening is capacity for later
-            # revisions, not a fourth progress state that blocks UNKNOWN/fallback.
+            # Required boundaries are released only after the alignment search
+            # itself is settled there; a narrow failed query cannot acknowledge
+            # the fence while retained evidence is still being examined.
             return required
         if self._last_progress_key is not None:
             previous, revision = self._last_progress_key
@@ -569,47 +553,66 @@ class NativeAudio:
         if callback is not None:
             callback(item.token, progress, observation)
 
-    def _start_alignment_locked(self, boundary: int):
-        if self._closed or self.token is None or self.aligner is None:
+    def _alignment_boundary_locked(self) -> int | None:
+        frontier = self.history.latest_ms
+        if frontier is None:
             return None
+        frontier = int(frontier)
+        ready = self._alignment_ready_through_ms
+        required = self._required_assessment_ms
+        if required is not None and (ready is None or int(ready) < int(required)):
+            return min(int(required), frontier)
+        if ready is not None and frontier <= int(ready):
+            return None
+
+        if self._last_alignment_query is not None:
+            previous = int(self._last_alignment_query[1])
+            if frontier > previous and frontier - previous < self.INFERENCE_INTERVAL_MS:
+                # If the prior frontier is still unsettled, continue widening it
+                # while waiting for enough genuinely new PCM to justify moving on.
+                if ready is None or int(ready) < previous:
+                    return previous
+                return None
+        return frontier
+
+    def _schedule_alignment_locked(self):
+        """Build the one next alignment query from current measurement state."""
+        if (self._closed or self.token is None or self.aligner is None
+                or self._alignment_inflight_generation is not None):
+            return None
+        boundary = self._alignment_boundary_locked()
+        if boundary is None:
+            return None
+
+        self._prepare_new_audio_search_locked(boundary)
         start = max(self._search_lower_bound_locked(boundary), int(self._search_start_ms))
+        if boundary - start < self.MIN_AUDIO_MS:
+            required = self._required_assessment_ms
+            if required is not None and boundary <= int(required):
+                self._alignment_ready_through_ms = max(
+                    boundary,
+                    self._alignment_ready_through_ms
+                    if self._alignment_ready_through_ms is not None else boundary,
+                )
+            return None
+
+        query = (start, boundary)
+        if query == self._last_alignment_query:
+            return None
         segments = self.history.read(start, boundary).spans
         if not segments:
+            self._alignment_ready_through_ms = max(
+                boundary,
+                self._alignment_ready_through_ms
+                if self._alignment_ready_through_ms is not None else boundary,
+            )
             return None
-        query = (start, int(boundary))
+
         self._last_alignment_query = query
         generation = self._generation
         self._alignment_inflight_generation = generation
         requested_ns = time.perf_counter_ns() if self.on_inference else 0
         return (self.token, generation, segments, self.aligner, requested_ns, query)
-
-    def _request_alignment_locked(self, boundary: int):
-        if self._closed or self.token is None or self.aligner is None:
-            return None
-        boundary = int(boundary)
-        if boundary - int(self._search_start_ms) < self.MIN_AUDIO_MS:
-            return None
-        query = (max(self._search_lower_bound_locked(boundary), int(self._search_start_ms)), boundary)
-        if query == self._last_alignment_query:
-            return None
-        if self._alignment_inflight_generation is not None:
-            active_boundary = (
-                int(self._last_alignment_query[1])
-                if self._last_alignment_query is not None else -1
-            )
-            if boundary <= active_boundary:
-                return None
-            if self._pending_alignment_boundary is None or boundary > self._pending_alignment_boundary:
-                self._pending_alignment_boundary = boundary
-            return None
-        return self._start_alignment_locked(boundary)
-
-    def _take_pending_alignment_locked(self):
-        boundary = self._pending_alignment_boundary
-        self._pending_alignment_boundary = None
-        if boundary is None:
-            return None
-        return self._start_alignment_locked(int(boundary))
 
     def _submit_alignment(self, work) -> None:
         if work is None:
@@ -623,7 +626,7 @@ class NativeAudio:
             with self._lock:
                 if self._alignment_inflight_generation == generation:
                     self._alignment_inflight_generation = None
-                    next_work = self._take_pending_alignment_locked()
+                    next_work = self._schedule_alignment_locked()
             self._submit_alignment(next_work)
 
     @staticmethod
@@ -727,17 +730,17 @@ class NativeAudio:
                         selection.alignment is not None
                         and selection.alignment.target_associated
                     )
-                    retry_same_boundary = False
+                    can_widen = False
                     if not associated and not selection.ambiguous:
-                        retry_same_boundary = self._expand_search_locked(boundary)
-                        if retry_same_boundary:
-                            # Widen the failed snapshot itself. Letting a newer
-                            # frontier inherit this expanded start turns retained
-                            # history back into the routine work unit. New PCM is
-                            # already in AudioHistory and is scheduled after this
-                            # bounded historical search settles or the target moves.
-                            self._pending_alignment_boundary = boundary
-                    if lexical is not None:
+                        can_widen = self._expand_search_locked(boundary)
+                    settled = associated or selection.ambiguous or not can_widen
+
+                    # An unresolved narrow query is not yet product evidence. Keep
+                    # its metrics for diagnostics, but publish lexical evidence only
+                    # when this frontier has a supported association or the available
+                    # search has actually settled. This also prevents evidence from a
+                    # newer unsettled frontier being paired with an older ready one.
+                    if settled and lexical is not None:
                         if lexical != self._lexical:
                             self._lexical = lexical
                             self._lexical_revision += 1
@@ -747,29 +750,15 @@ class NativeAudio:
                                 frame_ms=selection.alignment.frame_ms,
                                 capture_end_ms=boundary,
                             )
-                        if selection.alignment is not None and selection.alignment.committed_target_end:
+                        if selection.alignment.committed_target_end:
                             self.aligner = None
-                            self._pending_alignment_boundary = None
                             self._alignment_ready_through_ms = boundary
-                    if self.aligner is not None:
-                        # Every completed bounded query is factual lexical evidence
-                        # at this frontier, including unresolved/ambiguous results.
-                        # A wider retry can revise it later without withholding the
-                        # current UNKNOWN/ACTIVE assessment from Controller.
+                    if self.aligner is not None and settled:
                         self._alignment_ready_through_ms = max(
                             boundary,
                             self._alignment_ready_through_ms
                             if self._alignment_ready_through_ms is not None else boundary,
                         )
-                        if not retry_same_boundary:
-                            latest = self.history.latest_ms
-                            if latest is not None and int(latest) > boundary:
-                                self._prepare_new_audio_search_locked(int(latest))
-                                self._pending_alignment_boundary = max(
-                                    int(latest),
-                                    self._pending_alignment_boundary
-                                    if self._pending_alignment_boundary is not None else int(latest),
-                                )
                     wake_observer = self._wake_observer_locked()
 
                     if self.on_inference is not None:
@@ -809,15 +798,16 @@ class NativeAudio:
                     self.on_inference(token, metrics)
                 except Exception:
                     pass
-            if wake_observer:
-                self._submit_observer()
         except Exception as exc:
             self.on_error(token, "acoustic inference failure: " + str(exc))
         finally:
             with self._lock:
                 if self._alignment_inflight_generation == generation:
                     self._alignment_inflight_generation = None
-                    next_work = self._take_pending_alignment_locked()
+                    next_work = self._schedule_alignment_locked()
+                    wake_observer = self._wake_observer_locked() or wake_observer
+            if wake_observer:
+                self._submit_observer()
             self._submit_alignment(next_work)
 
     def close(self) -> None:
