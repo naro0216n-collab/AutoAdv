@@ -14,16 +14,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class VocalScoreSample:
-    """One observer score with the exact input support that produced it."""
-
-    at_ms: int
-    score: float
-    support_start_ms: int
-    component_scores: tuple[float, ...] = ()
-
-
-@dataclass(frozen=True)
 class VocalActivityInterval:
     """One observer-local interval of measured human-vocal activity.
 
@@ -56,11 +46,9 @@ class VocalActivityInterval:
 
 @dataclass(frozen=True)
 class VocalEvidenceSeries:
-    """One observer's measurements on its own score and time-support scale."""
+    """Observer-local human-vocal activity used by integrated inference."""
 
     observer: str
-    active_score_threshold: float = 0.45
-    samples: tuple[VocalScoreSample, ...] = ()
     activity: tuple[VocalActivityInterval, ...] = ()
 
 
@@ -121,15 +109,3 @@ class LexicalProgressEvidence:
             path_margin=alignment.fit.path_margin,
             boundary_margin=alignment.fit.boundary_margin,
         )
-
-
-@dataclass(frozen=True)
-class NativeAudioObservation:
-    """Factual measurements published beside one integrated audio judgment."""
-
-    lexical: LexicalProgressEvidence | None = None
-    vocal: HumanVocalEvidence | None = None
-    recurrence: tuple[VocalRecurrenceEvidence, ...] = ()
-    causal_lower_bound_ms: int | None = None
-    input_candidates_ms: tuple[int, ...] = ()
-    target_attached_ms: int | None = None

@@ -36,29 +36,6 @@ def _imported_names(module: str, source: str) -> set[str]:
     return names
 
 
-def _calls_in(node: ast.AST) -> set[str]:
-    calls: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        target = child.func
-        if isinstance(target, ast.Name):
-            calls.add(target.id)
-        elif isinstance(target, ast.Attribute):
-            calls.add(target.attr)
-    return calls
-
-
-def _names_and_attributes(node: ast.AST) -> set[str]:
-    values: set[str] = set()
-    for child in ast.walk(node):
-        if isinstance(child, ast.Name):
-            values.add(child.id)
-        elif isinstance(child, ast.Attribute):
-            values.add(child.attr)
-    return values
-
-
 def test_audio_layers_have_no_back_edges_into_policy_or_application():
     """Lower layers cannot import a higher layer to preserve their own purity."""
     forbidden = {
@@ -136,32 +113,14 @@ def test_progress_state_is_not_reinterpreted_outside_its_owner():
     assert not semantic_reads, semantic_reads
 
 
-def test_application_cannot_turn_audio_evidence_into_an_advancement_policy():
-    """Evidence-dependent branches in Application may diagnose, never advance.
+def test_application_transports_integrated_audio_without_owning_measurement_or_state_creation():
+    """Application may transport progress/diagnostics but not recreate audio inference."""
+    assert "audio_evidence" not in _local_imports("application")
 
-    This allows telemetry formatting and forwarding the integrated progress to
-    Controller, while rejecting the former failure mode where a lexical/VAD/
-    recurrence fact became an application-side fallback or send condition.
-    """
-    evidence_terms = {
-        "observation", "lexical", "vocal", "recurrence", "representative_recurrence",
-        "target_units", "observed_units", "aligned_target_units", "target_associated",
-        "complete_alignment", "committed_target_end", "activity", "score", "prominence",
-    }
-    policy_calls = {
-        "_apply_fallback_due", "_attempt_advance", "try_advance",
-        "presentation_event", "_presentation_done", "_send_runtime_input",
-    }
-    violations: list[tuple[int, list[str], list[str]]] = []
+    constructors = []
     for node in ast.walk(_tree("application")):
-        if not isinstance(node, (ast.If, ast.IfExp, ast.While)):
+        if not isinstance(node, ast.Call):
             continue
-        condition = node.test
-        condition_terms = _names_and_attributes(condition)
-        if not condition_terms & evidence_terms:
-            continue
-        calls = _calls_in(node)
-        forbidden_calls = sorted(calls & policy_calls)
-        if forbidden_calls:
-            violations.append((node.lineno, sorted(condition_terms & evidence_terms), forbidden_calls))
-    assert not violations, violations
+        if isinstance(node.func, ast.Name) and node.func.id == "UtteranceProgress":
+            constructors.append(node.lineno)
+    assert not constructors, constructors

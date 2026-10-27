@@ -108,6 +108,16 @@ def test_completion_evidence_is_mode_specific_and_uncertainty_policy_does_not_re
     assert strict.apply_utterance_progress(strict_token, UtteranceProgress(state=UtteranceProgressState.ENDED))
     assert strict.presentation_reason == 'utterance_progress'
 
+    unavailable, _, _ = controller(mode=AdvanceMode.AUDIO, tts=False, fallback=True)
+    unavailable_token = observe(unavailable, '「本文」')
+    assert unavailable_token is not None
+    assert not unavailable.apply_utterance_progress(
+        unavailable_token, UtteranceProgress(state=UtteranceProgressState.ACTIVE))
+    assert not unavailable.native_audio_unavailable(unavailable_token)
+    assert unavailable.native_progress.unknown and unavailable.presentation_reason is None
+    assert unavailable.presentation_event(unavailable_token, 'fallback_due')
+    assert unavailable.presentation_reason == 'uncertain_text_fallback'
+
 
 def test_user_authorization_runtime_holds_and_input_failure_are_independent_state():
     ctrl, sent, readiness = controller(mode=AdvanceMode.TEXT, tts=False)

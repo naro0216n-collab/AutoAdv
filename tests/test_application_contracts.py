@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from autoadv.application import AutoAdvApplication
-from autoadv.audio_evidence import NativeAudioObservation
 from autoadv.utterance_progress import (
     UtteranceProgress, UtteranceProgressState,
 )
@@ -35,8 +34,8 @@ class _FakeNativeAudio:
         self.pid = pid
         self.callbacks = callbacks
         self.begun = []
-        self.requests = []
-        self.fence_ms = None
+        self.settled = None
+        self.settlement_available = False
         self.clock_ms = 5000
         self.started = False
         self.closed = False
@@ -61,25 +60,24 @@ class _FakeNativeAudio:
     def clock(self):
         return self.clock_ms
 
-    def request_policy_assessment(self, token):
-        if self.fence_ms is None:
+    def request_assessment_settlement(self, token, on_settled):
+        if not self.settlement_available:
             return False
-        self.requests.append(token)
+        self.settled = on_settled
         return True
 
     def publish_progress(self, token, state, evidence_at_ms):
         self.callbacks['on_progress'](
             token,
             UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
-            NativeAudioObservation(),
+            {},
         )
 
-    def publish_policy_progress(self, token, state, evidence_at_ms):
-        self.callbacks['on_policy_progress'](
-            token,
-            UtteranceProgress(state=state, evidence_at_ms=evidence_at_ms),
-            NativeAudioObservation(),
-        )
+    def settle_progress(self, token, state, evidence_at_ms):
+        self.publish_progress(token, state, evidence_at_ms)
+        assert self.settled is not None
+        settled, self.settled = self.settled, None
+        settled(token)
 
 
 class _FakeGameInputObserver:
@@ -441,7 +439,7 @@ def test_audio_fallback_settles_already_captured_pcm_before_policy_completion(mo
     token = runtime_hook(app, selected, '本文', 2)
     assert token is not None
     native = Native.instances[-1]
-    native.fence_ms = 1500
+    native.settlement_available = True
 
     # A current human-vocal frontier does not imply that known-text alignment
     # has settled the same boundary. Fallback therefore requests an explicit
@@ -452,9 +450,8 @@ def test_audio_fallback_settles_already_captured_pcm_before_policy_completion(mo
         if delay == app.runtime_state().utterance.text_wait_ms)
     deadline()
     assert not app.runtime_state().completed
-    assert native.requests == [token]
 
-    native.publish_policy_progress(
+    native.settle_progress(
         token, UtteranceProgressState.UNKNOWN, 1500)
     state = app.runtime_state()
     assert state.completed

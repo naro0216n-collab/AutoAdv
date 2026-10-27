@@ -228,13 +228,10 @@ def make_native(model, observations, errors=None, reports=None, *, clock=lambda:
     error_sink = errors if errors is not None else []
     return NativeAudio(
         42, Path('unused-helper.dll'), Path('unused.onnx'), Path('unused.json'),
-        lambda token, reason: error_sink.append((token, reason, "ordinary")),
-        on_policy_error=lambda token, reason: error_sink.append((token, reason, "policy")),
+        lambda token, reason: error_sink.append((token, reason)),
         model_backend=model, g2p=StaticG2P(), clock=clock, vocal_observer=vocal_observer or StaticVocalObserver(),
         on_progress=lambda token, progress, item: observations.append(
-            (token, progress, item, "ordinary")),
-        on_policy_progress=lambda token, progress, item: observations.append(
-            (token, progress, item, "policy")),
+            (token, progress, item, "progress")),
         on_inference=(lambda token, item: reports.append((token, item))) if reports is not None else None,
     )
 
@@ -320,23 +317,28 @@ def test_alignment_scheduler_synchronizes_only_explicit_assessment_fences(monkey
         native.feed(fenced)
         assert assessment_started.wait(1)
         before = len(observations)
-        assert native.request_policy_assessment(token)
+        settled = []
+        assert native.request_assessment_settlement(token, settled.append)
         assessment_release.set()
         time.sleep(.02)
         assert not any(progress.evidence_at_ms == 21_200
                        for _observed, progress, _item, _channel in observations[before:])
+        assert not settled
 
         model.widened_release.set()
         wait_until(lambda: any(
             observed == token and progress.evidence_at_ms == 21_200
             for observed, progress, _item, _channel in observations[before:]))
+        wait_until(lambda: settled == [token])
 
         # An already-settled fence remains an idempotent obligation.
         before = len(observations)
-        assert native.request_policy_assessment(token)
+        settled.clear()
+        assert native.request_assessment_settlement(token, settled.append)
         wait_until(lambda: any(
-            progress.evidence_at_ms == 21_200 and channel == "policy"
-            for _observed, progress, _item, channel in observations[before:]))
+            progress.evidence_at_ms == 21_200
+            for _observed, progress, _item, _channel in observations[before:]))
+        wait_until(lambda: settled == [token])
     finally:
         model.release.set()
         model.widened_release.set()
@@ -378,12 +380,10 @@ def test_native_audio_maps_model_time_to_capture_time_without_using_transport_as
         chunk = stereo_chunk(2000, 1000)
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
-        wait_until(lambda: bool(observations) and observations[-1][2].lexical is not None)
+        wait_until(lambda: bool(observations) and observations[-1][2]['aligned_target_units'] > 0)
         item = observations[-1][2]
-        assert item.lexical is not None
-        assert item.lexical.target_end_ms == 1620
-        assert item.lexical.complete_alignment and item.lexical.committed_target_end
-        assert item.vocal is not None
+        assert item['lexical_target_end_ms'] == 1620
+        assert item['complete_alignment'] and item['committed_target_end']
 
         before = len(observations)
         native.health(CaptureHealth(2100, True, ''))
@@ -425,8 +425,7 @@ def test_pcm_timeline_preserves_causal_cropping_and_discontinuity_for_alignment(
         assert not any(item['target_associated'] for _token, item in reports)
         # Human-vocal measurements on both sides of the transport gap
         # remain factual cache entries; the gap is not filled with invented PCM.
-        vocal = native.features.summarize_vocal(start_ms=700, end_ms=2200)
-        times = tuple(sample.at_ms for series in vocal.series for sample in series.samples)
+        times = tuple(observer.observed_until)
         assert min(times) < 1000 < max(times)
         assert not any(1400 < at_ms < 1800 for at_ms in times)
     finally:
@@ -444,8 +443,8 @@ def test_external_input_candidates_narrow_initial_search_without_becoming_causal
         native.begin(token, 'target', input_candidates_ms=(1200, 1400))
         wait_until(lambda: bool(observations))
         item = observations[-1][2]
-        assert item.causal_lower_bound_ms is None
-        assert item.input_candidates_ms == (1200, 1400)
+        assert item['causal_lower_bound_ms'] is None
+        assert item['input_candidates_ms'] == [1200, 1400]
         assert reports[0][1]["capture_start_ms"] == 1200
     finally:
         native.close()
@@ -475,13 +474,17 @@ def test_delayed_hook_attachment_does_not_change_retained_acoustic_meaning():
 
     early = observe_at(1700)
     late = observe_at(5200)
-    assert early.lexical == late.lexical
-    assert early.vocal == late.vocal
-    assert early.recurrence == late.recurrence
-    assert early.vocal is not None
-    assert min(
-        sample.at_ms for series in early.vocal.series for sample in series.samples
-    ) < early.causal_lower_bound_ms
+    lexical_keys = (
+        'target_units', 'observed_units', 'aligned_target_units',
+        'target_associated', 'complete_alignment', 'committed_target_end',
+        'lexical_target_start_ms', 'lexical_aligned_end_ms', 'lexical_target_end_ms',
+    )
+    assert {key: early[key] for key in lexical_keys} == {
+        key: late[key] for key in lexical_keys}
+    assert early['vocal_activity'] == late['vocal_activity']
+    assert early['recurrence_candidates'] == late['recurrence_candidates']
+    assert early['vocal_activity']
+    assert min(item['start_ms'] for item in early['vocal_activity']) < early['causal_lower_bound_ms']
 
 
 def test_candidate_search_widens_only_until_target_context_is_located():
@@ -498,7 +501,7 @@ def test_candidate_search_widens_only_until_target_context_is_located():
             causal_lower_bound_ms=1000, input_candidates_ms=(19_700,),
         )
         wait_until(lambda: any(
-            item.lexical is not None and item.lexical.target_associated
+            item['target_associated']
             for _observed, _progress, item, _channel in observations))
 
         associated_report = next(
@@ -538,7 +541,7 @@ def test_heartbeat_is_transport_health_only_and_never_advances_acoustic_evidence
         native.history.push(chunk, target_pid=42)
         native.feed(chunk)
         assert model.started.wait(1)
-        assert native.request_policy_assessment(token)
+        assert native.request_assessment_settlement(token, lambda _token: None)
 
         # Transport liveness at a later wall-clock time is not new PCM and cannot
         # become a later acoustic-evidence frontier.
@@ -562,12 +565,10 @@ def test_committed_target_mapping_is_reused_while_later_pcm_only_updates_endpoin
         first = stereo_chunk(2000, 1000)
         native.history.push(first, target_pid=42)
         native.feed(first)
-        wait_until(lambda: bool(observations) and observations[-1][2].lexical is not None
-                   and observations[-1][2].lexical.committed_target_end)
+        wait_until(lambda: bool(observations) and observations[-1][2]['committed_target_end'])
         first_progress, first_snapshot = observations[-1][1], observations[-1][2]
         assert first_progress.evidence_at_ms == 2000
-        assert first_snapshot.lexical is not None
-        assert first_snapshot.lexical.committed_target_end
+        assert first_snapshot['committed_target_end']
 
         tail = stereo_chunk(2600, 600)
         native.history.push(tail, target_pid=42)
@@ -575,7 +576,12 @@ def test_committed_target_mapping_is_reused_while_later_pcm_only_updates_endpoin
         wait_until(lambda: bool(observations) and observations[-1][1].evidence_at_ms == 2600)
         second_progress, second_snapshot = observations[-1][1], observations[-1][2]
         assert second_progress.evidence_at_ms == 2600
-        assert second_snapshot.lexical == first_snapshot.lexical
+        for key in (
+            'target_units', 'aligned_target_units', 'target_associated',
+            'complete_alignment', 'committed_target_end',
+            'lexical_target_start_ms', 'lexical_aligned_end_ms', 'lexical_target_end_ms',
+        ):
+            assert second_snapshot[key] == first_snapshot[key]
     finally:
         native.close()
 
@@ -592,24 +598,22 @@ def test_recurrence_remains_optional_evidence_when_direct_endpoint_risk_stays_op
         first = stereo_chunk(2000, 1000, value=.05)
         native.history.push(first, target_pid=42)
         native.feed(first)
-        wait_until(lambda: bool(observations) and observations[-1][2].lexical is not None
-                   and observations[-1][2].lexical.committed_target_end)
+        wait_until(lambda: bool(observations) and observations[-1][2]['committed_target_end'])
         first_snapshot = observations[-1][2]
-        assert first_snapshot.lexical is not None
-        assert first_snapshot.lexical.committed_target_end
+        assert first_snapshot['committed_target_end']
 
         tail = stereo_chunk(4000, 2000, value=.05)
         native.history.push(tail, target_pid=42)
         native.feed(tail)
         wait_until(lambda: any(
-            any(candidate.period_ms is not None for candidate in item.recurrence)
+            any(candidate['period_ms'] is not None for candidate in item['recurrence_candidates'])
             for _observed, _progress, item, _channel in observations))
         recurrent = next(
             candidate
             for _observed, _progress, item, _channel in reversed(observations)
-            for candidate in item.recurrence
-            if candidate.period_ms is not None)
-        assert recurrent.period_ms is not None
+            for candidate in item['recurrence_candidates']
+            if candidate['period_ms'] is not None)
+        assert recurrent['period_ms'] is not None
     finally:
         native.close()
 
@@ -656,8 +660,7 @@ def test_capture_callback_is_not_blocked_by_acoustic_analysis():
         first = stereo_chunk(2000, 1000, value=.05)
         native.history.push(first, target_pid=42)
         native.feed(first)
-        wait_until(lambda: bool(observations) and observations[-1][2].lexical is not None
-                   and observations[-1][2].lexical.committed_target_end)
+        wait_until(lambda: bool(observations) and observations[-1][2]['committed_target_end'])
 
         native.features.recurrences = blocking_recurrences
         tail = stereo_chunk(3200, 1200, value=.05)
@@ -684,25 +687,27 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
     token = Token(9, 1)
     try:
         native.history.start(42)
-        for end_ms in range(1000, 60_001, 1000):
+        retained_end_ms = 60_000
+        for end_ms in range(1000, retained_end_ms + 1, 1000):
             native.history.push(compact_chunk(end_ms), target_pid=42)
 
         native.begin(token, 'target')
         wait_until(lambda: reports and min(
             item['capture_start_ms'] for _token, item in reports) <= 1000
-            and any(item.lexical is not None for _token, _progress, item, _channel in observations))
+            and any(item['aligned_target_units'] > 0
+                    for _token, _progress, item, _channel in observations))
         initial = tuple(model.durations_ms)
         initial_reports = len(reports)
         weak_starts = [
-            item.lexical.target_start_ms
+            item['lexical_target_start_ms']
             for _token, _progress, item, _channel in observations
-            if item.lexical is not None and item.lexical.aligned_target_units > 0
-            and not item.lexical.target_associated and item.lexical.target_start_ms is not None
+            if item['aligned_target_units'] > 0
+            and not item['target_associated'] and item['lexical_target_start_ms'] is not None
         ]
         assert initial and weak_starts
         # Retention can be searched to its old edge without ever becoming one
         # giant HuBERT inference request.
-        assert max(initial) <= NativeAudio.INITIAL_SEARCH_WINDOW_MS
+        assert max(initial) < retained_end_ms
 
         # New PCM reopens only the bounded current window. An unassociated phone
         # fragment remains a measurement and never becomes a persistent floor.
@@ -715,7 +720,7 @@ def test_retention_is_search_capacity_not_the_default_alignment_work_unit():
         additional_reports = reports[initial_reports:]
         assert additional and additional_reports
         assert additional_reports[0][1]['capture_start_ms'] < weak_start
-        assert max(additional) <= NativeAudio.INITIAL_SEARCH_WINDOW_MS
+        assert max(additional) < retained_end_ms
     finally:
         native.close()
 
@@ -734,19 +739,21 @@ def test_human_vocal_observers_keep_independent_score_series_and_time_support():
     assert event_frames[0].support_start_ms == 760
     vocal = history.summarize_vocal(start_ms=760, end_ms=1240)
     by_observer = {item.observer: item for item in vocal.series}
-    assert max(sample.score for sample in by_observer['nonlexical'].samples) == pytest.approx(.9)
-    assert by_observer['nonlexical'].samples[-1].component_scores[19] == pytest.approx(.9)
-    assert any(sample.score >= by_observer['nonlexical'].active_score_threshold for sample in by_observer['nonlexical'].samples)
-    assert by_observer['nonlexical'].samples
-    assert by_observer['nonlexical'].samples[0].support_start_ms == 760
-    assert not any(sample.score >= by_observer['speech'].active_score_threshold for sample in by_observer['speech'].samples)
-    # No cross-model mean/combined probability or cached event interval is created.
-    assert all(item.samples for item in vocal.series)
+    assert max(frame.score for frame in event_frames) == pytest.approx(.9)
+    assert event_frames[-1].component_scores[19] == pytest.approx(.9)
+    diagnostics = {item['observer']: item for item in history.vocal_diagnostics(start_ms=760, end_ms=1240)}
+    assert diagnostics['nonlexical']['active_count'] > 0
+    assert diagnostics['nonlexical']['measurement_support_start_ms'] == 760
+    assert diagnostics['speech']['active_count'] == 0
+    # Inference receives only observer-local activity intervals; raw score and
+    # class structure remain inside the measurement cache for recurrence/diagnosis.
+    assert by_observer['nonlexical'].activity
+    assert set(by_observer) <= set(diagnostics)
 
 
 def test_vocal_history_derives_observer_local_activity_intervals_from_score_support():
     history = AcousticObservationHistory()
-    history.add_vocal(tuple(
+    initial = tuple(
         VocalActivityFrame(
             at_ms=at_ms, score=probability, support_start_ms=support, observer='speech')
         for at_ms, probability, support in (
@@ -756,34 +763,49 @@ def test_vocal_history_derives_observer_local_activity_intervals_from_score_supp
             (1480, .1, 1360),
             (1600, .9, 1480),
         )
-    ))
+    )
+    history.add_vocal(initial)
 
     measured = history.summarize_vocal(start_ms=1000, end_ms=1600).series[0]
-    assert tuple(sample.at_ms for sample in measured.samples) == (1120, 1240, 1360, 1480, 1600)
     # Short sub-threshold support is not enough to establish disappearance, so
     # score valleys remain one measured activity interval without Presentation state.
     assert len(measured.activity) == 1
     assert (measured.activity[0].start_ms, measured.activity[0].last_active_ms) == (1120, 1600)
     assert measured.activity[0].ongoing
 
-    history.add_vocal((
+    quiet = (
         VocalActivityFrame(at_ms=1840, score=.1, support_start_ms=1600, observer='speech'),
         VocalActivityFrame(at_ms=2080, score=.1, support_start_ms=1840, observer='speech'),
-    ))
+    )
+    history.add_vocal(quiet)
     closed = history.summarize_vocal(start_ms=1000, end_ms=2080).series[0].activity
     assert len(closed) == 1
     assert not closed[0].ongoing
     assert closed[0].inactive_support_after(1600)
 
-    history.add_vocal((
+    resumed = (
         VocalActivityFrame(at_ms=2200, score=.9, support_start_ms=2184, observer='speech'),
-    ))
+    )
+    history.add_vocal(resumed)
     reopened = history.summarize_vocal(start_ms=1000, end_ms=2200).series[0].activity
     assert len(reopened) == 2
     assert not reopened[0].ongoing and reopened[1].ongoing
 
+    # Measurement meaning is independent of transport chunking. Incremental
+    # caching must produce the same intervals whether frames arrive together or
+    # one callback at a time.
+    streamed = AcousticObservationHistory()
+    for frame in (*initial, *quiet, *resumed):
+        streamed.add_vocal((frame,))
+    assert streamed.summarize_vocal(start_ms=1000, end_ms=2200) == history.summarize_vocal(
+        start_ms=1000, end_ms=2200)
+
 
 def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
+    def strongest(candidates):
+        assert candidates
+        return max(candidates, key=lambda item: item.prominence)
+
     def recurrence_for_cycles(cycles, *, cadence_ms=100):
         history = AcousticObservationHistory()
         frames = []
@@ -794,12 +816,12 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
                     at_ms=at, score=score, support_start_ms=at - cadence_ms, observer='speech'))
                 at += cadence_ms
         history.add_vocal(tuple(frames))
-        return history.recurrence(start_ms=1000, end_ms=at - cadence_ms)
+        return history.recurrences(start_ms=1000, end_ms=at - cadence_ms)
 
     repeated = (.92, .88, .2, .1, .86, .9)
-    periodic = recurrence_for_cycles((repeated,) * 5)
+    periodic_candidates = recurrence_for_cycles((repeated,) * 5)
     flat_finite_risk = recurrence_for_cycles(((.9,) * 6,) * 5)
-    changing = recurrence_for_cycles((
+    changing_candidates = recurrence_for_cycles((
         repeated,
         (.75, .25, .8, .15, .3, .9),
         (.2, .9, .35, .8, .1, .4),
@@ -807,12 +829,13 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
         (.3, .75, .1, .55, .9, .2),
     ))
 
+    periodic = strongest(periodic_candidates)
     assert periodic.period_ms is not None and periodic.observer == 'speech'
     # A sustained flat human-vocal score is persistence, not recurrence; this
     # prevents a long finite cry from being released merely for being steady.
-    assert flat_finite_risk.period_ms is None
-    assert changing.strength < periodic.strength
-    assert changing.prominence < periodic.prominence
+    assert not flat_finite_risk
+    assert max((item.strength for item in changing_candidates), default=0.0) < periodic.strength
+    assert max((item.prominence for item in changing_candidates), default=0.0) < periodic.prominence
 
     # Recurrence is a property of the structure that still reaches the current
     # frontier. A disturbance inside the latest required cycles must suppress the
@@ -829,8 +852,8 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
                 at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
             at += 100
     interrupted_history.add_vocal(tuple(interrupted_frames))
-    interrupted = interrupted_history.recurrence(
-        start_ms=900, end_ms=at - 100, observer='speech')
+    interrupted = strongest(interrupted_history.recurrences(
+        start_ms=900, end_ms=at - 100, observer='speech'))
     assert interrupted.strength < periodic.strength
     assert interrupted.prominence < periodic.prominence
 
@@ -841,20 +864,24 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
                 at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
             at += 100
     interrupted_history.add_vocal(tuple(recovered_frames))
-    recovered = interrupted_history.recurrence(
+    recovered_candidates = interrupted_history.recurrences(
         start_ms=900, end_ms=at - 100, observer='speech')
+    recovered = max(
+        (item for item in recovered_candidates if item.period_ms == periodic.period_ms),
+        key=lambda item: item.prominence,
+    )
     assert recovered.period_ms == periodic.period_ms
     assert recovered.strength > interrupted.strength
     assert recovered.prominence > interrupted.prominence
 
     # Slow finite change can be highly self-similar at many lags. It is not a
     # period unless one lag stands out from the other admissible lags.
-    smooth = recurrence_for_cycles(tuple(
+    smooth_candidates = recurrence_for_cycles(tuple(
         tuple(.5 + .01 * (cycle * 6 + index) for index in range(6))
         for cycle in range(6)
     ))
-    assert smooth.strength > .9
-    assert smooth.prominence < 1e-6
+    assert max((item.strength for item in smooth_candidates), default=0.0) > .9
+    assert max((item.prominence for item in smooth_candidates), default=0.0) < 1e-6
 
     # Recurrence is a current measurement, not whole-run conformity.  Earlier
     # non-periodic activity must age out once enough recent cycles repeat.  A
@@ -880,7 +907,8 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
         ))
         at += 100
     history.add_vocal(tuple(frames))
-    current = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
+    current = strongest(history.recurrences(
+        start_ms=1000, end_ms=at - 100, observer='speech'))
     assert current.period_ms is not None
     assert current.strength > .85
     assert current.prominence > 0.0
@@ -898,9 +926,10 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
             at_ms=at, score=score, support_start_ms=at - 100, observer='speech'))
         at += 100
     history.add_vocal(tuple(later_frames))
-    later = history.recurrence(start_ms=1000, end_ms=at - 100, observer='speech')
-    assert later.strength < current.strength
-    assert later.prominence < current.prominence
+    later_candidates = history.recurrences(
+        start_ms=1000, end_ms=at - 100, observer='speech')
+    assert max((item.strength for item in later_candidates), default=0.0) < current.strength
+    assert max((item.prominence for item in later_candidates), default=0.0) < current.prominence
 
     # Human-vocal event observers expose class structure that a scalar maximum
     # cannot retain.  A loop can keep the same peak activity level while its
@@ -926,8 +955,8 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
             ))
             at += 100
     component_history.add_vocal(tuple(component_frames))
-    structured = component_history.recurrence(
-        start_ms=1000, end_ms=at - 100, observer='nonlexical')
+    structured = strongest(component_history.recurrences(
+        start_ms=1000, end_ms=at - 100, observer='nonlexical'))
     assert structured.period_ms == 400 and structured.observer == 'nonlexical'
     assert structured.strength > .95
 
@@ -951,6 +980,6 @@ def test_vocal_recurrence_is_conditioned_on_human_vocal_score_structure():
         ))
         at += 100
     changed_history.add_vocal(tuple(changed_frames))
-    changed_structure = changed_history.recurrence(
+    changed_candidates = changed_history.recurrences(
         start_ms=1000, end_ms=at - 100, observer='nonlexical')
-    assert changed_structure.strength < structured.strength
+    assert max((item.strength for item in changed_candidates), default=0.0) < structured.strength

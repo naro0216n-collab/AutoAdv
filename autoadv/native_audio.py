@@ -22,7 +22,7 @@ from .model import Token
 from .forced_alignment import OnnxPhoneCTCModel, TargetConditionedAligner, TargetTimeAlignment
 from .g2p import PronunciationCandidate
 from .process_audio import CaptureHealth, ProcessCapture
-from .audio_evidence import LexicalProgressEvidence, NativeAudioObservation
+from .audio_evidence import LexicalProgressEvidence
 from .utterance_progress import UtteranceProgress, evaluate_utterance_progress
 
 
@@ -45,6 +45,60 @@ class _Assessment:
     lexical_revision: int
 
 
+@dataclass(frozen=True)
+class _AssessmentFence:
+    """One captured frontier that must be settled before an optional callback."""
+
+    boundary_ms: int
+    on_settled: Callable[[Token], None] | None = None
+
+
+def _assessment_diagnostics(
+    item: _Assessment, progress: UtteranceProgress, vocal,
+    vocal_diagnostics: list[dict], recurrence,
+) -> dict:
+    lexical = item.lexical
+    representative = (
+        max(recurrence, key=lambda candidate: (candidate.prominence, candidate.strength))
+        if recurrence else None
+    )
+    return {
+        "target_units": lexical.target_units if lexical is not None else 0,
+        "observed_units": lexical.observed_units if lexical is not None else 0,
+        "aligned_target_units": lexical.aligned_target_units if lexical is not None else 0,
+        "target_associated": lexical.target_associated if lexical is not None else False,
+        "complete_alignment": lexical.complete_alignment if lexical is not None else False,
+        "committed_target_end": lexical.committed_target_end if lexical is not None else False,
+        "lexical_target_start_ms": lexical.target_start_ms if lexical is not None else None,
+        "lexical_aligned_end_ms": lexical.aligned_end_ms if lexical is not None else None,
+        "lexical_target_end_ms": lexical.target_end_ms if lexical is not None else None,
+        "evidence_at_ms": progress.evidence_at_ms,
+        "causal_lower_bound_ms": item.causal_lower_bound_ms,
+        "input_candidates_ms": list(item.input_candidates_ms),
+        "target_attached_ms": item.target_attached_ms,
+        "vocal_series": vocal_diagnostics,
+        "vocal_activity": ([{
+            "observer": series.observer,
+            "start_ms": interval.start_ms,
+            "last_active_ms": interval.last_active_ms,
+            "ongoing": interval.ongoing,
+            "inactive_start_ms": interval.inactive_start_ms,
+            "inactive_end_ms": interval.inactive_end_ms,
+            "inactive_required_ms": interval.inactive_required_ms,
+        } for series in vocal.series for interval in series.activity]
+            if vocal is not None else []),
+        "recurrence_strength": representative.strength if representative is not None else 0.0,
+        "recurrence_period_ms": representative.period_ms if representative is not None else None,
+        "recurrence_prominence": representative.prominence if representative is not None else 0.0,
+        "recurrence_candidates": [{
+            "observer": candidate.observer,
+            "strength": candidate.strength,
+            "period_ms": candidate.period_ms,
+            "prominence": candidate.prominence,
+        } for candidate in recurrence],
+    }
+
+
 class NativeAudio:
     """Measure one process PCM timeline and publish integrated utterance progress."""
 
@@ -59,19 +113,15 @@ class NativeAudio:
 
     def __init__(self, pid: int, helper: Path, model: Path, vocab: Path,
                  on_error: Callable[[Token | None, str], None],
-                 *, on_policy_error: Callable[[Token | None, str], None],
-                 on_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation], None],
-                 on_policy_progress: Callable[[Token, UtteranceProgress, NativeAudioObservation], None],
+                 *, on_progress: Callable[[Token, UtteranceProgress, dict], None],
                  model_backend=None, g2p=None, clock=None,
                  human_vocal_model: Path | None = None,
                  vocal_observer: VocalActivityObserver | None = None,
                  on_inference: Callable[[Token, dict], None] | None = None):
         self.pid = pid
         self.on_error = on_error
-        self.on_policy_error = on_policy_error
         self.on_inference = on_inference
         self.on_progress = on_progress
-        self.on_policy_progress = on_policy_progress
         self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
 
         self.history = AudioHistory(horizon_ms=self.RETENTION_MS)
@@ -119,8 +169,7 @@ class NativeAudio:
 
         # Explicit assessment obligations synchronize observer/alignment work only
         # through captured PCM; they never require exhausting retained history.
-        self._required_assessment_ms: int | None = None
-        self._policy_assessment_pending = False
+        self._assessment_fence: _AssessmentFence | None = None
         self._last_progress_key: tuple[int, int] | None = None
 
         self._generation = 0
@@ -129,6 +178,18 @@ class NativeAudio:
 
     def start(self) -> None:
         self._capture.start()
+
+    def _take_settlement_locked(self) -> Callable[[Token], None] | None:
+        fence = self._assessment_fence
+        self._assessment_fence = None
+        return fence.on_settled if fence is not None else None
+
+    def _notify_failure(
+        self, token: Token, reason: str, settled: Callable[[Token], None] | None,
+    ) -> None:
+        self.on_error(token, reason)
+        if settled is not None:
+            settled(token)
 
     def _retained_start_locked(self, end_ms: int | None = None) -> int:
         earliest = self.history.earliest_ms
@@ -259,8 +320,7 @@ class NativeAudio:
             self._alignment_ready_through_ms = None if aligner is not None else self.history.latest_ms
             self._last_alignment_query = None
             self._last_progress_key = None
-            self._required_assessment_ms = None
-            self._policy_assessment_pending = False
+            self._assessment_fence = None
             self._confirmed_search_floor_ms = None
             self._history_search_end_ms = None
 
@@ -269,7 +329,7 @@ class NativeAudio:
                 # Attaching a target obligates one integrated assessment through
                 # all PCM already retained at that moment. Hook timing must not
                 # make a partially processed observer frontier the product result.
-                self._required_assessment_ms = int(frontier)
+                self._assessment_fence = _AssessmentFence(int(frontier))
             if frontier is not None:
                 if aligner is not None:
                     alignment_work = self._schedule_alignment_locked()
@@ -293,8 +353,7 @@ class NativeAudio:
         self._confirmed_search_floor_ms = None
         self._history_search_end_ms = None
         self._alignment_ready_through_ms = None
-        self._required_assessment_ms = None
-        self._policy_assessment_pending = False
+        self._assessment_fence = None
         self._last_progress_key = None
 
     def finish_line(self, token: Token) -> bool:
@@ -316,22 +375,23 @@ class NativeAudio:
         with self._lock:
             self._capture_error = status.reason
             token = self.token
-            policy_pending = self._policy_assessment_pending
-            self._policy_assessment_pending = False
-            self._required_assessment_ms = None
+            settled = self._take_settlement_locked()
             self._observer_revision += 1
             self._observer_cursor_ms = None
         if token is not None:
-            (self.on_policy_error if policy_pending else self.on_error)(token, status.reason)
+            self._notify_failure(token, status.reason, settled)
 
-    def request_policy_assessment(self, token: Token) -> bool:
-        """Settle all measurements through PCM captured at this policy instant.
+    def request_assessment_settlement(
+        self, token: Token, on_settled: Callable[[Token], None],
+    ) -> bool:
+        """Settle all measurements through the PCM frontier captured now.
 
         The caller does not own or receive the capture boundary. Once observer
         and lexical work both cover that internal frontier, the same integrated
-        inference is published through the dedicated policy-assessment callback.
-        If capture/inference is already unavailable, no obligation is armed and
-        the caller may apply uncertainty policy immediately.
+        inference is published through the ordinary progress callback, followed
+        by the one-shot settlement callback. If capture/inference is already
+        unavailable, no obligation is armed and the caller may continue without
+        waiting for acoustic work.
         """
         alignment_work = None
         submit_observer = False
@@ -342,12 +402,11 @@ class NativeAudio:
             if frontier is None:
                 return False
             boundary = int(frontier)
-            self._required_assessment_ms = max(
-                boundary,
-                self._required_assessment_ms
-                if self._required_assessment_ms is not None else boundary,
+            current = self._assessment_fence
+            self._assessment_fence = _AssessmentFence(
+                boundary_ms=max(boundary, current.boundary_ms if current is not None else boundary),
+                on_settled=on_settled,
             )
-            self._policy_assessment_pending = True
             if self.aligner is not None:
                 alignment_work = self._schedule_alignment_locked()
             submit_observer = self._wake_observer_locked()
@@ -452,13 +511,11 @@ class NativeAudio:
             if error is not None:
                 with self._lock:
                     token = self.token
-                    policy_pending = self._policy_assessment_pending
-                    self._policy_assessment_pending = False
-                    self._required_assessment_ms = None
+                    settled = self._take_settlement_locked()
                     self._observer_running = False
                 if token is not None:
-                    callback = self.on_policy_error if policy_pending else self.on_error
-                    callback(token, "human-vocal observer failure: " + str(error))
+                    self._notify_failure(
+                        token, "human-vocal observer failure: " + str(error), settled)
 
     def _fence_ready_locked(self, boundary_ms: int) -> bool:
         observer = self._observer_cursor_ms
@@ -474,15 +531,15 @@ class NativeAudio:
             return None
         observer = int(self._observer_cursor_ms)
 
-        required = self._required_assessment_ms
-        if required is not None:
-            required = int(required)
+        fence = self._assessment_fence
+        if fence is not None:
+            boundary = int(fence.boundary_ms)
             # An explicit assessment fence is the only point where both
             # measurements must cover the same captured boundary. Ordinary
             # human-vocal updates must not be frozen by slower alignment work.
-            if not self._fence_ready_locked(required):
+            if not self._fence_ready_locked(boundary):
                 return None
-            return required
+            return boundary
 
         # Outside an explicit fence, the continuously measured acoustic frontier
         # is the assessment frontier. A later alignment result increments the
@@ -499,18 +556,15 @@ class NativeAudio:
         if boundary is None or self.token is None:
             return None
         key = (int(boundary), self._lexical_revision)
-        # A policy assessment may request a boundary that was already assessed.
-        # Re-emitting that same settled assessment is the acknowledgement;
-        # otherwise the obligation would remain armed forever merely because
-        # duplicate product progress is normally suppressed.
-        if key == self._last_progress_key and self._required_assessment_ms is None:
+        # A requested fence may target a boundary that was already assessed.
+        # Re-emitting that result is the settlement acknowledgement.
+        if key == self._last_progress_key and self._assessment_fence is None:
             return None
-        lexical = self._lexical
         return _Assessment(
             token=self.token,
             generation=self._generation,
             boundary_ms=int(boundary),
-            lexical=lexical,
+            lexical=self._lexical,
             causal_lower_bound_ms=self.causal_lower_bound_ms,
             input_candidates_ms=self.input_candidates_ms,
             target_attached_ms=self.target_attached_ms,
@@ -519,6 +573,7 @@ class NativeAudio:
 
     def _run_assessment(self, item: _Assessment) -> None:
         vocal = None
+        vocal_diagnostics: list[dict] = []
         needs_vocal = bool(
             item.causal_lower_bound_ms is not None
             or item.input_candidates_ms
@@ -528,11 +583,12 @@ class NativeAudio:
         )
         feature_start = self.features.earliest_ms if needs_vocal else None
         if feature_start is not None:
-            # Alignment may narrow its PCM queries after locating the text, but
-            # continuous human-vocal activity keeps one meaning over the retained
-            # measurement timeline. Cropping that cache at a Presentation fact
-            # would recreate an old run as a synthetic post-fact onset.
+            # Activity intervals preserve their measured onset in the cache, so
+            # querying the retained range cannot recreate an old activity as a
+            # synthetic post-Presentation onset.
             vocal = self.features.summarize_vocal(
+                start_ms=int(feature_start), end_ms=int(item.boundary_ms))
+            vocal_diagnostics = self.features.vocal_diagnostics(
                 start_ms=int(feature_start), end_ms=int(item.boundary_ms))
 
         def recurrence_lookup(start_ms: int, end_ms: int):
@@ -549,42 +605,32 @@ class NativeAudio:
             input_candidates_ms=item.input_candidates_ms,
             recurrence_lookup=recurrence_lookup,
         )
-        observation = NativeAudioObservation(
-            lexical=item.lexical,
-            vocal=vocal,
-            recurrence=recurrence,
-            causal_lower_bound_ms=item.causal_lower_bound_ms,
-            input_candidates_ms=item.input_candidates_ms,
-            target_attached_ms=item.target_attached_ms,
-        )
+        diagnostics = _assessment_diagnostics(
+            item, progress, vocal, vocal_diagnostics, recurrence)
 
-        callback = None
+        settled = None
         with self._lock:
             if (self._closed or item.generation != self._generation
                     or item.token != self.token
                     or item.lexical_revision != self._lexical_revision):
                 return
             key = (item.boundary_ms, item.lexical_revision)
-            required = self._required_assessment_ms
-            if required is not None:
-                required = int(required)
-                # An ordinary assessment may have started just before a fallback
-                # fence was requested. It cannot acknowledge that newer fence
-                # unless both measurements are now settled through the boundary.
-                if item.boundary_ms < required or not self._fence_ready_locked(required):
+            fence = self._assessment_fence
+            if fence is not None:
+                boundary = int(fence.boundary_ms)
+                # Work that began before a newer fence was requested cannot
+                # acknowledge it until both measurements cover that frontier.
+                if item.boundary_ms < boundary or not self._fence_ready_locked(boundary):
                     return
-            if key == self._last_progress_key and required is None:
+            if key == self._last_progress_key and fence is None:
                 return
             self._last_progress_key = key
-            policy_assessment = False
-            if required is not None:
-                policy_assessment = self._policy_assessment_pending
-                self._required_assessment_ms = None
-                if policy_assessment:
-                    self._policy_assessment_pending = False
-            callback = self.on_policy_progress if policy_assessment else self.on_progress
-        if callback is not None:
-            callback(item.token, progress, observation)
+            if fence is not None:
+                self._assessment_fence = None
+                settled = fence.on_settled
+        self.on_progress(item.token, progress, diagnostics)
+        if settled is not None:
+            settled(item.token)
 
         # Releasing a required fence may expose optional retained-history search.
         # Resume it only after Controller has consumed the assessment, because
@@ -612,14 +658,14 @@ class NativeAudio:
             return None
         frontier = int(frontier)
         ready = self._alignment_ready_through_ms
-        required = self._required_assessment_ms
+        fence = self._assessment_fence
         associated = self._target_associated_locked()
 
         # A required fence has priority over optional historical discovery. One
         # bounded frontier measurement acknowledges it; older retained windows
         # remain searchable but do not become a fourth product state.
-        if required is not None:
-            boundary = min(int(required), frontier)
+        if fence is not None:
+            boundary = min(int(fence.boundary_ms), frontier)
             if ready is not None and int(ready) >= boundary:
                 return None
             start = (
@@ -909,11 +955,9 @@ class NativeAudio:
                     pass
         except Exception as exc:
             with self._lock:
-                policy_pending = self._policy_assessment_pending
-                self._policy_assessment_pending = False
-                self._required_assessment_ms = None
-            callback = self.on_policy_error if policy_pending else self.on_error
-            callback(token, "acoustic inference failure: " + str(exc))
+                settled = self._take_settlement_locked()
+            self._notify_failure(
+                token, "acoustic inference failure: " + str(exc), settled)
         finally:
             with self._lock:
                 if self._alignment_inflight_generation == generation:

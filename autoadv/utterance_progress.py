@@ -86,87 +86,74 @@ def _target_overlap(
     )
 
 
-def _starts_after_presentation_fact(
-    interval: VocalActivityInterval, *, lexical: LexicalProgressEvidence | None,
+def _relate_activity(
+    vocal: HumanVocalEvidence | None, *, lexical: LexicalProgressEvidence | None,
     causal_lower_bound_ms: int | None, input_candidates_ms: tuple[int, ...],
-) -> bool:
-    """Relate an onset without collapsing distinct temporal facts into one anchor.
+) -> tuple[tuple[VocalActivityInterval, ...], int | None]:
+    """Relate measured activity once and retain the recurrence measurement floor.
 
-    AutoAdv's own successful input is a hard lower bound. External inputs remain
-    independent candidates. Once known text is located, an external candidate is
-    useful for narrowing only when it is not later than the measured target onset;
-    the measured target onset itself can relate later non-lexical activity.
+    The returned floor is not a Presentation boundary. It is only the earliest
+    measurement point needed if the related ongoing activity later requires
+    optional recurrence analysis.
     """
+    if vocal is None:
+        return (), None
+    intervals = tuple(
+        interval for series in vocal.series for interval in series.activity
+    )
+    if not intervals:
+        return (), None
+
     if causal_lower_bound_ms is not None:
         boundary = int(causal_lower_bound_ms)
-        return interval.start_ms >= boundary and interval.last_active_ms > boundary
+        related = tuple(
+            interval for interval in intervals
+            if interval.start_ms >= boundary and interval.last_active_ms > boundary
+        )
+        return related, boundary if any(interval.ongoing for interval in related) else None
 
     candidates = tuple(sorted({
         int(value) for value in input_candidates_ms if int(value) > 0
     }))
     if _target_located(lexical) and lexical is not None:
         target_start = int(lexical.target_start_ms)
-        if interval.start_ms >= target_start and interval.last_active_ms > target_start:
-            return True
-        return any(
-            value <= target_start
-            and interval.start_ms >= value
-            and interval.last_active_ms > value
+        earlier = tuple(value for value in candidates if value <= target_start)
+        related = tuple(
+            interval for interval in intervals
+            if _target_overlap(interval, lexical)
+            or (interval.start_ms >= target_start and interval.last_active_ms > target_start)
+            or any(
+                interval.start_ms >= value and interval.last_active_ms > value
+                for value in earlier
+            )
+        )
+        recurrence_start = (
+            (max(earlier) if earlier else target_start)
+            if any(interval.ongoing for interval in related) else None
+        )
+        return related, recurrence_start
+
+    related = tuple(
+        interval for interval in intervals
+        if any(
+            interval.start_ms >= value and interval.last_active_ms > value
             for value in candidates
         )
-
-    return any(
-        interval.start_ms >= value and interval.last_active_ms > value
-        for value in candidates
     )
-
-
-def _related_activity(
-    vocal: HumanVocalEvidence | None, *, lexical: LexicalProgressEvidence | None,
-    causal_lower_bound_ms: int | None, input_candidates_ms: tuple[int, ...],
-) -> tuple[VocalActivityInterval, ...]:
-    if vocal is None:
-        return ()
-    intervals = tuple(
-        interval for series in vocal.series for interval in series.activity
-    )
-    if causal_lower_bound_ms is not None:
-        return tuple(
-            interval for interval in intervals
-            if _starts_after_presentation_fact(
-                interval, lexical=lexical, causal_lower_bound_ms=causal_lower_bound_ms,
-                input_candidates_ms=input_candidates_ms)
-        )
-    return tuple(
-        interval for interval in intervals
-        if _target_overlap(interval, lexical)
-        or _starts_after_presentation_fact(
-            interval, lexical=lexical, causal_lower_bound_ms=None,
-            input_candidates_ms=input_candidates_ms)
-    )
-
-
-def _recurrence_query_start(
-    ongoing: tuple[VocalActivityInterval, ...], *, lexical: LexicalProgressEvidence | None,
-    causal_lower_bound_ms: int | None, input_candidates_ms: tuple[int, ...],
-) -> int:
-    """Choose only the measurement range needed for optional recurrence analysis."""
-    if causal_lower_bound_ms is not None:
-        return int(causal_lower_bound_ms)
-    if _target_located(lexical) and lexical is not None:
-        target_start = int(lexical.target_start_ms)
-        earlier = tuple(
-            int(value) for value in input_candidates_ms
-            if int(value) > 0 and int(value) <= target_start
-        )
-        return max(earlier) if earlier else target_start
-    candidates = tuple(int(value) for value in input_candidates_ms if int(value) > 0)
+    ongoing = tuple(interval for interval in related if interval.ongoing)
+    if not ongoing:
+        return related, None
     related_candidates = tuple(
         value for value in candidates
-        if any(interval.start_ms >= value and interval.last_active_ms > value for interval in ongoing)
+        if any(
+            interval.start_ms >= value and interval.last_active_ms > value
+            for interval in ongoing
+        )
     )
-    return min(related_candidates) if related_candidates else min(
-        interval.start_ms for interval in ongoing)
+    return related, (
+        min(related_candidates) if related_candidates
+        else min(interval.start_ms for interval in ongoing)
+    )
 
 
 def evaluate_utterance_progress(
@@ -183,7 +170,7 @@ def evaluate_utterance_progress(
         return UtteranceProgress(evidence_at_ms=None), ()
     capture_end = int(capture_end_ms)
     complete = _target_complete(lexical)
-    related = _related_activity(
+    related, recurrence_start = _relate_activity(
         vocal, lexical=lexical, causal_lower_bound_ms=causal_lower_bound_ms,
         input_candidates_ms=input_candidates_ms)
     ongoing = tuple(interval for interval in related if interval.ongoing)
@@ -197,12 +184,8 @@ def evaluate_utterance_progress(
         )
         recurrence_needed = bool(not _target_located(lexical) or complete or reading_exceeded)
         if recurrence_needed and recurrence_lookup is not None:
-            recurrence = recurrence_lookup(
-                _recurrence_query_start(
-                    ongoing, lexical=lexical, causal_lower_bound_ms=causal_lower_bound_ms,
-                    input_candidates_ms=input_candidates_ms),
-                capture_end,
-            )
+            assert recurrence_start is not None
+            recurrence = recurrence_lookup(recurrence_start, capture_end)
         if not any(_stable_recurrence(candidate) for candidate in recurrence):
             return UtteranceProgress(
                 state=UtteranceProgressState.ACTIVE, evidence_at_ms=capture_end

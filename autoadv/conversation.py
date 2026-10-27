@@ -119,6 +119,14 @@ class Controller:
         else:
             self.pending_profile = staged
 
+    def _resolve_dialogue(self, body: str, speaker: str) -> tuple[str, str]:
+        """Apply the one configured post-extraction dialogue transformation."""
+        assert self.profile is not None
+        if not self.profile.unwrap_speaker_enclosed_body:
+            return speaker, body
+        return resolve_speaker_enclosed_body(
+            body, speaker, configured_speaker_names(self.profile))
+
     def observe(self, *, generation: str, connection: int, sequence: int,
                 source: object, text: str, pid: int, received_ns: int = 0) -> Token | None:
         if not self.profile or not self.target or self.profile.source != 'hook':
@@ -141,11 +149,7 @@ class Controller:
             return None
         self.highest_sequence = sequence
         speaker = (fields.speaker if self.profile.speaker_source in ('', identity) else '')
-        if self.profile.unwrap_speaker_enclosed_body:
-            speaker, body = resolve_speaker_enclosed_body(
-                fields.body, speaker, configured_speaker_names(self.profile))
-        else:
-            body = fields.body
+        speaker, body = self._resolve_dialogue(fields.body, speaker)
         return self._accept_line(sequence=sequence, raw=text, body=body, speaker=speaker,
                                  origin=identity, verified_boundary=False, received_ns=received_ns)
 
@@ -195,12 +199,7 @@ class Controller:
         assert assembly.body_index is not None
         body_event = matching[assembly.body_index]
 
-        speaker = assembly.speaker
-        if self.profile.unwrap_speaker_enclosed_body:
-            speaker, body = resolve_speaker_enclosed_body(
-                assembly.body, speaker, configured_speaker_names(self.profile))
-        else:
-            body = assembly.body
+        speaker, body = self._resolve_dialogue(assembly.body, assembly.speaker)
         result = self._accept_line(
             sequence=body_event.sequence, raw=body_event.text, body=body,
             speaker=speaker, origin=self.profile.body_source, verified_boundary=False,
@@ -226,12 +225,7 @@ class Controller:
         fields = extract_source_fields(text, self.profile, 'ocr')
         if not fields.body:
             return None
-        speaker = fields.speaker
-        if self.profile.unwrap_speaker_enclosed_body:
-            speaker, body = resolve_speaker_enclosed_body(
-                fields.body, speaker, configured_speaker_names(self.profile))
-        else:
-            body = fields.body
+        speaker, body = self._resolve_dialogue(fields.body, fields.speaker)
         return self._accept_line(sequence=sequence, raw=text, body=body,
                                  speaker=speaker, origin='ocr',
                                  verified_boundary=had_blank,
@@ -367,6 +361,10 @@ class Controller:
             return False
         self.native_progress = progress
         return self._reconcile_completion()
+
+    def native_audio_unavailable(self, token: Token) -> bool:
+        """Record that native audio can no longer establish a current judgment."""
+        return self.apply_utterance_progress(token, UtteranceProgress())
 
     def _reconcile_completion(self) -> bool:
         """Derive Presentation completion from the facts owned by Controller."""
