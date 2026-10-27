@@ -64,6 +64,7 @@ label advancement_accuracy:
     # is signalled to AutoAdv.
     python:
         _adv_runtime_assets = [
+            "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav",
             "audio/runtime/voice/jvs002_VOICEACTRESS100_001.wav",
             "audio/runtime/music/Heavenly Loop_0.ogg",
             "audio/runtime/music/LofiLoop_2.ogg",
@@ -173,7 +174,7 @@ label advancement_accuracy:
     stop adv_vocal_loop fadeout 0.2
 
     # Scene 4: leave the crowd and change BGM as a normal scene transition.
-    # A recurrent human-vocal cry then persists on an independent game channel, first
+    # A recurrent Japanese vocal track then persists on an independent game channel, first
     # alongside a text-corresponding voice and then through an unvoiced protagonist line.
     stop adv_ambient fadeout 0.6
     scene bg adv_street with fade
@@ -182,7 +183,7 @@ label advancement_accuracy:
     voice "audio/voice/normal_026.wav"
     $ _adv_evidence_voice_commanded()
     a "私はいつもミネラルウォーターを持ち歩いています。"
-    play adv_vocal_loop "audio/voice/stress_cry.wav" loop volume 0.18
+    play adv_vocal_loop "audio/runtime/voice/jvs001_VOICEACTRESS100_001.wav" loop volume 0.18
     $ _adv_evidence_case("street-text-with-vocal-loop", "彼のあだ名は言い得て妙だよね。", "audio/voice/normal_010.wav")
     voice "audio/voice/normal_010.wav"
     $ _adv_evidence_voice_commanded()
@@ -254,16 +255,17 @@ label advancement_accuracy:
     $ _adv_evidence_voice_commanded()
     s "あああっ！"
 
-    # Scene 6: move into a machine room while the old BGM remains. The next
-    # line therefore sees old BGM + new ambience; the following whisper occurs
-    # while BGM fades out. Ambient noise then persists through unvoiced/voiced
-    # lines without any session reset.
+    # Scene 6: move into a machine room while the old BGM remains. The first
+    # line sees old BGM + machine ambience + a recurrent human cry; only the
+    # background vocal loop ends before the following whisper.
     scene bg adv_machine with fade
     play adv_ambient "audio/runtime/ambient/AMBInd_RoomToneMachineRoom_LOOP_01.ogg" loop fadein 0.4 volume 0.25
+    play adv_vocal_loop "audio/voice/stress_cry.wav" loop volume 0.18
     $ _adv_evidence_case("machine-transition-voiced", "ゼロという概念は、ヒンドゥー文化に由来している。", "audio/voice/normal_012.wav")
     voice "audio/voice/normal_012.wav"
     $ _adv_evidence_voice_commanded()
     c "ゼロという概念は、ヒンドゥー文化に由来している。"
+    stop adv_vocal_loop fadeout 0.2
     stop music fadeout 1.2
     $ _adv_evidence_case("machine-fading-bgm-whisper", "あっベルが鳴ってる。", "audio/voice/whisper_017.wav")
     voice "audio/voice/whisper_017.wav"

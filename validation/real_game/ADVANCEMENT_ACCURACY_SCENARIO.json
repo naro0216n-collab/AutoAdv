@@ -660,7 +660,7 @@
         "text_correspondence": true,
         "finite_vocal_activity": true,
         "finite_vocal_repetition": false,
-        "vocal_loop": false,
+        "vocal_loop": true,
         "vocal_crosses_boundary": false,
         "delayed_vocal_onset": false
       }
