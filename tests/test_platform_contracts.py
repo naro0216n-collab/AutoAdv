@@ -315,34 +315,70 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         assert len(fake.calls) == expected_calls
 
 
-def test_windows_game_input_observer_publishes_only_for_the_selected_process(monkeypatch):
+def test_windows_game_input_observer_relay_preserves_target_and_callback_boundary(monkeypatch):
     import autoadv.windows_input as windows_input_module
     import ctypes
 
     class HookUser32(_TargetUser32):
         def __init__(self, pid):
             super().__init__(pid=pid)
-            self.keyboard_proc = None
-            self._buffer = ctypes.create_string_buffer(64)
+            self.pid = pid
+            self.keyboard_proc = self.mouse_proc = None
+            self.in_hook_callback = False
+            self._sent_inputs = False
+            self.queue = []
+            self.WindowFromPoint = _Win32Function(self._from_point)
+            self.GetWindowThreadProcessId = _Win32Function(self._get_pid)
             self.SetWindowsHookExW = _Win32Function(self._set_hook)
             self.CallNextHookEx = _Win32Function(lambda *_: 0)
             self.UnhookWindowsHookEx = _Win32Function(lambda *_: 1)
             self.GetForegroundWindow = _Win32Function(lambda: 77)
-            self.WindowFromPoint = _Win32Function(lambda _point: 77)
             self.GetMessageW = _Win32Function(self._message)
+            self.PeekMessageW = _Win32Function(lambda *_: 0)
+            self.PostThreadMessageW = _Win32Function(self._post)
             self.TranslateMessage = _Win32Function(lambda *_: 1)
             self.DispatchMessageW = _Win32Function(lambda *_: 1)
-            self.PostThreadMessageW = _Win32Function(lambda *_: 1)
 
         def _set_hook(self, kind, callback, _module, _thread):
             if kind == windows_input_module.WH_KEYBOARD_LL:
                 self.keyboard_proc = callback
+            else:
+                self.mouse_proc = callback
             return kind
 
-        def _message(self, *_args):
-            if self.keyboard_proc is not None:
-                callback, self.keyboard_proc = self.keyboard_proc, None
-                callback(0, WM_KEYDOWN, ctypes.addressof(self._buffer))
+        def _get_pid(self, hwnd, out):
+            assert not self.in_hook_callback
+            out._obj.value = self.pid if hwnd.value == 77 else 999
+            return 1
+
+        def _from_point(self, point):
+            assert not self.in_hook_callback  # WindowFromPoint sends WM_NCHITTEST
+            return 77 if point.x == 10 else 88  # game vs. AutoAdv
+
+        def _post(self, _thread, message, _wparam, _lparam):
+            self.queue.append(message)
+            return 1
+
+        def _message(self, message, *_args):
+            if not self._sent_inputs:
+                self._sent_inputs = True
+                # Both target and unrelated clicks hit the global hook; only
+                # target input may be admitted after leaving the Win32 callback.
+                mouse_buffer = ctypes.create_string_buffer(64)
+                struct = self.observer_mouse_struct
+                for point in (10, 20):
+                    packet = struct.from_buffer(mouse_buffer)
+                    packet.pt.x, packet.pt.y = point, 0
+                    self.in_hook_callback = True
+                    self.mouse_proc(0, windows_input_module.WM_LBUTTONDOWN,
+                                    ctypes.addressof(mouse_buffer))
+                    self.in_hook_callback = False
+                self.in_hook_callback = True
+                self.keyboard_proc(0, WM_KEYDOWN, 0)
+                self.in_hook_callback = False
+            if self.queue:
+                message._obj.message = self.queue.pop(0)
+                return 1
             return 0
 
     class Kernel32:
@@ -350,9 +386,20 @@ def test_windows_game_input_observer_publishes_only_for_the_selected_process(mon
             self.GetCurrentThreadId = _Win32Function(lambda: 1)
             self.GetModuleHandleW = _Win32Function(lambda _name: 1)
 
+    # ctypes.Structure is normally local to the Windows hook worker; match
+    # the native POINT and MSLLHOOKSTRUCT layout for a 64-bit host.
+    from ctypes import wintypes
+    class POINT(ctypes.Structure):
+        _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
+    class MOUSE(ctypes.Structure):
+        _fields_ = [('pt', POINT), ('mouseData', wintypes.DWORD),
+                    ('flags', wintypes.DWORD), ('time', wintypes.DWORD),
+                    ('dwExtraInfo', ctypes.c_size_t)]
+
     def observed(expected_pid, actual_pid):
         events = []
         user32 = HookUser32(actual_pid)
+        user32.observer_mouse_struct = MOUSE
         with patch.object(windows_input_module.sys, 'platform', 'win32'), \
              patch.object(windows_input_module.ctypes, 'windll',
                           SimpleNamespace(user32=user32, kernel32=Kernel32()), create=True), \
@@ -363,8 +410,9 @@ def test_windows_game_input_observer_publishes_only_for_the_selected_process(mon
             observer.close()
         return events
 
-    assert observed(101, 101) == [4321]
+    assert observed(101, 101) == [4321, 4321]  # game click and game key
     assert observed(202, 101) == []
+
 
 def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_state():
     assert CommonSettings().uncertain_text_fallback

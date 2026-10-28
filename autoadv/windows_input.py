@@ -9,6 +9,7 @@ that the input advanced dialogue or changed product state.
 from __future__ import annotations
 
 import ctypes
+from collections import deque
 import sys
 import threading
 import time
@@ -24,6 +25,7 @@ WM_RBUTTONDOWN = 0x0204
 WM_MBUTTONDOWN = 0x0207
 WM_XBUTTONDOWN = 0x020B
 WM_QUIT = 0x0012
+WM_INPUT_OBSERVED = 0x802A  # WM_APP message on the hook thread
 WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
 GA_ROOT = 2
@@ -144,15 +146,6 @@ class WindowsGameInputObserver:
         class POINT(ctypes.Structure):
             _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
 
-        class KBDLLHOOKSTRUCT(ctypes.Structure):
-            _fields_ = [
-                ('vkCode', wintypes.DWORD),
-                ('scanCode', wintypes.DWORD),
-                ('flags', wintypes.DWORD),
-                ('time', wintypes.DWORD),
-                ('dwExtraInfo', ctypes.c_size_t),
-            ]
-
         class MSLLHOOKSTRUCT(ctypes.Structure):
             _fields_ = [
                 ('pt', POINT),
@@ -184,37 +177,50 @@ class WindowsGameInputObserver:
         kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
         kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        user32.PostThreadMessageW.argtypes = (
+            wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+        user32.PostThreadMessageW.restype = wintypes.BOOL
+        user32.PeekMessageW.argtypes = (
+            ctypes.POINTER(wintypes.MSG), ctypes.c_void_p,
+            wintypes.UINT, wintypes.UINT, wintypes.UINT)
+        user32.PeekMessageW.restype = wintypes.BOOL
 
         keyboard_hook = mouse_hook = None
         self._thread_id = int(kernel32.GetCurrentThreadId())
 
-        def publish() -> None:
+        # Win32 low-level hooks run synchronously before the target window
+        # receives its input. Never query the target window (WindowFromPoint can
+        # send WM_NCHITTEST), nor invoke application callbacks, in that context.
+        # Instead, relay the observed input to this thread's normal message loop.
+        pending = deque()
+
+        def relay(kind: str, target: int | tuple[int, int]) -> None:
             try:
-                self.on_input(int(self.clock()))
+                at_ms = int(self.clock())
+                if user32.PostThreadMessageW(self._thread_id, WM_INPUT_OBSERVED, 0, 0):
+                    pending.append((kind, target, at_ms))
             except Exception:
+                # Never let Python exceptions escape through a Win32 hook thunk.
                 pass
 
         @hookproc
         def keyboard_proc(code, message, data):
             if code >= 0 and int(message) in _KEY_DOWN:
-                info = ctypes.cast(data, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                hwnd = int(user32.GetForegroundWindow() or 0)
-                if self._window_pid(user32, hwnd) == self.pid:
-                    publish()
+                relay('keyboard', int(user32.GetForegroundWindow() or 0))
             return user32.CallNextHookEx(keyboard_hook, code, message, data)
 
         @hookproc
         def mouse_proc(code, message, data):
             if code >= 0 and int(message) in _MOUSE_DOWN:
-                info = ctypes.cast(data, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                hwnd = int(user32.WindowFromPoint(info.pt) or 0)
-                if self._window_pid(user32, hwnd) == self.pid:
-                    publish()
+                point = ctypes.cast(data, ctypes.POINTER(MSLLHOOKSTRUCT)).contents.pt
+                relay('mouse', (int(point.x), int(point.y)))
             return user32.CallNextHookEx(mouse_hook, code, message, data)
 
         self._keyboard_proc = keyboard_proc
         self._mouse_proc = mouse_proc
         try:
+            # PostThreadMessage requires a created message queue.
+            user32.PeekMessageW(ctypes.byref(wintypes.MSG()), None, 0, 0, 0)
             module = kernel32.GetModuleHandleW(None)
             keyboard_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, module, 0)
             mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, module, 0)
@@ -222,7 +228,26 @@ class WindowsGameInputObserver:
                 raise OSError('SetWindowsHookExW failed')
             self._ready.set()
             message = wintypes.MSG()
-            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+            while True:
+                result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+                if result <= 0:
+                    if result < 0:
+                        raise OSError('GetMessageW failed')
+                    break
+                if message.message == WM_INPUT_OBSERVED:
+                    if not pending:
+                        continue
+                    kind, target, at_ms = pending.popleft()
+                    if kind == 'mouse':
+                        hwnd = int(user32.WindowFromPoint(POINT(*target)) or 0)
+                    else:
+                        hwnd = target
+                    if self._window_pid(user32, hwnd) == self.pid:
+                        try:
+                            self.on_input(at_ms)
+                        except Exception:
+                            pass
+                    continue
                 user32.TranslateMessage(ctypes.byref(message))
                 user32.DispatchMessageW(ctypes.byref(message))
         except BaseException as exc:
