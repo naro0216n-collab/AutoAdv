@@ -8,6 +8,7 @@ from pathlib import Path
 from collections.abc import Callable
 from dataclasses import asdict
 from .hook_protocol import HookEvent,ThreadSource
+from .crash_report import record_exception, record_failure
 
 
 def parse_host_event(packet: dict) -> HookEvent:
@@ -67,13 +68,18 @@ class HookHost:
 
     def _reader(self):
         reason='native_host_exit'
+        child = self.child
         try:
-            for line in self.child.stdout:
+            for line in child.stdout:
                 event=parse_host_event(json.loads(line))
                 self.on_event(event)
         except Exception as exc:
             reason=f'native_host_ipc_failure: {type(exc).__name__}: {exc}'
+            record_exception('native Hook Host IPC reader failure', exc)
         finally:
+            exit_code = child.poll() if child is not None else None
+            if exit_code not in (None, 0):
+                record_failure(f'native Hook Host exited with code {exit_code}')
             self.on_closed(reason)
 
     def command(self,action:str,**kwargs):

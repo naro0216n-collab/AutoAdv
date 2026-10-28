@@ -3,6 +3,8 @@ from __future__ import annotations
 
 
 def main() -> int:
+    from .crash_report import install_crash_reporting
+    install_crash_reporting('gui')
     try:
         from .gui import run_gui
     except ImportError as error:

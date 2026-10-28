@@ -231,6 +231,8 @@ def ipc_json(packet: dict) -> str:
 
 
 def main(argv=None):
+    from .crash_report import install_crash_reporting, record_exception
+    install_crash_reporting('hook-host')
     parser=argparse.ArgumentParser()
     parser.add_argument('--dll',required=True,type=Path)
     args=parser.parse_args(argv)
@@ -248,6 +250,7 @@ def main(argv=None):
                 host.emit('diagnostic',detail=f'command_failed: {type(error).__name__}: {error}')
         return 0
     except Exception as error:
+        record_exception('native Hook Host startup failure', error)
         print(ipc_json({'kind':'fatal','reason':f'{type(error).__name__}: {error}'}),flush=True)
         return 1
 
