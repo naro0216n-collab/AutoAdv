@@ -1,0 +1,38 @@
+name: Windows Adapter Validation
+
+on:
+  pull_request:
+    branches: [main]
+    types: [reopened]
+
+# A nonmerging draft PR (develop -> main) is an explicit validation control.
+# No heavy validation on routine develop pushes or PR creation.
+
+permissions:
+  contents: read
+
+jobs:
+  windows-adapters:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'develop' && github.event.pull_request.base.ref == 'main' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Windows GUI, audio, OCR and native adapters
+        run: python -m pip install '.[gui,audio,ocr,native,dev]'
+      - name: Run Windows platform boundary contracts
+        run: python -m pytest -q tests/test_platform_contracts.py
+      - name: Validate installed Windows adapter imports
+        run: |
+          python -c "import cv2, mss, numpy, onnxruntime, sounddevice; from ten_vad import TenVad; from PySide6.QtWidgets import QApplication; from autoadv.gui import run_gui; from autoadv.windows_input import WindowsAdvancementInput, key_message_parameters; from autoadv.g2p import HaqumeiG2P; assert HaqumeiG2P().candidates('えっ嘘でしょ。'); vad=TenVad(256, 0.5); probability, flag=vad.process(numpy.zeros(256, dtype=numpy.int16)); assert 0.0 <= probability <= 1.0 and flag in (0, 1); print('Windows adapters available')"
+      - name: Validate pinned native-audio model inference
+        run: |
+          python -c "import os, numpy as np; from pathlib import Path; from autoadv.audio_buffer import PCMChunk; from autoadv.native_runtime import managed_paths, prepare_alignment_model, prepare_human_vocal_model, verify_g2p; from autoadv.forced_alignment import OnnxPhoneCTCModel; from autoadv.acoustic_observers import OnnxAudioSetModel; root=Path(os.environ['RUNNER_TEMP']) / 'autoadv-native'; prepare_alignment_model(runtime_root=root); prepare_human_vocal_model(runtime_root=root); paths=managed_paths(runtime_root=root); model=OnnxPhoneCTCModel(Path(paths.alignment_model), Path(paths.alignment_vocab)); chunk=PCMChunk(1000, np.zeros((48000, 2), dtype=np.float32).tobytes(), 48000, 2, 4); logits=model.infer((chunk,)); assert logits.ndim == 2 and logits.shape[0] > 0 and logits.shape[1] == len(model.vocab); vocal=OnnxAudioSetModel(Path(paths.human_vocal_model)).infer(np.zeros(16000, dtype=np.float32)); assert vocal.shape == (521,); assert verify_g2p()['ready']; print('Pinned native-audio model inference ready')"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Build process-scoped audio loopback helper
+        run: dotnet build integrations/windows-loopback/AutoAdv.ProcessLoopback.csproj --configuration Release --nologo

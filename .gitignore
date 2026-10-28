@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+/dist/
+/build/
+*.zip
+# Model weights remain outside the Git checkout. CC0 validation PCM is committed.
+# Legacy in-repo paths are ignored; current default is an external cache.
+/validation/real_game/asr-model/

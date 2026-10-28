@@ -1,0 +1,5 @@
+音声素材：あみたろの声素材工房（https://amitaro.net/）
+音声収録: あみたろITAコーパス Ver.2.2／ささやきA Ver.1.0
+台詞: ITAコーパス（パブリックドメイン; https://github.com/mmorise/ita-corpus）
+利用規約：https://amitaro.net/voice/voice_rule/
+音声素材単体・素材集としての配布は禁止。著作者の規約に従うこと。

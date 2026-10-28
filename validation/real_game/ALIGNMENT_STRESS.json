@@ -1,0 +1,172 @@
+{
+  "description": "Target-conditioned alignment stress cases described by text correspondence, finite human-vocal activity, and recurrence. Source order is a fixture mixing fact and never dialogue ownership.",
+  "cases": [
+    {
+      "id": "clean_text_correspondence",
+      "display": "えっ嘘でしょ。",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      },
+      "sources": [
+        {
+          "recording": "normal-001"
+        }
+      ]
+    },
+    {
+      "id": "text_correspondence_with_vocal_loop",
+      "display": "えっ嘘でしょ。",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-001"
+        },
+        {
+          "recording": "normal-020",
+          "gain": 0.4,
+          "loop_ms": 5600
+        }
+      ]
+    },
+    {
+      "id": "text_correspondence_with_late_vocal_loop",
+      "display": "えっ嘘でしょ。",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-001"
+        },
+        {
+          "recording": "normal-020",
+          "offset_ms": 900,
+          "gain": 0.4,
+          "loop_ms": 5600
+        }
+      ]
+    },
+    {
+      "id": "no_text_correspondence_with_vocal_loop",
+      "display": "これは表示されただけの文章です。",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-020",
+          "gain": 1.0,
+          "loop_ms": 5600
+        }
+      ]
+    },
+    {
+      "id": "text_correspondence_from_recurrent_mix",
+      "display": "ヒューズが飛んだ。",
+      "audio_facts": {
+        "text_correspondence": true,
+        "finite_vocal_activity": false,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "normal-020",
+          "gain": 1.0,
+          "loop_ms": 5600
+        }
+      ]
+    },
+    {
+      "id": "nonlexical_finite_cry",
+      "display": "うっ……うう……",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      },
+      "sources": [
+        {
+          "recording": "stress_cry"
+        }
+      ]
+    },
+    {
+      "id": "nonlexical_finite_scream",
+      "display": "あああっ！",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": false
+      },
+      "sources": [
+        {
+          "recording": "stress_scream"
+        }
+      ]
+    },
+    {
+      "id": "nonlexical_finite_with_vocal_loop",
+      "display": "うっ……うう……",
+      "audio_facts": {
+        "text_correspondence": false,
+        "finite_vocal_activity": true,
+        "finite_vocal_repetition": false,
+        "vocal_loop": true
+      },
+      "sources": [
+        {
+          "recording": "stress_cry"
+        },
+        {
+          "recording": "normal-020",
+          "offset_ms": 600,
+          "gain": 0.35,
+          "loop_ms": 5600
+        }
+      ]
+    }
+  ],
+  "external_assets": [
+    {
+      "id": "stress_cry",
+      "filename": "stress_cry.wav",
+      "commons_page": "https://commons.wikimedia.org/wiki/File:Cry_of_woman.ogg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/5/5f/Cry_of_woman.ogg",
+      "source_sha1": "35b42259d69dcc55c70174e086d1395a4ad655a7",
+      "license": "CC0-1.0",
+      "author": "AlucardsBride",
+      "trim_start_s": 0,
+      "trim_duration_s": 8,
+      "prepared_sha256": "bb077953062cef4d9f46db1f32faa4c9520f29f532ceb9b84960ac3094b9cac9"
+    },
+    {
+      "id": "stress_scream",
+      "filename": "stress_scream.wav",
+      "commons_page": "https://commons.wikimedia.org/wiki/File:NOW_screaming.ogg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/0d/NOW_screaming.ogg",
+      "source_sha1": "4f3a425ec7e690bd7566a032e62732ac8930846d",
+      "license": "CC0-1.0",
+      "author": "Ranch9613",
+      "trim_start_s": 0,
+      "trim_duration_s": 4.2,
+      "prepared_sha256": "116c4b75a4d03e8c894565d703c98bc8bb1ac30ce1c128eed59c567e06392d71"
+    }
+  ]
+}

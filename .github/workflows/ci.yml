@@ -1,0 +1,79 @@
+name: Fast CI
+
+on:
+  push:
+    branches: [develop, temp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fast-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-artifact:
+    name: Source artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build restorable source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/source"
+          branch="${GITHUB_REF_NAME}"
+          publish_commit="$(git rev-parse refs/remotes/origin/publish)"
+          publish_tree="$(git rev-parse "${publish_commit}^{tree}")"
+          git update-ref "refs/heads/${branch}" "${GITHUB_SHA}"
+          git update-ref refs/autoadv/publish-base "${publish_commit}"
+          git bundle create "${RUNNER_TEMP}/source/repository.bundle" \
+            "refs/heads/${branch}" refs/autoadv/publish-base
+          git bundle verify "${RUNNER_TEMP}/source/repository.bundle"
+          printf '%s\n' "${GITHUB_SHA}" > "${RUNNER_TEMP}/source/.source-commit"
+          git rev-parse "${GITHUB_SHA}^{tree}" > "${RUNNER_TEMP}/source/.source-tree"
+          printf '%s\n' "${branch}" > "${RUNNER_TEMP}/source/.source-branch"
+          printf '%s\n' "${publish_commit}" > "${RUNNER_TEMP}/source/.source-publish-commit"
+          printf '%s\n' "${publish_tree}" > "${RUNNER_TEMP}/source/.source-publish-tree"
+      - name: Upload source bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: ${{ runner.temp }}/source
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  unit:
+    name: Domain contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Qt runtime library
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1
+      - name: Install lightweight contract-test dependencies
+        run: python -m pip install 'numpy>=1.26,<3' 'PySide6-Essentials>=6.8,<7' 'pytest>=8,<10'
+      - name: Run product and measurement-harness unit contracts
+        run: python -m pytest -q tests validation/real_game
+
+  package-smoke:
+    name: Clean package install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install .
+      - run: |
+          cd "${RUNNER_TEMP}"
+          python -c "import autoadv; assert autoadv.Controller"
