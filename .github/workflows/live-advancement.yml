@@ -39,13 +39,20 @@ jobs:
             --runtime $runtime --cache $cache --wait-seconds 600
           if ($LASTEXITCODE -ne 0 -or -not $game) { throw 'Prebuilt validation game staging failed' }
           "AUTOADV_VALIDATION_GAME=$game" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Check Hook and reading decision through actual Luna and Windows input
+      - name: Check Hook and reading decision through both Windows input methods
         shell: pwsh
         run: |
           & .\validation\real_game\run_live_check.ps1 -Phase reading `
             -GameExecutable $env:AUTOADV_VALIDATION_GAME -Automated `
-            -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-reading.jsonl') `
-            -Report (Join-Path $env:RUNNER_TEMP 'autoadv-reading.result.json') `
+            -InputMethod window_message `
+            -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-reading-window-message.jsonl') `
+            -Report (Join-Path $env:RUNNER_TEMP 'autoadv-reading-window-message.result.json') `
+            -TimeoutSeconds 120
+          & .\validation\real_game\run_live_check.ps1 -Phase reading `
+            -GameExecutable $env:AUTOADV_VALIDATION_GAME -Automated `
+            -InputMethod send_input `
+            -Trace (Join-Path $env:RUNNER_TEMP 'autoadv-reading-send-input.jsonl') `
+            -Report (Join-Path $env:RUNNER_TEMP 'autoadv-reading-send-input.result.json') `
             -TimeoutSeconds 120
       - name: Preserve hosted Hook and reading observations including failed runs
         if: always()
@@ -53,8 +60,8 @@ jobs:
         with:
           name: live-reading-advancement
           path: |
-            ${{ runner.temp }}/autoadv-reading.jsonl
-            ${{ runner.temp }}/autoadv-reading.result.json
+            ${{ runner.temp }}/autoadv-reading-*.jsonl
+            ${{ runner.temp }}/autoadv-reading-*.result.json
             ${{ runner.temp }}/autoadv-game-*.jsonl
           if-no-files-found: warn
           retention-days: 30
