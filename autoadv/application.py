@@ -19,6 +19,7 @@ from typing import Callable
 from collections.abc import Sequence
 
 from .conversation import Controller, Target
+from .crash_report import record_stage
 from .g2p import G2PBackend, default_g2p
 from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
@@ -887,6 +888,7 @@ class AutoAdvApplication:
             raise ValueError('作品とプロファイルを選択してください')
         effective = self.catalog.effective_profile(profile)
         target = self._session_target()
+        record_stage(f'monitor starting source={effective.source} advance={effective.advance_mode.value}')
         self.stop_monitoring('session_changed')
         if effective.source == 'ocr':
             self._begin_runtime(effective, target, 'ocr', 1)
@@ -907,6 +909,7 @@ class AutoAdvApplication:
             self._start_game_input_observer(target)
             self._reconcile_hook_sync()
         self._start_native_audio(effective)
+        record_stage('monitor initialized')
         state = self.runtime_state()
         if state.target is not None and state.profile is not None:
             self._emit_runtime_event(
@@ -1006,6 +1009,7 @@ class AutoAdvApplication:
         """Apply connection provenance, profile restoration and monitor resume."""
         transition = self._accept_hook_connection_event(event)
         if transition in ('connected', 'changed'):
+            record_stage(f'hook connection {transition}')
             if transition == 'changed':
                 self.stop_monitoring('host_changed')
                 self.clear_capture_observations()
@@ -1293,6 +1297,7 @@ class AutoAdvApplication:
         def load_native() -> None:
             native = None
             try:
+                record_stage('native audio model initialization started')
                 native = NativeAudio(
                     pid, Path(native_helper), Path(alignment_model), Path(alignment_vocab),
                     lambda token, detail: dispatch(consume_error, token, detail),
@@ -1300,13 +1305,17 @@ class AutoAdvApplication:
                     on_inference=publish_inference,
                     on_progress=lambda token, progress, diagnostics: dispatch(
                         self._consume_native_progress, token, progress, diagnostics))
+                record_stage('native audio model initialization finished')
                 native.start()
+                record_stage('native audio capture started')
                 self._dispatch_runtime(lambda: activate(native))
             except Exception as exc:
+                record_stage(f'native audio startup failed: {type(exc).__name__}')
                 if native is not None:
                     native.close()
                 self._dispatch_runtime(lambda reason=str(exc): fail(reason))
 
+        record_stage('native audio loading scheduled')
         threading.Thread(target=load_native, daemon=True, name='autoadv-load-native').start()
         return True
 

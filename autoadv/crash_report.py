@@ -22,9 +22,11 @@ _lock = threading.Lock()
 
 
 def crash_directory() -> Path:
-    configured = os.environ.get('AUTOADV_DATA_DIR')
-    root = Path(configured).resolve() if configured else Path(__file__).resolve().parents[1] / '.autoadv'
-    return root / 'crashes'
+    # Only an explicit crash-report destination overrides the installation folder.
+    # In particular, AUTOADV_DATA_DIR changes product data during validation but
+    # must not redirect a crash report away from the launched AutoAdv.cmd.
+    configured = os.environ.get('AUTOADV_CRASH_DIR')
+    return Path(configured).resolve() if configured else Path(__file__).resolve().parents[1]
 
 
 def _record(title: str, exception_type, value, tb) -> None:
@@ -36,6 +38,22 @@ def _record(title: str, exception_type, value, tb) -> None:
         _stream.write(f'\n{datetime.now(timezone.utc).isoformat()} {title}\n')
         traceback.print_exception(exception_type, value, tb, file=_stream)
         _stream.flush()
+
+
+def record_stage(stage: str) -> None:
+    """Persist the last reached runtime boundary before an untrappable process exit.
+
+    A clean exit removes this trace with the report. A sudden native exit may
+    never run Python exception hooks, so these boundaries remain available.
+    """
+    try:
+        with _lock:
+            if _stream is not None:
+                _stream.write(f'{datetime.now(timezone.utc).isoformat()} stage: {stage}\n')
+                _stream.flush()
+    except (OSError, ValueError):
+        # Diagnostics must never take down the product during shutdown.
+        pass
 
 
 def record_exception(title: str, error: BaseException) -> None:

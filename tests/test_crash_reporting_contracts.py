@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_python(script: str, log_base: Path) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, 'AUTOADV_DATA_DIR': str(log_base)}
+    env = {**os.environ, 'AUTOADV_CRASH_DIR': str(log_base)}
     return subprocess.run(
         [sys.executable, '-c', script], cwd=ROOT, env=env,
         capture_output=True, text=True, timeout=15,
@@ -27,7 +27,7 @@ def test_clean_process_does_not_leave_crash_report(tmp_path, role):
         f"install_crash_reporting({role!r})", tmp_path,
     )
     assert completed.returncode == 0, completed.stderr
-    assert list((tmp_path / 'crashes').glob('*.log')) == []
+    assert list(tmp_path.glob('*.log')) == []
 
 
 @pytest.mark.parametrize('script,expected', [
@@ -45,7 +45,7 @@ def test_clean_process_does_not_leave_crash_report(tmp_path, role):
 ])
 def test_python_failure_is_persisted_with_full_traceback(tmp_path, script, expected):
     result = _run_python(script, tmp_path)
-    reports = list((tmp_path / 'crashes').glob('*.log'))
+    reports = list(tmp_path.glob('*.log'))
     assert len(reports) == 1, result.stderr
     report = reports[0].read_text(encoding='utf-8')
     assert expected in report
@@ -58,7 +58,7 @@ def test_native_process_abort_preserves_faulthandler_trace(tmp_path):
               "install_crash_reporting('hook-host'); os.abort()")
     result = _run_python(script, tmp_path)
     assert result.returncode != 0
-    reports = list((tmp_path / 'crashes').glob('hook-host-*.log'))
+    reports = list(tmp_path.glob('hook-host-*.log'))
     assert len(reports) == 1
     report = reports[0].read_text(encoding='utf-8')
     assert 'Fatal Python error' in report
@@ -75,8 +75,28 @@ with patch('autoadv.hook_host_worker.NativeHost', side_effect=RuntimeError('host
     result = _run_python(script, tmp_path)
     assert result.returncode == 1
     assert '"kind": "fatal"' in result.stdout
-    reports = list((tmp_path / 'crashes').glob('hook-host-*.log'))
+    reports = list(tmp_path.glob('hook-host-*.log'))
     assert len(reports) == 1
     report = reports[0].read_text(encoding='utf-8')
     assert 'RuntimeError: host setup rejected' in report
     assert 'native Hook Host startup failure' in report
+
+
+def test_report_directory_is_the_install_directory_not_a_machine_specific_cache(monkeypatch):
+    from autoadv.crash_report import crash_directory
+    monkeypatch.delenv('AUTOADV_CRASH_DIR', raising=False)
+    monkeypatch.setenv('AUTOADV_DATA_DIR', str(ROOT / 'arbitrary-runtime-data'))
+    assert crash_directory() == ROOT
+
+
+def test_abrupt_exit_preserves_last_reached_stage(tmp_path):
+    result = _run_python(
+        "from autoadv.crash_report import install_crash_reporting, record_stage; "
+        "import os; install_crash_reporting('gui'); "
+        "record_stage('native audio model initialization started'); os._exit(35)",
+        tmp_path,
+    )
+    assert result.returncode == 35
+    reports = list(tmp_path.glob('gui-*.log'))
+    assert len(reports) == 1
+    assert 'stage: native audio model initialization started' in reports[0].read_text(encoding='utf-8')
