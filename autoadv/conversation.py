@@ -7,7 +7,7 @@ from threading import Lock
 from .hook_protocol import HookEvent
 from .g2p import G2PBackend
 from .utterance_progress import UtteranceProgress
-from .model import (AdvanceMode, Profile, Token, Utterance, assemble_dialogue_fields,
+from .model import (AdvanceMode, InputMethod, Profile, Token, Utterance, assemble_dialogue_fields,
                     configured_speaker_names, extract_source_fields, interpret,
                     resolve_speaker_enclosed_body)
 
@@ -32,12 +32,22 @@ class PresentationTiming:
     input_candidates_ms: tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class InputAttempt:
+    sent: bool
+    reason: str = ''
+
+
+_DYNAMIC_INPUT_HOLDS = frozenset({'target_unavailable', 'input_foreground_required'})
+
+
 class Controller:
-    """Callbacks from devices never send input; only try_advance may do that."""
-    def __init__(self, input_send: Callable[[Target, int], int | None],
-                 target_ready: Callable[[Target], bool], g2p: G2PBackend):
+    """Own Presentation identity, completion, and every AutoAdv game input."""
+    def __init__(self, input_send: Callable[[Target, InputMethod, int, str], int | None],
+                 input_unavailable: Callable[[Target, InputMethod], str | None],
+                 g2p: G2PBackend):
         self.input_send = input_send
-        self.target_ready = target_ready
+        self.input_unavailable = input_unavailable
         self.g2p = g2p
         self.session = 0
         self.target: Target | None = None
@@ -60,7 +70,7 @@ class Controller:
         self.ocr_blank = False
         self._input_facts_lock = Lock()
         self._external_input_times: list[int] = []
-        self._pending_auto_input_ms: int | None = None
+        self._pending_owned_input_ms: int | None = None
         self._presentation_timing = PresentationTiming()
 
     def begin(self, profile: Profile, target: Target, host_generation: str, connection_generation: int) -> int:
@@ -91,7 +101,7 @@ class Controller:
         self.ocr_blank = False
         with self._input_facts_lock:
             self._external_input_times.clear()
-            self._pending_auto_input_ms = None
+            self._pending_owned_input_ms = None
             self._presentation_timing = PresentationTiming()
         self.presentation_reason = None
         self.text_elapsed = self.tts_finished = False
@@ -246,8 +256,8 @@ class Controller:
             received_ms = received_ns // 1_000_000
             self._external_input_times = [
                 value for value in self._external_input_times if value > received_ms]
-        causal = self._pending_auto_input_ms
-        self._pending_auto_input_ms = None
+        causal = self._pending_owned_input_ms
+        self._pending_owned_input_ms = None
         return PresentationTiming(
             received_ns=received_ns, causal_lower_bound_ms=causal,
             input_candidates_ms=candidates)
@@ -413,6 +423,39 @@ class Controller:
         if self.hold_reason is None:
             self.hold_reason = reason
 
+    def _input_settings(self) -> tuple[InputMethod, int] | None:
+        if self.utterance is not None:
+            return self.utterance.input_method, self.utterance.input_key
+        if self.profile is not None:
+            return InputMethod(self.profile.input_method), self.profile.input_key
+        return None
+
+    def _current_input_block(self) -> str | None:
+        settings = self._input_settings()
+        if self.target is None or settings is None:
+            return 'target_unavailable'
+        return self.input_unavailable(self.target, settings[0])
+
+    def _admit_dynamic_input_state(self) -> bool:
+        """Re-evaluate only runtime target conditions that can recover by themselves."""
+        if self.hold_reason is not None and self.hold_reason not in _DYNAMIC_INPUT_HOLDS:
+            return False
+        reason = self._current_input_block()
+        if reason is not None:
+            self.hold_reason = reason
+            return False
+        if self.hold_reason in _DYNAMIC_INPUT_HOLDS:
+            self.hold_reason = None
+        return True
+
+    def _record_owned_input(self, sent_at_ms: int | None) -> None:
+        if sent_at_ms is None:
+            return
+        sent_at_ms = int(sent_at_ms)
+        if sent_at_ms > 0:
+            with self._input_facts_lock:
+                self._pending_owned_input_ms = sent_at_ms
+
     def try_advance(self) -> bool:
         if not (self.authorized and self.completed and self.utterance and self.target and not self.sent):
             return False
@@ -422,18 +465,7 @@ class Controller:
         # that input as timing evidence and restores normal evaluation.
         if self._external_input_pending():
             return False
-        ready = None
-        if self.hold_reason == 'target_unavailable':
-            ready = self.target_ready(self.target)
-            if not ready:
-                return False
-            self.hold_reason = None
-        elif self.hold_reason is not None:
-            return False
-        if ready is None:
-            ready = self.target_ready(self.target)
-        if not ready:
-            self.pause('target_unavailable')
+        if not self._admit_dynamic_input_state():
             return False
         # Target checks may cross a scheduling boundary. The final external-input
         # check and operation reservation are one input-fact transaction: an
@@ -445,13 +477,43 @@ class Controller:
             self.sent = True
             self.completed = False
         try:
-            sent_at_ms = self.input_send(self.target, self.profile.input_key)  # type: ignore[union-attr]
+            sent_at_ms = self.input_send(
+                self.target, self.utterance.input_method, self.utterance.input_key, 'auto')
         except Exception:
             self.pause('input_failure_no_retry')
             return False
-        if sent_at_ms is not None:
-            sent_at_ms = int(sent_at_ms)
-            if sent_at_ms > 0:
-                with self._input_facts_lock:
-                    self._pending_auto_input_ms = sent_at_ms
+        self._record_owned_input(sent_at_ms)
         return True
+
+    def test_input(self) -> InputAttempt:
+        """Send one explicit user-requested test through the same input authority.
+
+        If a current Presentation exists, the test consumes its single input slot
+        so automatic advancement can never send a second key for that line.
+        """
+        if self.profile is None or self.target is None:
+            return InputAttempt(False, 'monitoring_inactive')
+        if self.utterance is not None and self.sent:
+            return InputAttempt(False, 'already_sent')
+        if self._external_input_pending():
+            return InputAttempt(False, 'external_input_pending')
+        input_block = self._current_input_block()
+        if input_block is not None:
+            return InputAttempt(False, input_block)
+        settings = self._input_settings()
+        assert settings is not None
+        with self._input_facts_lock:
+            if self._external_input_times:
+                return InputAttempt(False, 'external_input_pending')
+            reserved = self.utterance is not None
+            if reserved:
+                self.sent = True
+                self.completed = False
+        try:
+            sent_at_ms = self.input_send(self.target, settings[0], settings[1], 'test')
+        except Exception:
+            if reserved:
+                self.pause('input_failure_no_retry')
+            return InputAttempt(False, 'input_failure_no_retry')
+        self._record_owned_input(sent_at_ms)
+        return InputAttempt(True)

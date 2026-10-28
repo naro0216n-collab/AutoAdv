@@ -10,7 +10,7 @@ import re
 
 from .model import Token
 from .hook_protocol import HookEvent, ThreadSource
-from .model import (AdvanceMode, Profile, SpeakerStyle, StructureRule, ReplacementRule,
+from .model import (AdvanceMode, InputMethod, Profile, SpeakerStyle, StructureRule, ReplacementRule,
                     COMMON_FIELDS, SPEAKER_STYLE_OPTIONS, build_speaker_caption,
                     configured_speaker_names, interpret)
 from .storage import load, save
@@ -215,6 +215,21 @@ def run_gui() -> int:
             self.advance_authorization.setProperty('primary', True)
             self.advance_authorization.toggled.connect(self.set_advance_authorization)
             advance.addRow(self.advance_authorization)
+            self.input_method = QComboBox()
+            self.input_method.addItem('ウィンドウ指定（非アクティブ可）', InputMethod.WINDOW_MESSAGE.value)
+            self.input_method.addItem('キーボード入力（前面時）', InputMethod.SEND_INPUT.value)
+            advance.addRow('キー送信方式', setting_row('input_method', self.input_method))
+            self.input_key_status = QLabel('')
+            advance.addRow('送りキー', self.input_key_status)
+            self.input_status = QLabel('')
+            self.input_status.setWordWrap(True)
+            advance.addRow('キー送信先', self.input_status)
+            self.input_test_status = QLabel('未確認')
+            self.input_test_status.setWordWrap(True)
+            advance.addRow('動作確認', self.input_test_status)
+            self.btn_input_test = QPushButton('入力をテスト')
+            self.btn_input_test.clicked.connect(self.test_input)
+            advance.addRow(self.btn_input_test)
 
             capture_box = QGroupBox('会話取得')
             capture_outer = QVBoxLayout(capture_box)
@@ -491,13 +506,15 @@ def run_gui() -> int:
 
             common = group('共通の既定値', page='settings', section='common_advance')
             self.common_controls={}
-            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき本文時間で進む','force_advance_seconds':'強制進行までの最大待機 (秒)','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'本文待機の最低時間 (ms)','per_reading_unit_wait_ms':'1読み単位あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード'}
+            common_titles={'advance_mode':'自動進行方式','uncertain_text_fallback':'音声判定が不確かなとき本文時間で進む','force_advance_seconds':'強制進行までの最大待機 (秒)','default_tts':'未知話者にもIrodori TTSを使用','default_voice':'既定Voice','reading_ms':'本文待機の最低時間 (ms)','per_reading_unit_wait_ms':'1読み単位あたり待機時間 (ms)','native_helper':'Process Loopbackヘルパー','alignment_model':'日本語音響整列モデル','alignment_vocab':'音響整列語彙ファイル','input_key':'送りキーコード','input_method':'キー送信方式'}
             for key in common_titles:
                 value=getattr(self.catalog.common,key)
                 if key=='advance_mode':
                     control=QWidget(); lay=QHBoxLayout(control); lay.setContentsMargins(0,0,0,0); mode_group=QButtonGroup(self); mode_group.setExclusive(True); text_button=QPushButton('文字のみ判断'); audio_button=QPushButton('音声判断')
                     for button,mode in ((text_button,AdvanceMode.TEXT),(audio_button,AdvanceMode.AUDIO)): button.setCheckable(True); button.setProperty('advanceMode',mode.value); mode_group.addButton(button); lay.addWidget(button,1)
                     (audio_button if value==AdvanceMode.AUDIO else text_button).setChecked(True); self.common_advance_mode_group=mode_group; self.common_advance_text_button=text_button; self.common_advance_audio_button=audio_button
+                elif key=='input_method':
+                    control=QComboBox(); control.addItem('ウィンドウ指定（非アクティブ可）',InputMethod.WINDOW_MESSAGE.value); control.addItem('キーボード入力（前面時）',InputMethod.SEND_INPUT.value); control.setCurrentIndex(max(0,control.findData(InputMethod(value).value)))
                 elif isinstance(value,bool): control=QCheckBox('有効'); control.setChecked(value)
                 elif isinstance(value,int):
                     control=QSpinBox()
@@ -543,7 +560,7 @@ def run_gui() -> int:
             diagnostics.addRow(self.btn_host)
             self.section_toggles['diagnostics'].toggled.connect(lambda checked: checked and self.refresh_diagnostics())
 
-            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'force_advance_seconds':self.force_advance_seconds,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_reading_unit_wait_ms':self.per_reading_unit_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key}
+            self.profile_field_controls={'advance_mode':self.advance_mode_widget,'uncertain_text_fallback':self.uncertain_text_fallback,'force_advance_seconds':self.force_advance_seconds,'default_tts':self.default_tts,'default_voice':self.default_voice,'reading_ms':self.reading_ms,'per_reading_unit_wait_ms':self.per_reading_unit_wait_ms,'native_helper':self.native_helper,'alignment_model':self.alignment_model,'alignment_vocab':self.alignment_vocab,'input_key':self.input_key,'input_method':self.input_method}
 
             for button in (self.advance_text_button,self.advance_audio_button): button.toggled.connect(lambda checked,key='advance_mode': checked and self.profile_setting_changed(key))
             for button in (self.source_hook_button,self.source_ocr_button): button.toggled.connect(lambda checked: checked and self.profile_setting_changed('source'))
@@ -567,6 +584,9 @@ def run_gui() -> int:
 
             self.fill_games()
             if self.irodori_url.text().strip(): QTimer.singleShot(0,self.start_server)
+            self._input_status_timer = QTimer(self)
+            self._input_status_timer.timeout.connect(self.refresh_input_status)
+            self._input_status_timer.start(500)
             for layout in pages.values(): layout.addStretch(1)
 
         @property
@@ -600,6 +620,8 @@ def run_gui() -> int:
             if key == 'advance_mode':
                 return AdvanceMode.AUDIO if self.common_advance_audio_button.isChecked() else AdvanceMode.TEXT
             widget = self.common_controls[key]
+            if key == 'input_method':
+                return InputMethod(widget.currentData())
             if isinstance(widget, QComboBox):
                 return widget.currentText().strip()
             if isinstance(widget, QCheckBox):
@@ -733,6 +755,34 @@ def run_gui() -> int:
             else:
                 self.pause()
 
+        def test_input(self):
+            if QMessageBox.question(
+                    self, '入力をテスト',
+                    '実際にゲームへ送りキーを1回送るため、会話が進む可能性があります。\n'
+                    'キーボード入力方式では、実行後5秒以内にゲームを前面にしてください。\n\n'
+                    'テスト入力を送りますか？') != QMessageBox.StandardButton.Yes:
+                return
+            self.application.test_input()
+            self.refresh_input_status()
+
+        @staticmethod
+        def input_key_text(key: int) -> str:
+            names = {0x08: 'Backspace', 0x09: 'Tab', 0x0D: 'Enter', 0x1B: 'Esc', 0x20: 'Space'}
+            if key in names:
+                return f'{names[key]} (VK {key})'
+            if 0x30 <= key <= 0x39 or 0x41 <= key <= 0x5A:
+                return f'{chr(key)} (VK {key})'
+            return f'VK {key}'
+
+        def refresh_input_status(self):
+            if not hasattr(self, 'input_status'):
+                return
+            view = self.application.play_view().input
+            self.input_key_status.setText(self.input_key_text(view.key))
+            self.input_status.setText(view.status)
+            self.input_test_status.setText(view.test_status or '未確認')
+            self.btn_input_test.setEnabled(view.can_test)
+
         def profile_setting_changed(self, key: str):
             if self._loading_profile:
                 return
@@ -753,6 +803,8 @@ def run_gui() -> int:
             if key == 'advance_mode':
                 return self.current_advance_mode()
             control = self.profile_field_controls[key]
+            if key == 'input_method':
+                return InputMethod(control.currentData())
             if isinstance(control, QCheckBox):
                 return control.isChecked()
             if isinstance(control, QSpinBox):
@@ -768,7 +820,9 @@ def run_gui() -> int:
             control = self.profile_field_controls[key]
             previous = control.blockSignals(True)
             try:
-                if isinstance(control, QCheckBox):
+                if key == 'input_method':
+                    control.setCurrentIndex(max(0, control.findData(InputMethod(value).value)))
+                elif isinstance(control, QCheckBox):
                     control.setChecked(bool(value))
                 elif isinstance(control, QSpinBox):
                     control.setValue(int(value))
@@ -869,6 +923,7 @@ def run_gui() -> int:
             self.hook_buffer.setValue(profile.hook_max_buffer)
             self.hook_history.setValue(profile.hook_max_history)
             self.input_key.setValue(effective.input_key)
+            self.input_method.setCurrentIndex(max(0,self.input_method.findData(InputMethod(effective.input_method).value)))
             self.repeat.setCurrentIndex(self.repeat.findData(profile.repeat_rule))
             self.set_source_mode(profile.source)
             self.ocr_exe.setText(profile.ocr.executable)
@@ -2038,6 +2093,7 @@ def run_gui() -> int:
             self.advance_authorization.setChecked(view.advance_authorized)
             self.advance_authorization.setText('自動送り ON' if view.advance_authorized else '自動送り OFF')
             self.advance_authorization.blockSignals(previous)
+            self.refresh_input_status()
             if view.issue:
                 self.play_issue.setText(view.issue.message)
                 self._play_issue_action = view.issue.action

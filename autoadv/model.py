@@ -14,6 +14,11 @@ class AdvanceMode(str, Enum):
     AUDIO = 'audio'
 
 
+class InputMethod(str, Enum):
+    WINDOW_MESSAGE = 'window_message'
+    SEND_INPUT = 'send_input'
+
+
 @dataclass(frozen=True)
 class HookSelection:
     """Stable reference to one Luna output source.
@@ -190,7 +195,8 @@ class OCRSettings:
 
 COMMON_FIELDS = ('advance_mode', 'uncertain_text_fallback', 'force_advance_seconds', 'default_tts',
                  'default_voice', 'reading_ms', 'per_reading_unit_wait_ms',
-                 'native_helper', 'alignment_model', 'alignment_vocab', 'input_key')
+                 'native_helper', 'alignment_model', 'alignment_vocab', 'input_key',
+                 'input_method')
 
 
 SPEAKER_STYLE_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -368,6 +374,7 @@ class Profile:
     hook_max_history: int = 1000000
     repeat_rule: str = 'distinct_only'
     input_key: int = 13
+    input_method: InputMethod = InputMethod.WINDOW_MESSAGE
     source: str = 'hook'
     ocr: OCRSettings = field(default_factory=OCRSettings)
     native_helper: str = ''
@@ -419,6 +426,7 @@ class Profile:
         for style in self.speaker_styles.values():
             style.validate()
         AdvanceMode(self.advance_mode)
+        InputMethod(self.input_method)
         if len(self.inherit_common) != len(set(self.inherit_common)) or any(
                 name not in COMMON_FIELDS for name in self.inherit_common):
             raise ValueError('invalid common setting inheritance')
@@ -473,6 +481,8 @@ class Utterance:
     voice: str
     tts_caption: str
     advance_mode: AdvanceMode
+    input_method: InputMethod
+    input_key: int
     uncertain_text_fallback: bool
     force_advance_seconds: int
     reading_unit_count: int
@@ -772,6 +782,7 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
     voice = profile.speaker_voices.get(speaker, profile.default_voice)
     tts_caption = build_speaker_caption(profile.speaker_styles.get(speaker, SpeakerStyle()))
     advance_mode = AdvanceMode(profile.advance_mode)
+    input_method = InputMethod(profile.input_method)
     use_alignment = advance_mode == AdvanceMode.AUDIO and not use_tts
     primary_candidates = g2p.candidates(resolved, max_candidates=4 if use_alignment else 1)
     reading_units = reading_units_from_candidates(resolved, primary_candidates)
@@ -784,7 +795,8 @@ def interpret(raw: str, profile: Profile, *, session: int, line: int, source: st
         session=session, line=line, source=source, sequence=sequence, raw=raw,
         speaker=speaker, text=body, speech=speech, use_tts=use_tts, voice=voice,
         tts_caption=tts_caption,
-        advance_mode=advance_mode, uncertain_text_fallback=profile.uncertain_text_fallback,
+        advance_mode=advance_mode, input_method=input_method, input_key=profile.input_key,
+        uncertain_text_fallback=profile.uncertain_text_fallback,
         force_advance_seconds=profile.force_advance_seconds,
         reading_unit_count=reading_units,
         text_wait_ms=max(profile.reading_ms, reading_units * profile.per_reading_unit_wait_ms),

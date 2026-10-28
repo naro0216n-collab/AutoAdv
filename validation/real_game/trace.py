@@ -92,6 +92,7 @@ class ProductTraceObserver:
                 source=utterance.source, hook_sequence=utterance.sequence,
                 raw=utterance.raw, body=utterance.text, speaker=utterance.speaker,
                 advance_mode=utterance.advance_mode.value, use_tts=utterance.use_tts,
+                input_method=utterance.input_method.value, input_key=utterance.input_key,
                 uncertain_text_fallback=utterance.uncertain_text_fallback,
                 force_advance_seconds=utterance.force_advance_seconds,
                 reading_units=utterance.reading_unit_count, text_wait_ms=utterance.text_wait_ms)

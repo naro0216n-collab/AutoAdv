@@ -13,7 +13,7 @@ from autoadv.utterance_progress import (
 from autoadv.conversation import Target
 from autoadv.model import Token
 from autoadv.hook_protocol import HookEvent
-from autoadv.model import AdvanceMode, HookSelection
+from autoadv.model import AdvanceMode, HookSelection, InputMethod
 from autoadv.storage import Catalog
 from tests.contracts_support import app_with_game, capture_group, connect_hook, runtime_hook, source
 from tests.g2p_support import TEST_G2P
@@ -177,7 +177,7 @@ def test_capture_recipe_is_a_transaction_and_ambiguous_or_failed_commit_never_ch
     game = catalog.create_game('Game')
     failing = AutoAdvApplication(
         catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
-        input_send=lambda *_: None, target_ready=lambda *_: True, g2p=TEST_G2P,
+        input_send=lambda *_: None, input_unavailable=lambda *_: None, g2p=TEST_G2P,
     )
     failing.select_profile(game.id, game.default_profile)
     recovery = source('RECOVERY', 7)
@@ -519,7 +519,7 @@ def test_persistence_commands_are_atomic_and_user_settings_hide_storage_mechanic
     original_default = game.default_profile
     failing = AutoAdvApplication(
         catalog, lambda: (_ for _ in ()).throw(OSError('disk full')),
-        input_send=lambda *_: None, target_ready=lambda *_: True, g2p=TEST_G2P,
+        input_send=lambda *_: None, input_unavailable=lambda *_: None, g2p=TEST_G2P,
     )
     failing.select_profile(game.id, second.id)
     original_profiles = set(game.profiles)
@@ -548,6 +548,51 @@ def test_play_view_exposes_only_actionable_runtime_holds():
         app.controller.hold_reason = reason
         issue = app.play_view().issue
         assert (issue.action if issue else None) == action
+
+
+def test_play_input_view_and_explicit_test_follow_the_selected_input_method_without_duplicate_paths():
+    catalog = Catalog()
+    game = catalog.create_game('Game')
+    availability = {'reason': 'input_foreground_required'}
+    sent = []
+    app = AutoAdvApplication(
+        catalog, lambda: None,
+        input_send=lambda target, method, key: sent.append((target.hwnd, method, key)),
+        input_unavailable=lambda _target, _method: availability['reason'],
+        g2p=TEST_G2P,
+    )
+    app.select_profile(game.id, game.default_profile)
+    selected = source('INPUT', 1)
+    p = app.current_profile()
+    p.hooks = [HookSelection('INPUT', 1, 2)]
+    p.body_source = selected.identity
+    p.input_method = InputMethod.SEND_INPUT
+    p.inherit_common.remove('input_method')
+    app.select_profile(game.id, game.default_profile)
+    scheduled = []
+    app.configure_runtime_loop(schedule=lambda delay, callback: scheduled.append((delay, callback)))
+    connect_hook(app, pid=101, hwnd=77)
+    first = runtime_hook(app, selected, 'テスト前の本文', 2, pid=101)
+    assert first is not None
+
+    input_view = app.play_view().input
+    assert not input_view.available and input_view.can_test
+    assert '前面' in input_view.status
+
+    # One explicit request waits briefly for the user to foreground the game;
+    # it does not create another sender or force focus itself.
+    assert not app.test_input()
+    assert '5秒以内' in app.play_view().input.test_status
+    delay, retry = next(item for item in scheduled if item[0] == 100)
+    assert delay == 100
+    availability['reason'] = None
+    retry()
+    assert sent == [(77, InputMethod.SEND_INPUT, 13)]
+    assert '反応はまだ確認していません' in app.play_view().input.test_status
+
+    token = runtime_hook(app, selected, 'テスト後の本文', 3, pid=101)
+    assert token is not None
+    assert '後続の会話を取得' in app.play_view().input.test_status
 
 def test_ocr_worker_lifecycle_and_results_are_owned_by_the_active_monitoring_session(monkeypatch):
     import autoadv.application as application_module

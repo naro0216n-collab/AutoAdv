@@ -256,12 +256,12 @@ def _compact_product_trace(
 
     presentation_fields = {
         "utterance": ["source", "hook_sequence", "raw", "body", "speaker", "advance_mode",
-                      "use_tts", "uncertain_text_fallback", "force_advance_seconds",
+                      "use_tts", "input_method", "input_key", "uncertain_text_fallback", "force_advance_seconds",
                       "reading_units", "text_wait_ms"],
         "utterance_progress": ["state", "evidence_at_ms"],
-        "advance_attempt": [],
-        "audio_causal_lower_bound": ["at_ms", "after_line"],
-        "advance_input": ["presentation_reason"],
+        "advance_attempt": ["method", "virtual_key"],
+        "audio_causal_lower_bound": ["at_ms", "after_line", "input_purpose"],
+        "advance_input": ["presentation_reason", "method", "virtual_key"],
         "presentation_complete": ["reason"],
         "uncertainty_fallback_due": ["text_wait_ms"],
         "game_input_candidates_attached": ["text_received_ns", "input_candidates_ms"],

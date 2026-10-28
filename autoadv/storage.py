@@ -7,7 +7,7 @@ import os
 import tempfile
 import uuid
 import copy
-from .model import (AdvanceMode, Game, HookSelection, Profile, SpeakerStyle, StructureRule,
+from .model import (AdvanceMode, InputMethod, Game, HookSelection, Profile, SpeakerStyle, StructureRule,
                     ReplacementRule, OCRSettings, COMMON_FIELDS, SPEAKER_STYLE_FIELDS)
 
 
@@ -24,7 +24,7 @@ _PROFILE_KEYS = frozenset({
     'name_readings', 'source', 'ocr', 'native_helper', 'alignment_model',
     'alignment_vocab', 'inherit_common', 'reading_ms',
     'per_reading_unit_wait_ms', 'hook_flush_ms', 'hook_codepage', 'hook_max_buffer',
-    'hook_max_history', 'repeat_rule', 'input_key',
+    'hook_max_history', 'repeat_rule', 'input_key', 'input_method',
 })
 _HOOK_KEYS = frozenset({'code', 'context', 'context2'})
 _STRUCTURE_RULE_KEYS = frozenset({'pattern', 'condition', 'enabled'})
@@ -47,11 +47,12 @@ def _require_profile_object(value: object) -> dict:
     if keys == _PROFILE_KEYS:
         return value
     missing = _PROFILE_KEYS - keys
-    if not (keys - _PROFILE_KEYS) and missing <= {'speaker_styles', 'force_advance_seconds'}:
+    if not (keys - _PROFILE_KEYS) and missing <= {'speaker_styles', 'force_advance_seconds', 'input_method'}:
         return {
             **value,
             'speaker_styles': value.get('speaker_styles', {}),
             'force_advance_seconds': value.get('force_advance_seconds', 30),
+            'input_method': value.get('input_method', InputMethod.WINDOW_MESSAGE.value),
         }
     raise ValueError('invalid current settings profile')
 
@@ -62,8 +63,12 @@ def _require_common_object(value: object) -> dict:
     keys = set(value)
     if keys == _COMMON_KEYS:
         return value
-    if keys == _COMMON_KEYS - {'force_advance_seconds'}:
-        return {**value, 'force_advance_seconds': 30}
+    if not (keys - _COMMON_KEYS) and (_COMMON_KEYS - keys) <= {'force_advance_seconds', 'input_method'}:
+        return {
+            **value,
+            'force_advance_seconds': value.get('force_advance_seconds', 30),
+            'input_method': value.get('input_method', InputMethod.WINDOW_MESSAGE.value),
+        }
     raise ValueError('invalid current settings common settings')
 
 @dataclass
@@ -79,6 +84,7 @@ class CommonSettings:
     alignment_model: str = ''
     alignment_vocab: str = ''
     input_key: int = 13
+    input_method: InputMethod = InputMethod.WINDOW_MESSAGE
 
     def validate(self):
         template = Profile('_common', '_common')
@@ -170,7 +176,7 @@ def _profile_payload(p: Profile) -> dict:
         reading_ms=p.reading_ms, per_reading_unit_wait_ms=p.per_reading_unit_wait_ms,
         hook_flush_ms=p.hook_flush_ms, hook_codepage=p.hook_codepage,
         hook_max_buffer=p.hook_max_buffer, hook_max_history=p.hook_max_history,
-        repeat_rule=p.repeat_rule, input_key=p.input_key)
+        repeat_rule=p.repeat_rule, input_key=p.input_key, input_method=p.input_method.value)
 
 def _read_replacements(raw: object) -> list[ReplacementRule]:
     if not isinstance(raw, list):
@@ -227,7 +233,8 @@ def _read_profile(raw: object) -> Profile:
         reading_ms=raw['reading_ms'], per_reading_unit_wait_ms=raw['per_reading_unit_wait_ms'],
         hook_flush_ms=raw['hook_flush_ms'], hook_codepage=raw['hook_codepage'],
         hook_max_buffer=raw['hook_max_buffer'], hook_max_history=raw['hook_max_history'],
-        repeat_rule=raw['repeat_rule'], input_key=raw['input_key'])
+        repeat_rule=raw['repeat_rule'], input_key=raw['input_key'],
+        input_method=InputMethod(raw['input_method']))
     p.validate()
     return p
 
@@ -235,7 +242,8 @@ def save(catalog: Catalog, path: Path | None = None) -> None:
     path = path or user_settings_path()
     raw = {'schema_version': 4, 'irodori_root': catalog.irodori_root,
            'irodori_url': catalog.irodori_url, 'host_dll': catalog.host_dll, 'luna_imports': catalog.luna_imports,
-           'common': {**vars(catalog.common), 'advance_mode': catalog.common.advance_mode.value},
+           'common': {**vars(catalog.common), 'advance_mode': catalog.common.advance_mode.value,
+                      'input_method': catalog.common.input_method.value},
            'games': {k: dict(id=g.id, name=g.name, executable=g.executable,
                              audio_executable=g.audio_executable, input_executable=g.input_executable,
                              default_profile=g.default_profile,
@@ -267,7 +275,11 @@ def load(path: Path | None = None) -> Catalog:
     catalog = Catalog(
         raw['irodori_root'], raw['irodori_url'], raw['host_dll'],
         luna_imports=dict(raw['luna_imports']),
-        common=CommonSettings(**{**common_raw, 'advance_mode': AdvanceMode(common_raw['advance_mode'])}))
+        common=CommonSettings(**{
+            **common_raw,
+            'advance_mode': AdvanceMode(common_raw['advance_mode']),
+            'input_method': InputMethod(common_raw['input_method']),
+        }))
     catalog.common.validate()
     games_raw = raw['games']
     if not isinstance(games_raw, dict):

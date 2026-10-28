@@ -7,7 +7,7 @@ import pytest
 
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent
-from autoadv.model import (AdvanceMode, HookSelection, ReplacementRule, SpeakerStyle,
+from autoadv.model import (AdvanceMode, HookSelection, InputMethod, ReplacementRule, SpeakerStyle,
                            BODY_ONLY_RULE, SPEAKER_ONLY_RULE)
 from autoadv.utterance_progress import UtteranceProgress, UtteranceProgressState
 from tests.contracts_support import SOURCE, controller, observe, profile, source
@@ -143,7 +143,7 @@ def test_user_authorization_runtime_holds_and_input_failure_are_independent_stat
     # I/O failure reserves the utterance and is never automatically retried.
     failures = []
     failing = Controller(lambda *_: failures.append(1) or (_ for _ in ()).throw(OSError('boom')),
-                         lambda _target: True, TEST_G2P)
+                         lambda *_: None, TEST_G2P)
     failing.begin(profile(), Target(101, 202), 'host', 1)
     failing.permit(True)
     token = failing.observe(generation='host', connection=1, sequence=1,
@@ -154,16 +154,61 @@ def test_user_authorization_runtime_holds_and_input_failure_are_independent_stat
     assert not failing.try_advance() and len(failures) == 1
 
 
+def test_input_method_is_frozen_per_presentation_and_test_input_shares_the_single_input_slot():
+    sent = []
+    blocked = {'reason': None}
+
+    def send(_target, method, key, purpose):
+        sent.append((method, key, purpose))
+        return 1234 + len(sent)
+
+    ctrl = Controller(send, lambda _target, _method: blocked['reason'], TEST_G2P)
+    initial = profile(input_method=InputMethod.WINDOW_MESSAGE)
+    ctrl.begin(initial, Target(101, 202), 'host', 1)
+    first = observe(ctrl, '「一つ目」')
+    assert first is not None
+
+    staged = deepcopy(initial)
+    staged.input_method = InputMethod.SEND_INPUT
+    staged.input_key = 0x20
+    ctrl.stage_profile(staged)
+    assert (ctrl.utterance.input_method, ctrl.utterance.input_key) == (
+        InputMethod.WINDOW_MESSAGE, 0x0D)
+
+    # The explicit test is a user-directed game operation, independent of
+    # automatic presentation holds, but it consumes the same one-input slot.
+    ctrl.hold_reason = 'tts_playback_failed'
+    result = ctrl.test_input()
+    assert result.sent and sent == [(InputMethod.WINDOW_MESSAGE, 0x0D, 'test')]
+    assert ctrl.sent and not ctrl.try_advance()
+
+    second = observe(ctrl, '「二つ目」', 2)
+    assert second is not None
+    assert (ctrl.utterance.input_method, ctrl.utterance.input_key) == (
+        InputMethod.SEND_INPUT, 0x20)
+    timing = ctrl.presentation_timing(second)
+    assert timing is not None and timing.causal_lower_bound_ms == 1235
+
+    ctrl.permit(True)
+    assert ctrl.presentation_event(second, 'text_elapsed')
+    blocked['reason'] = 'input_foreground_required'
+    assert not ctrl.try_advance() and ctrl.pause_reason == 'input_foreground_required'
+    blocked['reason'] = None
+    assert ctrl.try_advance()
+    assert sent[-1] == (InputMethod.SEND_INPUT, 0x20, 'auto')
+    assert len(sent) == 2
+
+
 def test_external_input_observed_during_target_preflight_prevents_operation_reservation():
     sent = []
     ctrl = None
 
-    def ready(_target):
+    def ready(_target, _method):
         assert ctrl is not None
         assert ctrl.record_external_input(ctrl.session, 1200)
-        return True
+        return None
 
-    ctrl = Controller(lambda _target, key: sent.append(key), ready, TEST_G2P)
+    ctrl = Controller(lambda _target, _method, key, _purpose: sent.append(key), ready, TEST_G2P)
     ctrl.begin(profile(), Target(101, 202), 'host', 1)
     ctrl.permit(True)
     token = observe(ctrl, '「一つ目」')
@@ -211,7 +256,7 @@ def test_profile_changes_are_staged_at_utterance_boundaries_and_capture_ownershi
     p.speaker_tts['京'] = True
     p.speaker_voices['京'] = 'voice-1'
     p.speaker_styles['京'] = SpeakerStyle(timbre='soft')
-    ctrl = Controller(lambda *_: None, lambda _target: True, TEST_G2P)
+    ctrl = Controller(lambda *_: None, lambda *_: None, TEST_G2P)
     ctrl.begin(p, Target(101, 202), 'host', 1)
     first = ctrl.observe(generation='host', connection=1, sequence=1,
                          source=SOURCE, text='京「一つ目」', pid=101)
@@ -237,7 +282,7 @@ def test_profile_changes_are_staged_at_utterance_boundaries_and_capture_ownershi
 def test_active_utterance_is_immutable_under_setting_changes():
     p = profile(tts=True)
     p.replacements = [ReplacementRule('東京', 'とうきょう', target='both')]
-    ctrl = Controller(lambda *_: None, lambda _target: True, TEST_G2P)
+    ctrl = Controller(lambda *_: None, lambda *_: None, TEST_G2P)
     ctrl.begin(p, Target(101, 202), 'host', 1)
     token = ctrl.observe(generation='host', connection=1, sequence=1,
                          source=SOURCE, text='「東京」', pid=101)
@@ -258,7 +303,7 @@ def test_multisource_dialogue_is_composed_only_inside_one_synchronized_group():
     p.speaker_source = speaker.identity
     p.source_rules[body.identity] = [BODY_ONLY_RULE]
     p.source_rules[speaker.identity] = [SPEAKER_ONLY_RULE]
-    ctrl = Controller(lambda *_: None, lambda _target: True, TEST_G2P)
+    ctrl = Controller(lambda *_: None, lambda *_: None, TEST_G2P)
     ctrl.begin(p, Target(101, 202), 'host', 1)
 
     def event(hook, sequence, text):
@@ -331,7 +376,7 @@ def test_external_progress_and_stale_presentation_evidence_preserve_state_owners
 def test_stable_ocr_body_changes_share_the_normal_utterance_admission_contract():
     p = profile()
     p.source = 'ocr'
-    ctrl = Controller(lambda *_: None, lambda _target: True, TEST_G2P)
+    ctrl = Controller(lambda *_: None, lambda *_: None, TEST_G2P)
     ctrl.begin(p, Target(101, 202), 'ocr', 1)
     first = ctrl.observe_ocr(sequence=1, text='一つ目', pid=101, session=ctrl.session)
     assert first is not None

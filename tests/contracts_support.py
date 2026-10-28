@@ -6,18 +6,20 @@ from types import SimpleNamespace
 from autoadv.application import AutoAdvApplication
 from autoadv.conversation import Controller, Target
 from autoadv.hook_protocol import HookEvent, ThreadSource
-from autoadv.model import AdvanceMode, HookSelection, Profile
+from autoadv.model import AdvanceMode, HookSelection, InputMethod, Profile
 from autoadv.storage import Catalog
 from tests.g2p_support import TEST_G2P
 
 
 def profile(*, mode: AdvanceMode = AdvanceMode.TEXT, tts: bool = False,
-            fallback: bool = True) -> Profile:
+            fallback: bool = True,
+            input_method: InputMethod = InputMethod.WINDOW_MESSAGE) -> Profile:
     return Profile(
         'p', 'game', hooks=[HookSelection('H', 1, 2)], body_source='H|1|2',
         advance_mode=mode, default_tts=tts, default_voice='v0',
         uncertain_text_fallback=fallback, reading_ms=350,
         per_reading_unit_wait_ms=180,
+        input_method=input_method,
     )
 
 
@@ -30,15 +32,17 @@ SOURCE = SimpleNamespace(hook_code='H', context=1, context2=2)
 
 
 def controller(*, mode: AdvanceMode = AdvanceMode.TEXT, tts: bool = False,
-               fallback: bool = True, ready: bool = True):
+               fallback: bool = True, ready: bool = True,
+               input_method: InputMethod = InputMethod.WINDOW_MESSAGE):
     sent: list[int] = []
     readiness = {'ready': ready}
     ctrl = Controller(
-        lambda _target, key: sent.append(key),
-        lambda _target: readiness['ready'],
+        lambda _target, _method, key, _purpose: sent.append(key),
+        lambda _target, _method: None if readiness['ready'] else 'target_unavailable',
         TEST_G2P,
     )
-    ctrl.begin(profile(mode=mode, tts=tts, fallback=fallback), Target(101, 202), 'host', 1)
+    ctrl.begin(profile(mode=mode, tts=tts, fallback=fallback, input_method=input_method),
+               Target(101, 202), 'host', 1)
     return ctrl, sent, readiness
 
 
@@ -58,7 +62,7 @@ def app_with_game():
         catalog,
         lambda: saves.append('save'),
         input_send=lambda *_: None,
-        target_ready=lambda *_: True,
+        input_unavailable=lambda *_: None,
         g2p=TEST_G2P,
     )
     app.select_profile(game.id, game.default_profile)

@@ -452,6 +452,7 @@ def test_trace_keeps_raw_hook_and_utterance_instead_of_hash_only_evidence():
                 source='HOOK|1|2', sequence=3, raw=raw, text=raw, speaker='',
                 advance_mode=SimpleNamespace(value='audio'), use_tts=False,
                     uncertain_text_fallback=True, force_advance_seconds=30,
+                    input_method=SimpleNamespace(value='window_message'), input_key=13,
                     reading_unit_count=12, text_wait_ms=900))
         app.observer('utterance', token, {})
         app.observer('hook_error', token, {'reason': 'native diagnostic'})

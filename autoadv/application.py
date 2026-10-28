@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
-import ctypes
 import sys
 import threading
 import time
@@ -25,7 +24,7 @@ from .hook_host import HookHost
 from .luna_runtime import adopted_runtime
 from .hook_protocol import HookEvent, ThreadSource
 from .irodori_server import IrodoriServer
-from .model import (HookSelection, OCRSettings, Profile, SpeakerStyle, ReplacementRule, StructureRule, Token,
+from .model import (HookSelection, InputMethod, OCRSettings, Profile, SpeakerStyle, ReplacementRule, StructureRule, Token,
                     Utterance, EXTRACTION_PRESETS, assemble_dialogue_fields,
                     configured_speaker_names, extract_fields, interpret,
                     resolve_speaker_enclosed_body)
@@ -34,7 +33,8 @@ from .ocr import OCRWorker, TesseractOCR
 from .screen import WindowsClientCapture
 from .storage import Catalog
 from .voice import VoiceJobs
-from .windows_input import WindowsAdvancementInput, WindowsGameInputObserver
+from .windows_input import (INPUT_FOREGROUND_REQUIRED, INPUT_TARGET_UNAVAILABLE,
+                            WindowsAdvancementInput, WindowsGameInputObserver)
 
 
 @dataclass(frozen=True)
@@ -162,9 +162,20 @@ class PlayDialogueView:
 
 
 @dataclass(frozen=True)
+class PlayInputView:
+    method: InputMethod
+    key: int
+    available: bool
+    status: str
+    test_status: str
+    can_test: bool
+
+
+@dataclass(frozen=True)
 class PlayView:
     advance_authorized: bool
     dialogue: PlayDialogueView | None
+    input: PlayInputView
     issue: CaptureProblemView | None
 
 
@@ -203,6 +214,7 @@ _PLAY_ISSUES = {
     'tts_playback_failed': ('TTS再生に失敗したため、この台詞の自動送りを保留しています。', 'open_voice'),
     'host_changed': ('ゲームからの台詞取得が途切れたため、自動送りを保留しています。', 'open_capture_recovery'),
     'input_failure_no_retry': ('ゲームへの送り操作に失敗しました。安全のため自動再試行していません。', None),
+    'input_foreground_required': ('キーボード入力方式では、ゲームを前面にすると自動送りを再開します。', None),
 }
 
 _PLAY_ISSUES_WITHOUT_AUTO = {
@@ -542,7 +554,7 @@ class AutoAdvApplication:
     """
 
     def __init__(self, catalog: Catalog, persist: Callable[[], None], *,
-                 input_send: Callable | None = None, target_ready: Callable | None = None,
+                 input_send: Callable | None = None, input_unavailable: Callable | None = None,
                  g2p: G2PBackend | None = None):
         self.catalog = catalog
         self._persist = persist
@@ -552,7 +564,8 @@ class AutoAdvApplication:
         self._runtime_capture_problem: CaptureProblemView | None = None
         self._raw_input_send = input_send or self._windows_input_send
         self.g2p = g2p if g2p is not None else default_g2p()
-        self.controller = Controller(self._send_runtime_input, target_ready or self._windows_target_ready, self.g2p)
+        self._input_unavailable = input_unavailable or self._windows_input_unavailable
+        self.controller = Controller(self._send_runtime_input, self._input_unavailable, self.g2p)
         self.hook_host: HookHost | None = None
         self._host_epoch = 0
         self._irodori_server: IrodoriServer | None = None
@@ -579,32 +592,22 @@ class AutoAdvApplication:
         self._runtime_observer: Callable[[], None] | None = None
         self._runtime_event_observer: Callable[[str, Token | None, dict], None] | None = None
         self._telemetry_observer: Callable[[str, Token | None, dict], None] | None = None
+        self._input_retry_token: Token | None = None
+        self._input_test_status = ''
+        self._input_test_pending = False
+        self._input_test_request_active = False
+        self._input_test_deadline_ms = 0
+        self._input_test_session = 0
+        self._input_test_token: Token | None = None
 
     @staticmethod
-    def _windows_target_ready(target: Target) -> bool:
-        """Confirm the selected HWND still belongs to the configured input process.
-
-        Foreground focus is deliberately irrelevant: runtime input is posted
-        directly to this HWND and must not steal focus from the user.
-        """
-        if sys.platform != 'win32':
-            return False
-        user32 = ctypes.windll.user32
-        user32.IsWindow.argtypes = (ctypes.c_void_p,)
-        user32.IsWindow.restype = ctypes.c_int
-        user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
-        user32.GetWindowThreadProcessId.restype = ctypes.c_uint32
-        hwnd = ctypes.c_void_p(target.hwnd)
-        if not user32.IsWindow(hwnd):
-            return False
-        pid = ctypes.c_uint32()
-        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
-            return False
-        return pid.value == target.pid
+    def _windows_input_unavailable(target: Target, method: InputMethod) -> str | None:
+        return WindowsAdvancementInput.availability_reason(target.pid, target.hwnd, method)
 
     @staticmethod
-    def _windows_input_send(target: Target, virtual_key: int) -> None:
-        WindowsAdvancementInput(target.hwnd, virtual_key=virtual_key).advance()
+    def _windows_input_send(target: Target, method: InputMethod, virtual_key: int) -> None:
+        WindowsAdvancementInput(
+            target.pid, target.hwnd, method=method, virtual_key=virtual_key).advance()
 
     def configure_runtime_loop(self, *,
                                schedule: Callable[[int, Callable[[], None]], None],
@@ -639,6 +642,11 @@ class AutoAdvApplication:
     def _accept_runtime_token(self, token: Token | None) -> None:
         if token is None or token != self.controller.token:
             return
+        if (self._input_test_pending
+                and token.session == self._input_test_session
+                and token != self._input_test_token):
+            self._input_test_pending = False
+            self._input_test_status = 'テスト送信後に後続の会話を取得しました。'
         # Publish the admitted immutable Utterance before any presentation side
         # effect can emit PCM/alignment/TTS/completion telemetry. Besides making the
         # lifecycle causal, this gives validation a conservative reading-time
@@ -687,9 +695,12 @@ class AutoAdvApplication:
         if observer is not None:
             observer.close()
 
-    def _send_runtime_input(self, target: Target, virtual_key: int) -> int:
+    def _send_runtime_input(self, target: Target, method: InputMethod,
+                            virtual_key: int, purpose: str) -> int:
         token = self.controller.token
-        self._emit_runtime_event('advance_attempt', token)
+        event_prefix = 'advance' if purpose == 'auto' else 'input_test'
+        self._emit_runtime_event(f'{event_prefix}_attempt', token, method=method.value,
+                                 virtual_key=virtual_key)
         native = self._native_audio
         # Record the causal edge independently of NativeAudio readiness.  The
         # successful send belongs to the next admitted Presentation and must
@@ -697,10 +708,16 @@ class AutoAdvApplication:
         lower_bound_ms = (
             native.clock() if native is not None
             else time.monotonic_ns() // 1_000_000)
-        self._raw_input_send(target, virtual_key)
-        self._emit_runtime_event('audio_causal_lower_bound', token, at_ms=lower_bound_ms)
-        self._emit_runtime_event(
-            'advance_input', token, presentation_reason=self.controller.presentation_reason)
+        self._raw_input_send(target, method, virtual_key)
+        self._emit_runtime_event('audio_causal_lower_bound', token, at_ms=lower_bound_ms,
+                                 input_purpose=purpose)
+        if purpose == 'auto':
+            self._emit_runtime_event(
+                'advance_input', token, presentation_reason=self.controller.presentation_reason,
+                method=method.value, virtual_key=virtual_key)
+        else:
+            self._emit_runtime_event(
+                'input_test_sent', token, method=method.value, virtual_key=virtual_key)
         return int(lower_bound_ms)
 
     def runtime_state(self) -> RuntimeState:
@@ -772,8 +789,28 @@ class AutoAdvApplication:
             self._cancel_voice()
         if sent and self._capture_transition_pending:
             self._schedule(0, self._apply_capture_transition)
+        if (not sent and self.controller.authorized and self.controller.completed
+                and self.controller.pause_reason == INPUT_FOREGROUND_REQUIRED
+                and self.controller.token is not None):
+            self._schedule_input_retry(self.controller.token)
         self._notify_runtime()
         return sent
+
+    def _schedule_input_retry(self, token: Token) -> None:
+        if self._schedule_runtime is None or self._input_retry_token == token:
+            return
+        self._input_retry_token = token
+
+        def retry() -> None:
+            if self._input_retry_token != token:
+                return
+            self._input_retry_token = None
+            state = self.runtime_state()
+            if (state.token == token and state.authorized and state.completed
+                    and not state.sent):
+                self._attempt_advance()
+
+        self._schedule(250, retry)
 
     def _finish_presentation_transition(self, token: Token, completed: bool) -> bool:
         if completed:
@@ -796,6 +833,55 @@ class AutoAdvApplication:
             self._attempt_advance()
         else:
             self._notify_runtime()
+
+    def test_input(self) -> bool:
+        """Request one explicit diagnostic key through Controller ownership.
+
+        System-keyboard input may require the user to foreground the game after
+        clicking the GUI button. The one user request remains pending briefly and
+        may produce at most one game input.
+        """
+        if self._input_test_request_active:
+            return False
+        self._input_test_request_active = True
+        self._input_test_deadline_ms = time.monotonic_ns() // 1_000_000 + 5000
+        return self._attempt_input_test_request()
+
+    def _attempt_input_test_request(self) -> bool:
+        if not self._input_test_request_active:
+            return False
+        result = self.controller.test_input()
+        token = self.controller.token
+        if result.sent:
+            self._input_test_request_active = False
+            self._input_test_status = 'テスト入力を送信しました。ゲームの反応はまだ確認していません。'
+            self._input_test_pending = True
+            self._input_test_session = self.controller.session
+            self._input_test_token = token
+            self._emit_runtime_event('input_test_result', token, sent=True)
+        elif (result.reason == INPUT_FOREGROUND_REQUIRED
+              and self._schedule_runtime is not None
+              and time.monotonic_ns() // 1_000_000 < self._input_test_deadline_ms):
+            self._input_test_status = '5秒以内にゲームを前面にしてください。前面になったら1回だけテスト入力します。'
+            self._notify_runtime()
+            self._schedule(100, self._attempt_input_test_request)
+            return False
+        else:
+            self._input_test_request_active = False
+            self._input_test_pending = False
+            messages = {
+                'monitoring_inactive': 'ゲームの監視開始後にテストできます。',
+                'already_sent': '現在の会話には既に入力済みです。次の会話でテストしてください。',
+                'external_input_pending': '外部入力後の次の会話を待っているためテストしませんでした。',
+                INPUT_TARGET_UNAVAILABLE: '入力先ウィンドウを確認できません。',
+                INPUT_FOREGROUND_REQUIRED: 'ゲームを前面にできなかったためテスト入力しませんでした。',
+                'input_failure_no_retry': 'キー送信に失敗しました。',
+            }
+            self._input_test_status = messages.get(result.reason, 'キー送信を実行できませんでした。')
+            self._emit_runtime_event(
+                'input_test_result', token, sent=False, reason=result.reason)
+        self._notify_runtime()
+        return result.sent
 
     def _fallback_utterance(self, token: Token) -> Utterance | None:
         state = self.runtime_state()
@@ -934,6 +1020,13 @@ class AutoAdvApplication:
         self._cancel_voice()
         self.cancel_voice_preview()
         self._close_runtime(reason)
+        self._input_retry_token = None
+        self._input_test_status = ''
+        self._input_test_pending = False
+        self._input_test_request_active = False
+        self._input_test_deadline_ms = 0
+        self._input_test_session = 0
+        self._input_test_token = None
 
     def _reconcile_monitoring(self, profile: Profile | None = None) -> RuntimeState | None:
         """Converge runtime monitoring from current persisted and connection state.
@@ -2217,9 +2310,55 @@ class AutoAdvApplication:
             ('Runtime reason: presentation=' + (runtime.presentation_reason or '-') +
              ' pause=' + (runtime.pause_reason or '-')),
         ]
+        input_view = self._play_input_view()
+        lines.append(
+            'Input: method=' + input_view.method.value + ' key=' + str(input_view.key) +
+            ' available=' + str(input_view.available))
         if capture.problem is not None:
             lines.append('Capture problem: ' + capture.problem.message)
         return DiagnosticsView(tuple(lines))
+
+    def _play_input_view(self) -> PlayInputView:
+        controller = self.controller
+        if controller.utterance is not None:
+            method = controller.utterance.input_method
+            key = controller.utterance.input_key
+        elif controller.profile is not None:
+            method = InputMethod(controller.profile.input_method)
+            key = controller.profile.input_key
+        else:
+            profile = self.current_profile()
+            if profile is not None:
+                effective = self.catalog.effective_profile(profile)
+                method = InputMethod(effective.input_method)
+                key = effective.input_key
+            else:
+                method = InputMethod(self.catalog.common.input_method)
+                key = self.catalog.common.input_key
+
+        target = controller.target
+        if target is None and self._runtime_target.input_ready:
+            try:
+                target = self._runtime_target.target()
+            except ValueError:
+                target = None
+        reason = (INPUT_TARGET_UNAVAILABLE if target is None
+                  else self._input_unavailable(target, method))
+        if reason is None:
+            status = ('ゲームが前面にあり送信できます。'
+                      if method == InputMethod.SEND_INPUT else
+                      '入力先ウィンドウへ送信できます。')
+        elif reason == INPUT_FOREGROUND_REQUIRED:
+            status = 'ゲームを前面にすると送信できます。'
+        else:
+            status = '入力先ウィンドウを確認できません。'
+        can_test = bool(
+            controller.profile is not None and controller.target is not None
+            and reason in (None, INPUT_FOREGROUND_REQUIRED) and not controller.sent
+            and not self._input_test_request_active)
+        return PlayInputView(
+            method=method, key=key, available=reason is None, status=status,
+            test_status=self._input_test_status, can_test=can_test)
 
     def play_view(self) -> PlayView:
         controller = self.controller
@@ -2234,7 +2373,7 @@ class AutoAdvApplication:
             resolved = _PLAY_ISSUES.get(reason)
             if resolved:
                 issue = CaptureProblemView(*resolved)
-        return PlayView(authorized, dialogue, issue)
+        return PlayView(authorized, dialogue, self._play_input_view(), issue)
 
 
     def commit_capture(self) -> Profile:

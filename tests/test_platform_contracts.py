@@ -24,12 +24,13 @@ from autoadv.hook_host import HookHost, parse_host_event
 from autoadv.hook_host_worker import NativeHost, ipc_json
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.luna_abi import ThreadParam, load_exports, validate_abi
-from autoadv.model import HookSelection, ReplacementRule, SpeakerStyle
+from autoadv.model import HookSelection, InputMethod, ReplacementRule, SpeakerStyle
 from autoadv.process_audio import ProcessCapture
 from autoadv.running_target_dialog import available_targets
 from autoadv.storage import Catalog, CommonSettings, load, save
 from autoadv.voice import synthesize
 from autoadv.windows_input import (
+    AUTOADV_INPUT_MARKER, INPUT_FOREGROUND_REQUIRED, LLKHF_INJECTED,
     WindowsAdvancementInput, WindowsGameInputObserver, WM_KEYDOWN, WM_KEYUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters,
 )
@@ -122,14 +123,29 @@ class _Win32Function:
 
 
 class _User32:
-    def __init__(self, *, results=(1, 1)):
+    def __init__(self, *, results=(1, 1), pid=101, foreground=77, send_result=2):
         self.calls = []
         self.results = iter(results)
+        self.pid = pid
+        self.foreground = foreground
+        self.send_result = send_result
+        self.send_calls = []
+        self.IsWindow = _Win32Function(lambda hwnd: int(hwnd.value == 77))
+        self.GetAncestor = _Win32Function(lambda hwnd, _kind: hwnd.value)
+        self.GetForegroundWindow = _Win32Function(lambda: self.foreground)
+        def get_pid(hwnd, out):
+            out._obj.value = self.pid if hwnd.value == 77 else 999
+            return 1
+        self.GetWindowThreadProcessId = _Win32Function(get_pid)
         self.MapVirtualKeyW = _Win32Function(lambda key, kind: 0x1c if key == 0x0d else 0x38)
         def post(hwnd, message, wparam, lparam):
             self.calls.append((hwnd.value, message, wparam, lparam))
             return next(self.results)
         self.PostMessageW = _Win32Function(post)
+        def send(count, inputs, size):
+            self.send_calls.append((count, inputs, size))
+            return self.send_result
+        self.SendInput = _Win32Function(send)
 
 
 class _TargetUser32:
@@ -272,7 +288,9 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         game = catalog.create_game('Game')
         app = AutoAdvApplication(
             catalog, lambda: None,
-            input_send=lambda target, key: sent.append((target.pid, target.hwnd, key)),
+            input_send=lambda target, method, key: sent.append((target.pid, target.hwnd, method, key)),
+            input_unavailable=(
+                lambda target, _method: None if target.pid == window_pid else 'target_unavailable'),
             g2p=TEST_G2P,
         )
         app.select_profile(game.id, game.default_profile)
@@ -296,12 +314,10 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
 
     monkeypatch.setattr('autoadv.application.sys.platform', 'win32')
     monkeypatch.setattr('autoadv.application.WindowsGameInputObserver', NoopInputObserver)
-    with patch('autoadv.application.ctypes.windll', create=True) as dll:
-        dll.user32 = _TargetUser32(pid=101)
-        sent, state = advance_with_window_owner(101, 101)
-        assert sent == [(101, 77, 13)] and state.sent
-        sent, state = advance_with_window_owner(202, 101)
-        assert sent == [] and state.pause_reason == 'target_unavailable'
+    sent, state = advance_with_window_owner(101, 101)
+    assert sent == [(101, 77, InputMethod.WINDOW_MESSAGE, 13)] and state.sent
+    sent, state = advance_with_window_owner(202, 101)
+    assert sent == [] and state.pause_reason == 'target_unavailable'
 
     for results, expected_calls, raises in (((1, 1), 2, False), ((0,), 1, True), ((1, 0), 2, True)):
         fake = _User32(results=results)
@@ -309,10 +325,27 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
             dll.user32 = fake
             if raises:
                 with pytest.raises(RuntimeError, match='no retry'):
-                    WindowsAdvancementInput(77).advance()
+                    WindowsAdvancementInput(101, 77).advance()
             else:
-                WindowsAdvancementInput(77).advance()
+                WindowsAdvancementInput(101, 77).advance()
         assert len(fake.calls) == expected_calls
+
+    # Window-targeted input remains available without foreground focus. The
+    # system-keyboard method requires the selected game window to be foreground
+    # and tags both injected events so AutoAdv's observer can ignore only itself.
+    fake = _User32(foreground=88)
+    with patch('autoadv.windows_input.sys.platform', 'win32'), patch('autoadv.windows_input.ctypes.windll', create=True) as dll:
+        dll.user32 = fake
+        assert WindowsAdvancementInput.availability_reason(
+            101, 77, InputMethod.WINDOW_MESSAGE) is None
+        assert WindowsAdvancementInput.availability_reason(
+            101, 77, InputMethod.SEND_INPUT) == INPUT_FOREGROUND_REQUIRED
+        fake.foreground = 77
+        WindowsAdvancementInput(101, 77, method=InputMethod.SEND_INPUT).advance()
+        count, inputs, _ = fake.send_calls[-1]
+        assert count == 2
+        assert inputs[0].ki.dwExtraInfo == AUTOADV_INPUT_MARKER
+        assert inputs[1].ki.dwExtraInfo == AUTOADV_INPUT_MARKER
 
 
 def test_windows_game_input_observer_relay_preserves_target_and_callback_boundary(monkeypatch):
@@ -373,9 +406,17 @@ def test_windows_game_input_observer_relay_preserves_target_and_callback_boundar
                     self.mouse_proc(0, windows_input_module.WM_LBUTTONDOWN,
                                     ctypes.addressof(mouse_buffer))
                     self.in_hook_callback = False
-                self.in_hook_callback = True
-                self.keyboard_proc(0, WM_KEYDOWN, 0)
-                self.in_hook_callback = False
+                keyboard_buffer = ctypes.create_string_buffer(64)
+                keyboard_struct = self.observer_keyboard_struct
+                for flags, extra in (
+                        (LLKHF_INJECTED, AUTOADV_INPUT_MARKER),
+                        (LLKHF_INJECTED, 12345),
+                        (0, 0)):
+                    packet = keyboard_struct.from_buffer(keyboard_buffer)
+                    packet.flags, packet.dwExtraInfo = flags, extra
+                    self.in_hook_callback = True
+                    self.keyboard_proc(0, WM_KEYDOWN, ctypes.addressof(keyboard_buffer))
+                    self.in_hook_callback = False
             if self.queue:
                 message._obj.message = self.queue.pop(0)
                 return 1
@@ -395,11 +436,16 @@ def test_windows_game_input_observer_relay_preserves_target_and_callback_boundar
         _fields_ = [('pt', POINT), ('mouseData', wintypes.DWORD),
                     ('flags', wintypes.DWORD), ('time', wintypes.DWORD),
                     ('dwExtraInfo', ctypes.c_size_t)]
+    class KBD(ctypes.Structure):
+        _fields_ = [('vkCode', wintypes.DWORD), ('scanCode', wintypes.DWORD),
+                    ('flags', wintypes.DWORD), ('time', wintypes.DWORD),
+                    ('dwExtraInfo', ctypes.c_size_t)]
 
     def observed(expected_pid, actual_pid):
         events = []
         user32 = HookUser32(actual_pid)
         user32.observer_mouse_struct = MOUSE
+        user32.observer_keyboard_struct = KBD
         with patch.object(windows_input_module.sys, 'platform', 'win32'), \
              patch.object(windows_input_module.ctypes, 'windll',
                           SimpleNamespace(user32=user32, kernel32=Kernel32()), create=True), \
@@ -410,16 +456,18 @@ def test_windows_game_input_observer_relay_preserves_target_and_callback_boundar
             observer.close()
         return events
 
-    assert observed(101, 101) == [4321, 4321]  # game click and game key
+    assert observed(101, 101) == [4321, 4321, 4321]  # click + other injected key + physical key
     assert observed(202, 101) == []
 
 
 def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_state():
     assert CommonSettings().uncertain_text_fallback
     assert CommonSettings().force_advance_seconds == 30
+    assert CommonSettings().input_method == InputMethod.WINDOW_MESSAGE
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / 'settings.json'
         c = Catalog(irodori_root='C:/tts', host_dll='C:/luna/LunaHost.dll')
+        c.common.input_method = InputMethod.SEND_INPUT
         game = c.create_game('ゲーム1', 'C:/games/a.exe')
         c.create_game('ゲーム2', 'C:/games/b.exe')
         p = c.add_profile(game.id, 'Route B')
@@ -435,9 +483,13 @@ def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_stat
         p.speaker_voices = {'大和': 'voice-m'}
         p.speaker_styles = {'大和': SpeakerStyle(age='young', timbre='soft', pace='slightly_slow')}
         p.replacements = [ReplacementRule('東京', 'とうきょう')]
+        p.input_method = InputMethod.SEND_INPUT
         game.default_profile = p.id
         save(c, path)
-        q = load(path).games[game.id].profiles[p.id]
+        loaded = load(path)
+        q = loaded.games[game.id].profiles[p.id]
+        assert loaded.common.input_method == InputMethod.SEND_INPUT
+        assert q.input_method == InputMethod.SEND_INPUT
         assert (q.hooks, q.body_source, q.speaker_source) == (p.hooks, p.body_source, p.speaker_source)
         assert (q.speaker_tts, q.speaker_voices, q.speaker_styles) == (
             p.speaker_tts, p.speaker_voices, p.speaker_styles)
