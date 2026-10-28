@@ -20,7 +20,7 @@ def _run_python(script: str, log_base: Path) -> subprocess.CompletedProcess[str]
     )
 
 
-@pytest.mark.parametrize('role', ['gui', 'hook-host'])
+@pytest.mark.parametrize('role', ['gui', 'hook-host', 'input-observer'])
 def test_clean_process_does_not_leave_crash_report(tmp_path, role):
     completed = _run_python(
         f"from autoadv.crash_report import install_crash_reporting; "
@@ -82,11 +82,12 @@ with patch('autoadv.hook_host_worker.NativeHost', side_effect=RuntimeError('host
     assert 'native Hook Host startup failure' in report
 
 
-def test_report_directory_is_the_install_directory_not_a_machine_specific_cache(monkeypatch):
+def test_default_report_directory_is_crash_folder_beside_launched_product(monkeypatch):
     from autoadv.crash_report import crash_directory
     monkeypatch.delenv('AUTOADV_CRASH_DIR', raising=False)
     monkeypatch.setenv('AUTOADV_DATA_DIR', str(ROOT / 'arbitrary-runtime-data'))
-    assert crash_directory() == ROOT
+    monkeypatch.chdir(ROOT)
+    assert crash_directory() == ROOT / 'crash'
 
 
 def test_abrupt_exit_preserves_last_reached_stage(tmp_path):
@@ -102,7 +103,7 @@ def test_abrupt_exit_preserves_last_reached_stage(tmp_path):
     assert 'stage: native audio model initialization started' in reports[0].read_text(encoding='utf-8')
 
 
-@pytest.mark.parametrize('role', ['gui', 'hook-host'])
+@pytest.mark.parametrize('role', ['gui', 'hook-host', 'input-observer'])
 def test_active_hook_evidence_survives_clean_process_exit(tmp_path, role):
     result = _run_python(
         "from autoadv.crash_report import install_crash_reporting, record_stage; "

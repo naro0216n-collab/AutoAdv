@@ -666,14 +666,24 @@ class AutoAdvApplication:
         else:
             self._schedule_runtime(0, callback)
 
-    def _record_game_input(self, session: int, at_ms: int) -> None:
-        """Admit observed game input only on the Controller's event-loop owner."""
-        at_ms = int(at_ms)
+    def _record_game_inputs(self, session: int, times_ms: Sequence[int]) -> None:
+        """Admit one isolated-observer batch on the Controller event-loop owner."""
+        values = tuple(int(value) for value in times_ms if int(value) > 0)
+        if not values:
+            return
 
         def deliver() -> None:
-            if self.controller.record_external_input(session, at_ms):
-                self._emit_telemetry('game_input_observed', self.controller.token, at_ms=at_ms)
+            if self.controller.record_external_inputs(session, values):
+                self._emit_telemetry(
+                    'game_input_observed', self.controller.token,
+                    at_ms=values[-1], input_times_ms=list(values))
 
+        self._dispatch_runtime(deliver)
+
+    def _record_game_input_observer_error(self, session: int, reason: str) -> None:
+        def deliver() -> None:
+            if session == self.controller.session:
+                self._emit_runtime_event('game_input_observer_error', None, reason=reason)
         self._dispatch_runtime(deliver)
 
     def _start_game_input_observer(self, target: Target) -> None:
@@ -683,7 +693,10 @@ class AutoAdvApplication:
         session = self.controller.session
         try:
             observer = WindowsGameInputObserver(
-                target.pid, lambda at_ms, s=session: self._record_game_input(s, at_ms))
+                target.pid,
+                lambda times, s=session: self._record_game_inputs(s, times),
+                on_error=lambda reason, s=session: self._record_game_input_observer_error(s, reason),
+            )
             observer.start()
         except Exception as exc:
             self._emit_runtime_event('game_input_observer_error', None, reason=str(exc))
@@ -1706,8 +1719,24 @@ class AutoAdvApplication:
 
         self._schedule(delay_ms, finish)
 
-    def _consume_host_event(self, event: HookEvent) -> None:
-        self.handle_hook_event(event)
+    def _consume_host_events(self, events: Sequence[HookEvent]) -> None:
+        """Apply one ordered Host batch in one application event-loop turn.
+
+        Every Host fact still reaches telemetry in sequence.  GUI notification
+        is batched so candidate-heavy games cannot turn one native burst into
+        an equal number of Qt callbacks and full workspace repaints.
+        """
+        items: list[tuple[HookEvent, HookEventOutcome]] = []
+        for event in events:
+            outcome = self._apply_hook_event(event)
+            items.append((event, outcome))
+            self._emit_telemetry('hook_event', None, hook_event=event, outcome=outcome)
+            if self._schedule_runtime is not None:
+                self._accept_runtime_token(outcome.token)
+                if outcome.flush_delay_ms is not None:
+                    self._schedule_hook_flush(outcome.flush_delay_ms)
+        if items and self._runtime_event_observer is not None:
+            self._runtime_event_observer('hook_events', None, {'items': tuple(items)})
 
     def _consume_host_closed(self, reason: str) -> None:
         self._handle_hook_closed()
@@ -1734,7 +1763,7 @@ class AutoAdvApplication:
         runtime = adopted_runtime()
         host = HookHost(
             runtime.host,
-            lambda event: current(self._consume_host_event, event),
+            lambda events: current(self._consume_host_events, events),
             lambda reason: current(self._consume_host_closed, reason),
             lambda message: current(self._consume_host_error, message),
         )

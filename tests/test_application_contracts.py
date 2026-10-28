@@ -83,9 +83,10 @@ class _FakeNativeAudio:
 class _FakeGameInputObserver:
     instances = []
 
-    def __init__(self, pid, on_input):
+    def __init__(self, pid, on_inputs, *, on_error=None):
         self.pid = pid
-        self.on_input = on_input
+        self.on_inputs = on_inputs
+        self.on_error = on_error
         self.started = False
         self.closed = False
         self.__class__.instances.append(self)
@@ -96,8 +97,8 @@ class _FakeGameInputObserver:
     def close(self):
         self.closed = True
 
-    def publish(self, at_ms):
-        self.on_input(at_ms)
+    def publish(self, *times_ms):
+        self.on_inputs(tuple(times_ms))
 
 
 def _install_audio_runtime_fakes(monkeypatch):
@@ -311,16 +312,17 @@ def test_external_input_is_admitted_and_published_on_event_loop_owner(monkeypatc
     calls = []
     app.configure_runtime_loop(schedule=lambda delay, callback: queued.append((delay, callback)))
     app.configure_telemetry(lambda event, token, detail: calls.append(('telemetry', event, detail)))
-    monkeypatch.setattr(app.controller, 'record_external_input',
-                        lambda session, at_ms: calls.append(('admit', session, at_ms)) or True)
+    monkeypatch.setattr(app.controller, 'record_external_inputs',
+                        lambda session, times: calls.append(('admit', session, tuple(times))) or True)
 
-    app._record_game_input(app.controller.session, 1200)
+    app._record_game_inputs(app.controller.session, (1200, 1400))
     assert calls == []  # The observer thread cannot mutate Controller state.
     assert [delay for delay, _ in queued] == [0]
     queued.pop()[1]()
     assert calls == [
-        ('admit', app.controller.session, 1200),
-        ('telemetry', 'game_input_observed', {'at_ms': 1200}),
+        ('admit', app.controller.session, (1200, 1400)),
+        ('telemetry', 'game_input_observed', {
+            'at_ms': 1400, 'input_times_ms': [1200, 1400]}),
     ]
 
 
@@ -881,3 +883,28 @@ def test_selected_capture_providers_own_luna_sync_and_connected_profile_configur
         'max_buffer': second.hook_max_buffer, 'max_history': second.hook_max_history,
     }]
     assert ('insert_hook', {'pid': 101, 'code': 'H2'}) in app.hook_host.commands
+
+
+def test_host_event_batches_preserve_fact_order_but_cross_gui_boundary_once():
+    app, _ = app_with_game()
+    runtime_events = []
+    telemetry = []
+    app.configure_runtime_loop(
+        schedule=lambda _delay, callback: callback(),
+        on_change=lambda: None,
+        on_event=lambda event, token, detail: runtime_events.append((event, detail)))
+    app.configure_telemetry(
+        lambda event, token, detail: telemetry.append((event, detail)))
+
+    events = tuple(
+        HookEvent('diagnostic', 'host', 1, index, index * 10, 101, detail=f'd{index}')
+        for index in range(1, 101)
+    )
+    app._consume_host_events(events)
+
+    hook_facts = [detail['hook_event'].sequence for event, detail in telemetry
+                  if event == 'hook_event']
+    assert hook_facts == list(range(1, 101))
+    batches = [detail['items'] for event, detail in runtime_events if event == 'hook_events']
+    assert len(batches) == 1
+    assert [event.sequence for event, _outcome in batches[0]] == list(range(1, 101))

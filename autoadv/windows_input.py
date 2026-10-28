@@ -9,11 +9,13 @@ that the input advanced dialogue or changed product state.
 from __future__ import annotations
 
 import ctypes
-from collections import deque
+import json
+import subprocess
 import sys
 import threading
-import time
 from typing import Callable
+
+from .crash_report import record_exception, record_failure
 
 from .model import InputMethod
 
@@ -206,50 +208,72 @@ class WindowsAdvancementInput:
             self._send_input(scan)
 
 
-class WindowsGameInputObserver:
-    """Observe external low-level keyboard/mouse input directed at one game.
+def parse_input_observer_packet(packet: dict) -> tuple[str, tuple[int, ...] | str | None]:
+    """Validate the isolated input observer's deliberately small IPC protocol."""
+    if not isinstance(packet, dict) or not isinstance(packet.get('kind'), str):
+        raise ValueError('invalid Windows input observer packet')
+    kind = packet['kind']
+    if kind == 'ready' and set(packet) == {'kind'}:
+        return kind, None
+    if kind == 'inputs' and set(packet) == {'kind', 'times'}:
+        times = packet['times']
+        if (not isinstance(times, list) or not times or
+                any(not isinstance(value, int) or value <= 0 for value in times)):
+            raise ValueError('invalid Windows input observer input batch')
+        return kind, tuple(times)
+    if kind == 'fatal' and set(packet) == {'kind', 'reason'}:
+        reason = packet['reason']
+        if not isinstance(reason, str) or not reason:
+            raise ValueError('invalid Windows input observer fatal packet')
+        return kind, reason
+    raise ValueError('invalid Windows input observer packet')
 
-    The callback receives only a monotonic timestamp.  No key/button is treated
-    as proof that dialogue advanced.  AutoAdv's own advancement path uses
-    Window-message advancement never appears here. System-keyboard advancement
-    is tagged and ignored by this observer. Low-level input injected by another
-    application remains external game input and is retained as the same factual
-    timing evidence as hardware input.
+
+class WindowsGameInputObserver:
+    """Isolate global low-level Windows hooks from the GUI process.
+
+    The helper process owns ``WH_KEYBOARD_LL``/``WH_MOUSE_LL`` and publishes
+    only ordered batches of monotonic timestamps that were directed at the
+    selected game process.  No key/button is treated as proof that dialogue
+    advanced.  AutoAdv's own ``SendInput`` events are tagged and excluded in
+    the helper, while other applications' injected input remains factual input.
     """
 
-    def __init__(self, expected_pid: int, on_input: Callable[[int], None], *,
-                 clock: Callable[[], int] | None = None):
+    def __init__(self, expected_pid: int, on_inputs: Callable[[tuple[int, ...]], None], *,
+                 on_error: Callable[[str], None] | None = None):
         if sys.platform != 'win32':
             raise OSError('WindowsGameInputObserver requires Windows')
         if expected_pid <= 0:
             raise ValueError('invalid game input observation target')
         self.pid = int(expected_pid)
-        self.on_input = on_input
-        self.clock = clock or (lambda: time.monotonic_ns() // 1_000_000)
-        self._thread: threading.Thread | None = None
-        self._thread_id = 0
+        self.on_inputs = on_inputs
+        self.on_error = on_error or (lambda _reason: None)
+        self.child: subprocess.Popen[str] | None = None
+        self._reader_thread: threading.Thread | None = None
+        self._error_thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._error: BaseException | None = None
-
-    @staticmethod
-    def _window_pid(user32, hwnd: int) -> int:
-        if not hwnd:
-            return 0
-        root = user32.GetAncestor(ctypes.c_void_p(hwnd), GA_ROOT)
-        target = int(root or hwnd)
-        from ctypes import wintypes
-        pid = wintypes.DWORD()
-        if not user32.GetWindowThreadProcessId(ctypes.c_void_p(target), ctypes.byref(pid)):
-            return 0
-        return int(pid.value)
+        self._closing = threading.Event()
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self.child is not None:
             return
         self._ready.clear()
         self._error = None
-        self._thread = threading.Thread(target=self._run, daemon=True, name='autoadv-game-input')
-        self._thread.start()
+        self._closing.clear()
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        child = subprocess.Popen(
+            [sys.executable, '-m', 'autoadv.windows_input_worker', '--pid', str(self.pid)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', bufsize=1, creationflags=flags,
+        )
+        self.child = child
+        self._reader_thread = threading.Thread(
+            target=self._reader, daemon=True, name='autoadv-game-input-reader')
+        self._error_thread = threading.Thread(
+            target=self._read_errors, daemon=True, name='autoadv-game-input-errors')
+        self._reader_thread.start()
+        self._error_thread.start()
         if not self._ready.wait(2.0):
             self.close()
             raise RuntimeError('game input observer did not start')
@@ -258,152 +282,64 @@ class WindowsGameInputObserver:
             self.close()
             raise RuntimeError('game input observer failed to start') from error
 
-    def _run(self) -> None:
-        from ctypes import wintypes
-
-        class POINT(ctypes.Structure):
-            _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
-
-        class MSLLHOOKSTRUCT(ctypes.Structure):
-            _fields_ = [
-                ('pt', POINT),
-                ('mouseData', wintypes.DWORD),
-                ('flags', wintypes.DWORD),
-                ('time', wintypes.DWORD),
-                ('dwExtraInfo', ctypes.c_size_t),
-            ]
-
-        class KBDLLHOOKSTRUCT(ctypes.Structure):
-            _fields_ = [
-                ('vkCode', wintypes.DWORD),
-                ('scanCode', wintypes.DWORD),
-                ('flags', wintypes.DWORD),
-                ('time', wintypes.DWORD),
-                ('dwExtraInfo', ctypes.c_size_t),
-            ]
-
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        hookproc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-
-        user32.SetWindowsHookExW.argtypes = (ctypes.c_int, hookproc, ctypes.c_void_p, wintypes.DWORD)
-        user32.SetWindowsHookExW.restype = ctypes.c_void_p
-        user32.CallNextHookEx.argtypes = (ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-        user32.CallNextHookEx.restype = ctypes.c_ssize_t
-        user32.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
-        user32.UnhookWindowsHookEx.restype = wintypes.BOOL
-        user32.GetForegroundWindow.restype = ctypes.c_void_p
-        user32.WindowFromPoint.argtypes = (POINT,)
-        user32.WindowFromPoint.restype = ctypes.c_void_p
-        user32.GetAncestor.argtypes = (ctypes.c_void_p, wintypes.UINT)
-        user32.GetAncestor.restype = ctypes.c_void_p
-        user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD))
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), ctypes.c_void_p, wintypes.UINT, wintypes.UINT)
-        user32.GetMessageW.restype = ctypes.c_int
-        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-        kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
-        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
-        user32.PostThreadMessageW.argtypes = (
-            wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
-        user32.PostThreadMessageW.restype = wintypes.BOOL
-        user32.PeekMessageW.argtypes = (
-            ctypes.POINTER(wintypes.MSG), ctypes.c_void_p,
-            wintypes.UINT, wintypes.UINT, wintypes.UINT)
-        user32.PeekMessageW.restype = wintypes.BOOL
-
-        keyboard_hook = mouse_hook = None
-        self._thread_id = int(kernel32.GetCurrentThreadId())
-
-        # Win32 low-level hooks run synchronously before the target window
-        # receives its input. Never query the target window (WindowFromPoint can
-        # send WM_NCHITTEST), nor invoke application callbacks, in that context.
-        # Instead, relay the observed input to this thread's normal message loop.
-        pending = deque()
-
-        def relay(kind: str, target: int | tuple[int, int]) -> None:
-            try:
-                at_ms = int(self.clock())
-                if user32.PostThreadMessageW(self._thread_id, WM_INPUT_OBSERVED, 0, 0):
-                    pending.append((kind, target, at_ms))
-            except Exception:
-                # Never let Python exceptions escape through a Win32 hook thunk.
-                pass
-
-        @hookproc
-        def keyboard_proc(code, message, data):
-            if code >= 0 and int(message) in _KEY_DOWN:
-                own_injected = False
-                if data:
-                    event = ctypes.cast(data, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                    own_injected = (
-                        bool(int(event.flags) & LLKHF_INJECTED)
-                        and int(event.dwExtraInfo) == AUTOADV_INPUT_MARKER)
-                if not own_injected:
-                    relay('keyboard', int(user32.GetForegroundWindow() or 0))
-            return user32.CallNextHookEx(keyboard_hook, code, message, data)
-
-        @hookproc
-        def mouse_proc(code, message, data):
-            if code >= 0 and int(message) in _MOUSE_DOWN:
-                point = ctypes.cast(data, ctypes.POINTER(MSLLHOOKSTRUCT)).contents.pt
-                relay('mouse', (int(point.x), int(point.y)))
-            return user32.CallNextHookEx(mouse_hook, code, message, data)
-
-        self._keyboard_proc = keyboard_proc
-        self._mouse_proc = mouse_proc
+    def _reader(self) -> None:
+        child = self.child
+        if child is None or child.stdout is None:
+            return
         try:
-            # PostThreadMessage requires a created message queue.
-            user32.PeekMessageW(ctypes.byref(wintypes.MSG()), None, 0, 0, 0)
-            module = kernel32.GetModuleHandleW(None)
-            keyboard_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, module, 0)
-            mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, module, 0)
-            if not keyboard_hook or not mouse_hook:
-                raise OSError('SetWindowsHookExW failed')
-            self._ready.set()
-            message = wintypes.MSG()
-            while True:
-                result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
-                if result <= 0:
-                    if result < 0:
-                        raise OSError('GetMessageW failed')
-                    break
-                if message.message == WM_INPUT_OBSERVED:
-                    if not pending:
-                        continue
-                    kind, target, at_ms = pending.popleft()
-                    if kind == 'mouse':
-                        hwnd = int(user32.WindowFromPoint(POINT(*target)) or 0)
-                    else:
-                        hwnd = target
-                    if self._window_pid(user32, hwnd) == self.pid:
-                        try:
-                            self.on_input(at_ms)
-                        except Exception:
-                            pass
-                    continue
-                user32.TranslateMessage(ctypes.byref(message))
-                user32.DispatchMessageW(ctypes.byref(message))
-        except BaseException as exc:
+            for line in child.stdout:
+                kind, value = parse_input_observer_packet(json.loads(line))
+                if kind == 'ready':
+                    self._ready.set()
+                elif kind == 'inputs':
+                    try:
+                        self.on_inputs(value)  # type: ignore[arg-type]
+                    except Exception as exc:
+                        record_exception('Windows input observer callback failure', exc)
+                else:
+                    raise RuntimeError(str(value))
+        except Exception as exc:
             self._error = exc
             self._ready.set()
+            if not self._closing.is_set():
+                record_exception('Windows input observer IPC reader failure', exc)
+                self.on_error(f'{type(exc).__name__}: {exc}')
         finally:
-            if keyboard_hook:
-                user32.UnhookWindowsHookEx(keyboard_hook)
-            if mouse_hook:
-                user32.UnhookWindowsHookEx(mouse_hook)
-            self._thread_id = 0
+            if child is not None:
+                exit_code = child.poll()
+                if exit_code not in (None, 0) and not self._closing.is_set():
+                    record_failure(f'Windows input observer exited with code {exit_code}')
+                    self.on_error(f'Windows input observer exited with code {exit_code}')
+
+    def _read_errors(self) -> None:
+        child = self.child
+        if child is None or child.stderr is None:
+            return
+        for line in child.stderr:
+            if line.strip() and not self._closing.is_set():
+                self.on_error(line.rstrip())
 
     def close(self) -> None:
-        thread, self._thread = self._thread, None
-        if thread is None:
+        child, self.child = self.child, None
+        if child is None:
             return
-        thread_id = self._thread_id
-        if thread_id and sys.platform == 'win32':
-            user32 = ctypes.windll.user32
-            user32.PostThreadMessageW.argtypes = (
-                ctypes.c_uint32, ctypes.c_uint32, ctypes.c_size_t, ctypes.c_ssize_t)
-            user32.PostThreadMessageW.restype = ctypes.c_int
-            user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
-        if thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+        self._closing.set()
+        try:
+            if child.poll() is None and child.stdin is not None:
+                child.stdin.write('{"action":"stop"}\n')
+                child.stdin.flush()
+                child.wait(timeout=2.0)
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+            if child.poll() is None:
+                child.kill()
+        finally:
+            try:
+                child.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=2.0)
+        for thread in (self._reader_thread, self._error_thread):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+        self._reader_thread = None
+        self._error_thread = None

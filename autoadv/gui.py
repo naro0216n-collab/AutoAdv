@@ -1990,26 +1990,42 @@ def run_gui() -> int:
             except Exception as exc:
                 self.note('会話取得を確定できません: ' + str(exc))
 
+        def on_hooks(self, items):
+            """Render one semantic refresh for an ordered native Host batch."""
+            refresh_workspace = False
+            refresh_hint = False
+            notes = []
+            for event, outcome in items:
+                if outcome.connection_transition in ('connected', 'changed', 'restore_failed'):
+                    refresh_workspace = True
+                    refresh_hint = True
+                elif outcome.connection_transition == 'disconnected':
+                    refresh_workspace = True
+
+                capture = outcome.capture
+                if capture.changed:
+                    refresh_workspace = True
+                    refresh_hint = True
+                    if capture.active_source_removed and not capture.monitor_started:
+                        notes.append('監視中の台詞取得元が消失しました。取得の復旧を確認してください。')
+                    if capture.new_ambiguity:
+                        notes.append('同じ識別子の取得元が複数検出されました。別の取得元を選択してください。')
+                if event.kind == 'diagnostic':
+                    refresh_workspace = True
+                if outcome.note:
+                    notes.append(outcome.note)
+
+            if refresh_workspace:
+                self.refresh_capture_workspace()
+            if refresh_hint:
+                self.refresh_capture_hint()
+            # Notes are a current UI surface, not an event log. Preserve the
+            # latest distinct actionable/diagnostic message from the batch.
+            if notes:
+                self.note(next(reversed(dict.fromkeys(notes))))
+
         def on_hook(self, event: HookEvent, outcome):
-            if outcome.connection_transition in ('connected', 'changed', 'restore_failed'):
-                self.refresh_capture_workspace()
-                self.refresh_capture_hint()
-            elif outcome.connection_transition == 'disconnected':
-                self.refresh_capture_workspace()
-
-            capture = outcome.capture
-            if capture.changed:
-                self.refresh_capture_workspace()
-                self.refresh_capture_hint()
-                if capture.active_source_removed and not capture.monitor_started:
-                    self.note('監視中の台詞取得元が消失しました。取得の復旧を確認してください。')
-                if capture.new_ambiguity:
-                    self.note('同じ識別子の取得元が複数検出されました。別の取得元を選択してください。')
-            if event.kind == 'diagnostic':
-                self.refresh_capture_workspace()
-
-            if outcome.note:
-                self.note(outcome.note)
+            self.on_hooks(((event, outcome),))
 
 
         def show_hook_preview(self, *_):
@@ -2059,6 +2075,8 @@ def run_gui() -> int:
         def on_runtime_event(self, event: str, token: Token | None, detail: dict):
             if event == 'hook_event':
                 self.on_hook(detail['hook_event'], detail['outcome'])
+            elif event == 'hook_events':
+                self.on_hooks(detail['items'])
             elif event == 'hook_closed':
                 self.on_host_closed(detail.get('reason', ''))
             elif event == 'hook_error':

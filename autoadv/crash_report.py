@@ -23,11 +23,14 @@ _lock = threading.Lock()
 
 
 def crash_directory() -> Path:
-    # Only an explicit crash-report destination overrides the installation folder.
+    # Only an explicit crash-report destination overrides the launched product's
+    # crash folder. AutoAdv.cmd and AutoAdv.pyw both establish the repository /
+    # installation directory as cwd before the GUI and helpers are started, and
+    # child helpers inherit it.
     # In particular, AUTOADV_DATA_DIR changes product data during validation but
     # must not redirect a crash report away from the launched AutoAdv.cmd.
     configured = os.environ.get('AUTOADV_CRASH_DIR')
-    return Path(configured).resolve() if configured else Path(__file__).resolve().parents[1]
+    return Path(configured).resolve() if configured else (Path.cwd() / 'crash').resolve()
 
 
 def _record(title: str, exception_type, value, tb) -> None:

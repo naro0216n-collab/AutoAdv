@@ -302,20 +302,24 @@ class Controller:
         self._presentation_timing = timing
         return Token(self.session, self.line_no)
 
-    def record_external_input(self, session: int, at_ms: int) -> bool:
-        """Retain one observed game-input time without inventing a boundary.
+    def record_external_inputs(self, session: int, times_ms: Sequence[int]) -> bool:
+        """Retain observed game-input times without inventing a boundary.
 
         An input observed after the current body makes that token stale for
         further AutoAdv input.  The fact is retained until a later admitted
         body consumes it as timing evidence for that new Presentation.
         """
-        at_ms = int(at_ms)
-        if session != self.session or self.profile is None or at_ms <= 0:
+        values = tuple(int(value) for value in times_ms if int(value) > 0)
+        if session != self.session or self.profile is None or not values:
             return False
         with self._input_facts_lock:
-            self._external_input_times.append(at_ms)
+            self._external_input_times.extend(values)
             self._external_input_times.sort()
         return True
+
+    def record_external_input(self, session: int, at_ms: int) -> bool:
+        """Compatibility-free scalar convenience for one factual input."""
+        return self.record_external_inputs(session, (at_ms,))
 
     def presentation_timing(self, token: Token) -> PresentationTiming | None:
         if token != self.token:

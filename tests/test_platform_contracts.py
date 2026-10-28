@@ -22,6 +22,7 @@ from autoadv.conversation import Target
 from autoadv.game_windows import ProcessCandidate, WindowCandidate, find_game_processes, find_game_windows
 from autoadv.hook_host import HookHost, parse_host_event
 from autoadv.hook_host_worker import NativeHost, ipc_json
+from autoadv.hook_protocol import HookEvent
 from autoadv.import_luna import inspect_luna, add_luna_games
 from autoadv.luna_abi import ThreadParam, load_exports, validate_abi
 from autoadv.model import HookSelection, InputMethod, ReplacementRule, SpeakerStyle
@@ -31,9 +32,10 @@ from autoadv.storage import Catalog, CommonSettings, load, save
 from autoadv.voice import synthesize
 from autoadv.windows_input import (
     AUTOADV_INPUT_MARKER, INPUT_FOREGROUND_REQUIRED, LLKHF_INJECTED,
-    WindowsAdvancementInput, WindowsGameInputObserver, WM_KEYDOWN, WM_KEYUP,
+    WindowsAdvancementInput, WM_KEYDOWN, WM_KEYUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, key_message_parameters,
 )
+from autoadv.windows_input_worker import run_observer
 from scripts import adopt_luna_release, prepare_windows_runtime
 from tests.g2p_support import TEST_G2P
 
@@ -352,8 +354,9 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         assert inputs[1].ki.dwExtraInfo == AUTOADV_INPUT_MARKER
 
 
-def test_windows_game_input_observer_relay_preserves_target_and_callback_boundary(monkeypatch):
+def test_windows_game_input_observer_worker_isolates_callback_and_batches_target_facts(monkeypatch):
     import autoadv.windows_input as windows_input_module
+    import autoadv.windows_input_worker as worker_module
     import ctypes
 
     class HookUser32(_TargetUser32):
@@ -393,14 +396,14 @@ def test_windows_game_input_observer_relay_preserves_target_and_callback_boundar
             return 77 if point.x == 10 else 88  # game vs. AutoAdv
 
         def _post(self, _thread, message, _wparam, _lparam):
+            # A burst creates one wakeup; the normal worker loop drains all raw
+            # events and publishes one ordered target-input batch.
             self.queue.append(message)
             return 1
 
         def _message(self, message, *_args):
             if not self._sent_inputs:
                 self._sent_inputs = True
-                # Both target and unrelated clicks hit the global hook; only
-                # target input may be admitted after leaving the Win32 callback.
                 mouse_buffer = ctypes.create_string_buffer(64)
                 struct = self.observer_mouse_struct
                 for point in (10, 20):
@@ -431,8 +434,6 @@ def test_windows_game_input_observer_relay_preserves_target_and_callback_boundar
             self.GetCurrentThreadId = _Win32Function(lambda: 1)
             self.GetModuleHandleW = _Win32Function(lambda _name: 1)
 
-    # ctypes.Structure is normally local to the Windows hook worker; match
-    # the native POINT and MSLLHOOKSTRUCT layout for a 64-bit host.
     from ctypes import wintypes
     class POINT(ctypes.Structure):
         _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
@@ -446,23 +447,23 @@ def test_windows_game_input_observer_relay_preserves_target_and_callback_boundar
                     ('dwExtraInfo', ctypes.c_size_t)]
 
     def observed(expected_pid, actual_pid):
-        events = []
+        packets = []
         user32 = HookUser32(actual_pid)
         user32.observer_mouse_struct = MOUSE
         user32.observer_keyboard_struct = KBD
-        with patch.object(windows_input_module.sys, 'platform', 'win32'), \
-             patch.object(windows_input_module.ctypes, 'windll',
+        with patch.object(worker_module.sys, 'platform', 'win32'), \
+             patch.object(worker_module.sys, 'stdin', io.StringIO('')), \
+             patch.object(worker_module.ctypes, 'windll',
                           SimpleNamespace(user32=user32, kernel32=Kernel32()), create=True), \
-             patch.object(windows_input_module.ctypes, 'WINFUNCTYPE',
+             patch.object(worker_module.ctypes, 'WINFUNCTYPE',
                           lambda *_types: (lambda fn: fn), create=True):
-            observer = WindowsGameInputObserver(expected_pid, events.append, clock=lambda: 4321)
-            observer.start()
-            observer.close()
-        return events
+            run_observer(expected_pid, packets.append, clock=lambda: 4321)
+        return packets
 
-    assert observed(101, 101) == [4321, 4321, 4321]  # click + other injected key + physical key
-    assert observed(202, 101) == []
-
+    packets = observed(101, 101)
+    assert packets[0] == {'kind': 'ready'}
+    assert packets[1:] == [{'kind': 'inputs', 'times': [4321, 4321, 4321]}]
+    assert observed(202, 101) == [{'kind': 'ready'}]
 
 def test_settings_roundtrip_preserves_product_configuration_but_not_runtime_state():
     assert CommonSettings().uncertain_text_fallback
@@ -617,3 +618,25 @@ def test_luna_import_is_explicit_read_only_and_maps_only_supported_product_setti
     assert p.replacements[0].target == 'tts'
     with pytest.raises(ValueError, match='already imported'):
         add_luna_games(imported, games)
+
+
+def test_hook_host_dispatch_batches_are_bounded_and_ordered():
+    import queue
+    host = HookHost.__new__(HookHost)
+    host.MAX_BATCH_EVENTS = 3
+    host.BATCH_COALESCE_SECONDS = 1.0
+    host._events = queue.Queue(maxsize=16)
+    batches = []
+    closed = []
+    host.on_events = batches.append
+    host.on_closed = closed.append
+    events = [HookEvent('diagnostic', 'host', 1, index, index * 10, 101, detail=str(index))
+              for index in range(1, 6)]
+    for event in events:
+        host._events.put(event)
+    host._events.put((None, 'done'))
+
+    host._dispatch_events()
+
+    assert [[event.sequence for event in batch] for batch in batches] == [[1, 2, 3], [4, 5]]
+    assert closed == ['done']
