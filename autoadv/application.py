@@ -658,13 +658,14 @@ class AutoAdvApplication:
             self._schedule_runtime(0, callback)
 
     def _record_game_input(self, session: int, at_ms: int) -> None:
-        """Publish one target-scoped external-input fact to the Controller owner."""
+        """Admit observed game input only on the Controller's event-loop owner."""
         at_ms = int(at_ms)
-        if not self.controller.record_external_input(session, at_ms):
-            return
-        self._dispatch_runtime(
-            lambda ms=at_ms: self._emit_telemetry(
-                'game_input_observed', self.controller.token, at_ms=ms))
+
+        def deliver() -> None:
+            if self.controller.record_external_input(session, at_ms):
+                self._emit_telemetry('game_input_observed', self.controller.token, at_ms=at_ms)
+
+        self._dispatch_runtime(deliver)
 
     def _start_game_input_observer(self, target: Target) -> None:
         self._close_game_input_observer()

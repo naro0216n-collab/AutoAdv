@@ -22,8 +22,9 @@ _lock = threading.Lock()
 
 
 def crash_directory() -> Path:
-    base = Path(os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or Path.home())
-    return base / 'AutoAdv' / 'crashes'
+    configured = os.environ.get('AUTOADV_DATA_DIR')
+    root = Path(configured).resolve() if configured else Path(__file__).resolve().parents[1] / '.autoadv'
+    return root / 'crashes'
 
 
 def _record(title: str, exception_type, value, tb) -> None:

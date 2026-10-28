@@ -305,6 +305,25 @@ def test_monitoring_starts_input_observation_before_hook_acquisition(monkeypatch
     assert timeline.index('input_observer') < timeline.index('hook_acquisition')
 
 
+def test_external_input_is_admitted_and_published_on_event_loop_owner(monkeypatch):
+    app, _ = app_with_game()
+    queued = []
+    calls = []
+    app.configure_runtime_loop(schedule=lambda delay, callback: queued.append((delay, callback)))
+    app.configure_telemetry(lambda event, token, detail: calls.append(('telemetry', event, detail)))
+    monkeypatch.setattr(app.controller, 'record_external_input',
+                        lambda session, at_ms: calls.append(('admit', session, at_ms)) or True)
+
+    app._record_game_input(app.controller.session, 1200)
+    assert calls == []  # The observer thread cannot mutate Controller state.
+    assert [delay for delay, _ in queued] == [0]
+    queued.pop()[1]()
+    assert calls == [
+        ('admit', app.controller.session, 1200),
+        ('telemetry', 'game_input_observed', {'at_ms': 1200}),
+    ]
+
+
 def test_admitted_text_keeps_auto_input_bound_distinct_from_external_input_candidates(monkeypatch):
     Native, InputObserver = _install_audio_runtime_fakes(monkeypatch)
     app, _ = app_with_game()
