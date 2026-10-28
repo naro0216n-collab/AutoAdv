@@ -15,6 +15,8 @@ param(
     [string] $IrodoriUrl = 'http://127.0.0.1:8088',
     [int] $TimeoutSeconds = 120,
     [switch] $UncertainFallback,
+    [ValidateSet('window_message', 'send_input')]
+    [string] $InputMethod = 'window_message',
     [string] $PythonExecutable = 'python'
 )
 $ErrorActionPreference = 'Stop'
@@ -137,6 +139,7 @@ try {
                     'tts' { 3 }; 'mixed' { 19 }; 'stress' { 9 }
                 });
                 voice = $Voice; irodori_url = $IrodoriUrl;
+                input_method = $InputMethod;
                 fallback = [bool](($Phase -eq 'accuracy') -or $UncertainFallback);
                 force_advance_seconds = $(if ($Phase -eq 'accuracy') { 12 } else { 30 });
                 final_observation_seconds = 12.0

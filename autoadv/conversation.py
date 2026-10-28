@@ -424,17 +424,33 @@ class Controller:
             self.hold_reason = reason
 
     def _input_settings(self) -> tuple[InputMethod, int] | None:
+        """Return settings frozen into the current automatic operation."""
         if self.utterance is not None:
             return self.utterance.input_method, self.utterance.input_key
         if self.profile is not None:
             return InputMethod(self.profile.input_method), self.profile.input_key
         return None
 
-    def _current_input_block(self) -> str | None:
-        settings = self._input_settings()
+    def _configured_input_settings(self) -> tuple[InputMethod, int] | None:
+        """Return the user's currently selected settings for an explicit test.
+
+        A staged profile deliberately does not rewrite an admitted Presentation,
+        but a diagnostic test is an explicit user action whose purpose is to
+        verify the setting they just selected. It still consumes the same
+        Presentation input slot when one exists.
+        """
+        profile = self.pending_profile or self.profile
+        if profile is None:
+            return None
+        return InputMethod(profile.input_method), profile.input_key
+
+    def _input_block(self, settings: tuple[InputMethod, int] | None) -> str | None:
         if self.target is None or settings is None:
             return 'target_unavailable'
         return self.input_unavailable(self.target, settings[0])
+
+    def _current_input_block(self) -> str | None:
+        return self._input_block(self._input_settings())
 
     def _admit_dynamic_input_state(self) -> bool:
         """Re-evaluate only runtime target conditions that can recover by themselves."""
@@ -497,10 +513,10 @@ class Controller:
             return InputAttempt(False, 'already_sent')
         if self._external_input_pending():
             return InputAttempt(False, 'external_input_pending')
-        input_block = self._current_input_block()
+        settings = self._configured_input_settings()
+        input_block = self._input_block(settings)
         if input_block is not None:
             return InputAttempt(False, input_block)
-        settings = self._input_settings()
         assert settings is not None
         with self._input_facts_lock:
             if self._external_input_times:

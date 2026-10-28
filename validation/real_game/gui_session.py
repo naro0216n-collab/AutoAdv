@@ -46,6 +46,8 @@ def load_session(environment=None):
             raise ValueError('missing validation session option: ' + key)
     if options['phase'] not in ('hook', 'reading', 'accuracy', 'tts', 'mixed', 'stress'):
         raise ValueError('invalid validation phase')
+    if options.get('input_method', 'window_message') not in ('window_message', 'send_input'):
+        raise ValueError('invalid validation input method')
     if int(options['timeout_seconds']) < 10:
         raise ValueError('validation session must have a finite reasonable timeout')
     return options
@@ -105,6 +107,30 @@ class SessionDriver:
 
     def _release(self, suffix):
         Path(self.options['gate'] + suffix).write_text('ready', encoding='ascii')
+
+    @staticmethod
+    def _foreground_product_target(runtime):
+        """Make the fixture satisfy the selected method's external focus condition."""
+        import ctypes
+        from ctypes import wintypes
+
+        if runtime.target is None:
+            raise RuntimeError('validation game has no product input target')
+        user32 = ctypes.windll.user32
+        user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = (
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.SetForegroundWindow(wintypes.HWND(int(runtime.target.hwnd)))
+        time.sleep(0.05)
+        foreground = user32.GetForegroundWindow()
+        pid = wintypes.DWORD()
+        if (not foreground
+                or not user32.GetWindowThreadProcessId(foreground, ctypes.byref(pid))
+                or int(pid.value) != int(runtime.target.pid)):
+            raise RuntimeError('validation game could not become the foreground product input target')
 
     @staticmethod
     def _send_validation_game_input(runtime):
@@ -232,7 +258,7 @@ class SessionDriver:
         return records
 
     def _configure_product(self, target):
-        from autoadv.model import AdvanceMode
+        from autoadv.model import AdvanceMode, InputMethod
 
         game = self.product.create_game('RenPy AutoAdv validation', self.options['executable'])
         self.product.select_profile(game.id, game.default_profile)
@@ -242,6 +268,8 @@ class SessionDriver:
         self.product.set_profile_setting(
             'advance_mode',
             AdvanceMode.TEXT if self.options['phase'] in ('hook', 'reading') else AdvanceMode.AUDIO)
+        self.product.set_profile_setting(
+            'input_method', InputMethod(self.options.get('input_method', 'window_message')))
         self.product.set_profile_setting('default_tts', self.options['phase'] == 'tts')
         fallback = True if self.options['phase'] == 'accuracy' else bool(self.options.get('fallback', False))
         self.product.set_profile_setting('uncertain_text_fallback', fallback)
@@ -359,6 +387,8 @@ class SessionDriver:
                         final_observation_seconds=self.final_observation_seconds)
                     self.collection_target_emitted = True
                 if self.options['phase'] != 'hook':
+                    if self.options.get('input_method', 'window_message') == 'send_input':
+                        self._foreground_product_target(self.product.runtime_state())
                     self.w.permit()
                     if not self.product.runtime_state().authorized:
                         raise RuntimeError('AutoAdv not authorized to send')

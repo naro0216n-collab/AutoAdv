@@ -562,13 +562,20 @@ def test_accuracy_config_uses_product_force_advance_as_the_only_case_progress_de
         SimpleNamespace(emit=lambda *_a, **_k: None), clock=lambda: 1.0)
     driver._configure_product(SimpleNamespace(pid=50, hwnd=77))
     assert ('force_advance_seconds', 12) in settings
+    assert any(key == 'input_method' and value.value == 'window_message'
+               for key, value in settings)
 
 
 def test_session_contract_is_finite():
     valid = dict(gate='session-gate', executable='validation-game.exe', phase='accuracy', timeout_seconds=120)
     assert load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(valid)})['phase'] == 'accuracy'
+    assert load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(
+        {**valid, 'input_method': 'send_input'})})['input_method'] == 'send_input'
     with pytest.raises(ValueError):
         load_session({'AUTOADV_VALIDATION_SESSION': json.dumps({**valid, 'timeout_seconds': 0})})
+    with pytest.raises(ValueError):
+        load_session({'AUTOADV_VALIDATION_SESSION': json.dumps(
+            {**valid, 'input_method': 'unknown'})})
 
 
 def _comments():

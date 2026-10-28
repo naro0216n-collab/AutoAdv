@@ -344,6 +344,10 @@ def test_windows_input_targets_selected_hwnd_once_without_foreground_dependency(
         WindowsAdvancementInput(101, 77, method=InputMethod.SEND_INPUT).advance()
         count, inputs, _ = fake.send_calls[-1]
         assert count == 2
+        assert (inputs[0].ki.wVk, inputs[1].ki.wVk) == (0x0D, 0x0D)
+        assert (inputs[0].ki.wScan, inputs[1].ki.wScan) == (0x1C, 0x1C)
+        assert inputs[0].ki.dwFlags == 0
+        assert inputs[1].ki.dwFlags == 0x0002
         assert inputs[0].ki.dwExtraInfo == AUTOADV_INPUT_MARKER
         assert inputs[1].ki.dwExtraInfo == AUTOADV_INPUT_MARKER
 

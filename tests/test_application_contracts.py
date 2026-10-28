@@ -558,7 +558,8 @@ def test_play_input_view_and_explicit_test_follow_the_selected_input_method_with
     app = AutoAdvApplication(
         catalog, lambda: None,
         input_send=lambda target, method, key: sent.append((target.hwnd, method, key)),
-        input_unavailable=lambda _target, _method: availability['reason'],
+        input_unavailable=lambda _target, method: (
+            availability['reason'] if method == InputMethod.SEND_INPUT else None),
         g2p=TEST_G2P,
     )
     app.select_profile(game.id, game.default_profile)
@@ -578,6 +579,16 @@ def test_play_input_view_and_explicit_test_follow_the_selected_input_method_with
     input_view = app.play_view().input
     assert not input_view.available and input_view.can_test
     assert '前面' in input_view.status
+
+    # Editing the input setting stages automatic advancement for the next
+    # Presentation, but the status/test surface immediately represents the
+    # newly selected diagnostic setting rather than the stale admitted line.
+    app.set_profile_setting('input_method', InputMethod.WINDOW_MESSAGE)
+    input_view = app.play_view().input
+    assert input_view.method == InputMethod.WINDOW_MESSAGE and input_view.available
+    app.set_profile_setting('input_method', InputMethod.SEND_INPUT)
+    input_view = app.play_view().input
+    assert input_view.method == InputMethod.SEND_INPUT and not input_view.available
 
     # One explicit request waits briefly for the user to foreground the game;
     # it does not create another sender or force focus itself.

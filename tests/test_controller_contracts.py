@@ -175,11 +175,12 @@ def test_input_method_is_frozen_per_presentation_and_test_input_shares_the_singl
     assert (ctrl.utterance.input_method, ctrl.utterance.input_key) == (
         InputMethod.WINDOW_MESSAGE, 0x0D)
 
-    # The explicit test is a user-directed game operation, independent of
-    # automatic presentation holds, but it consumes the same one-input slot.
+    # Automatic input keeps the admitted Presentation settings, while the
+    # explicit diagnostic verifies the setting the user just selected. It still
+    # consumes the same one-input slot.
     ctrl.hold_reason = 'tts_playback_failed'
     result = ctrl.test_input()
-    assert result.sent and sent == [(InputMethod.WINDOW_MESSAGE, 0x0D, 'test')]
+    assert result.sent and sent == [(InputMethod.SEND_INPUT, 0x20, 'test')]
     assert ctrl.sent and not ctrl.try_advance()
 
     second = observe(ctrl, '「二つ目」', 2)

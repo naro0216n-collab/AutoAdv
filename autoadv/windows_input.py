@@ -36,7 +36,6 @@ VK_F10 = 0x79
 INPUT_KEYBOARD = 1
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_SCANCODE = 0x0008
 LLKHF_INJECTED = 0x00000010
 AUTOADV_INPUT_MARKER = 0x41554144  # ``AUAD`` in a ULONG_PTR-sized field.
 
@@ -170,13 +169,17 @@ class WindowsAdvancementInput:
             _anonymous_ = ('value',)
             _fields_ = [('type', wintypes.DWORD), ('value', INPUTUNION)]
 
+        # ``input_key`` is a Windows virtual-key setting. Preserve that semantic
+        # for system keyboard injection instead of silently translating the
+        # configured key into a scan-code-only event. This also matches the
+        # ordinary external keyboard stimulus used by the Windows live suite.
         extended = KEYEVENTF_EXTENDEDKEY if self.virtual_key in _EXTENDED_KEYS else 0
-        common = KEYEVENTF_SCANCODE | extended
         inputs = (INPUT * 2)(
             INPUT(INPUT_KEYBOARD, INPUTUNION(ki=KEYBDINPUT(
-                0, scan, common, 0, AUTOADV_INPUT_MARKER))),
+                self.virtual_key, scan, extended, 0, AUTOADV_INPUT_MARKER))),
             INPUT(INPUT_KEYBOARD, INPUTUNION(ki=KEYBDINPUT(
-                0, scan, common | KEYEVENTF_KEYUP, 0, AUTOADV_INPUT_MARKER))),
+                self.virtual_key, scan, extended | KEYEVENTF_KEYUP,
+                0, AUTOADV_INPUT_MARKER))),
         )
         user32 = ctypes.windll.user32
         user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)

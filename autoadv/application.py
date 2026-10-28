@@ -2320,21 +2320,20 @@ class AutoAdvApplication:
 
     def _play_input_view(self) -> PlayInputView:
         controller = self.controller
-        if controller.utterance is not None:
-            method = controller.utterance.input_method
-            key = controller.utterance.input_key
+        profile = self.current_profile()
+        if profile is not None:
+            effective = self.catalog.effective_profile(profile)
+            method = InputMethod(effective.input_method)
+            key = effective.input_key
+        elif controller.pending_profile is not None:
+            method = InputMethod(controller.pending_profile.input_method)
+            key = controller.pending_profile.input_key
         elif controller.profile is not None:
             method = InputMethod(controller.profile.input_method)
             key = controller.profile.input_key
         else:
-            profile = self.current_profile()
-            if profile is not None:
-                effective = self.catalog.effective_profile(profile)
-                method = InputMethod(effective.input_method)
-                key = effective.input_key
-            else:
-                method = InputMethod(self.catalog.common.input_method)
-                key = self.catalog.common.input_key
+            method = InputMethod(self.catalog.common.input_method)
+            key = self.catalog.common.input_key
 
         target = controller.target
         if target is None and self._runtime_target.input_ready:
