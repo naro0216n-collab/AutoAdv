@@ -18,6 +18,7 @@ import traceback
 _stream = None
 _path: Path | None = None
 _reported = False
+_retained = False
 _lock = threading.Lock()
 
 
@@ -40,17 +41,20 @@ def _record(title: str, exception_type, value, tb) -> None:
         _stream.flush()
 
 
-def record_stage(stage: str) -> None:
-    """Persist the last reached runtime boundary before an untrappable process exit.
+def record_stage(stage: str, *, retain: bool = False) -> None:
+    """Persist a runtime boundary even when termination bypasses Python hooks.
 
-    A clean exit removes this trace with the report. A sudden native exit may
-    never run Python exception hooks, so these boundaries remain available.
+    A native Hook interaction can outlive a GUI incident. Preserve both reports
+    once the interaction starts, even if their processes later exit normally.
     """
+    global _retained
     try:
         with _lock:
             if _stream is not None:
                 _stream.write(f'{datetime.now(timezone.utc).isoformat()} stage: {stage}\n')
                 _stream.flush()
+                if retain:
+                    _retained = True
     except (OSError, ValueError):
         # Diagnostics must never take down the product during shutdown.
         pass
@@ -102,7 +106,7 @@ def _close() -> None:
         faulthandler.disable()
         stream.flush()
         stream.close()
-        if not _reported and _path is not None:
+        if not (_reported or _retained) and _path is not None:
             _path.unlink(missing_ok=True)
     except OSError:
         pass
@@ -111,7 +115,7 @@ def _close() -> None:
 def install_crash_reporting(role: str) -> Path | None:
     """Install once per process, before loading Qt or the native Hook library.
 
-    A report is removed on a clean exit, but survives a native process abort.
+    Idle reports are removed on clean exit; active Hook sessions and failures survive.
     """
     global _stream, _path
     if _stream is not None:

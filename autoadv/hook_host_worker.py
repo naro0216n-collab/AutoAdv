@@ -231,7 +231,7 @@ def ipc_json(packet: dict) -> str:
 
 
 def main(argv=None):
-    from .crash_report import install_crash_reporting, record_exception
+    from .crash_report import install_crash_reporting, record_exception, record_stage
     install_crash_reporting('hook-host')
     parser=argparse.ArgumentParser()
     parser.add_argument('--dll',required=True,type=Path)
@@ -241,11 +241,16 @@ def main(argv=None):
         with out_lock:
             print(ipc_json(obj),flush=True)
     try:
+        record_stage('native Hook Host initialization started')
         host=NativeHost(args.dll,send)
         host.start()
+        record_stage('native Hook Host initialized')
         for line in sys.stdin:
             try:
-                if not host.command(json.loads(line)):break
+                message = json.loads(line)
+                if message.get('action') == 'connect':
+                    record_stage(f"hook attach requested pid={message.get('pid')}", retain=True)
+                if not host.command(message):break
             except Exception as error:
                 host.emit('diagnostic',detail=f'command_failed: {type(error).__name__}: {error}')
         return 0

@@ -100,3 +100,36 @@ def test_abrupt_exit_preserves_last_reached_stage(tmp_path):
     reports = list(tmp_path.glob('gui-*.log'))
     assert len(reports) == 1
     assert 'stage: native audio model initialization started' in reports[0].read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize('role', ['gui', 'hook-host'])
+def test_active_hook_evidence_survives_clean_process_exit(tmp_path, role):
+    result = _run_python(
+        "from autoadv.crash_report import install_crash_reporting, record_stage; "
+        f"install_crash_reporting({role!r}); "
+        "record_stage('hook attach requested pid=42', retain=True)",
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    reports = list(tmp_path.glob(f'{role}-*.log'))
+    assert len(reports) == 1
+    assert 'stage: hook attach requested pid=42' in reports[0].read_text(encoding='utf-8')
+
+
+def test_native_hook_session_report_survives_explicit_gui_shutdown(tmp_path):
+    script = '''
+import io
+import sys
+from unittest.mock import patch
+from autoadv.hook_host_worker import main
+sys.stdin = io.StringIO('{"action":"connect","pid":42}\\n{"action":"stop"}\\n')
+with patch('autoadv.hook_host_worker.NativeHost') as native:
+    native.return_value.command.side_effect = [True, False]
+    raise SystemExit(main(['--dll', 'unused.dll']))
+'''
+    result = _run_python(script, tmp_path)
+    assert result.returncode == 0, result.stderr
+    native_logs = list(tmp_path.glob('hook-host-*.log'))
+    assert len(native_logs) == 1
+    assert 'hook attach requested pid=42' in native_logs[0].read_text(encoding='utf-8')
+    assert 'native Hook Host initialized' in native_logs[0].read_text(encoding='utf-8')

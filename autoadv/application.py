@@ -1514,6 +1514,7 @@ class AutoAdvApplication:
         if not self.hook_host_running:
             raise RuntimeError('LunaHook Host is not running')
         self._hook_connection = HookConnectionState(connecting_pid=pid)
+        record_stage(f'hook attach requested pid={pid}', retain=True)
         try:
             self._hook_command('settings', flush_ms=profile.hook_flush_ms,
                 codepage=profile.hook_codepage, max_buffer=profile.hook_max_buffer,
